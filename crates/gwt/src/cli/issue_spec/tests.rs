@@ -9,6 +9,28 @@ use crate::cli::env::TestEnv;
 
 use super::*;
 
+#[test]
+fn committed_unverified_receipt_does_not_claim_final_confirmation() {
+    let mut receipt = gwt_github::WriteReceipt {
+        bytes: 9,
+        parts: 0,
+        sha256: "content-hash".into(),
+        location: "body".into(),
+        comment_ids: vec![],
+        largest_part_bytes: 9,
+        verification_error: Some("final fetch failed".into()),
+    };
+    let output = render_write_receipt("tasks", &receipt);
+    assert!(output.contains("outcome: committed_unverified"), "{output}");
+    assert!(output.contains("write committed"), "{output}");
+    assert!(output.contains("final fetch failed"), "{output}");
+    assert!(!output.contains("readback verified"), "{output}");
+    receipt.verification_error = None;
+    let output = render_write_receipt("tasks", &receipt);
+    assert!(output.contains("readback verified"), "{output}");
+    assert!(!output.contains("committed_unverified"), "{output}");
+}
+
 fn sample_structured_input() -> StructuredSpecInput {
     StructuredSpecInput {
         background: Some(TextBlock::Paragraphs(vec![
@@ -55,6 +77,7 @@ tasks=body\n\
 
 fn seed_issue(env: &TestEnv, number: u64, title: &str, spec: &str, tasks: &str, labels: &[&str]) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: issue_body(spec, tasks),
@@ -308,7 +331,8 @@ fn parse_supports_list_create_pull_repair_and_edit_modes() {
     let refs = args.iter().collect::<Vec<_>>();
     assert!(matches!(
         parse(&refs),
-        Ok(IssueCommand::SpecRepair { number }) if number == 77
+        Ok(IssueCommand::SpecRepair { number, archive_comments })
+            if number == 77 && archive_comments.is_empty()
     ));
 
     let args = [
@@ -396,7 +420,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert!(out.contains("#42 [OPEN] [phase/review] SPEC: Launch agents"));
+    assert!(out.starts_with("Issue #42 [OPEN] [phase/review] SPEC: Launch agents"));
 
     env.files.insert(
         "legacy.md".to_string(),
@@ -474,7 +498,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert_eq!(out, "pulled #42\n");
+    assert_eq!(out, "pulled Issue #42\n");
 
     let err = run(
         &mut env,
@@ -489,13 +513,52 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
 
     out.clear();
     assert_eq!(
-        run(&mut env, IssueCommand::SpecRepair { number: 42 }, &mut out).unwrap(),
+        run(
+            &mut env,
+            IssueCommand::SpecRepair {
+                number: 42,
+                archive_comments: Vec::new(),
+            },
+            &mut out
+        )
+        .unwrap(),
         0
     );
     // #4838: the old wording claimed a repair the operation never performed —
     // it only re-read the section. A fixture with well-formed markers now says
     // so explicitly, and a genuine repair names the artifacts it rewrote.
-    assert_eq!(out, "refreshed cache for #42; no artifact needed repair\n");
+    assert_eq!(
+        out,
+        "refreshed cache for Issue #42; no artifact needed repair\n"
+    );
+
+    let orphan = env
+        .client
+        .create_comment(
+            IssueNumber(42),
+            "<!-- artifact:tasks BEGIN part=1/9 -->\nold tasks\n<!-- artifact:tasks END part=1/9 -->",
+        )
+        .unwrap();
+    out.clear();
+    assert_eq!(
+        run(
+            &mut env,
+            IssueCommand::SpecRepair {
+                number: 42,
+                archive_comments: vec![orphan.id.0],
+            },
+            &mut out
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        out,
+        format!(
+            "archived 1 orphan artifact comment(s) for Issue #42: comment:{} (payload preserved)\n",
+            orphan.id.0,
+        )
+    );
 
     out.clear();
     assert_eq!(
@@ -765,7 +828,9 @@ fn spec_audit_reports_closed_specs_with_untracked_task_rows() {
     );
 
     assert!(
-        out.contains("#3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"),
+        out.contains(
+            "Issue #3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"
+        ),
         "untracked rows are reported with their counts: {out}"
     );
     assert!(
@@ -794,6 +859,7 @@ fn spec_audit_parse_accepts_state_flag() {
 
 fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: issue_body("spec body", tasks),
@@ -836,7 +902,10 @@ fn lint_fixture(number: u64, spec: &str, tasks: &str) -> LintFixture {
     let lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let home = tempfile::tempdir().expect("home");
+    let home_root = gwt_config::home::user_home().expect("isolated test home root");
+    gwt_config::home::assert_test_path(&home_root);
+    std::fs::create_dir_all(&home_root).expect("test home root");
+    let home = tempfile::tempdir_in(home_root).expect("home");
     let home_var = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
     let userprofile_var = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
     let cache = tempfile::tempdir().expect("cache");

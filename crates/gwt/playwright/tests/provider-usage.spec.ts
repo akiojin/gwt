@@ -4,6 +4,7 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
 
@@ -12,6 +13,73 @@ test.describe("Provider usage status summary", () => {
   test.beforeEach(async ({ page }, info) => {
     await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
       info.project.name.includes("light") ? "light" : "dark");
+  });
+
+  test("Usage frame subscriptions batch bursts and advance with suspended animation frames", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page, true);
+    await page.goto(liveUrl || APP_URL);
+    await page.getByRole("tab", { name: "Usage & Limits" }).click();
+    const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
+    await expect(checkbox).toBeChecked();
+    const result = await page.evaluate(async () => {
+      // Exercise the post-dispatch factory from the served checkout. Socket
+      // coalescing alone must not mask repeated synchronous model updates.
+      const modulePath = "/provider-usage-surface.js";
+      const { createProviderUsageSurface } = await import(modulePath);
+      const shell = (window as any).__operatorShell;
+      const originalRender = shell.applyProviderUsage;
+      const originalFrame = window.requestAnimationFrame;
+      const renders: number[] = [];
+      let workspaceRenders = 0;
+      shell.applyProviderUsage = (snapshot: any) => {
+        renders.push(snapshot.accounts[0].windows[0].used_percent);
+        originalRender(snapshot);
+      };
+      const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows: () => workspaceRenders++ });
+      const usage = (value: number) => ({
+        accounts: [{ provider: "claude_code", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: value }] }],
+        sessions: Array.from({ length: 5 }, (_, i) => ({ session_id: `frame-${i}`, value })), consumption: [],
+      });
+      const panel = document.querySelector<HTMLElement>('[data-settings-panel="usage"]')!;
+      try {
+        surface.renderUsagePanel(panel);
+        const control = panel.querySelector("input")!;
+        control.focus();
+        for (let value = 1; value <= 50; value++) surface.applyProviderUsageUi(usage(value));
+        const immediate = surface.usageForSession("frame-4").value;
+        const beforeFrame = renders.length;
+        await new Promise<void>(resolve => originalFrame(() => resolve()));
+        const normal = { renders: [...renders], workspaceRenders, immediate, beforeFrame };
+        window.requestAnimationFrame = () => -1;
+        const start = performance.now();
+        for (let value = 51; value <= 70; value++) surface.applyProviderUsageUi(usage(value));
+        while (renders.length < 2 && performance.now() - start < 1000) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return { normal, renders, workspaceRenders, fallbackMs: performance.now() - start,
+          focused: document.activeElement === control, checked: control.checked };
+      } finally {
+        window.requestAnimationFrame = originalFrame;
+        shell.applyProviderUsage = originalRender;
+      }
+    });
+    expect(result.normal).toEqual({ renders: [50], workspaceRenders: 1, immediate: 50, beforeFrame: 0 });
+    expect(result.renders).toEqual([50, 70]);
+    expect(result.workspaceRenders).toBe(2);
+    expect(result.fallbackMs).toBeLessThan(1000);
+    expect(result.focused && result.checked).toBe(true);
+    await expect(checkbox).toBeFocused();
+    await expect(page.locator("#op-strip-usage")).toContainText("CC 70%");
+    await page.locator("#op-strip-usage").hover();
+    await expect(page.locator("#provider-usage-popover")).toContainText(/Weekly\s*70%/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: info.outputPath("usage-frame.png"), fullPage: true });
+    await info.attach("frame-results", { body: JSON.stringify(result), contentType: "application/json" });
+    expect(errors).toEqual([]);
   });
 
   test("mounted Usage setting follows snapshots without replacing its focused control", async ({ page }) => {
@@ -206,6 +274,114 @@ test.describe("Provider usage status summary", () => {
     await expect(weekly).toHaveAttribute("title", "Window length: 7 days");
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
+  });
+
+  test("shows Claude Fable weekly and enabled usage credits (SPEC #2970 Phase 8)", async ({
+    page,
+  }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    const projectKey = process.env.GWT_PLAYWRIGHT_PROJECT_KEY;
+    const appUrl = liveUrl && projectKey
+      ? new URL(`/p/${projectKey}`, liveUrl).href
+      : liveUrl || APP_URL;
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    await page.goto(appUrl);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    const resetsAt = "2031-01-02T03:04:05Z";
+    const account = {
+      provider: "claude_code", plan: "max", state: { kind: "ok" },
+      windows: [{ kind: "fable_weekly", used_percent: 0, resets_at: resetsAt }],
+    };
+    const extraUsage = { is_enabled: true, used_credits: 1610, monthly_limit: 2000,
+      utilization: 80.5, currency: "USD", disabled_reason: null };
+    await emitProviderUsage(page, [{ ...account, extra_usage: extraUsage }]);
+    await expect(strip).toContainText("CC —");
+    // Keep the detail open through updates without depending on the native
+    // pointer staying over the trigger in a headed browser.
+    await page.mouse.move(0, 0);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    await expect(page.locator("#provider-usage-popover")).toBeFocused();
+    const card = page.locator('.op-usage-card[data-provider="claude_code"]');
+    const fable = card.locator(".op-usage-win").filter({ hasText: "Fable weekly" });
+    await expect(fable.locator(".op-usage-win__lbl")).toHaveText("Fable weekly");
+    await expect(fable.locator(".op-usage-win__pct")).toHaveText("0%");
+    await expect(fable.locator(".op-usage-bar__fill")).toHaveCSS("width", "0px");
+    const resetLabel = await page.evaluate(iso => new Date(iso).toLocaleString(undefined, {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    }), resetsAt);
+    await expect(fable.locator(".op-usage-win__reset")).toHaveText(`↻ ${resetLabel}`);
+    const credits = card.locator('[data-usage-credits="true"]');
+    await expect(credits).toBeVisible();
+    await expect(credits.locator(".op-usage-win__lbl")).toHaveText("Usage credits");
+    await expect(credits.locator(".op-usage-win__pct")).toHaveText("81%");
+    await expect(credits.locator(".op-usage-bar__fill")).toHaveAttribute("style", "width: 81%;");
+    await expect(credits.locator(".op-usage-bar__fill")).toHaveAttribute("data-severity", "warning");
+    await expect(credits.locator(".op-usage-win__reset")).toHaveText("1610 / 2000 USD");
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: testInfo.outputPath("claude-fable-usage-credits.png"), fullPage: true });
+
+    await emitProviderUsage(page, [{ ...account, extra_usage: { ...extraUsage,
+      used_credits: null, monthly_limit: null, utilization: null, currency: null } }]);
+    await expect(credits.locator(".op-usage-win__reset")).toHaveText("— / —");
+    await expect(credits.locator(".op-usage-win__pct")).toHaveText("—");
+    await expect(credits.locator(".op-usage-bar")).toHaveCount(0);
+    for (const extra of [undefined, null, { is_enabled: false, used_credits: null,
+      monthly_limit: null, utilization: null, currency: null, disabled_reason: null }]) {
+      await emitProviderUsage(page, [{ ...account, extra_usage: extra }]);
+      await expect(credits).toHaveCount(0);
+      await expect(fable.locator(".op-usage-win__pct")).toHaveText("0%");
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps full Claude model windows separate from account limits (Issue #6638)", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+    const account = {
+      provider: "claude_code", state: { kind: "ok" }, limit_reached: false,
+      windows: [
+        { kind: "weekly", used_percent: 96 },
+        { kind: "fable_weekly", used_percent: 100, resets_at: "2031-01-02T03:04:05Z" },
+      ],
+    };
+    await emitProviderUsage(page, [account]);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toContainText("CC 96%");
+    await expect(strip).not.toHaveAttribute("data-limit", "true");
+    await page.mouse.move(0, 0);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeFocused();
+    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
+    await expect(card).toContainText(/Weekly\s*96%/);
+    await expect(card).toContainText(/Fable weekly\s*100%/);
+    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
+    await expect(card.locator(".op-usage-win").filter({ hasText: "Fable weekly" })
+      .locator(".op-usage-win__reset")).not.toBeEmpty();
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      info.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: info.outputPath("claude-model-limit.png"), fullPage: true });
+
+    await emitProviderUsage(page, [{ ...account, limit_reached: true,
+      windows: [{ kind: "five_hour", used_percent: 100 }, ...account.windows] }]);
+    await expect(strip).toContainText("CC 100%");
+    await expect(card.locator(".op-usage-card__limit")).toHaveText("Limit reached");
+    await expect(card).toContainText(/Fable weekly\s*100%/);
+    expect(errors).toEqual([]);
   });
 
   test("keeps weekly 100% separate from a provider refusal (Issue #5037)", async ({

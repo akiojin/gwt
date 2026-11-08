@@ -1,0 +1,770 @@
+{
+  "Classification": "gwt runtime diagnostic; repository-only ignored tooling",
+  "Limitation": "During Agent fixture launch, not idle. No acceptance proof or CPU/profile percentage claim. No arguments, values, environment, or dump memory contents in this summary.",
+  "Method": "MiniDumpNormal | MiniDumpWithThreadInfo (0x1000); exact PID/start/image validation before and same-start alive validation after every capture; offline LLDB native PDB reader only",
+  "Captures": [
+    {
+      "Sample": 0,
+      "TimestampUtc": "2026-10-16T20:47:58.5209237Z",
+      "Pid": 36172,
+      "StartFileTime": "134366568581391229",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\gui-36172-normal-0.dmp",
+      "DumpBytes": 887179,
+      "AliveAfterCapture": true,
+      "ElapsedMs": 581.9478,
+      "Flags": "0x1000"
+    },
+    {
+      "Sample": 1,
+      "TimestampUtc": "2026-10-16T20:48:00.7989804Z",
+      "Pid": 36172,
+      "StartFileTime": "134366568581391229",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\gui-36172-normal-1.dmp",
+      "DumpBytes": 893098,
+      "AliveAfterCapture": true,
+      "ElapsedMs": 175.0844,
+      "Flags": "0x1000"
+    },
+    {
+      "Sample": 2,
+      "TimestampUtc": "2026-10-16T20:48:02.5867503Z",
+      "Pid": 36172,
+      "StartFileTime": "134366568581391229",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\gui-36172-normal-2.dmp",
+      "DumpBytes": 925594,
+      "AliveAfterCapture": true,
+      "ElapsedMs": 328.1266,
+      "Flags": "0x1000"
+    },
+    {
+      "Sample": 3,
+      "TimestampUtc": "2026-10-16T20:48:04.4365688Z",
+      "Pid": 36172,
+      "StartFileTime": "134366568581391229",
+      "DumpPath": "E:\\gwt\\work\\issue-5658\\target\\issue-5658-debugger\\gui-36172-normal-3.dmp",
+      "DumpBytes": 893298,
+      "AliveAfterCapture": true,
+      "ElapsedMs": 164.2601,
+      "Flags": "0x1000"
+    }
+  ],
+  "ThreadCpuDifference": [
+    {
+      "tid": 30480,
+      "name": "",
+      "kernel_seconds": 0.015625,
+      "user_seconds": 2.75,
+      "cpu_seconds": 2.765625
+    },
+    {
+      "tid": 36880,
+      "name": "tokio-rt-worker",
+      "kernel_seconds": 0.1875,
+      "user_seconds": 0.078125,
+      "cpu_seconds": 0.265625
+    },
+    {
+      "tid": 63396,
+      "name": "gwt-agent-capacity",
+      "kernel_seconds": 0.171875,
+      "user_seconds": 0.015625,
+      "cpu_seconds": 0.1875
+    },
+    {
+      "tid": 6968,
+      "name": "gwt-monitor-runtime",
+      "kernel_seconds": 0.109375,
+      "user_seconds": 0.0,
+      "cpu_seconds": 0.109375
+    },
+    {
+      "tid": 39136,
+      "name": "main",
+      "kernel_seconds": 0.0,
+      "user_seconds": 0.015625,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "tid": 2400,
+      "name": "gwt-index-refresh-drain",
+      "kernel_seconds": 0.0,
+      "user_seconds": 0.0,
+      "cpu_seconds": 0.0
+    }
+  ],
+  "SharedSysinfoFrames": [
+    {
+      "Address": "0x4177586",
+      "ModuleName": "E:/gwt/work/issue-5658/target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "windows::Win32::System::Threading::GetSystemTimes",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b2ad83",
+      "ModuleName": "E:/gwt/work/issue-5658/target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "sysinfo::windows::process::get_process_data",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b29840",
+      "ModuleName": "E:/gwt/work/issue-5658/target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::windows::process::ProcessInner>::update",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b19c91",
+      "ModuleName": "E:/gwt/work/issue-5658/target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::windows::system::SystemInner>::refresh_processes_specifics",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    },
+    {
+      "Address": "0x2b23171",
+      "ModuleName": "E:/gwt/work/issue-5658/target/debug/gwt.exe",
+      "Symbol": [
+        {
+          "Column": 0,
+          "Discriminator": 0,
+          "FileName": "",
+          "FunctionName": "<sysinfo::common::system::System>::refresh_processes_specifics",
+          "Line": 0,
+          "StartAddress": "",
+          "StartFileName": "",
+          "StartLine": 0
+        }
+      ]
+    }
+  ],
+  "CapturedRepositoryFrames": [
+    {
+      "Sample": 0,
+      "TID": 39136,
+      "Name": "main",
+      "LeafFunctions": [
+        "NtUserGetMessage",
+        "GetMessageW"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 36880,
+      "Name": "tokio-rt-worker",
+      "LeafFunctions": [
+        "NtRemoveIoCompletionEx",
+        "GetQueuedCompletionStatusEx"
+      ],
+      "RepositoryFrames": []
+    },
+    {
+      "Sample": 0,
+      "TID": 63396,
+      "Name": "gwt-agent-capacity",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 6968,
+      "Name": "gwt-monitor-runtime",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 2400,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 0,
+      "TID": 30480,
+      "Name": "",
+      "LeafFunctions": [
+        null,
+        null
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_core::work_events_intake::content_fingerprint",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 1454
+        },
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild::closure$2",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 399
+        },
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 403
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 948
+        },
+        {
+          "function": "gwt_core::work_events_intake::rebuild_work_events_with_shared_loader<gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure_env$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>,alloc::vec::Vec<tuple$<alloc::string::String,alloc::string::String>,alloc::alloc::Global> >",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 478
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 945
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 448
+        },
+        {
+          "function": "gwt::app_runtime::AppRuntime::prepare_work_events_ingest",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5064
+        },
+        {
+          "function": "gwt::app_runtime::impl$13::spawn_work_events_ingest_for_project_key::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5015
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 39136,
+      "Name": "main",
+      "LeafFunctions": [
+        "NtUserGetMessage",
+        "GetMessageW"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 36880,
+      "Name": "tokio-rt-worker",
+      "LeafFunctions": [
+        "NtRemoveIoCompletionEx",
+        "GetQueuedCompletionStatusEx"
+      ],
+      "RepositoryFrames": []
+    },
+    {
+      "Sample": 1,
+      "TID": 63396,
+      "Name": "gwt-agent-capacity",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 6968,
+      "Name": "gwt-monitor-runtime",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 2400,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 1,
+      "TID": 30480,
+      "Name": "",
+      "LeafFunctions": [
+        "__NLG_Return2",
+        null
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_core::work_events_intake::content_fingerprint",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 1454
+        },
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild::closure$2",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 399
+        },
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 403
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 948
+        },
+        {
+          "function": "gwt_core::work_events_intake::rebuild_work_events_with_shared_loader<gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure_env$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>,alloc::vec::Vec<tuple$<alloc::string::String,alloc::string::String>,alloc::alloc::Global> >",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 478
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 945
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 448
+        },
+        {
+          "function": "gwt::app_runtime::AppRuntime::prepare_work_events_ingest",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5064
+        },
+        {
+          "function": "gwt::app_runtime::impl$13::spawn_work_events_ingest_for_project_key::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5015
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 39136,
+      "Name": "main",
+      "LeafFunctions": [
+        "NtUserGetMessage",
+        "GetMessageW"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 36880,
+      "Name": "tokio-rt-worker",
+      "LeafFunctions": [
+        "NtQuerySystemInformation",
+        "GetSystemTimes"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::runtime_health_poller::Poller::poll_once",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\runtime_health_poller.rs",
+          "line": 173
+        },
+        {
+          "function": "gwt::runtime_health_poller::run::async_fn$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\runtime_health_poller.rs",
+          "line": 49
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 63396,
+      "Name": "gwt-agent-capacity",
+      "LeafFunctions": [
+        "NtQuerySystemInformation",
+        "GetSystemTimes"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 170
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure$0::closure$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 196
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 195
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_with_liveness::closure$12<gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure_env$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0> >",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 1029
+        },
+        {
+          "function": "gwt::session_inventory::read_candidates_with_liveness<gwt::session_inventory::observe_machine_sessions_with_system_refresh::closure_env$0<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0> >",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 1029
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system_refresh<gwt::session_inventory::observe_machine_sessions_with_system::closure_env$0>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 187
+        },
+        {
+          "function": "gwt::session_inventory::observe_machine_sessions_with_system",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\session_inventory.rs",
+          "line": 169
+        },
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::sample_machine",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\agent_capacity.rs",
+          "line": 855
+        },
+        {
+          "function": "gwt::agent_capacity::RuntimeProbe::refresh_projects",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\agent_capacity.rs",
+          "line": 684
+        },
+        {
+          "function": "gwt::agent_capacity::refresh_machine_capacity_for_projects",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\agent_capacity.rs",
+          "line": 620
+        },
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10637
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 6968,
+      "Name": "gwt-monitor-runtime",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 2400,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 2,
+      "TID": 30480,
+      "Name": "",
+      "LeafFunctions": [
+        null,
+        "core::iter::adapters::map::map_fold::closure$0<ref$<gwt::work_events_ingest::PendingWorkEventsSource>,tuple$<alloc::string::String,alloc::sync::Arc<str$,alloc::alloc::Global> >,tuple$<>,gwt::work_events_ingest::load_pending_sources_for_rebuild::closure_env$2,core::iter::traits::iterator::Iterator::for_each::call::closure_env$0<tuple$<alloc::string::String,alloc::sync::Arc<str$,alloc::alloc::Global> >,hashbrown::map::impl$82::extend::closure_env$0<alloc::string::String,alloc::sync::Arc<str$,alloc::alloc::Global>,std::hash::random::RandomState,alloc::alloc::Global,core::iter::adapters::map::Map<core::slice::iter::Iter<gwt::work_events_ingest::PendingWorkEventsSource>,gwt::work_events_ingest::load_pending_sources_for_rebuild::closure_env$2> > > >"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 403
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 948
+        },
+        {
+          "function": "gwt_core::work_events_intake::rebuild_work_events_with_shared_loader<gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure_env$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>,alloc::vec::Vec<tuple$<alloc::string::String,alloc::string::String>,alloc::alloc::Global> >",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 478
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 945
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 448
+        },
+        {
+          "function": "gwt::app_runtime::AppRuntime::prepare_work_events_ingest",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5064
+        },
+        {
+          "function": "gwt::app_runtime::impl$13::spawn_work_events_ingest_for_project_key::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5015
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 39136,
+      "Name": "main",
+      "LeafFunctions": [
+        "NtUserGetMessage",
+        "GetMessageW"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10893
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 36880,
+      "Name": "tokio-rt-worker",
+      "LeafFunctions": [
+        "NtWaitForAlertByThreadId",
+        "RtlWaitOnAddress"
+      ],
+      "RepositoryFrames": []
+    },
+    {
+      "Sample": 3,
+      "TID": 63396,
+      "Name": "gwt-agent-capacity",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::main::closure$12",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\main.rs",
+          "line": 10627
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 6968,
+      "Name": "gwt-monitor-runtime",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::monitor_duplicate_runtime::spawn::closure$0<gwt::main::closure_env$13>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\monitor_duplicate_runtime.rs",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 2400,
+      "Name": "gwt-index-refresh-drain",
+      "LeafFunctions": [
+        "NtWaitForSingleObject",
+        "WaitForSingleObjectEx"
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt::project_index_bootstrap::refresh_broker_drain_loop",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1318
+        },
+        {
+          "function": "gwt::project_index_bootstrap::ensure_refresh_broker_drain::closure$0::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\project_index_bootstrap.rs",
+          "line": 1293
+        }
+      ]
+    },
+    {
+      "Sample": 3,
+      "TID": 30480,
+      "Name": "",
+      "LeafFunctions": [
+        null,
+        null
+      ],
+      "RepositoryFrames": [
+        {
+          "function": "gwt_core::work_events_intake::content_fingerprint",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 1454
+        },
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild::closure$2",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 399
+        },
+        {
+          "function": "gwt::work_events_ingest::load_pending_sources_for_rebuild",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 403
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 948
+        },
+        {
+          "function": "gwt_core::work_events_intake::rebuild_work_events_with_shared_loader<gwt::work_events_ingest::ingest_project_work_events_paths_inner::closure_env$20<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>,alloc::vec::Vec<tuple$<alloc::string::String,alloc::string::String>,alloc::alloc::Global> >",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt-core\\src\\work_events_intake.rs",
+          "line": 478
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_inner<gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$0,gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory::closure_env$1>",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 945
+        },
+        {
+          "function": "gwt::work_events_ingest::ingest_project_work_events_paths_with_inventory",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\work_events_ingest.rs",
+          "line": 448
+        },
+        {
+          "function": "gwt::app_runtime::AppRuntime::prepare_work_events_ingest",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5064
+        },
+        {
+          "function": "gwt::app_runtime::impl$13::spawn_work_events_ingest_for_project_key::closure$0",
+          "source": "E:\\gwt\\work\\issue-5658\\crates\\gwt\\src\\app_runtime\\mod.rs",
+          "line": 5015
+        }
+      ]
+    }
+  ]
+}

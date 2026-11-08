@@ -1,0 +1,627 @@
+{
+  "issue": 5597,
+  "theme": "dark",
+  "passed": true,
+  "fixture": {
+    "repo_hash": "99a8660247f5bc49",
+    "project": "E:\\gwt\\work\\issue-5597",
+    "started_at": "2026-10-16T04:55:26.8941619Z",
+    "git_head": "0b087f0b79dd5578dacadea51165caf467e43598",
+    "sha256": {
+      "target/debug/gwt.exe": "EAC6214D753C28E11D167F8C5821EE97B3CDCD0BA89DAC63DEDC4ED02E324BF2",
+      "target/debug/gwtd.exe": "723704FA093AFEA6FFE2DAB7F56F8CE7E19FC0281B5054B6F590898D64D5E7B3",
+      "crates/gwt/src/main.rs": "B4F22AE359755E1406FC56ECBDE4652805CA05CCE564D90C9150DCAC2A5F5D4B",
+      "crates/gwt/src/agent_capacity.rs": "DEF1F0202D6EC1942478AC3046C3EB4367A3CAB8F76C364E5DEBDA8F32E6F229",
+      "crates/gwt/src/app_runtime/mod.rs": "41D06F4D58607E528CA166EA796E74D5FC37D276E8437255BF12AFDE6F17FC31",
+      "crates/gwt/src/usage_poller.rs": "69482D98390DA50A07AA26B8BD1169F8DB5BE862FAEEE2D5278A9FDB8D8460F0"
+    },
+    "pid": 43128
+  },
+  "started_at": "2026-10-16T04:55:50.034Z",
+  "ended_at": "2026-10-16T04:56:57.893Z",
+  "observation_ms": 67859,
+  "requests": [
+    {
+      "elapsed_ms": 485.0667000000003,
+      "reply_ms": 25,
+      "forced_usage": true
+    },
+    {
+      "elapsed_ms": 5817.5467,
+      "reply_ms": 2.300000000745058,
+      "forced_usage": true
+    },
+    {
+      "elapsed_ms": 11209.6927,
+      "reply_ms": 1.599999999627471,
+      "forced_usage": true
+    },
+    {
+      "elapsed_ms": 16540.687700000002,
+      "reply_ms": 12,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 21636.7552,
+      "reply_ms": 1.5,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 26746.5499,
+      "reply_ms": 1.700000001117587,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 31841.574300000004,
+      "reply_ms": 1.400000000372529,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 36944.18659999999,
+      "reply_ms": 7.800000000745058,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 42091.608799999995,
+      "reply_ms": 1.400000000372529,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 47410.955799999996,
+      "reply_ms": 12.400000000372529,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 52504.972599999994,
+      "reply_ms": 1.5,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 57623.872299999995,
+      "reply_ms": 1.599999999627471,
+      "forced_usage": false
+    },
+    {
+      "elapsed_ms": 62731.21549999999,
+      "reply_ms": 1.900000000372529,
+      "forced_usage": false
+    }
+  ],
+  "capacity_observed_at": [
+    1792126544,
+    1792126554,
+    1792126565,
+    1792126576,
+    1792126587,
+    1792126598,
+    1792126609
+  ],
+  "usage": [
+    {
+      "at": 1792126550146,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126550147,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126555853,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126555853,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126557089,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126557089,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126561244,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126561244,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126587098,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126587098,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126617108,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    },
+    {
+      "at": 1792126617108,
+      "accounts": [
+        {
+          "provider": "codex",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "no_data"
+          },
+          "fetched_at": null
+        },
+        {
+          "provider": "claude_code",
+          "plan": null,
+          "windows": [],
+          "limit_reached": false,
+          "state": {
+            "kind": "disabled"
+          },
+          "fetched_at": null
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "handlers": [
+    {
+      "handler": "ProviderUsageSnapshot",
+      "count": 1,
+      "max_ms": 0,
+      "max_upper_bound_ms": 1,
+      "max_rolling_minute_total_ms": 0,
+      "max_rolling_minute_upper_bound_ms": 1
+    },
+    {
+      "handler": "IssueMonitorCapacityChanged",
+      "count": 11,
+      "max_ms": 0,
+      "max_upper_bound_ms": 1,
+      "max_rolling_minute_total_ms": 0,
+      "max_rolling_minute_upper_bound_ms": 11
+    }
+  ],
+  "combined_handlers": {
+    "count": 12,
+    "max_ms": 0,
+    "max_upper_bound_ms": 1,
+    "max_rolling_minute_total_ms": 0,
+    "max_rolling_minute_upper_bound_ms": 11
+  },
+  "timing_log_rows": [
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:55:47.093302900+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"ProviderUsageSnapshot\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:55:47.093302900+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "ProviderUsageSnapshot",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:55:55.333411500+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:55:55.333411500+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:06.825280100+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:06.825280100+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:11.865003200+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:11.865003200+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:17.234960200+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:17.234960200+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:22.270318500+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:22.270318500+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:28.668753700+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:28.668753700+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:33.866610300+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:33.866610300+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:39.210392900+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:39.210392900+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:44.248946500+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:44.248946500+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:49.570934200+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:49.570934200+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    },
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\gwt.log.2026-10-16",
+      "raw": "{\"timestamp\":\"2026-10-16T13:56:54.606646200+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"IssueMonitorCapacityChanged\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}",
+      "record": {
+        "timestamp": "2026-10-16T13:56:54.606646200+09:00",
+        "level": "DEBUG",
+        "fields": {
+          "message": "GUI event loop dispatch handled",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 0
+        },
+        "target": "gwt.frontend.timing"
+      }
+    }
+  ],
+  "gui_dispatch_summary_rows": [
+    {
+      "file": "E:\\gwt\\work\\issue-5597\\target\\issue-5597-home-417e020e41d146769ee65cf59d5f353c\\.gwt\\logs\\perf\\perf-2026-10-16.jsonl",
+      "raw": "{\"schema_version\":1,\"type\":\"gui_dispatch_summary\",\"timestamp\":\"2026-10-16T04:56:28.668367400Z\",\"stream\":\"ui\",\"target\":\"gui:event_loop\",\"value\":-0.0,\"unit\":\"ms\",\"dispatch\":{\"pid\":43128,\"count\":0,\"total_ms\":-0.0,\"p95_ms\":0.0,\"max_ms\":0.0,\"pending_max\":null,\"pending_unknown_count\":0,\"window_ms\":61490.085999999996,\"dropped_windows\":0,\"window_ended_at\":\"2026-10-16T04:56:28.668367400Z\"}}",
+      "record": {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-16T04:56:28.668367400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 43128,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 61490.085999999996,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-16T04:56:28.668367400Z"
+        }
+      }
+    }
+  ],
+  "limitations": "Dispatch summaries include only handlers over 50ms; their absence for these handlers is not a 16ms proof. Debug rows include every dispatch. elapsed_ms is truncated; +1ms per sample gives a conservative upper bound. All captured handler rows since owned GUI startup are included in the budgets.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "pass"
+}

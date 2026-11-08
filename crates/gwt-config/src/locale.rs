@@ -13,11 +13,14 @@
 /// when the locale cannot be determined.
 pub fn detect_user_locale() -> Option<String> {
     let env_values = ["LC_ALL", "LC_MESSAGES", "LANG"].map(std::env::var);
-    let system_locale = read_system_locale();
-    detect_user_locale_from_env_and_system(
+    if let Some(language) = detect_user_locale_from_env_and_system(
         env_values.iter().map(|value| value.as_deref().ok()),
-        system_locale.as_deref(),
-    )
+        None,
+    ) {
+        return Some(language);
+    }
+    let system_locale = read_system_locale();
+    detect_user_locale_from(system_locale.as_deref())
 }
 
 /// Resolve a preferred language from environment locale candidates first,

@@ -521,6 +521,36 @@ fn prompt_write_lease_wait() -> std::time::Duration {
     })
 }
 
+/// Prepare the owning session's leftover obligations for a delivered-owner
+/// settlement. The caller holds the trusted write lease and records its audit
+/// before saving this state; foreign or corrupt obligations fail closed.
+pub(crate) fn prepare_delivered_settlement(
+    worktree: &Path,
+    session_id: &str,
+    evidence: &str,
+) -> io::Result<Option<ActionObligationState>> {
+    let Some(mut state) = load(worktree)? else {
+        return Ok(None);
+    };
+    if state.session_id != session_id || !integrity_ok(&state) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "delivered-owner settlement requires integrity-valid obligations owned by this session",
+        ));
+    }
+    let mut changed = false;
+    for obligation in &mut state.obligations {
+        if obligation.settled.is_none() {
+            obligation.settled = Some(ObligationSettlement {
+                evidence: evidence.to_string(),
+                settled_at: Utc::now(),
+            });
+            changed = true;
+        }
+    }
+    Ok(changed.then_some(state))
+}
+
 /// Settle every open obligation of the given kinds with the named canonical
 /// evidence. Best-effort from operation success paths: a bookkeeping
 /// failure must not fail the verified operation.
@@ -682,10 +712,15 @@ pub fn open_obligation_refusal(
     ))
 }
 
-/// Open (unsettled) obligation kinds for the session — the Stop gate input.
+/// Open obligation kinds, retaining the existing fail-open behavior on read errors.
 pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
-    match load(worktree) {
-        Ok(Some(state)) if state.session_id == session_id && integrity_ok(&state) => {
+    try_open_kinds(worktree, session_id).unwrap_or_default()
+}
+
+/// Open obligation kinds with read errors preserved for Stop diagnostics.
+pub fn try_open_kinds(worktree: &Path, session_id: &str) -> io::Result<Vec<ObligationKind>> {
+    Ok(match load(worktree)? {
+        Some(state) if state.session_id == session_id && integrity_ok(&state) => {
             let mut kinds: Vec<ObligationKind> = Vec::new();
             for entry in &state.obligations {
                 if entry.settled.is_none() && !kinds.contains(&entry.kind) {
@@ -694,11 +729,11 @@ pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
             }
             kinds
         }
-        // Missing, cross-session, tampered, or unreadable state fails open
+        // Missing, cross-session, or tampered state fails open
         // for the hook reader (FR-014u; tamper enforcement lives with the
         // execution-control gate).
         _ => Vec::new(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -827,6 +862,7 @@ mod tests {
             "fix this; do not create a PR",
             "fix this; don't open a pull request",
             "Before changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
+            "Before changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
         ] {
             assert_ne!(classify_prompt(prompt), Some(ObligationKind::Pr), "{prompt}");
         }

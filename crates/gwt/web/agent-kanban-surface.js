@@ -12,18 +12,11 @@ export function isAgentKanbanPlacement(windowData) {
   return windowData?.placement?.kind === "agent_kanban";
 }
 
-// SPEC-3671 FR-004: the single seam that answers "is this window drawn on the
-// canvas?". Callers that ask about Kanban *lane membership* (board_id / lane_id)
-// keep using `isAgentKanbanPlacement()`; callers that decide canvas rendering use
-// this predicate so a new off-canvas placement only has to be added here.
-export function isOffCanvasPlacement(windowData) {
+// A contained terminal is mounted by its Issue preview or Kanban card host.
+// This describes terminal ownership, independent of window coordinates.
+export function isContainedPlacement(windowData) {
   const kind = windowData?.placement?.kind;
   return kind === "agent_kanban" || kind === "issue_preview";
-}
-
-function isCanvasPlacement(windowData) {
-  const kind = windowData?.placement?.kind;
-  return !kind || kind === "canvas";
 }
 
 function isAgentWindow(windowData) {
@@ -34,8 +27,7 @@ export function isAgentKanbanEligible(windowData) {
   return Boolean(
     windowData?.id &&
       isAgentWindow(windowData) &&
-      !windowData.tab_group_id &&
-      isCanvasPlacement(windowData),
+      !isContainedPlacement(windowData),
   );
 }
 
@@ -78,11 +70,10 @@ export function moveAgentKanbanCardMessage(id, boardId, laneId, order) {
   };
 }
 
-export function undockAgentWindowMessage(id, geometry) {
+export function undockAgentWindowMessage(id) {
   return {
     kind: "undock_agent_window",
     id,
-    geometry,
   };
 }
 
@@ -193,7 +184,7 @@ export function createAgentKanbanSurface({
   createTerminalRuntime,
   send,
   onLaunchAgent,
-  visibleBounds,
+  onUndockAgent,
   windowDisplayTitle,
   windowRoleBadgeLabel,
 }) {
@@ -306,12 +297,15 @@ export function createAgentKanbanSurface({
     titleWrap.className = "agent-kanban-card-title-wrap";
     const title = document.createElement("div");
     title.className = "agent-kanban-card-title";
-    title.textContent =
-      windowDisplayTitle?.(windowData) || windowData.title || windowData.id;
+    title.textContent = windowData.is_pm
+      ? windowDisplayTitle?.(windowData) || "Project Manager"
+      : String(windowData.agent_name || "").trim() || windowDisplayTitle?.(windowData)
+        || windowData.title || windowData.branch || windowData.agent_id || "Agent";
     const meta = document.createElement("div");
     meta.className = "agent-kanban-card-meta";
-    meta.textContent =
-      windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
+    const provider = windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
+    const purpose = windowData.dynamic_title || windowData.purpose_title || windowData.title || "";
+    meta.textContent = purpose ? `${provider} — ${purpose}` : provider;
     titleWrap.append(title, meta);
 
     const actions = document.createElement("div");
@@ -330,16 +324,29 @@ export function createAgentKanbanSurface({
     });
 
     const undock = document.createElement("button");
+    const issueNumber = Number(windowData.linked_issue_number);
+    const existingIssueWindow = () => Number.isInteger(issueNumber) && issueNumber > 0
+      ? (activeWorkspace?.()?.windows || []).find(candidate => candidate.id !== windowData.id
+        && isAgentWindow(candidate) && !isContainedPlacement(candidate)
+        && Number(candidate.linked_issue_number) === issueNumber)
+      : null;
+    const focusesExisting = Boolean(existingIssueWindow());
     undock.type = "button";
     undock.dataset.action = "undock";
     undock.className = "agent-kanban-card-action";
-    undock.textContent = "↗";
-    undock.title = "Undock";
-    undock.setAttribute("aria-label", "Undock agent window");
+    undock.textContent = focusesExisting ? "◎" : "↗";
+    undock.title = focusesExisting ? "Focus existing Issue window" : "Undock";
+    undock.setAttribute("aria-label", focusesExisting ? "Focus existing Issue window" : "Undock agent window");
     undock.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      send?.(undockAgentWindowMessage(windowData.id, undockGeometry(windowData)));
+      const existing = existingIssueWindow();
+      if (existing) {
+        onUndockAgent?.(existing.id);
+        return;
+      }
+      send?.(undockAgentWindowMessage(windowData.id));
+      onUndockAgent?.(windowData.id);
     });
     actions.append(collapse, undock);
     header.append(titleWrap, actions);
@@ -391,24 +398,6 @@ export function createAgentKanbanSurface({
     } else if (isAgentKanbanEligible(windowData)) {
       send?.(placeAgentWindowMessage(id, target.boardId, target.laneId, target.order));
     }
-  }
-
-  function undockGeometry(windowData) {
-    if (windowData?.geometry) {
-      return {
-        x: Number(windowData.geometry.x) || 0,
-        y: Number(windowData.geometry.y) || 0,
-        width: Number(windowData.geometry.width) || 720,
-        height: Number(windowData.geometry.height) || 420,
-      };
-    }
-    const bounds = visibleBounds?.() || { x: 0, y: 0 };
-    return {
-      x: (Number(bounds.x) || 0) + 32,
-      y: (Number(bounds.y) || 0) + 32,
-      width: 720,
-      height: 420,
-    };
   }
 
   return { mount };

@@ -77,6 +77,15 @@ impl AISettings {
     ///
     /// SPEC-1933 FR-009 / SC-004.
     pub fn effective_language(&self) -> &'static str {
+        if !self
+            .language
+            .as_deref()
+            .unwrap_or("auto")
+            .trim()
+            .eq_ignore_ascii_case("auto")
+        {
+            return self.effective_language_with_locale(None);
+        }
         let detected = detect_user_locale();
         self.effective_language_with_locale(detected.as_deref())
     }

@@ -1,0 +1,10 @@
+{
+  "reused_matching_embedded_assets": true,
+  "probe_cache": {
+    "requirements_hash": "eac269738a090205",
+    "runner_hash": "3442421ce309a375",
+    "schema_version": 1,
+    "venv_python_identity": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\runtime\\venvs\\chroma-venv-eac269738a090205\\Scripts\\python.exe:1759803448000",
+    "verified_at_ms": 1792134835052
+  }
+}

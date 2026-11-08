@@ -55,6 +55,7 @@ pub fn parse(args: &[String]) -> Result<SearchCommand, CliParseError> {
             "--board" => push_scope(&mut scopes, IndexSearchScope::Board),
             "--discussions" => push_scope(&mut scopes, IndexSearchScope::Discussions),
             "--works" => push_scope(&mut scopes, IndexSearchScope::Works),
+            "--reports" => push_scope(&mut scopes, IndexSearchScope::Reports),
             "--json" => json = true,
             "--match-mode" => {
                 i += 1;
@@ -176,6 +177,7 @@ pub fn run<E: CliEnv>(
             &suggestions,
             &outcome.stale_scopes,
             outcome.refresh_queued,
+            &outcome.unavailable_scopes,
         );
     } else {
         render_text(out, &results, &suggestions);
@@ -185,6 +187,7 @@ pub fn run<E: CliEnv>(
                 outcome.stale_scopes.join(", ")
             ));
         }
+        render_unavailable_scope_warning(out, &outcome.unavailable_scopes);
     }
     Ok(0)
 }
@@ -294,6 +297,7 @@ fn render_json(
     suggestions: &[IndexSearchResult],
     stale_scopes: &[String],
     refresh_queued: bool,
+    unavailable_scopes: &[crate::index_search::IndexSearchUnavailableScope],
 ) {
     let mut payload = serde_json::json!({
         "ok": true,
@@ -307,8 +311,29 @@ fn render_json(
         payload["stale_scopes"] = serde_json::json!(stale_scopes);
         payload["refresh_queued"] = serde_json::json!(refresh_queued);
     }
+    if !unavailable_scopes.is_empty() {
+        payload["partial"] = serde_json::json!(true);
+        payload["unavailable_scopes"] = serde_json::json!(unavailable_scopes);
+    }
     out.push_str(&payload.to_string());
     out.push('\n');
+}
+
+fn render_unavailable_scope_warning(
+    out: &mut String,
+    unavailable_scopes: &[crate::index_search::IndexSearchUnavailableScope],
+) {
+    if unavailable_scopes.is_empty() {
+        return;
+    }
+    let excluded = unavailable_scopes
+        .iter()
+        .map(|scope| format!("{} ({})", scope.scope, scope.reason))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "warning: partial search; unavailable scopes excluded: {excluded}; check index.status for recovery\n"
+    ));
 }
 
 fn render_text(out: &mut String, results: &[IndexSearchResult], suggestions: &[IndexSearchResult]) {
@@ -511,6 +536,7 @@ mod tests {
             &[sample_result(IndexSearchScope::Specs, "spec suggestion")],
             &[],
             false,
+            &[],
         );
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
         assert_eq!(payload["ok"], serde_json::Value::Bool(true));
@@ -526,11 +552,49 @@ mod tests {
     #[test]
     fn render_json_adds_freshness_metadata_for_stale_scopes() {
         let mut out = String::new();
-        render_json(&mut out, "q", &[], &[], &["issues".to_string()], true);
+        render_json(&mut out, "q", &[], &[], &["issues".to_string()], true, &[]);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
         assert_eq!(payload["ok"], serde_json::Value::Bool(true));
         assert_eq!(payload["stale_scopes"][0], "issues");
         assert_eq!(payload["refresh_queued"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn partial_search_reports_every_unavailable_scope_in_json_and_text() {
+        let unavailable = vec![
+            crate::index_search::IndexSearchUnavailableScope {
+                scope: "issues".into(),
+                reason: "repair_stopped".into(),
+            },
+            crate::index_search::IndexSearchUnavailableScope {
+                scope: "memory".into(),
+                reason: "missing".into(),
+            },
+        ];
+        let mut json_out = String::new();
+        render_json(
+            &mut json_out,
+            "q",
+            &[sample_result(IndexSearchScope::Specs, "usable hit")],
+            &[],
+            &[],
+            false,
+            &unavailable,
+        );
+        let payload: serde_json::Value = serde_json::from_str(json_out.trim()).unwrap();
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["partial"], true);
+        assert_eq!(payload["results"][0]["title"], "usable hit");
+        assert_eq!(
+            payload["unavailable_scopes"],
+            serde_json::json!(unavailable)
+        );
+
+        let mut text_out = String::new();
+        render_unavailable_scope_warning(&mut text_out, &unavailable);
+        assert!(text_out.contains("warning: partial search"));
+        assert!(text_out.contains("issues (repair_stopped)"));
+        assert!(text_out.contains("memory (missing)"));
     }
 
     #[test]
@@ -598,6 +662,8 @@ mod tests {
                 project_root: Some(std::path::PathBuf::from("other-project")),
                 action: Some("index-issues".into()),
                 qos: Some("background".into()),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
             })),
         });
 

@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "issue": 5489,
+  "observed_at": "2026-10-15T13:56:47.4690204Z",
+  "gui_version": "9.123.1",
+  "auto_apply_updates": true,
+  "auto_apply_status_operation": "update.settings.status",
+  "release_tag": "v9.123.2",
+  "release_commit": "4c909ebe1e428cf668f76142e46eabda0b3c4baf",
+  "fix_commit": "2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0",
+  "update_cache": {
+    "checked_at": "2026-10-15T13:55:31.264675100Z",
+    "latest_version": "9.123.2",
+    "release_url": "https://github.com/akiojin/gwt/releases/tag/v9.123.2",
+    "portable_asset_url": "https://github.com/akiojin/gwt/releases/download/v9.123.2/gwt-windows-x86_64.zip",
+    "installer_asset_url": "https://github.com/akiojin/gwt/releases/download/v9.123.2/gwt-windows-x86_64.msi",
+    "asset_url": "https://github.com/akiojin/gwt/releases/download/v9.123.2/gwt-windows-x86_64.msi"
+  },
+  "update_log_source": "~/.gwt/logs/update-2026-10-15.log",
+  "refusals": [
+    {
+      "observed_at": "2026-10-15T13:55:34.816803600+00:00",
+      "project_root": "E:\\gwt",
+      "reason": "Update v9.123.2 needs elevated permissions to install — apply it manually from the update button.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.817057200+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.839195200+00:00",
+      "project_root": "E:\\gwt",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T22:55:34.839398+09:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.844304400+00:00",
+      "project_root": "E:\\160-Idina",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.844491400+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.856487400+00:00",
+      "project_root": "E:\\KeibaSuite",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.856688400+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.867539700+00:00",
+      "project_root": "E:\\unity-cli",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.867755300+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.880691900+00:00",
+      "project_root": "E:\\llmlb",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.880885500+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.895041100+00:00",
+      "project_root": "E:\\160-Idina",
+      "reason": "Update v9.123.2 needs elevated permissions to install — apply it manually from the update button.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.895493600+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.912428400+00:00",
+      "project_root": "E:\\160-Idina",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T22:55:34.91275+09:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.936086900+00:00",
+      "project_root": "E:\\KeibaSuite",
+      "reason": "Update v9.123.2 needs elevated permissions to install — apply it manually from the update button.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.936283700+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.955987700+00:00",
+      "project_root": "E:\\KeibaSuite",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.956193900+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.968299200+00:00",
+      "project_root": "E:\\unity-cli",
+      "reason": "Update v9.123.2 needs elevated permissions to install — apply it manually from the update button.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T22:55:34.968479+09:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:34.992285900+00:00",
+      "project_root": "E:\\unity-cli",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:34.992511800+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T22:55:35.000515+09:00",
+      "project_root": "E:\\llmlb",
+      "reason": "Update v9.123.2 needs elevated permissions to install — apply it manually from the update button.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:35.000718400+00:00",
+      "version": "9.123.2"
+    },
+    {
+      "observed_at": "2026-10-15T13:55:35.035528200+00:00",
+      "project_root": "E:\\llmlb",
+      "reason": "Update v9.123.2: Administrator privileges required; the update stays staged. Use the update button to apply manually.",
+      "stage": "pending_refused",
+      "ts": "2026-10-15T13:55:35.035770400+00:00",
+      "version": "9.123.2"
+    }
+  ]
+}

@@ -16,6 +16,7 @@ pub mod launch;
 pub mod permission_mode;
 pub mod prepare;
 pub mod presets;
+pub mod runtime_gc;
 pub mod session;
 mod session_bridge;
 pub mod session_ledger;
@@ -59,23 +60,25 @@ pub use permission_mode::{
     ProviderSkipMapping,
 };
 pub use prepare::{
-    branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
-    install_launch_gwt_bin_env_with_lookup, is_transient_launch_failure,
-    missing_launcher_binary_detail, pane_websocket_url_for_launch_runtime, prepare_agent_launch,
+    branch_worktree_path, check_codex_config, hook_forward_url_for_launch_runtime,
+    install_launch_gwt_bin_env, install_launch_gwt_bin_env_with_lookup,
+    is_codex_config_preflight_failure, is_transient_launch_failure, missing_launcher_binary_detail,
+    pane_websocket_url_for_launch_runtime, prepare_agent_launch,
     resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe,
     resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
     HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
-    PreparedAgentLaunch, PreparedProcessLaunch, TRANSIENT_LAUNCH_RETRY_HINT,
+    PreparedAgentLaunch, PreparedProcessLaunch, CODEX_CONFIG_PREFLIGHT_FAILURE_PREFIX,
+    CODEX_CONFIG_PREFLIGHT_TIMEOUT, DIRECT_RUNNER_PROBE_TIMEOUT, TRANSIENT_LAUNCH_RETRY_HINT,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
     PresetDefinition, PresetError, PresetId,
 };
 pub use session::{
-    active_launch_handshake_path, begin_session_active_launch_handshake_under_lease,
-    begin_session_manual_handoff_under_lease, clear_session_active_launch_handshake_under_lease,
-    clear_session_manual_handoff_under_lease, current_thread_holds_session_lease,
-    inspect_session_path, manual_handoff_path,
+    acquire_session_path_leases, active_launch_handshake_path,
+    begin_session_active_launch_handshake_under_lease, begin_session_manual_handoff_under_lease,
+    clear_session_active_launch_handshake_under_lease, clear_session_manual_handoff_under_lease,
+    current_thread_holds_session_lease, inspect_session_path, manual_handoff_path,
     mark_session_active_launch_handshake_child_spawned_under_lease, persist_agent_session_id,
     persist_session_completed_stop, persist_session_execution_binding, persist_session_exit,
     persist_session_hook_event, persist_session_hook_metadata_with_wait,
@@ -94,13 +97,14 @@ pub use session::{
     runtime_state_dir_for_pid, runtime_state_path, runtime_state_path_for_pid,
     session_active_launch_handshake_matches_under_lease,
     session_manual_handoff_matches_under_lease, sessions_dir_from_runtime_path, update_session,
-    update_session_if_changed, update_session_if_unchanged_with, update_session_with_wait,
-    validate_docker_runtime_worktree_path, validate_session_id_path_component, with_session_lease,
-    with_session_lease_wait, with_session_path_lease, with_session_path_lease_wait,
-    AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionBindingIdentity,
-    PendingDiscussionResume, Session, SessionActiveLaunchHandshake, SessionActiveLaunchPhase,
-    SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt, SessionLaunchOrigin,
-    SessionManualHandoffFence, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
+    update_session_if_changed, update_session_if_matches_with, update_session_if_unchanged_with,
+    update_session_with_wait, validate_docker_runtime_worktree_path,
+    validate_session_id_path_component, with_session_lease, with_session_lease_wait,
+    with_session_path_lease, with_session_path_lease_wait, AgentSessionHistoryEntry,
+    DockerRuntimeBinding, ExecutionBindingIdentity, PendingDiscussionResume, Session,
+    SessionActiveLaunchHandshake, SessionActiveLaunchPhase, SessionExecutionBinding,
+    SessionExecutionIdentity, SessionExitReceipt, SessionLaunchOrigin, SessionManualHandoffFence,
+    SessionPathLeases, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
     ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
     EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,

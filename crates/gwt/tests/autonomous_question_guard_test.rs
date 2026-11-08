@@ -27,6 +27,8 @@ fn event(tool_name: &str, tool_input: serde_json::Value) -> HookEvent {
         tool_name: Some(tool_name.to_string()),
         tool_input: Some(tool_input),
         transcript_path: None,
+        active_skill: None,
+        active_plugin: None,
         cwd: None,
     }
 }
@@ -206,6 +208,8 @@ fn unreadable_question_payload_still_converts() {
             tool_name: Some("AskUserQuestion".to_string()),
             tool_input: None,
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         },
         &inputs(&prefs_path, "claude-code"),

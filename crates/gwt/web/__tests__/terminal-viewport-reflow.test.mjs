@@ -20,7 +20,6 @@ import {
   attachContainerResizeReflow,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
-  clearTerminalOutputBeforeSnapshot,
   createTerminalFitScheduler,
   createTerminalSnapshotWriteCoordinator,
   createTerminalViewportRefreshScheduler,
@@ -43,6 +42,68 @@ const projectShellSurfaceSource = readFileSync(
 );
 const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
+test("initial fit runs once without frames and can be cancelled on runtime removal", (t) => {
+  const frames = new Map(), timers = new Map(), tasks = new Map(), listeners = new Set();
+  let nextId = 0, fits = 0;
+  const visibility = { hidden: false,
+    addEventListener: (_, listener) => listeners.add(listener),
+    removeEventListener: (_, listener) => listeners.delete(listener),
+  };
+  for (const [key, value] of Object.entries({
+    document: visibility,
+    MessageChannel: class {
+      port1 = { onmessage: null, close: () => tasks.delete(this.id) };
+      port2 = { close() {}, postMessage: () => {
+        this.id = ++nextId;
+        tasks.set(this.id, () => this.port1.onmessage?.());
+      } };
+    },
+    requestAnimationFrame: callback => { frames.set(++nextId, callback); return nextId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    assert.equal(delay, 100);
+    timers.set(++nextId, callback);
+    return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", id => timers.delete(id));
+  for (const winner of ["timer", "frame", "cancel", "hidden", "transition"]) {
+    visibility.hidden = winner === "hidden";
+    const before = fits;
+    const cancel = terminalViewportReflow.scheduleTerminalInitialFit(() => { fits += 1; });
+    if (!visibility.hidden) {
+      assert.equal(frames.size, 1);
+      assert.equal(timers.size, 1);
+    }
+    const frame = frames.values().next().value;
+    const timer = timers.values().next().value;
+    if (winner === "transition") {
+      visibility.hidden = true;
+      for (const listener of [...listeners]) listener();
+    }
+    const task = tasks.values().next().value;
+    if (visibility.hidden) {
+      assert.equal(tasks.size, 1, "hidden initial fit escapes suspended frames and timers");
+      task();
+    } else ({ timer, frame, cancel })[winner]();
+    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
+    assert.equal(tasks.size, 0);
+    assert.equal(listeners.size, 0);
+    frame?.();
+    timer?.();
+    task?.();
+    assert.equal(fits - before, winner === "cancel" ? 0 : 1, "stale callbacks cannot fit a removed or already fitted runtime");
+  }
+});
+
 function fixtureWindow() {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   return document.defaultView;
@@ -57,6 +118,9 @@ function asyncTerminalStub() {
   return {
     writes,
     resets,
+    buffer: { active: { viewportY: 0, baseY: 0 } },
+    scrollToBottom() { this.buffer.active.viewportY = this.buffer.active.baseY; },
+    scrollToLine(line) { this.buffer.active.viewportY = Math.min(line, this.buffer.active.baseY); },
     write(text, callback) {
       if (nextWriteFailure) {
         const { beforeThrow, error } = nextWriteFailure;
@@ -77,6 +141,7 @@ function asyncTerminalStub() {
         throw error;
       }
       resets.push(writes.length);
+      this.buffer.active = { viewportY: 0, baseY: 0 };
     },
     failNextReset(error, beforeThrow) {
       nextResetFailure = { beforeThrow, error };
@@ -99,7 +164,6 @@ function snapshotWriteHarness({
   const windowId = "wt-async-snapshot";
   const terminal = asyncTerminalStub();
   const pendingSnapshotMap = new Map();
-  const pendingOutputMap = new Map();
   const runtime = { deferredWrites: [] };
   const installedDecoders = [];
   const decodedSnapshots = [];
@@ -164,12 +228,9 @@ function snapshotWriteHarness({
   });
 
   function receiveSnapshot(snapshot) {
-    clearTerminalOutputBeforeSnapshot({
-      windowId,
-      runtime,
-      pendingOutputMap,
-      clearBatchedOutput: () => {},
-    });
+    // This harness isolates coordinator ordering; the real bounded queue's
+    // snapshot boundaries are exercised in terminal-output-buffer.test.mjs.
+    runtime.deferredWrites = [];
     pendingSnapshotMap.set(windowId, snapshot);
     return coordinator.start();
   }
@@ -238,49 +299,12 @@ test("decodeTerminalSnapshotBoundary isolates snapshot and subsequent live UTF-8
     "後続ライブ",
     "post-snapshot live output must decode through a fresh streaming decoder",
   );
-});
 
-test("clearTerminalOutputBeforeSnapshot drops only output before the latest snapshot boundary", () => {
-  const windowId = "wt-snapshot-boundary";
-  const pendingOutputMap = new Map([[windowId, ["pending-before-first"]]]);
-  const runtime = { deferredWrites: ["deferred-before-first"] };
-  const batchedOutputMap = new Map([[windowId, ["batched-before-first"]]]);
-  const clearedBatches = [];
-  const clearBoundary = () =>
-    clearTerminalOutputBeforeSnapshot({
-      windowId,
-      runtime,
-      pendingOutputMap,
-      clearBatchedOutput: (id) => {
-        clearedBatches.push(id);
-        batchedOutputMap.delete(id);
-      },
-    });
-
-  clearBoundary();
-
-  assert.deepEqual(clearedBatches, [windowId]);
-  assert.equal(pendingOutputMap.has(windowId), false);
-  assert.deepEqual(runtime.deferredWrites, []);
-  assert.equal(batchedOutputMap.has(windowId), false);
-
-  pendingOutputMap.set(windowId, ["pending-between-snapshots"]);
-  runtime.deferredWrites.push("deferred-between-snapshots");
-  batchedOutputMap.set(windowId, ["batched-between-snapshots"]);
-  clearBoundary();
-
-  assert.deepEqual(clearedBatches, [windowId, windowId]);
-  assert.equal(pendingOutputMap.has(windowId), false);
-  assert.deepEqual(runtime.deferredWrites, []);
-  assert.equal(batchedOutputMap.has(windowId), false);
-
-  pendingOutputMap.set(windowId, ["pending-after-latest"]);
-  runtime.deferredWrites.push("deferred-after-latest");
-  batchedOutputMap.set(windowId, ["batched-after-latest"]);
-
-  assert.deepEqual(pendingOutputMap.get(windowId), ["pending-after-latest"]);
-  assert.deepEqual(runtime.deferredWrites, ["deferred-after-latest"]);
-  assert.deepEqual(batchedOutputMap.get(windowId), ["batched-after-latest"]);
+  const partial = decodeTerminalSnapshotBoundary(Uint8Array.of(
+    ...new TextEncoder().encode("snapshot: "), 0xf0, 0x9f, 0xa6,
+  ));
+  assert.equal(partial.snapshotText, "snapshot: ", "a snapshot must retain its own incomplete UTF-8 prefix");
+  assert.equal(partial.nextLiveDecoder.decode(Uint8Array.of(0x80), { stream: true }), "🦀");
 });
 
 test("snapshot coordinator drains issued live writes and applies only the latest empty snapshot", () => {
@@ -331,6 +355,27 @@ test("snapshot coordinator serializes a newer snapshot and its live output after
   assert.deepEqual(harness.refreshes, ["refresh"]);
   assert.deepEqual(harness.runtime.deferredWrites, []);
   assert.deepEqual(harness.terminal.writes, ["", "decoded:A", "decoded:B", "live-after-B"]);
+});
+
+test("snapshot replacement follows the tail and preserves history through overlapping snapshots (Issue #6235)", () => {
+  const tail = snapshotWriteHarness();
+  tail.terminal.buffer.active = { viewportY: 100, baseY: 100 };
+  tail.receiveSnapshot("tail");
+  tail.terminal.completeNextWrite();
+  tail.terminal.buffer.active = { viewportY: 0, baseY: 150 };
+  tail.terminal.completeNextWrite();
+  assert.equal(tail.terminal.buffer.active.viewportY, 150, 'tail readers follow the replacement');
+
+  const history = snapshotWriteHarness();
+  history.terminal.buffer.active = { viewportY: 25, baseY: 100 };
+  history.receiveSnapshot("A");
+  history.terminal.completeNextWrite();
+  history.receiveSnapshot("B");
+  history.terminal.buffer.active = { viewportY: 0, baseY: 150 };
+  history.terminal.completeNextWrite();
+  history.terminal.buffer.active = { viewportY: 0, baseY: 200 };
+  history.terminal.completeNextWrite();
+  assert.equal(history.terminal.buffer.active.viewportY, 25, 'latest-wins snapshots retain the original reading position');
 });
 
 test("snapshot coordinator callbacks are no-ops after terminal runtime teardown", () => {
@@ -534,8 +579,8 @@ test("app routes snapshot receipts and live output through the async snapshot co
   );
   assert.match(
     appSource,
-    /onSnapshotFailureSettled:\s*\(\)\s*=>\s*\{[\s\S]*?decoderMap\.set\(windowId,\s*new TextDecoder\(\)\);[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);/,
-    "failed snapshot settlement must publish a fresh live decoder before flushing deferred output",
+    /onSnapshotFailureSettled:\s*\(\)\s*=>\s*\{\s*decoderMap\.set\(windowId,\s*new TextDecoder\(\)\);\s*\}/,
+    "failed snapshot settlement must replace the decoder without releasing failed output",
   );
   assert.match(
     appSource,
@@ -544,12 +589,12 @@ test("app routes snapshot receipts and live output through the async snapshot co
   );
   assert.match(
     appSource,
-    /runtime\.isReady\s*===\s*false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\)\s*===\s*true[\s\S]*?runtime\.deferredWrites\.push\(base64\);/,
-    "live output must stay encoded and deferred while a snapshot write is pending or in flight",
+    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true/,
+    "the single queue must not write to missing/unfit runtimes or cross a snapshot barrier",
   );
   assert.match(
     appSource,
-    /function replaceTerminalSnapshot\(windowId,\s*base64\)\s*\{[\s\S]*?clearTerminalOutputBeforeSnapshot\(\{[\s\S]*?pendingSnapshotMap\.set\(windowId,\s*base64\);[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);/,
+    /function replaceTerminalSnapshot\(windowId,\s*base64\)\s*\{[\s\S]*?terminalOutputBatcher\.beginSnapshot\(windowId\);[\s\S]*?pendingSnapshotMap\.set\(windowId,\s*base64\);[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);/,
     "every snapshot receipt must clear older queues, replace the pending snapshot, and start or join the coordinator",
   );
   assert.match(
@@ -559,9 +604,14 @@ test("app routes snapshot receipts and live output through the async snapshot co
   );
   assert.match(
     appSource,
-    /onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{\s*try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);[\s\S]*?\}/,
+    /onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{\s*try\s*\{\s*terminalOutputBatcher\.finishSnapshot\(windowId\);[\s\S]*?forceTerminalViewportRefresh\(windowId,[\s\S]*?\}\s*finally\s*\{\s*terminalOutputBatcher\.schedulePending\(windowId\);/,
     "final snapshot completion must flush post-boundary live output even when viewport refresh throws",
   );
+  assert.doesNotMatch(appSource, /pendingOutputMap|deferredWrites|flushDeferredTerminalWrites/,
+    "every pending RAW path must use the same bounded queue");
+  assert.match(appSource,
+    /const currentWindowIds = allProjectWindowIdSet\(\);[\s\S]*?const discardedRaw = terminalOutputBatcher\.prune\(new Set\(\[\.\.\.currentWindowIds, \.\.\.windowMap\.keys\(\)\]\)\);[\s\S]*?pendingSnapshotMap\.delete\(id\);\s*renderedTerminalPackets\.delete\(id\);\s*removePmWindowState\(id\);[\s\S]*?connectSocket\(discardedRaw\.length > 0 && socket\?\.readyState === WebSocket\.OPEN && socketProjectKey === activeProjectKey\(\)\);/,
+    "full catalog reconciliation must reclaim unmounted RAW and request a snapshot for an uncertain discarded prefix");
 });
 
 test("attachHostResizeReflow fans fitTerminal(persist=true) across visible terminals (T-184/T-187)", () => {
@@ -660,7 +710,7 @@ test("applyVisibilityTransition fires onReveal only on hidden -> visible with te
   assert.equal(becomingHidden.hidden, true);
 });
 
-test("viewportEligibleForRefresh skips display:none and minimised windows (T-186)", () => {
+test("viewportEligibleForRefresh follows DOM visibility and ignores saved minimization (Issue #4777 AC15)", () => {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   const visibleEl = document.createElement("section");
   visibleEl.hidden = false;
@@ -676,11 +726,11 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
     ".hidden element must skip refresh",
   );
 
-  // Visible + minimised: the existing minimised short-circuit still wins.
+  // Fixed rail layout ignores the retired saved canvas minimization state.
   assert.equal(
     viewportEligibleForRefresh({ element: visibleEl, workspaceWindow: { minimized: true } }),
-    false,
-    "minimised workspace state must skip refresh",
+    true,
+    "legacy minimization must not suppress a visible terminal refresh",
   );
 
   // Visible + not minimised: refresh allowed.
@@ -2333,8 +2383,8 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /scheduleTerminalFit\(windowData\.id,\s*shouldPersistTerminalGeometry\)/,
-    "workspace render geometry changes must route terminal fits through the shared scheduler",
+    /scheduleTerminalFit\(windowData\.id,\s*true\)/,
+    "surface render must route terminal fits through the shared scheduler",
   );
   assert.match(
     appSource,
@@ -2422,11 +2472,6 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /runTerminalActivationSequence\(\{/,
     "scheduleTerminalFocusActivation must delegate to runTerminalActivationSequence",
-  );
-  assert.match(
-    appSource,
-    /scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"topmost_focus"[\s\S]*?\}\)/,
-    "topmost focus activation must not persist geometry unconditionally on every workspace render",
   );
   assert.match(
     appSource,
@@ -2760,4 +2805,33 @@ test("app.js wires attachContainerResizeReflow on the terminal container", () =>
     /attachContainerResizeReflow/,
     "app.js must import + use attachContainerResizeReflow",
   );
+});
+
+test("ready fit and refresh queues run without hidden animation frames", (t) => {
+  const tasks = [], frames = [], fitted = [], refreshed = [];
+  for (const [key, value] of Object.entries({
+    document: { hidden: true },
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+    MessageChannel: class {
+      port1 = { onmessage: null, close() {} };
+      port2 = { close() {}, postMessage: () => tasks.push(() => this.port1.onmessage?.()) };
+    },
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  const fits = createTerminalFitScheduler({ fitTerminal: (id, persist) => fitted.push([id, persist]) });
+  const refreshes = createTerminalViewportRefreshScheduler({ refresh: id => refreshed.push(id) });
+  fits.enqueue("ready", { persist: true }); fits.enqueue("ready");
+  refreshes.enqueue("ready"); refreshes.enqueue("ready");
+  assert.equal(tasks.length, 2, "each bounded queue gets one hidden task");
+  assert.equal(frames.length, 0, "hidden queues do not wait for suspended frames");
+  while (tasks.length) tasks.shift()();
+  assert.deepEqual(fitted, [["ready", true]]);
+  assert.deepEqual(refreshed, ["ready"]);
+  assert.equal(fits.pendingCount() + refreshes.pendingCount(), 0);
 });

@@ -20,6 +20,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this shared value rather than recovering it
+/// out of the persisted `launch_args`.
+pub const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+
 /// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
 /// injects into the resident PM must end.
 ///
@@ -37,15 +44,24 @@ use sha2::{Digest, Sha256};
 /// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
 /// distinguishable from a dead one without a keepalive line in the
 /// conversation (FR-4).
-/// Issue #3868 AC-3: a red, conflicted, or escalation-due open PR is never a
-/// no-change cycle. SPEC #3835 AC-7 adds the promotable Draft: leaving one
-/// unpromoted is exactly how PR #4507 sat Draft until a human rescued it.
+/// Issue #3431 RPT-F: PR recovery and supervision remain mandatory, while
+/// unchanged material state must not force another Report on every wake.
 /// Kept terse on purpose — this clause rides the PTY wake prompts, which must
 /// stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
-    "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
-     output only if nothing changed and no open PR is CI-RED, CONFLICTED, READY_TO_PROMOTE, or \
-     escalation_due.";
+    "Full supervision continues; submit material changes through `pm.report.post` `submission` \
+     (max 6 summary lines, full details); unchanged state stays silent, including open PRs and waits.";
+
+/// Physical wake decorations shared by producers and human-prompt classification.
+pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
+pub const PM_AGENT_IDLE_WAKE_PREFIX: &str = "[gwt] Agent idle: ";
+
+/// Canonical periodic instruction shared by delivery and prompt classification.
+/// ASCII punctuation preserves the exact text through Windows terminal input.
+pub const PM_PERIODIC_WAKE_INSTRUCTION: &str =
+    "[gwt] Scheduled supervision tick: reconcile now: read a fresh \
+     `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
+     (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close).";
 
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
@@ -430,7 +446,10 @@ pub fn pm_autonomous_bootstrap_allowed(worktree: &Path) -> bool {
 }
 
 pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+    // A local-only PM worktree has a different path-fallback hash from its
+    // project, but its canonical store already identifies the receipt owner.
+    pm_worktree_store_dir(repo_path)
+        .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(repo_path))
         .join("project-state/pm-delivery-receipts.jsonl")
 }
 
@@ -440,7 +459,14 @@ pub enum PmDeliveryReceiptStatus {
     Prepared,
     Verified,
     Refused,
+    /// Legacy outcome: absence of acknowledgement was previously ambiguous.
     Ambiguous,
+    /// The bounded attempt ended without an exact target acknowledgement.
+    /// Same-operation readback may still upgrade this observation to Verified.
+    Unconfirmed,
+    /// The original target is unavailable for recovery. This does not prove
+    /// that the prompt never ran; a late exact acknowledgement still wins.
+    Lost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -615,7 +641,17 @@ fn validated_pm_delivery_operation<'a>(
             {
                 true
             }
-            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Verified,
+            ) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                PmDeliveryReceiptStatus::Lost,
+            ) => true,
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => true,
             _ => false,
         };
         if !transition_is_valid {
@@ -725,10 +761,27 @@ pub fn finish_pm_delivery_receipt(
         {
             match (existing.status, status) {
                 (existing, requested) if existing == requested => return Ok(existing),
-                (PmDeliveryReceiptStatus::Verified, PmDeliveryReceiptStatus::Ambiguous) => {
-                    return Ok(PmDeliveryReceiptStatus::Verified)
-                }
-                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => {}
+                (
+                    PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                ) => return Ok(PmDeliveryReceiptStatus::Lost),
+                (
+                    PmDeliveryReceiptStatus::Verified,
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                ) => return Ok(PmDeliveryReceiptStatus::Verified),
+                (
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Verified,
+                ) => {}
+                (
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                    PmDeliveryReceiptStatus::Lost,
+                ) => {}
+                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -3149,34 +3202,10 @@ fn with_pm_worktree_refresh_lock<T>(
     project_dir: &Path,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    with_pm_worktree_refresh_lock_policy(project_dir, false, operation)
-}
-
-/// Only acquisition contention, never an error from the protected operation.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct PmRefreshDeferred(String);
-
-fn with_pm_worktree_refresh_lock_policy<T>(
-    project_dir: &Path,
-    nonblocking: bool,
-    operation: impl FnOnce() -> io::Result<T>,
-) -> io::Result<T> {
     let project_state = project_dir.join("project-state");
     ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
     let path = project_state.join("pm-refresh.lock");
-    let lock = if nonblocking {
-        gwt_core::operation_deadline::NamedFileLock::try_acquire(&path, "pm.refresh.prompt")
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    io::Error::new(error.kind(), PmRefreshDeferred(error.to_string()))
-                } else {
-                    error
-                }
-            })?
-    } else {
-        gwt_core::operation_deadline::NamedFileLock::acquire(&path, "pm.refresh")?
-    };
+    let lock = gwt_core::operation_deadline::NamedFileLock::acquire(&path, "pm.refresh")?;
     let result = operation();
     let unlock = lock.unlock();
     match (result, unlock) {
@@ -3267,29 +3296,6 @@ fn parse_pm_worktree_control_path(path: &Path, prefix: Option<&str>) -> io::Resu
     })
 }
 
-fn git_common_dir(git_root: &Path) -> io::Result<PathBuf> {
-    let output =
-        gwt_core::process::run_git_logged(&["rev-parse", "--git-common-dir"], Some(git_root))?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "resolve PM Git common directory: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if common.as_os_str().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "resolve PM Git common directory: Git returned an empty path",
-        ));
-    }
-    Ok(if common.is_absolute() {
-        common
-    } else {
-        git_root.join(common)
-    })
-}
-
 fn git_repository_is_bare(git_root: &Path) -> io::Result<bool> {
     let output =
         gwt_core::process::run_git_logged(&["rev-parse", "--is-bare-repository"], Some(git_root))?;
@@ -3329,8 +3335,15 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
     let dot_git = worktree.join(".git");
     let admin_dir = parse_pm_worktree_control_path(&dot_git, Some("gitdir: "))?;
     require_real_pm_scratch_directory(&admin_dir, "PM linked-worktree admin directory")?;
-    let common_dir = git_common_dir(git_root)?;
+    let common_dir = gwt_core::repo_hash::repository_common_dir(git_root).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PM Git common directory is unavailable",
+        )
+    })?;
+    require_real_pm_scratch_directory(&common_dir, "PM Git common directory")?;
     let worktrees_dir = common_dir.join("worktrees");
+    require_real_pm_scratch_directory(&worktrees_dir, "PM linked-worktree registrations")?;
     let canonical_admin = dunce::canonicalize(&admin_dir)?;
     let canonical_worktrees = dunce::canonicalize(&worktrees_dir)?;
     if canonical_admin.parent() != Some(canonical_worktrees.as_path()) {
@@ -3352,19 +3365,31 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
             ),
         ));
     }
-    let registered = gwt_git::WorktreeManager::new(git_root)
-        .list()
-        .map_err(|error| io::Error::other(error.to_string()))?
-        .into_iter()
-        .filter(|entry| same_canonical_path(&entry.path, worktree))
-        .count();
-    if registered != 1 {
+    // The reciprocal gitdir pair identifies this one registration. Verify its
+    // remaining control files directly rather than enumerating every worktree.
+    let admin_common = parse_pm_worktree_control_path(&admin_dir.join("commondir"), None)?;
+    if dunce::canonicalize(admin_common)? != dunce::canonicalize(common_dir)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "PM worktree must have exactly one Git registration, found {registered}: {}",
-                worktree.display()
+                "PM linked-worktree commondir does not authorize {}",
+                worktree.display(),
             ),
+        ));
+    }
+    let head_path = admin_dir.join("HEAD");
+    require_regular_pm_worktree_control_file(&head_path, "PM linked-worktree HEAD")?;
+    let head = fs::read_to_string(&head_path)?;
+    let head = head.trim();
+    let symbolic = head.strip_prefix("ref: ").is_some_and(|reference| {
+        reference.starts_with("refs/") && !reference.bytes().any(|byte| byte.is_ascii_whitespace())
+    });
+    let detached =
+        matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !symbolic && !detached {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid PM linked-worktree HEAD: {}", head_path.display()),
         ));
     }
     Ok(())
@@ -4170,7 +4195,7 @@ fn persist_untrusted_inspection_failure_if_safe(project_dir: &Path, error: &io::
 pub fn refresh_pm_worktree_for_repo_path(repo_path: &Path) -> io::Result<PmWorktreeRefreshOutcome> {
     let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
     let worktree = project_dir.join("pm/worktree");
-    let git_root = match gwt_git::worktree::main_worktree_root(repo_path) {
+    let git_root = match gwt_git::repository::git_health::validate_project_git(repo_path) {
         Ok(git_root) => git_root,
         Err(error) => {
             let error = io::Error::other(error.to_string());
@@ -4305,21 +4330,6 @@ where
 pub fn refresh_pm_worktree_at_safe_boundary(
     worktree: &Path,
 ) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
-    refresh_pm_worktree_at_safe_boundary_with_policy(worktree, false)
-}
-
-/// The prompt may defer freshness work when another refresh already owns it.
-/// Ownership validation and failures after acquisition are unchanged.
-pub(crate) fn try_refresh_pm_worktree_at_safe_boundary(
-    worktree: &Path,
-) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
-    refresh_pm_worktree_at_safe_boundary_with_policy(worktree, true)
-}
-
-fn refresh_pm_worktree_at_safe_boundary_with_policy(
-    worktree: &Path,
-    nonblocking: bool,
-) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
     if !is_pm_worktree(worktree) {
         return Ok(None);
     }
@@ -4334,7 +4344,7 @@ fn refresh_pm_worktree_at_safe_boundary_with_policy(
     };
     require_real_pm_scratch_directory(project_dir, "project directory")?;
     require_real_pm_scratch_directory(worktree, "PM worktree")?;
-    with_pm_worktree_refresh_lock_policy(project_dir, nonblocking, || {
+    with_pm_worktree_refresh_lock(project_dir, || {
         let git_root = match gwt_git::worktree::main_worktree_root(worktree) {
             Ok(git_root) => git_root,
             Err(error) => {
@@ -4543,6 +4553,16 @@ pub fn is_pm_worktree(path: &Path) -> bool {
 /// and the plain shape test rejects a genuine PM worktree. Comparing both
 /// spellings keeps the answer about the path, not about how it was spelled.
 pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    // Ordinary Work rows cannot be PM worktrees. Exclude them before resolving
+    // the shared home (and validating its isolation in tests) for every row.
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
     if is_pm_worktree(path) {
         return true;
     }
@@ -4551,14 +4571,6 @@ pub fn is_canonical_pm_worktree(path: &Path) -> bool {
     else {
         return false;
     };
-    let Some(pm_dir) = path.parent() else {
-        return false;
-    };
-    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
-        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
-    {
-        return false;
-    }
     pm_dir
         .parent()
         .and_then(Path::parent)
@@ -4749,17 +4761,45 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
             .create_new(true)
             .write(true)
             .open(&scratch_path)?;
-        scratch.write_all(content)?;
-        scratch.sync_all()?;
+        timed_pm_prefs_stage("pm_prefs.sync", || {
+            scratch.write_all(content)?;
+            scratch.sync_all()
+        })?;
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
         // rename (same convention as the Issue Monitor prefs writer).
-        gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
-        fs::rename(&scratch_path, path)?;
-        sync_parent_directory(path)
+        timed_pm_prefs_stage("pm_prefs.rename", || {
+            gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
+            fs::rename(&scratch_path, path)?;
+            sync_parent_directory(path)
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&scratch_path);
+    }
+    result
+}
+
+fn timed_pm_prefs_stage<T>(
+    stage: &'static str,
+    action: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let started = std::time::Instant::now();
+    let remaining_budget_ms = gwt_core::operation_deadline::current()
+        .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
+    let result = action();
+    if result.is_err() {
+        tracing::warn!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success = false, "PM refresh stage"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success = true, "PM refresh stage"
+        );
     }
     result
 }
@@ -5289,6 +5329,19 @@ mod tests {
         assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
     }
 
+    #[test]
+    fn cycle_reporting_clause_keeps_supervision_without_duplicate_reports() {
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("Full supervision continues"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("material changes"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("`submission`"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("unchanged state stays silent"));
+        assert!(!PM_CYCLE_REPORTING_CLAUSE.contains("no open PR"));
+        assert!(
+            PM_CYCLE_REPORTING_CLAUSE.len() <= 220,
+            "preserve the wake byte budget"
+        );
+    }
+
     /// Issue #3825 AC-1 / AC-4: the terse wake clause and the full Stop-gate
     /// clause must agree that one resident `daemon.subscribe` blocks for at
     /// most five seconds and is never awaited. The two wordings differ only in
@@ -5675,6 +5728,92 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+
+    #[test]
+    fn linked_pm_registration_validation_only_reads_the_target_admin_files() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("pm-worktree");
+        fs::create_dir(&repo).expect("repo directory");
+        run_pm_scratch_git(&repo, &["init"]);
+        run_pm_scratch_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=PM Test",
+                "-c",
+                "user.email=pm@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        );
+        run_pm_scratch_git(
+            &repo,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        validate_linked_pm_worktree_marker(&repo, &worktree).expect("valid registration");
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count(),
+            before,
+            "registration validation must not spawn Git or enumerate other worktrees"
+        );
+
+        let admin = parse_pm_worktree_control_path(&worktree.join(".git"), Some("gitdir: "))
+            .expect("admin marker");
+        let head = fs::read(admin.join("HEAD")).expect("registered HEAD");
+        for index in 0..788 {
+            let unrelated = repo.join(format!(".git/worktrees/unrelated-{index}"));
+            fs::create_dir(&unrelated).expect("unrelated admin directory");
+            fs::write(unrelated.join("HEAD"), &head).expect("unrelated HEAD");
+            fs::write(unrelated.join("commondir"), "../..\n").expect("unrelated commondir");
+            fs::write(
+                unrelated.join("gitdir"),
+                format!(
+                    "{}/.git\n",
+                    temp.path().join(format!("missing-{index}")).display()
+                ),
+            )
+            .expect("unrelated stale registration");
+        }
+        fs::write(
+            repo.join(".git/worktrees/unrelated-787/HEAD"),
+            "invalid HEAD\n",
+        )
+        .expect("one malformed unrelated registration");
+        {
+            let expired = gwt_core::operation_deadline::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expired);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expired);
+            validate_linked_pm_worktree_marker(&repo, &worktree).expect(
+                "unrelated registrations and an expired Git budget cannot affect the target",
+            );
+        }
+        assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+        fs::write(admin.join("commondir"), temp.path().to_str().unwrap())
+            .expect("replace common directory");
+        validate_linked_pm_worktree_marker(&repo, &worktree)
+            .expect_err("a reciprocal registration must still belong to the expected common dir");
+        fs::write(admin.join("commondir"), "../..\n").expect("restore common directory");
+        fs::write(admin.join("HEAD"), "invalid HEAD\n").expect("corrupt HEAD");
+        validate_linked_pm_worktree_marker(&repo, &worktree)
+            .expect_err("malformed registration HEAD must fail closed");
+        #[cfg(unix)]
+        {
+            let external = temp.path().join("external-commondir");
+            fs::write(&external, "../..\n").expect("external control file");
+            fs::remove_file(admin.join("commondir")).expect("remove common directory marker");
+            std::os::unix::fs::symlink(&external, admin.join("commondir"))
+                .expect("indirect common directory marker");
+            let error = validate_linked_pm_worktree_marker(&repo, &worktree)
+                .expect_err("symlinked registration controls must fail closed");
+            assert!(error.to_string().contains("regular file"), "{error}");
+        }
     }
 
     fn commit_tracked_pm_scratch(worktree: &Path, relative: &str, contents: &[u8]) {
@@ -8277,6 +8416,60 @@ mod tests {
         assert!(!fs::read_to_string(path)
             .expect("receipt file")
             .contains(body));
+    }
+
+    #[test]
+    fn delivery_receipt_target_loss_still_accepts_a_late_exact_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d79135763897".into(),
+            recorded_at: "2026-10-22T00:00:00Z".into(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm".into(),
+            target_window_id: "tab::agent".into(),
+            target_session_id: "agent".into(),
+            body_sha256: pm_delivery_prompt_sha256("one prompt"),
+            reason: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+        let settle = |status, reason| {
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                status,
+                reason,
+            )
+            .unwrap()
+        };
+        settle(
+            PmDeliveryReceiptStatus::Ambiguous,
+            Some("submit_unconfirmed"),
+        );
+        settle(
+            PmDeliveryReceiptStatus::Unconfirmed,
+            Some("submit_unconfirmed"),
+        );
+        // Target loss proves recovery unavailable, not that the turn never ran.
+        let lost: PmDeliveryReceiptStatus = serde_json::from_str("\"lost\"").unwrap();
+        assert_eq!(settle(lost, Some("target_unavailable")), lost);
+        assert_eq!(
+            settle(PmDeliveryReceiptStatus::Verified, None),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            settle(lost, Some("target_unavailable")),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            pm_delivery_receipt_for_operation(&path, &prepared.operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PmDeliveryReceiptStatus::Verified
+        );
     }
 
     #[test]

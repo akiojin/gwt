@@ -1,0 +1,565 @@
+{
+  "schema_version": 1,
+  "issue": 5489,
+  "observed_at": "2026-10-15T07:28:27.7921471Z",
+  "gui_pid": 32708,
+  "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+  "gui_binary": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Programs\\GWT\\gwt.exe",
+  "gui_version": "9.121.1",
+  "gui_sha256": "3d35cf1b0264d3e6c7176fd5bc4757b11b730fdd47297e79b0d04ffb9aae5243",
+  "roots": [
+    "E:\\gwt",
+    "E:\\160-Idina",
+    "E:\\KeibaSuite",
+    "E:\\unity-cli",
+    "E:\\llmlb"
+  ],
+  "runtime": {
+    "namespaces": 699,
+    "files": 4064,
+    "bytes": 1919993.0
+  },
+  "elapsed_seconds": 30.0257424,
+  "gui_cpu_before_seconds": 6523.015625,
+  "gui_cpu_after_seconds": 6592.625,
+  "gui_cpu_seconds": 69.609375,
+  "gui_cores": 2.3183231932343498,
+  "rss_bytes": 856838144,
+  "threads": [
+    {
+      "id": 18792,
+      "cpu_seconds": 21.875
+    },
+    {
+      "id": 36776,
+      "cpu_seconds": 14.78125
+    },
+    {
+      "id": 29756,
+      "cpu_seconds": 4.1875
+    },
+    {
+      "id": 7272,
+      "cpu_seconds": 3.15625
+    },
+    {
+      "id": 37744,
+      "cpu_seconds": 2.640625
+    },
+    {
+      "id": 27884,
+      "cpu_seconds": 1.921875
+    },
+    {
+      "id": 30840,
+      "cpu_seconds": 1.90625
+    },
+    {
+      "id": 29952,
+      "cpu_seconds": 1.75
+    },
+    {
+      "id": 23216,
+      "cpu_seconds": 0.890625
+    },
+    {
+      "id": 7636,
+      "cpu_seconds": 0.171875
+    },
+    {
+      "id": 33296,
+      "cpu_seconds": 0.125
+    },
+    {
+      "id": 36108,
+      "cpu_seconds": 0.09375
+    },
+    {
+      "id": 37188,
+      "cpu_seconds": 0.09375
+    },
+    {
+      "id": 33020,
+      "cpu_seconds": 0.078125
+    },
+    {
+      "id": 14468,
+      "cpu_seconds": 0.0625
+    },
+    {
+      "id": 26448,
+      "cpu_seconds": 0.046875
+    },
+    {
+      "id": 38372,
+      "cpu_seconds": 0.046875
+    },
+    {
+      "id": 33628,
+      "cpu_seconds": 0.046875
+    },
+    {
+      "id": 3700,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 27436,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 12152,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 29988,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 24120,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 24308,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 1880,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 13660,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 34504,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 34196,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 12340,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 19220,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 17164,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 32224,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 30236,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 14952,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 34964,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 31200,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 4896,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 6720,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37276,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33144,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 25924,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30164,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35912,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33864,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 28920,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 16524,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30196,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36624,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30176,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 27960,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 31468,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 5732,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 28808,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 12344,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 21552,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 26204,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37600,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 4540,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35504,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 29216,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 10768,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 28176,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33456,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 7872,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 12676,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 27644,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33976,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22484,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 38012,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36868,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22548,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 21472,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33460,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 29296,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 25036,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 27736,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30052,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36048,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 17256,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 16888,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 28228,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 13644,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 9084,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 13176,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 25140,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36316,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 16912,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 31060,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 19188,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34856,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30168,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 4612,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 24612,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 18468,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 38340,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 32936,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34204,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 29780,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33128,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 5464,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 38460,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34540,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 11140,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35048,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 10252,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 31024,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37156,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35568,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37376,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37380,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 2728,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36036,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 21844,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22352,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33352,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22708,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22724,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 3500,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 16936,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 4352,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35476,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 27692,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 3660,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34492,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 10092,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 24492,
+      "cpu_seconds": 0.0
+    }
+  ],
+  "panes_before": [
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1408\trunning\tclaude\tStart Work\torigin=automatic_restore\tsession_created_at=2026-10-15T06:34:41.802496100+00:00\tworktree=C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\projects\\99a8660247f5bc49\\pm/worktree\tsource_session=aa01a4b6-11f1-4c97-b3ee-1ac82283a20b\trole=pm",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409\trunning\tcodex\tVirelan — Monitor のレビュー隔離と重複起動防止\torigin=launch\tsession_created_at=2026-10-15T06:35:52.353860400+00:00\tworktree=E:/gwt/work/issue-5478\tsource_session=none\tagent_name=Virelan\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410\trunning\tcodex\tValen — Issue #5401 の一覧差分描画と仮想化\torigin=launch\tsession_created_at=2026-10-15T06:40:16.132007600+00:00\tworktree=E:/gwt/work/issue-5401\tsource_session=none\tagent_name=Valen\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411\trunning\tcodex\tCevrin — Issue #5403 Board履歴と差分描画\torigin=launch\tsession_created_at=2026-10-15T06:40:17.100079100+00:00\tworktree=E:/gwt/work/issue-5403\tsource_session=none\tagent_name=Cevrin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412\trunning\tcodex\tVelrin — Work projection の再計算抑止\torigin=launch\tsession_created_at=2026-10-15T06:40:20.165443300+00:00\tworktree=E:/gwt/work/issue-5404\tsource_session=none\tagent_name=Velrin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413\trunning\tcodex\tVelrin-2 — Windows 全スコープ E5 E2E\torigin=launch\tsession_created_at=2026-10-15T06:40:23.270396700+00:00\tworktree=E:/gwt/work/issue-5437\tsource_session=none\tagent_name=Velrin-2\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414\trunning\tcodex\tVeylan — 索引ランナーの資源計測を正確にする\torigin=launch\tsession_created_at=2026-10-15T06:40:27.369362+00:00\tworktree=E:/gwt/work/issue-5435\tsource_session=none\tagent_name=Veylan\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415\trunning\tcodex\tVeylin — Issue #5436 broker owner 回収\torigin=launch\tsession_created_at=2026-10-15T06:40:27.957282100+00:00\tworktree=E:/gwt/work/issue-5436\tsource_session=none\tagent_name=Veylin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416\trunning\tcodex\tCeryn — Issue #5385 実 fleet の GUI 性能実測\torigin=launch\tsession_created_at=2026-10-15T06:41:30.542898900+00:00\tworktree=E:\\gwt\\work\\issue-5385\tsource_session=none\tagent_name=Ceryn\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1417\trunning\tcodex\tOrelith — Issue #5489 の Monitor census 共有\torigin=launch\tsession_created_at=2026-10-15T07:18:33.475841+00:00\tworktree=E:\\gwt\\work\\issue-5489\tsource_session=none\tagent_name=Orelith\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1418\trunning\tcodex\tOrvel — 実行領域の安全な早期回収\torigin=launch\tsession_created_at=2026-10-15T07:22:40.333821800+00:00\tworktree=E:\\gwt\\work\\issue-5498\tsource_session=none\tagent_name=Orvel\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1419\trunning\tcodex\tElvarin — Terminal snapshotの読取集約\torigin=launch\tsession_created_at=2026-10-15T07:22:42.509743+00:00\tworktree=E:\\gwt\\work\\issue-5499\tsource_session=none\tagent_name=Elvarin\trole=implementation_agent"
+  ],
+  "panes_after": [
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1408\trunning\tclaude\tStart Work\torigin=automatic_restore\tsession_created_at=2026-10-15T06:34:41.802496100+00:00\tworktree=C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\projects\\99a8660247f5bc49\\pm/worktree\tsource_session=aa01a4b6-11f1-4c97-b3ee-1ac82283a20b\trole=pm",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409\trunning\tcodex\tVirelan — Monitor のレビュー隔離と重複起動防止\torigin=launch\tsession_created_at=2026-10-15T06:35:52.353860400+00:00\tworktree=E:/gwt/work/issue-5478\tsource_session=none\tagent_name=Virelan\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410\trunning\tcodex\tValen — Issue #5401 の一覧差分描画と仮想化\torigin=launch\tsession_created_at=2026-10-15T06:40:16.132007600+00:00\tworktree=E:/gwt/work/issue-5401\tsource_session=none\tagent_name=Valen\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411\trunning\tcodex\tCevrin — Issue #5403 Board履歴と差分描画\torigin=launch\tsession_created_at=2026-10-15T06:40:17.100079100+00:00\tworktree=E:/gwt/work/issue-5403\tsource_session=none\tagent_name=Cevrin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412\trunning\tcodex\tVelrin — Work projection の再計算抑止\torigin=launch\tsession_created_at=2026-10-15T06:40:20.165443300+00:00\tworktree=E:/gwt/work/issue-5404\tsource_session=none\tagent_name=Velrin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413\trunning\tcodex\tVelrin-2 — Windows 全スコープ E5 E2E\torigin=launch\tsession_created_at=2026-10-15T06:40:23.270396700+00:00\tworktree=E:/gwt/work/issue-5437\tsource_session=none\tagent_name=Velrin-2\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414\trunning\tcodex\tVeylan — 索引ランナーの資源計測を正確にする\torigin=launch\tsession_created_at=2026-10-15T06:40:27.369362+00:00\tworktree=E:/gwt/work/issue-5435\tsource_session=none\tagent_name=Veylan\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415\trunning\tcodex\tVeylin — Issue #5436 broker owner 回収\torigin=launch\tsession_created_at=2026-10-15T06:40:27.957282100+00:00\tworktree=E:/gwt/work/issue-5436\tsource_session=none\tagent_name=Veylin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416\trunning\tcodex\tCeryn — Issue #5385 実 fleet の GUI 性能実測\torigin=launch\tsession_created_at=2026-10-15T06:41:30.542898900+00:00\tworktree=E:\\gwt\\work\\issue-5385\tsource_session=none\tagent_name=Ceryn\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1417\trunning\tcodex\tOrelith — Issue #5489 の Monitor census 共有\torigin=launch\tsession_created_at=2026-10-15T07:18:33.475841+00:00\tworktree=E:\\gwt\\work\\issue-5489\tsource_session=none\tagent_name=Orelith\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1418\trunning\tcodex\tOrvel — 実行領域の安全な早期回収\torigin=launch\tsession_created_at=2026-10-15T07:22:40.333821800+00:00\tworktree=E:\\gwt\\work\\issue-5498\tsource_session=none\tagent_name=Orvel\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1419\trunning\tcodex\tElvarin — Terminal snapshotの読取集約\torigin=launch\tsession_created_at=2026-10-15T07:22:42.509743+00:00\tworktree=E:\\gwt\\work\\issue-5499\tsource_session=none\tagent_name=Elvarin\trole=implementation_agent"
+  ],
+  "implementation_panes_before": 11,
+  "implementation_panes_after": 11,
+  "method": "GUI TotalProcessorTime and ProcessThread.TotalProcessorTime differences; Stopwatch seconds; core units are not divided by logical processors. Thread counters are read sequentially around the process interval; short-interval edge skew is retained."
+}

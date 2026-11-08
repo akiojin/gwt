@@ -1,0 +1,392 @@
+[
+  {
+    "at": "2026-10-26T15:26:03.4336873Z",
+    "pid": 33160,
+    "created": "2026-10-27T00:26:03.719879+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:03.4336873Z",
+    "pid": 34440,
+    "created": "2026-10-27T00:26:04.247924+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:05.0068987Z",
+    "pid": 35892,
+    "created": "2026-10-27T00:26:04.551864+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:05.0068987Z",
+    "pid": 41080,
+    "created": "2026-10-27T00:26:04.827591+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:05.0068987Z",
+    "pid": 45936,
+    "created": "2026-10-27T00:26:05.09684+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:05.7844033Z",
+    "pid": 41080,
+    "created": "2026-10-27T00:26:04.827591+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:05.7844033Z",
+    "pid": 45936,
+    "created": "2026-10-27T00:26:05.09684+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:05.7844033Z",
+    "pid": 38908,
+    "created": "2026-10-27T00:26:05.812077+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:06.5261953Z",
+    "pid": 16728,
+    "created": "2026-10-27T00:26:06.490625+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:06.5261953Z",
+    "pid": 35304,
+    "created": "2026-10-27T00:26:06.512591+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:06.5261953Z",
+    "pid": 35244,
+    "created": "2026-10-27T00:26:06.519363+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:06.5261953Z",
+    "pid": 42148,
+    "created": "2026-10-27T00:26:06.526057+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:06.5261953Z",
+    "pid": 8544,
+    "created": "2026-10-27T00:26:06.535969+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:07.2950910Z",
+    "pid": 47948,
+    "created": "2026-10-27T00:26:06.806498+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:07.2950910Z",
+    "pid": 35660,
+    "created": "2026-10-27T00:26:07.060587+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:07.2950910Z",
+    "pid": 43700,
+    "created": "2026-10-27T00:26:07.328291+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.0589109Z",
+    "pid": 35660,
+    "created": "2026-10-27T00:26:07.060587+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.0589109Z",
+    "pid": 43700,
+    "created": "2026-10-27T00:26:07.328291+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.0589109Z",
+    "pid": 3500,
+    "created": "2026-10-27T00:26:07.586453+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 40112,
+    "created": "2026-10-27T00:26:08.831044+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 30108,
+    "created": "2026-10-27T00:26:08.835724+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 22232,
+    "created": "2026-10-27T00:26:08.842747+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 6972,
+    "created": "2026-10-27T00:26:08.847769+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 49072,
+    "created": "2026-10-27T00:26:08.854809+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 47640,
+    "created": "2026-10-27T00:26:08.864503+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:08.8234311Z",
+    "pid": 22424,
+    "created": "2026-10-27T00:26:08.881876+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:09.6165853Z",
+    "pid": 27464,
+    "created": "2026-10-27T00:26:09.468077+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:09.6165853Z",
+    "pid": 49112,
+    "created": "2026-10-27T00:26:09.720613+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:09.6165853Z",
+    "pid": 44780,
+    "created": "2026-10-27T00:26:09.743786+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:09.6165853Z",
+    "pid": 34404,
+    "created": "2026-10-27T00:26:09.753489+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:10.4011134Z",
+    "pid": 40236,
+    "created": "2026-10-27T00:26:10.271132+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:10.4011134Z",
+    "pid": 40068,
+    "created": "2026-10-27T00:26:10.530924+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 27920,
+    "created": "2026-10-27T00:26:11.260948+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 38372,
+    "created": "2026-10-27T00:26:11.281085+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 19920,
+    "created": "2026-10-27T00:26:11.290821+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 30620,
+    "created": "2026-10-27T00:26:11.301772+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 7244,
+    "created": "2026-10-27T00:26:11.308538+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 17584,
+    "created": "2026-10-27T00:26:11.339375+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 8144,
+    "created": "2026-10-27T00:26:11.348031+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.1617867Z",
+    "pid": 37732,
+    "created": "2026-10-27T00:26:11.359855+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.9573199Z",
+    "pid": 6220,
+    "created": "2026-10-27T00:26:12.011164+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.9573199Z",
+    "pid": 8632,
+    "created": "2026-10-27T00:26:12.039377+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:11.9573199Z",
+    "pid": 5772,
+    "created": "2026-10-27T00:26:12.054037+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:12.7159585Z",
+    "pid": 47428,
+    "created": "2026-10-27T00:26:12.32232+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:13.4838972Z",
+    "pid": 16496,
+    "created": "2026-10-27T00:26:13.121641+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:13.4838972Z",
+    "pid": 46892,
+    "created": "2026-10-27T00:26:13.369208+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:14.2311444Z",
+    "pid": 16496,
+    "created": "2026-10-27T00:26:13.121641+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:14.2311444Z",
+    "pid": 46892,
+    "created": "2026-10-27T00:26:13.369208+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:14.9750020Z",
+    "pid": 16496,
+    "created": "2026-10-27T00:26:13.121641+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:14.9750020Z",
+    "pid": 46892,
+    "created": "2026-10-27T00:26:13.369208+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:15.7402299Z",
+    "pid": 46632,
+    "created": "2026-10-27T00:26:15.702899+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:16.4978838Z",
+    "pid": 48772,
+    "created": "2026-10-27T00:26:15.967414+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:16.4978838Z",
+    "pid": 44316,
+    "created": "2026-10-27T00:26:16.014929+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:16.4978838Z",
+    "pid": 44188,
+    "created": "2026-10-27T00:26:16.019449+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:16.4978838Z",
+    "pid": 35244,
+    "created": "2026-10-27T00:26:16.277605+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:16.4978838Z",
+    "pid": 47036,
+    "created": "2026-10-27T00:26:16.281876+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:16.4978838Z",
+    "pid": 28224,
+    "created": "2026-10-27T00:26:16.505724+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:17.2577516Z",
+    "pid": 28224,
+    "created": "2026-10-27T00:26:16.505724+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:17.2577516Z",
+    "pid": 40088,
+    "created": "2026-10-27T00:26:17.008895+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:17.2577516Z",
+    "pid": 22484,
+    "created": "2026-10-27T00:26:17.268227+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:18.0186333Z",
+    "pid": 22248,
+    "created": "2026-10-27T00:26:18.041789+09:00",
+    "command": "\"git\" ls-files --others --ignored --exclude-standard -z -- .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:18.0186333Z",
+    "pid": 36172,
+    "created": "2026-10-27T00:26:18.055508+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:18.0186333Z",
+    "pid": 9088,
+    "created": "2026-10-27T00:26:18.067206+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:18.0186333Z",
+    "pid": 38304,
+    "created": "2026-10-27T00:26:18.076165+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  },
+  {
+    "at": "2026-10-26T15:26:18.0186333Z",
+    "pid": 48888,
+    "created": "2026-10-27T00:26:18.086878+09:00",
+    "command": "\"git\" status --porcelain=v1 --untracked-files=all -- .gwt/work/events.jsonl .gwt/work/events"
+  }
+]

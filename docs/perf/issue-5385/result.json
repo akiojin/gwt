@@ -1,0 +1,16 @@
+{
+  "sample_count": 61,
+  "duration_seconds": 3599.9872066,
+  "peak_rss_bytes": 965627904,
+  "average_cpu_cores": 1.9344165966014688,
+  "min_implementation_panes": 8,
+  "max_implementation_panes": 11,
+  "fleet_within_requested_range": false,
+  "rss_within_budget": true,
+  "cpu_within_budget": false,
+  "follow_up_issue": 5489,
+  "additional_follow_up_issues": [
+    5503
+  ],
+  "issue_remains_open": true
+}

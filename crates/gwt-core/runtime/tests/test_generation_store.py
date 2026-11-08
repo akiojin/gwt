@@ -5,8 +5,8 @@ it by atomically replacing the `active.json` pointer. The live store is
 never reset in place: kill / crash / disk full at any boundary leaves the
 previous healthy generation searchable, and an incomplete generation is
 never exposed to readers. Legacy stores stay readable and lazily migrate on
-the next update (AS-17); abandoned generations older than 24 hours are the
-only GC target.
+the next update (AS-17). Issue #6728 retains only the active and previous
+completed generations and reclaims orphan file-index staging.
 """
 
 from __future__ import annotations
@@ -58,7 +58,61 @@ def _make_project(base: Path, docs: int) -> Path:
     return project
 
 
+class GenerationPublicationRetryTests(unittest.TestCase):
+    def test_windows_publication_waits_for_closed_sqlite_handles(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        denied, shared = PermissionError("closing SQLite"), PermissionError("sharing violation")
+        denied.winerror, shared.winerror = 5, 32
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner.os, "replace", side_effect=[denied, shared, None]
+        ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+            runner._replace_staging_generation(staging, target)
+        self.assertEqual(replace.call_args_list, [mock.call(staging, target)] * 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_permanent_windows_publication_failure_is_bounded(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        denied = PermissionError("original staging error")
+        denied.winerror = 5
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner.os, "replace", side_effect=denied
+        ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError) as caught:
+                runner._replace_staging_generation(staging, target)
+        self.assertIs(caught.exception, denied)
+        self.assertLessEqual(replace.call_count, 10)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 1.1)
+
+    def test_other_publication_errors_are_not_retried(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        for platform, winerror in (("posix", 5), ("nt", 112), ("nt", None)):
+            with self.subTest(platform=platform, winerror=winerror):
+                error = OSError("original error")
+                error.winerror = winerror
+                with mock.patch.object(runner.os, "name", platform), mock.patch.object(
+                    runner.os, "replace", side_effect=error
+                ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+                    with self.assertRaises(OSError) as caught:
+                        runner._replace_staging_generation(staging, target)
+                self.assertIs(caught.exception, error)
+                replace.assert_called_once_with(staging, target)
+                sleep.assert_not_called()
+
+
 class GenerationStoreTests(unittest.TestCase):
+    def test_staging_count_error_never_publishes_an_empty_generation(self):
+        collection = mock.Mock()
+        collection.count.side_effect = RuntimeError("count unavailable")
+        with mock.patch.object(
+            runner, "_open_chroma_collection", return_value=(mock.Mock(), collection)
+        ), mock.patch.object(runner, "_publish_generation") as publish:
+            result = runner._finish_full_build(
+                self.base / "board", self.base / "board.staging", "board"
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["error_code"], "BUILD_VERIFY_FAILED")
+        publish.assert_not_called()
+
     def setUp(self):
         runner._MODEL_CACHE = None
         self._tmp = tempfile.TemporaryDirectory()
@@ -373,35 +427,51 @@ class GenerationStoreTests(unittest.TestCase):
         self.assertTrue(status["healthy"], status)
         self.assertEqual(status["document_count"], 3, status)
 
-    def test_abandoned_generations_are_gc_only_after_24_hours(self):
+    def test_publish_keeps_only_active_and_previous_generations(self):
         project = _make_project(self.base, 3)
         baseline = self._build(project)
         self.assertTrue(baseline.get("ok"), baseline)
 
         pointer = runner.active_pointer_path(self._db_path())
         generations_root = pointer.parent
-        old_abandoned = generations_root / "gen-old-abandoned"
+        previous = json.loads(pointer.read_text(encoding="utf-8"))["generation"]
+        old_abandoned = generations_root / "gen-1-1"
         old_abandoned.mkdir()
         (old_abandoned / "chroma.sqlite3").write_text("old", encoding="utf-8")
         stale_time = time.time() - 25 * 3600
         os.utime(old_abandoned, (stale_time, stale_time))
-        fresh_abandoned = generations_root / "gen-fresh-abandoned"
+        fresh_abandoned = generations_root / "gen-2-2"
         fresh_abandoned.mkdir()
         (fresh_abandoned / "chroma.sqlite3").write_text("fresh", encoding="utf-8")
+        unknown = generations_root / "operator-notes"
+        unknown.mkdir()
 
-        result = self._build(project)
+        real_gc = runner._gc_abandoned_generations
+
+        def collect_under_lock(gen_root, keep):
+            self.assertFalse(_exclusive_lock_available(self._db_path() / runner.LOCK_FILENAME))
+            return real_gc(gen_root, keep)
+
+        with mock.patch.object(runner, "_gc_abandoned_generations", side_effect=collect_under_lock):
+            result = self._build(project)
         self.assertTrue(result.get("ok"), result)
 
         self.assertFalse(
             old_abandoned.exists(),
-            "generations abandoned for more than 24h must be garbage collected",
+            "unreferenced generations must be garbage collected",
         )
-        self.assertTrue(
+        self.assertFalse(
             fresh_abandoned.exists(),
-            "recently abandoned generations must be retained (crash recovery)",
+            "publish must not retain extra generations for 24 hours",
         )
         active = json.loads(pointer.read_text(encoding="utf-8"))
         self.assertTrue((generations_root / active["generation"]).exists())
+        self.assertTrue((generations_root / previous).exists())
+        self.assertTrue(unknown.is_dir(), "unknown directories are not generations")
+        self.assertEqual(
+            {entry.name for entry in generations_root.glob("gen-*")},
+            {active["generation"], previous},
+        )
 
 
 class Phase71WorktreeViewPublicationTests(unittest.TestCase):
@@ -1515,6 +1585,48 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "injected marker unlink failure"):
                 runner._clear_file_index_v2_recovery_marker(marker)
 
+    def test_artifact_failure_closes_clients_before_staging_cleanup(self):
+        client = mock.Mock()
+        real_remove = runner.shutil.rmtree
+
+        def open_store(store, _collection):
+            Path(store).mkdir(parents=True, exist_ok=True)
+            return client, mock.Mock()
+
+        def remove_after_close(path, **kwargs):
+            if ".staging-" in Path(path).name and Path(path).is_dir():
+                self.assertTrue(client.close.called, "SQLite must close before deletion")
+            return real_remove(path, **kwargs)
+
+        with mock.patch.object(
+            runner, "_make_file_index_v2_collection", side_effect=open_store
+        ), mock.patch.object(
+            runner, "_resolve_record_vector_batch",
+            side_effect=RuntimeError("injected artifact failure"),
+        ), mock.patch.object(runner.shutil, "rmtree", side_effect=remove_after_close):
+            with self.assertRaisesRegex(RuntimeError, "injected artifact failure"):
+                self._build()
+        self.assertEqual(list(self.db_root.rglob("*.staging-*")), [])
+
+    def test_verified_artifact_reuse_reclaims_its_orphan_staging(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, baseline["base_generation_id"], db_root=self.db_root
+        )
+        orphan = base_dir.with_name(f".{base_dir.name}.staging-1-1")
+        orphan.mkdir()
+        (orphan / "partial-store").write_bytes(b"interrupted writer")
+        unrelated = base_dir.with_name(".other.staging-1-1")
+        unrelated.mkdir()
+
+        with mock.patch.object(runner, "_make_file_index_v2_collection") as create:
+            result = self._build()
+        self.assertTrue(result.get("ok"), result)
+        create.assert_not_called()
+        self.assertFalse(orphan.exists(), "warm reuse must also reclaim dead staging")
+        self.assertTrue(unrelated.is_dir(), "another artifact owns its staging")
+
     def test_overlay_failure_after_new_base_keeps_old_pinned_view(self):
         baseline = self._build()
         self.assertTrue(baseline.get("ok"), baseline)
@@ -1588,6 +1700,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertIs(result.get("superseded"), True, result)
         self.assertIs(result.get("published"), False, result)
+        status = runner._explicit_file_index_v2_status(
+            REPO_HASH, WORKTREE_HASH, self.db_root
+        )
+        self.assertIn("build_progress", status["files"])
         self.assertEqual(self._head_path().read_bytes(), old_head)
         self.assertGreater(
             len(set((self._worktree_root() / "overlays").iterdir())),

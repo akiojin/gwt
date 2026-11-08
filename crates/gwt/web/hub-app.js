@@ -5,9 +5,12 @@ import { createCloseProjectController } from "./close-project-confirm-modal.js";
 // Project in its own browser tab.
 import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathForm } from "./project-clone-modal.js";
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
+import { createProjectExecutionPolicyModel, mountProjectExecutionStatus } from "./project-execution-policy-model.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
+  "orphan_daemon_result",
   "project_open_error",
   "project_opened",
   "clone_project_parent_selected",
@@ -31,10 +34,11 @@ function initialCloneState() {
     cloning: false,
     progress: "",
     error: "",
+    existingProjectUrl: "",
   };
 }
 
-export function createHubApp({ document: doc, window: win }) {
+function createHubApp({ document: doc, window: win }) {
   const node = (tag, className, text) => {
     const element = doc.createElement(tag);
     if (className) element.className = className;
@@ -42,11 +46,31 @@ export function createHubApp({ document: doc, window: win }) {
     return element;
   };
 
+  const executionPolicies = new Map();
+  let releaseExecutionViews = [];
+  let catalogConnectionFresh = true;
+  function executionPolicy(key) {
+    if (!executionPolicies.has(key)) executionPolicies.set(key, createProjectExecutionPolicyModel(key));
+    return executionPolicies.get(key);
+  }
+  function executionView(project) {
+    const view = node("div", "gwt-hub__orphan-detail"); view.dataset.projectExecution = project.project_key;
+    releaseExecutionViews.push(mountProjectExecutionStatus(view, executionPolicy(project.project_key).model, { projectTitle: project.title }));
+    return view;
+  }
   let catalog = { app_version: "", projects: [], recent_projects: [] };
   let cloneState = initialCloneState();
   let socket = null;
   let reconnectTimer = null;
-  const queued = [];
+  let queued = [];
+  let cloneTab = null;
+  const cloneResults = createUiStateStore(null);
+  const catalogResults = createUiStateStore(null);
+  const executionResults = createUiStateStore(null);
+  executionResults.subscribe(status => status, status => {
+    if (status && executionPolicies.has(status.project_key)) executionPolicies.get(status.project_key).applyStatus(status);
+  });
+  const openResults = createUiStateStore(null);
 
   const root = node("main", "gwt-hub");
   root.dataset.hub = "";
@@ -87,6 +111,13 @@ export function createHubApp({ document: doc, window: win }) {
   };
   const openSection = section("gwt-hub-open-title", "Open");
   openSection.list.dataset.hubList = "open";
+  const orphanSection = section("gwt-hub-orphans-title", "Projects awaiting shutdown");
+  orphanSection.list.dataset.hubList = "orphans";
+  const refreshOrphans = node("button", "text-button", "Refresh");
+  refreshOrphans.type = "button";
+  refreshOrphans.dataset.hubAction = "refresh-orphans";
+  refreshOrphans.addEventListener("click", () => send({ kind: "refresh_orphan_daemons" }));
+  orphanSection.element.append(refreshOrphans);
   const recentSection = section("gwt-hub-recent-title", "Recent");
   recentSection.list.dataset.hubList = "recent";
 
@@ -117,7 +148,7 @@ export function createHubApp({ document: doc, window: win }) {
     },
   });
 
-  root.append(header, actions, notice, error, openSection.element, recentSection.element);
+  root.append(header, actions, notice, error, openSection.element, recentSection.element, orphanSection.element);
 
   function projectLink(project, className = "gwt-hub__project") {
     const link = node("a", className, project.title || project.project_key);
@@ -144,12 +175,13 @@ export function createHubApp({ document: doc, window: win }) {
   const closeController = createCloseProjectController({
     document: doc, send, onError: showError,
     onClosed: (projectKey) => {
-      catalog.projects = catalog.projects.filter((project) => project.project_key !== projectKey);
-      render();
+      send({ kind: "frontend_ready" });
     },
   });
 
   function render() {
+    for (const release of releaseExecutionViews) release();
+    releaseExecutionViews = [];
     version.hidden = !catalog.app_version;
     version.textContent = catalog.app_version ? `v${catalog.app_version}` : "";
     renderList(openSection.list, catalog.projects, "No open projects", (project) => {
@@ -157,12 +189,40 @@ export function createHubApp({ document: doc, window: win }) {
       const close = node("button", "text-button", "Close Project");
       close.type = "button";
       close.dataset.closeProject = project.project_key;
-      close.addEventListener("click", () => closeController.request(project.project_key));
-      row.append(projectLink(project), close);
+      close.addEventListener("click", () => closeController.request(project.project_key, { projectWide: true }));
+      row.append(projectLink(project));
+      if (project.owner_health) {
+        const health = project.owner_health;
+        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "degraded" ? "Unavailable" : "Connecting");
+        badge.dataset.projectHealth = project.project_key;
+        badge.dataset.state = health.state;
+        badge.title = health.detail || "";
+        badge.setAttribute("role", "status");
+        row.append(badge);
+      }
+      row.append(close, executionView(project));
+      return row;
+    });
+    renderList(orphanSection.list, catalog.orphan_daemons || [], "No projects awaiting shutdown", (project) => {
+      const row = node("div", "gwt-hub__orphan");
+      row.append(node("span", "gwt-hub__project", project.title || project.project_key));
+      row.append(node("span", "gwt-hub__orphan-detail", project.detail));
+      const retry = node("button", "text-button", "Retry shutdown");
+      retry.type = "button";
+      retry.dataset.orphanRetry = "";
+      retry.disabled = !project.observation_token;
+      retry.addEventListener("click", () => {
+        if (retry.disabled) return;
+        retry.disabled = true;
+        send({ kind: "reap_orphan_daemon", observation_token: project.observation_token });
+      });
+      row.append(retry);
       return row;
     });
     renderList(recentSection.list, catalog.recent_projects, "No recent projects", (project) => {
-      if (project.project_key) return projectLink(project);
+      if (project.project_key) {
+        const row = node("div", "gwt-hub__project-actions"); row.append(projectLink(project), executionView(project)); return row;
+      }
       // The runtime resolves the key off-thread; until then the entry is
       // shown but not linkable (a link must never carry a path).
       const pending = node("span", "gwt-hub__project is-pending", project.title);
@@ -184,17 +244,39 @@ export function createHubApp({ document: doc, window: win }) {
   }
 
   function receiveCatalog(hub) {
+    // Recent links may duplicate an observed project without its runtime
+    // projection; the current project observation owns that shared row state.
+    const projects = new Map([...(hub?.recent_projects || []), ...(hub?.projects || [])].map(project => [project.project_key, project]));
+    for (const project of projects.values()) {
+      if (!project.project_key) continue;
+      if (project.execution) {
+        if (catalogConnectionFresh) executionPolicy(project.project_key).bindGeneration(project.execution.generation, { strict: false });
+        executionPolicy(project.project_key).applyStatus(project.execution);
+      }
+      else executionPolicy(project.project_key).connectionLost();
+    }
+    catalogConnectionFresh = false;
     catalog = {
       app_version: hub?.app_version || "",
       projects: Array.isArray(hub?.projects) ? hub.projects : [],
       recent_projects: Array.isArray(hub?.recent_projects) ? hub.recent_projects : [],
+      orphan_daemons: Array.isArray(hub?.orphan_daemons) ? hub.orphan_daemons : [],
     };
     render();
   }
 
+  catalogResults.subscribe(state => state, hub => {
+    if (hub) receiveCatalog(hub);
+  });
+
   function beginOpenRequest() {
     notice.hidden = true;
     showError("");
+  }
+
+  function closeCloneTab() {
+    if (cloneTab && !cloneTab.closed) cloneTab.close();
+    cloneTab = null;
   }
 
   function renderClone() {
@@ -205,11 +287,11 @@ export function createHubApp({ document: doc, window: win }) {
       createNode: node,
       onClose: () => {
         if (cloneState.cloning) return;
-        cloneState = { ...cloneState, open: false, searching: false, error: "", progress: "" };
+        cloneState = { ...cloneState, open: false, searching: false, error: "", progress: "", existingProjectUrl: "" };
         renderClone();
       },
       onModeChange: (mode) => {
-        cloneState = { ...cloneState, mode, error: "", progress: "" };
+        cloneState = { ...cloneState, mode, error: "", progress: "", existingProjectUrl: "" };
         renderClone();
       },
       onUrlChange: (url) => {
@@ -228,10 +310,11 @@ export function createHubApp({ document: doc, window: win }) {
         send({ kind: "github_repository_search", query });
       },
       onRepositorySelect: (url) => {
-        cloneState = { ...cloneState, selectedRepositoryUrl: url, url, error: "" };
+        cloneState = { ...cloneState, selectedRepositoryUrl: url, url, error: "", existingProjectUrl: "" };
         renderClone();
       },
       onClone: () => {
+        if (cloneState.cloning) return;
         const url = (cloneState.mode === "search" ? cloneState.selectedRepositoryUrl : cloneState.url).trim();
         const parentPath = cloneState.parentPath.trim();
         if (!url || !parentPath) {
@@ -243,7 +326,15 @@ export function createHubApp({ document: doc, window: win }) {
           return;
         }
         beginOpenRequest();
-        cloneState = { ...cloneState, cloning: true, progress: "Cloning repository...", error: "" };
+        // Reserve during the click's user activation; asynchronous completion
+        // can then navigate this tab without a second popup permission.
+        try {
+          cloneTab = win.open("about:blank", "_blank");
+          if (cloneTab) cloneTab.opener = null;
+        } catch {
+          closeCloneTab();
+        }
+        cloneState = { ...cloneState, cloning: true, progress: "Cloning repository...", error: "", existingProjectUrl: "" };
         renderClone();
         send({ kind: "clone_project_start", url, parent_path: parentPath });
       },
@@ -251,6 +342,10 @@ export function createHubApp({ document: doc, window: win }) {
   }
 
   function receiveClone(event) {
+    cloneResults.update(() => event);
+  }
+
+  function renderCloneResult(event) {
     switch (event.kind) {
       case "clone_project_parent_selected":
         cloneState = { ...cloneState, parentPath: event.path || "", error: "" };
@@ -270,13 +365,28 @@ export function createHubApp({ document: doc, window: win }) {
         cloneState = { ...cloneState, searching: false, error: event.message || "Repository search failed." };
         break;
       case "clone_project_progress":
+        if (!cloneState.cloning) return;
         cloneState = { ...cloneState, cloning: true, progress: event.message || "Cloning repository...", error: "" };
         break;
       case "clone_project_done":
+        if (!cloneState.cloning) return;
+        if (event.project_key) {
+          const url = projectUrlPath(event.project_key);
+          if (cloneTab && !cloneTab.closed) cloneTab.location.href = new URL(url, win.location.href).href;
+          cloneTab = null;
+          showNotice(event);
+        } else {
+          closeCloneTab();
+        }
         cloneState = { ...cloneState, open: false, cloning: false, searching: false, progress: "", error: "" };
         break;
       case "clone_project_error":
-        cloneState = { ...cloneState, cloning: false, progress: "", error: event.message || "Clone failed." };
+        if (!cloneState.cloning) return;
+        closeCloneTab();
+        cloneState = {
+          ...cloneState, cloning: false, progress: "", error: event.message || "Clone failed.",
+          existingProjectUrl: event.existing_project_key ? projectUrlPath(event.existing_project_key) : "",
+        };
         break;
       default:
         return;
@@ -284,16 +394,33 @@ export function createHubApp({ document: doc, window: win }) {
     renderClone();
   }
 
+  cloneResults.subscribe((state) => state, (event) => {
+    if (event) renderCloneResult(event);
+  });
+
+  openResults.subscribe(state => state, result => {
+    if (!result) return;
+    if (result.kind === "project_opened") showNotice(result);
+    else if (result.kind === "orphan_daemon_result") showError(result.message);
+    else showError(result.message || "Could not open the project.");
+  });
+
   function receive(event) {
     if (event && picker.receive(event)) return;
     if (event && closeController.receive(event)) return;
+    if (event?.kind === "project_execution_status") {
+      executionResults.update(() => event.status);
+      return;
+    }
     if (!event || !HUB_RESULT_KINDS.has(event.kind)) return;
-    if (event.kind === "hub_state") {
-      receiveCatalog(event.hub);
+    if (event.kind === "orphan_daemon_result") {
+      openResults.update(() => ({ ...event }));
+    } else if (event.kind === "hub_state") {
+      catalogResults.update(() => ({ ...event.hub }));
     } else if (event.kind === "project_opened") {
-      showNotice(event);
+      openResults.update(() => ({ ...event }));
     } else if (event.kind === "project_open_error") {
-      showError(event.message || "Could not open the project.");
+      openResults.update(() => ({ ...event }));
     } else {
       receiveClone(event);
     }
@@ -304,6 +431,7 @@ export function createHubApp({ document: doc, window: win }) {
       socket.send(JSON.stringify(message));
       return "sent";
     }
+    if (["confirm_close_project", "cancel_close_project", "preview_close_project"].includes(message.kind)) return "unavailable";
     queued.push(message);
     return "queued";
   }
@@ -315,7 +443,9 @@ export function createHubApp({ document: doc, window: win }) {
     socket = connection;
     connection.addEventListener("open", () => {
       if (socket !== connection) return;
+      catalogConnectionFresh = true;
       connection.send(JSON.stringify({ kind: "frontend_ready" }));
+      closeController.reconnect();
       for (const message of queued.splice(0)) connection.send(JSON.stringify(message));
     });
     connection.addEventListener("message", (message) => {
@@ -329,7 +459,14 @@ export function createHubApp({ document: doc, window: win }) {
     connection.addEventListener("close", () => {
       if (socket !== connection) return;
       closeController.connectionLost();
+      for (const policy of executionPolicies.values()) policy.connectionLost();
+      closeCloneTab();
+      if (cloneState.cloning) {
+        cloneState = { ...cloneState, cloning: false, progress: "", error: "Connection lost while cloning. Check the project list before retrying." };
+      }
       picker.connectionLost();
+      queued = queued.filter(({ kind }) =>
+        !["open_project_dialog", "select_clone_project_parent", "clone_project_start"].includes(kind));
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }
@@ -339,7 +476,7 @@ export function createHubApp({ document: doc, window: win }) {
     picker.begin("open");
   });
   cloneButton.addEventListener("click", () => {
-    cloneState = { ...cloneState, open: true, error: "", progress: "" };
+    cloneState = { ...cloneState, open: true, error: "", progress: "", existingProjectUrl: "" };
     renderClone();
   });
 
@@ -353,8 +490,19 @@ export function createHubApp({ document: doc, window: win }) {
     });
   }
 
+  function openInitialAction() {
+    const action = new URL(win.location.href).searchParams.get("action");
+    if (action === "open-folder") {
+      beginOpenRequest();
+      picker.begin("open");
+    } else if (action === "clone") {
+      cloneState = { ...cloneState, open: true };
+      renderClone();
+    }
+  }
+
   render();
-  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, homeUrl: HUB_URL_PATH };
+  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
@@ -362,6 +510,9 @@ export function mountHubApp({ window: win, document: doc }) {
   const app = createHubApp({ window: win, document: doc });
   doc.body.className = "route-body";
   doc.body.replaceChildren(app.root, app.cloneModal, app.closeModal);
+  // Run once after mounting, before connecting: picker requests queue behind
+  // frontend_ready, while reconnect only re-establishes the Hub connection.
+  app.openInitialAction();
   app.installTestBridge();
   app.connect();
   return app;

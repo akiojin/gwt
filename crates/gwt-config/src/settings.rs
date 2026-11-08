@@ -1,12 +1,14 @@
 //! Top-level application settings backed by `~/.gwt/config.toml`.
 
 use std::{
-    ffi::OsString,
+    collections::BTreeMap,
+    fs::{File, OpenOptions},
     num::NonZeroU16,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::{debug, error, info, warn};
@@ -17,12 +19,97 @@ use crate::{
     atomic::write_atomic,
     board_config::BoardConfig,
     error::{ConfigError, Result},
+    home::{assert_test_path, user_home},
     profile::ProfilesConfig,
     usage_config::UsageConfig,
     voice_config::VoiceConfig,
 };
 
 static UPDATE_LOCK: Mutex<()> = Mutex::new(());
+
+struct SettingsWriteGuard {
+    target: PathBuf,
+    _process: MutexGuard<'static, ()>,
+    _file: File,
+}
+
+fn settings_write_guard(path: &Path) -> Result<SettingsWriteGuard> {
+    assert_test_path(path);
+    let process = UPDATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let target = resolve_existing_settings_target(path)?;
+    let lock_path = target.with_extension("settings.lock");
+    assert_test_path(&target);
+    assert_test_path(&lock_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    file.lock_exclusive()?;
+    Ok(SettingsWriteGuard {
+        target,
+        _process: process,
+        _file: file,
+    })
+}
+
+/// Fixed workflows supported by the bounded policy writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowPolicyTarget {
+    Release,
+    WindowsDiagnostic,
+}
+
+impl WorkflowPolicyTarget {
+    pub const fn filename(self) -> &'static str {
+        match self {
+            Self::Release => "prepare-release.yml",
+            Self::WindowsDiagnostic => "windows-diagnostic.yml",
+        }
+    }
+
+    fn validate_repository(self, repository: &str) -> Result<()> {
+        validate_release_repository(repository)?;
+        if self == Self::WindowsDiagnostic && repository != "akiojin/gwt" {
+            return Err(ConfigError::ValidationError {
+                reason: "Windows diagnostic workflow policy requires akiojin/gwt".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Internal configuration bytes for the bounded workflow-policy executors.
+/// Never serialize `content` into a user-facing diagnostic or audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasePolicySnapshot {
+    pub content: String,
+    pub allowed: bool,
+}
+
+fn validate_release_repository(repository: &str) -> Result<()> {
+    let parts: Vec<_> = repository.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(ConfigError::ValidationError {
+            reason: "release policy requires an owner/repository identity".into(),
+        });
+    }
+    Ok(())
+}
 
 fn deserialize_optional_nonzero_port<'de, D>(
     deserializer: D,
@@ -96,17 +183,6 @@ impl Default for PerfConfig {
     }
 }
 
-fn resolve_config_home_dir(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
-) -> Option<PathBuf> {
-    home.filter(|value| !value.is_empty())
-        .or_else(|| userprofile.filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or(fallback)
-}
-
 fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -149,6 +225,11 @@ impl Default for PrInventoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// App-wide automatic gwt update preference. None is an unmigrated
+    /// installation; an explicit false must never import legacy project ON.
+    pub auto_apply_updates: Option<bool>,
+    /// Number of parsed terminal lines shown in Works. None uses three.
+    pub works_preview_lines: Option<u32>,
     /// Branches that cannot be deleted.
     pub protected_branches: Vec<String>,
     /// Default base branch for new worktrees.
@@ -180,6 +261,9 @@ pub struct Settings {
     pub server: ServerConfig,
     /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
     pub github_budget: crate::GitHubBudgetConfig,
+    /// Workflow filenames allowed for `actions.dispatch`, keyed by `owner/repository`.
+    /// An empty map denies every workflow (SPEC #4249 FR-006).
+    pub allowed_workflows: BTreeMap<String, Vec<String>>,
     /// Snapshot and running-check refresh intervals for `pr.list`.
     pub pr_inventory: PrInventoryConfig,
     /// Automatic build-artifact reclaim on low disk (Issue #4391).
@@ -191,6 +275,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            auto_apply_updates: None,
+            works_preview_lines: None,
             protected_branches: vec![
                 "main".to_string(),
                 "master".to_string(),
@@ -209,6 +295,7 @@ impl Default for Settings {
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
             github_budget: crate::GitHubBudgetConfig::default(),
+            allowed_workflows: BTreeMap::new(),
             pr_inventory: PrInventoryConfig::default(),
             build_artifact_gc: crate::BuildArtifactGcConfig::default(),
             verification: VerificationConfig::default(),
@@ -219,17 +306,14 @@ impl Default for Settings {
 impl Settings {
     /// Build the global config file path for a known home directory.
     pub fn global_config_path_for_home(home: &Path) -> PathBuf {
-        home.join(".gwt").join("config.toml")
+        let path = home.join(".gwt").join("config.toml");
+        assert_test_path(&path);
+        path
     }
 
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        resolve_config_home_dir(
-            std::env::var_os("HOME"),
-            std::env::var_os("USERPROFILE"),
-            dirs::home_dir(),
-        )
-        .map(|home| Self::global_config_path_for_home(&home))
+        user_home().map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -247,6 +331,7 @@ impl Settings {
 
     /// Load settings from an explicit path.
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        assert_test_path(path);
         let content = std::fs::read_to_string(path).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to read config");
             ConfigError::ParseError {
@@ -274,6 +359,11 @@ impl Settings {
 
     /// Save settings to the given path using atomic write.
     pub fn save(&self, path: &Path) -> Result<()> {
+        let guard = settings_write_guard(path)?;
+        self.save_unlocked(&guard.target)
+    }
+
+    fn save_unlocked(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).map_err(|e| ConfigError::WriteError {
             reason: format!("failed to serialize settings: {e}"),
         })?;
@@ -290,11 +380,9 @@ impl Settings {
     /// future keys, and the file's minimal shape. The typed parse still runs
     /// first so malformed or incompatible settings remain fatal.
     pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
-        let _guard = UPDATE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let target_path = resolve_existing_settings_target(path)?;
-        let content = match std::fs::read_to_string(&target_path) {
+        let guard = settings_write_guard(path)?;
+        let target_path = &guard.target;
+        let content = match std::fs::read_to_string(target_path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => {
@@ -331,7 +419,7 @@ impl Settings {
             *updated.decor_mut() = existing_decor;
         }
 
-        write_atomic(&target_path, &document.to_string())?;
+        write_atomic(target_path, &document.to_string())?;
         info!(path = %path.display(), port = port.get(), "Embedded server port saved");
         Ok(())
     }
@@ -347,13 +435,171 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
-        let _guard = UPDATE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = Self::global_config_path().ok_or(ConfigError::NoConfigPath)?;
+        Self::update_at_path(&path, mutate)
+    }
 
-        let mut settings = Self::load()?;
-        mutate(&mut settings)?;
-        settings.save_global()
+    /// Update an explicit settings file under the same process lock as the
+    /// global writer. Used by the Settings service and its isolated tests.
+    pub fn update_at_path<F, T>(path: &Path, mutate: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        let guard = settings_write_guard(path)?;
+        let path = &guard.target;
+
+        let mut settings = if path.exists() {
+            Self::load_from_path(path)?
+        } else {
+            Self::default()
+        };
+        let result = mutate(&mut settings)?;
+        settings.save_unlocked(path)?;
+        Ok(result)
+    }
+
+    /// Merge only the app-wide update preference, retaining comments and
+    /// unknown keys. Decide migration while holding the settings writer lock.
+    pub fn persist_auto_apply_updates<F>(path: &Path, decide: F) -> Result<bool>
+    where
+        F: FnOnce(Option<bool>) -> Result<bool>,
+    {
+        let guard = settings_write_guard(path)?;
+        let target = &guard.target;
+        let content = match std::fs::read_to_string(target) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    reason: error.to_string(),
+                })
+            }
+        };
+        let settings: Self = toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let enabled = decide(settings.auto_apply_updates)?;
+        if settings.auto_apply_updates == Some(enabled) {
+            return Ok(enabled);
+        }
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        document["auto_apply_updates"] = value(enabled);
+        write_atomic(target, &document.to_string())?;
+        Ok(enabled)
+    }
+
+    /// Read the fixed workflow's policy without creating directories or locks.
+    pub fn release_policy_snapshot(path: &Path, repository: &str) -> Result<ReleasePolicySnapshot> {
+        Self::workflow_policy_snapshot(path, repository, WorkflowPolicyTarget::Release)
+    }
+
+    /// Read one typed fixed workflow's policy without creating directories or locks.
+    pub fn workflow_policy_snapshot(
+        path: &Path,
+        repository: &str,
+        target: WorkflowPolicyTarget,
+    ) -> Result<ReleasePolicySnapshot> {
+        assert_test_path(path);
+        target.validate_repository(repository)?;
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let settings: Self = toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let allowed = settings
+            .allowed_workflows
+            .get(repository)
+            .is_some_and(|names| names.iter().any(|name| name == target.filename()));
+        Ok(ReleasePolicySnapshot { content, allowed })
+    }
+
+    /// Merge only `prepare-release.yml` for one already-resolved repository.
+    /// The callback performs the caller's CAS, final authorization and pending
+    /// receipt publication while all Settings writers are excluded. A callback
+    /// error leaves configuration unchanged; it is invoked even for a no-op.
+    pub fn with_locked_release_policy<F, T>(
+        path: &Path,
+        repository: &str,
+        allow: bool,
+        before_write: F,
+    ) -> Result<(T, ReleasePolicySnapshot)>
+    where
+        F: FnOnce(&ReleasePolicySnapshot, &ReleasePolicySnapshot) -> Result<T>,
+    {
+        Self::with_locked_workflow_policy(
+            path,
+            repository,
+            WorkflowPolicyTarget::Release,
+            allow,
+            before_write,
+        )
+    }
+
+    /// Update one fixed workflow through the shared Settings lock and writer.
+    /// The callback runs under that lock before any configuration effect,
+    /// including when the requested policy is already present.
+    pub fn with_locked_workflow_policy<F, T>(
+        path: &Path,
+        repository: &str,
+        target: WorkflowPolicyTarget,
+        allow: bool,
+        before_write: F,
+    ) -> Result<(T, ReleasePolicySnapshot)>
+    where
+        F: FnOnce(&ReleasePolicySnapshot, &ReleasePolicySnapshot) -> Result<T>,
+    {
+        target.validate_repository(repository)?;
+        let guard = settings_write_guard(path)?;
+        let before = Self::workflow_policy_snapshot(&guard.target, repository, target)?;
+        let mut after = before.clone();
+        if before.allowed != allow {
+            let mut document =
+                before
+                    .content
+                    .parse::<DocumentMut>()
+                    .map_err(|error| ConfigError::ParseError {
+                        reason: error.to_string(),
+                    })?;
+            if document.get("allowed_workflows").is_none() {
+                document["allowed_workflows"] = Item::Table(Table::new());
+            }
+            let policies = document["allowed_workflows"]
+                .as_table_like_mut()
+                .ok_or_else(|| ConfigError::ParseError {
+                    reason: "allowed_workflows must be a table".into(),
+                })?;
+            if policies.get(repository).is_none() {
+                policies.insert(repository, value(toml_edit::Array::new()));
+            }
+            let workflows = policies
+                .get_mut(repository)
+                .and_then(Item::as_array_mut)
+                .ok_or_else(|| ConfigError::ParseError {
+                    reason: "repository workflow policy must be an array".into(),
+                })?;
+            if allow {
+                workflows.push(target.filename());
+            } else {
+                workflows.retain(|name| name.as_str() != Some(target.filename()));
+            }
+            after = ReleasePolicySnapshot {
+                content: document.to_string(),
+                allowed: allow,
+            };
+        }
+        let result = before_write(&before, &after)?;
+        if after.content != before.content {
+            write_atomic(&guard.target, &after.content)?;
+        }
+        Ok((result, after))
     }
 }
 
@@ -445,41 +691,70 @@ gwtd_mutation_p95_ms = 350.0
 
     #[test]
     fn global_config_path_for_home_uses_canonical_layout() {
-        let home = PathBuf::from("home-dir");
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path();
 
         assert_eq!(
-            Settings::global_config_path_for_home(&home),
+            Settings::global_config_path_for_home(home),
             home.join(".gwt").join("config.toml")
         );
     }
 
     #[test]
+    fn global_config_path_is_isolated_without_a_scoped_override() {
+        let path = Settings::global_config_path().expect("test config path");
+        crate::home::assert_test_path(&path);
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn explicit_global_config_path_rejects_an_unisolated_home() {
+        // Pure path construction: RED never attempts a real-home write.
+        Settings::global_config_path_for_home(Path::new("/__gwt_protected_test_home__"));
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn settings_update_rejects_unisolated_path_before_mutation() {
+        let _: Result<()> = Settings::update_at_path(
+            Path::new("/__gwt_protected_test_home__/.gwt/config.toml"),
+            |_| panic!("mutation ran before the HOME guard"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn auto_apply_updates_rejects_unisolated_path_before_decision() {
+        let _ = Settings::persist_auto_apply_updates(
+            Path::new("/__gwt_protected_test_home__/.gwt/config.toml"),
+            |_| panic!("decision ran before the HOME guard"),
+        );
+    }
+
+    #[test]
     fn config_home_resolution_prefers_env_over_dirs_fallback() {
+        use crate::home::resolve_config_home_dir;
         assert_eq!(
             resolve_config_home_dir(
                 Some("home-env".into()),
                 Some("userprofile-env".into()),
-                Some(PathBuf::from("dirs-home")),
+                || Some(PathBuf::from("dirs-home")),
             ),
             Some(PathBuf::from("home-env"))
         );
         assert_eq!(
-            resolve_config_home_dir(
-                Some("".into()),
-                Some("userprofile-env".into()),
-                Some(PathBuf::from("dirs-home")),
-            ),
+            resolve_config_home_dir(Some("".into()), Some("userprofile-env".into()), || Some(
+                PathBuf::from("dirs-home")
+            ),),
             Some(PathBuf::from("userprofile-env"))
         );
         assert_eq!(
-            resolve_config_home_dir(
-                Some("".into()),
-                Some("".into()),
-                Some(PathBuf::from("dirs-home"))
-            ),
+            resolve_config_home_dir(Some("".into()), Some("".into()), || Some(PathBuf::from(
+                "dirs-home"
+            ))),
             Some(PathBuf::from("dirs-home"))
         );
-        assert_eq!(resolve_config_home_dir(None, None, None), None);
+        assert_eq!(resolve_config_home_dir(None, None, || None), None);
     }
 
     #[test]
@@ -547,7 +822,8 @@ gwtd_mutation_p95_ms = 350.0
 
     #[test]
     fn load_from_missing_file_returns_error() {
-        let result = Settings::load_from_path(Path::new("/nonexistent/config.toml"));
+        let directory = tempfile::tempdir().unwrap();
+        let result = Settings::load_from_path(&directory.path().join("missing/config.toml"));
         assert!(result.is_err());
     }
 
@@ -580,14 +856,13 @@ gwtd_mutation_p95_ms = 350.0
         let (loaded_tx, loaded_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let updater = thread::spawn(move || {
-            let _guard = UPDATE_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut settings = Settings::load_from_path(&updater_path).expect("load old snapshot");
-            loaded_tx.send(()).expect("signal old snapshot loaded");
-            release_rx.recv().expect("release global updater");
-            settings.debug = true;
-            settings.save(&updater_path).expect("save global update");
+            Settings::update_at_path(&updater_path, |settings| {
+                loaded_tx.send(()).expect("signal old snapshot loaded");
+                release_rx.recv().expect("release global updater");
+                settings.debug = true;
+                Ok(())
+            })
+            .expect("save global update");
         });
         loaded_rx.recv().expect("wait for old snapshot load");
 

@@ -78,29 +78,24 @@ root_js_modules! {
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-confirm-modal.js" => "createCloseProjectController",
+    "project-execution-policy-model.js" => "createProjectExecutionPolicyModel",
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
-    // SPEC-2008 Camera Focus: rail-safe viewport framing math for local
-    // per-viewer camera moves.
-    "camera-framing.js" => "computeCameraFrameArea",
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
     // notification controller.
     "agent-completion-notifications.js" => "createAgentCompletionNotifier",
     "project-page-metadata.js" => "createProjectPageMetadata",
-    // SPEC-3038 US-3: Close Guard — window close confirm modal renderer.
-    "window-close-confirm-modal.js" => "renderWindowCloseConfirmModal",
     "migration-modal.js" => "renderMigrationModal",
     "project-clone-modal.js" => "renderProjectCloneModal",
-    "window-docking.js" => "findTitlebarDockTarget",
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
+    "agent-activity-model.js" => "createAgentActivityModel",
     "issue-other-surface.js" => "createIssueOtherSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",
     "terminal-copy-shortcut.js" => "classifyTerminalCopyKeyEvent",
     "terminal-wheel-scroll.js" => "createTerminalWheelScrollController",
-    "canvas-wheel-gesture.js" => "createCanvasWheelGestureClassifier",
     // SPEC-2356 Operator Design System — module assets.
     "theme-manager.js" => "createThemeManager",
     "theme-toggle.js" => "wireThemeToggle",
@@ -110,12 +105,9 @@ root_js_modules! {
     "recovery-center-modal.js" => "createRecoveryCenterController",
     // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
     "index-settings-panel.js" => "renderIndexSettingsPanel",
+    "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
-    // SPEC-2008 Phase 25 — window geometry sync primitives (Issue #3364:
-    // the revision-arithmetic guard became the content-matched
-    // resolveIncomingGeometry).
-    "window-geometry-sync.js" => "resolveIncomingGeometry",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
@@ -124,7 +116,7 @@ root_js_modules! {
     "ui-content.js" => "renderUiContent",
     // Issue #3365 — render-key lifecycle with per-window exception isolation
     // (a failed sync retries on the next workspace_state instead of freezing
-    // the minimap / window list / telemetry behind a committed key).
+    // the window list / telemetry behind a committed key).
     "issue-render-sync.js" => "createWorkspaceRenderSync",
     // Issue #3365 — user-visible degradation notice for swallowed
     // render/receive failures.
@@ -141,12 +133,6 @@ root_js_modules! {
     // `scheduleTerminalFocusActivation` skip its xterm `terminal.focus()`
     // step while a modal is open or a text input owns focus.
     "clone-modal-focus-guard.js" => "shouldSkipTerminalFocusActivation",
-    // Issue #2698 PR 2 (B1) — viewport-persist throttle that caps the
-    // `update_viewport` WebSocket rate during sustained wheel/zoom gestures.
-    "viewport-persist-throttle.js" => "createViewportPersistThrottle",
-    // Issue #2698 — viewport sync guard. Protects in-flight local pan/zoom
-    // from stale workspace_state echoes.
-    "viewport-sync.js" => "createViewportSyncState",
     // Issue #2698 follow-up — browser-side metadata trace profiler.
     "ui-trace-profiler.js" => "createUiTraceProfiler",
     "ui-trace-wiring.js" => "createUiTraceWiring",
@@ -156,7 +142,6 @@ root_js_modules! {
     "release-notes-window.js" => "createReleaseNotesWindow",
     // SPEC-2809 — Console window for external process stdout/stderr live
     // tail (5 fixed kind tabs: gh / git / docker / agent / runner).
-    "console-window.js" => "createConsoleWindow",
     // SPEC-2014 2026-05-29 amendment — Launch Agent setting controls.
     "launch-controls.js" => "buildReasoningField",
     // SPEC-2359 W-17 (FR-398) — shared pending state for Resume/Launch
@@ -194,6 +179,7 @@ root_js_modules! {
     // app.js imports this at module top level, so the asset MUST be registered
     // or the ES module load 404s and the splash hangs.
     "pm-settings-panel.js" => "createPmSettingsPanel",
+    "control-explanations.js" => "bindControlExplanations",
     "pm-chat.js" => "createPmChat",
     // SPEC #3206 — shared floating-toast primitive behind the bottom-right
     // alerts stack and the notification-center history list.
@@ -202,10 +188,6 @@ root_js_modules! {
     // drawer). app.js imports this at module top level, so the asset MUST be
     // registered or the ES module load fails and the splash hangs.
     "notification-center.js" => "createNotificationCenter",
-    // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
-    // worktree picker + text/hex viewer + window mount) extracted from
-    // app.js.
-    "file-tree-surface.js" => "createFileTreeSurface",
     // SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface
     // (branch list state, cleanup modal flow, window mount) extracted from
     // app.js.
@@ -222,25 +204,17 @@ root_js_modules! {
     "profile-window-surface.js" => "createProfileWindowSurface",
     // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
     // (project tabs + close-tab confirm, recent projects + open-project
-    // menu, picker/onboarding, window list dropdown, maximized viewport
+    // menu, picker/onboarding, maximized viewport
     // sync, clone/migration modal glue) extracted from app.js.
     "project-shell-surface.js" => "createProjectShellSurface",
-    // SPEC-2008 camera-focus rework — Fleet Minimap overview. Lives in
-    // `#fleet-minimap` (canvas-area, outside the stage) and renders the window
-    // cell map + camera frame. app.js imports this at module top level, so the
-    // asset MUST be registered or the ES module load 404s and the splash hangs.
-    "fleet-minimap.js" => "createFleetMinimap",
     // Issue #4777 T-1 — the rail picks Issues / Agents / Board / Settings and
     // presses the surface of the focused window. app.js imports it at module
     // top level, so a missing entry would hang the splash.
     "surface-rail.js" => "installSurfaceRail",
     "split-surfaces.js" => "createSplitSurfaces",
     "agents-surface.js" => "createAgentsSurface",
+    "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",
-    // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
-    // cross-tab open-window set by owning project tab so the list matches the
-    // badge and supports cross-tab focus.
-    "window-list-model.js" => "groupProjectWindowList",
 }
 
 /// Embedded payload of a [`StaticAsset`].
@@ -341,6 +315,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: CSS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/styles/components.css")),
+    },
+    StaticAsset {
+        route: "/styles/works-agents.css",
+        content_type: CSS_CONTENT_TYPE,
+        cache_control: Some(MUTABLE_CACHE_CONTROL),
+        body: AssetBody::Text(include_str!("../web/styles/works-agents.css")),
     },
     // Issue #2694 Phase D — extracted from the formerly-inline index.html
     // <style> block (~91KB) so initial HTML parse stays fast.

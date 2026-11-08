@@ -1,0 +1,9 @@
+{
+  "observed_at": "2026-10-20T03:13:46.665848+00:00",
+  "index_modified_at": "2026-10-18T14:35:45.219466+00:00",
+  "group_count": 1291,
+  "source_count": 2926491,
+  "stored_group_bytes": 584186244,
+  "projection_version": "source-context-v10-legacy-log-metadata-cache",
+  "limitations": "Last persisted advisory index, not current discovery input or current live heap."
+}

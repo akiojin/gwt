@@ -2,7 +2,7 @@ use super::*;
 
 /// Phase U-5 (SPEC-2359 US-38, FR-129, FR-130): the WebSocket reconnect
 /// path goes through `FrontendEvent::FrontendReady` → `frontend_sync_events`.
-/// The replied `WindowCanvasState` must carry each window's `dynamic_title`
+/// The replied `WindowRegistry` must carry each window's `dynamic_title`
 /// and `dynamic_title_detail` so the frontend's `windowDisplayTitle()` can
 /// rehydrate the pane heading without waiting for another mutation. This
 /// test fails if anyone strips `dynamic_title` from the projected
@@ -28,7 +28,7 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -44,10 +44,10 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
 
     let workspace_event = events
         .iter()
-        .find(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
-        .expect("WindowCanvasState reply for FrontendReady");
+        .find(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
+        .expect("WindowRegistry reply for FrontendReady");
     let workspace = match &workspace_event.event {
-        BackendEvent::WindowCanvasState { workspace } => workspace,
+        BackendEvent::WorkspaceState { workspace } => workspace,
         _ => unreachable!(),
     };
     let projected_window = workspace
@@ -60,7 +60,7 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
                 .iter()
                 .find(|window| window.id == combined_window_id("tab-1", "agent-1"))
         })
-        .expect("agent window in projected WindowCanvasState");
+        .expect("agent window in projected WindowRegistry");
     assert_eq!(
             projected_window.dynamic_title.as_deref(),
             Some("Phase U-5 rehydrate target"),
@@ -76,7 +76,7 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
 /// Phase U-5: re-asserts the diff gate from
 /// `apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_resyncs`
 /// at the Board entrypoint. Re-posting an identical milestone (same body for
-/// `current_focus`) must not emit a duplicate `WindowCanvasState` broadcast
+/// `current_focus`) must not emit a duplicate `WindowRegistry` broadcast
 /// on busy projections.
 #[test]
 fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
@@ -98,7 +98,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -143,16 +143,16 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "first Board post should broadcast WindowCanvasState: {first:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "first Board post should broadcast WindowRegistry: {first:?}"
     );
 
     let second = runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
     assert!(
             !second
                 .iter()
-                .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-            "second Board post with identical current_focus must not duplicate WindowCanvasState: {second:?}"
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "second Board post with identical current_focus must not duplicate WindowRegistry: {second:?}"
         );
     assert!(second
         .iter()
@@ -182,7 +182,7 @@ fn app_runtime_board_milestone_ignores_legacy_title_summary_for_window_title() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -270,7 +270,7 @@ fn app_runtime_board_milestone_without_title_summary_keeps_existing_agent_window
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -343,7 +343,7 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -577,6 +577,47 @@ fn workspace_projection_changed_uses_supplied_snapshot_instead_of_rereading_disk
 }
 
 #[test]
+fn sync_agent_window_titles_preserves_review_purpose() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    runtime
+        .issue_monitor_review_dispatch_windows
+        .insert(window_id.clone());
+    runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .set_purpose_title("agent-1", Some("Review · Issue #5478".to_string()));
+    let mut projection = apply_title_sync_sample_projection(&repo, &window_id, None, None);
+    projection
+        .linked_issues
+        .push(gwt_core::workspace_projection::WorkspaceIssueLink {
+            number: 5478,
+            title: Some("Implementation owner title".to_string()),
+            url: None,
+        });
+
+    assert!(!runtime.sync_agent_window_titles_from_workspace_projection(&repo, &projection));
+    commit_workspace_watcher_update(&mut runtime, &repo, &projection);
+
+    let window = runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .window("agent-1")
+        .unwrap();
+    assert!(window.dynamic_title.is_none());
+    assert_eq!(
+        window.purpose_title.as_deref(),
+        Some("Review · Issue #5478")
+    );
+}
+
+#[test]
 fn apply_workspace_projection_title_sync_writes_dynamic_title() {
     let _env_lock = env_test_lock()
         .lock()
@@ -623,6 +664,9 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let workspace = &mut runtime.tab_mut("tab-1").unwrap().workspace;
+    workspace.set_session_id("agent-1", Some("session-1".into()));
+    workspace.set_agent_name("agent-1", Some("Falcon".into()));
     // Materialize an old cache first. The watcher payload remains the source
     // for title sync, and the cache-only Work broadcast must merge the fresh
     // payload rather than replaying this stale snapshot.
@@ -650,18 +694,21 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         .chain(cached_view.unassigned_agents.iter_mut())
     {
         if agent.session_id == "session-1" {
+            agent.agent_name = Some("Falcon".into());
             agent.sessions = vec![retained_session.clone()];
         }
     }
     for work in &mut cached_view.active_works {
         for agent in &mut work.agents {
             if agent.session_id == "session-1" {
+                agent.agent_name = Some("Falcon".into());
                 agent.sessions = vec![retained_session.clone()];
             }
         }
         for child in &mut work.works {
             for agent in &mut child.agents {
                 if agent.session_id == "session-1" {
+                    agent.agent_name = Some("Falcon".into());
                     agent.sessions = vec![retained_session.clone()];
                 }
             }
@@ -726,6 +773,7 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         agent.current_focus.as_deref() == Some("Fresh watcher focus")
             && agent.title_summary.as_deref() == Some("Fresh watcher purpose")
             && agent.status_category == "blocked"
+            && agent.agent_name.as_deref() == Some("Falcon")
             && agent.sessions.is_empty()
     }));
     assert!(runtime
@@ -737,7 +785,10 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         .into_iter()
         .flat_map(|projection| projection.agents.iter())
         .filter(|agent| agent.session_id == "session-1")
-        .all(|agent| agent.sessions == [retained_session.clone()]));
+        .all(|agent| {
+            agent.agent_name.as_deref() == Some("Falcon")
+                && agent.sessions == [retained_session.clone()]
+        }));
     let all_session_ids = active_work
         .agents
         .iter()
@@ -779,6 +830,9 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let workspace = &mut runtime.tab_mut("tab-1").unwrap().workspace;
+    workspace.set_session_id("agent-1", Some("session-added".into()));
+    workspace.set_agent_name("agent-1", Some("Falcon".into()));
     assert!(runtime
         .project_state_for_tab("tab-1")
         .unwrap()
@@ -793,7 +847,7 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
         Some("Fresh cold-cache focus"),
     );
     projection.agents[0].session_id = "session-added".to_string();
-    projection.agents[0].window_id = Some("tab-1::added".to_string());
+    projection.agents[0].window_id = Some(window_id);
 
     let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
@@ -804,6 +858,16 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
             _ => None,
         })
         .expect("expected bounded ActiveWorkProjection patch");
+    assert_eq!(
+        active_work
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-added")
+            .expect("authoritative Agent")
+            .agent_name
+            .as_deref(),
+        Some("Falcon")
+    );
     let session_ids = active_work
         .agents
         .iter()
@@ -949,7 +1013,7 @@ fn apply_workspace_projection_title_sync_emits_workspace_state_when_dynamic_titl
     let projection = apply_title_sync_sample_projection(
         &repo,
         &window_id,
-        Some("Phase U-2 WindowCanvasState assertion"),
+        Some("Phase U-2 WindowRegistry assertion"),
         None,
     );
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -958,15 +1022,15 @@ fn apply_workspace_projection_title_sync_emits_workspace_state_when_dynamic_titl
     let events = runtime.apply_workspace_projection_title_sync(&repo, &projection);
 
     // Phase U-2 (SPEC-2359 US-26): a workspace update path that mutates
-    // an in-memory dynamic_title MUST broadcast WindowCanvasState in the
+    // an in-memory dynamic_title MUST broadcast WindowRegistry in the
     // same batch so the frontend's `windowData.dynamic_title` and the
     // pane heading `windowDisplayTitle` refresh without waiting for the
     // next hook event or window structure change.
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "expected WindowCanvasState broadcast when dynamic_title changed: {events:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "expected WindowRegistry broadcast when dynamic_title changed: {events:?}"
     );
 }
 
@@ -984,7 +1048,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_nothing_chan
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
     // Drop the active_agent_sessions entry AND erase the projection's
     // window_id so neither the fast path nor the Phase U-3 fallback
-    // can resolve a window. The WindowCanvasState broadcast should be
+    // can resolve a window. The WindowRegistry broadcast should be
     // skipped to avoid forcing a frontend re-render for a no-op update.
     runtime.active_agent_sessions.clear();
     let mut projection =
@@ -998,8 +1062,8 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_nothing_chan
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "WindowCanvasState must be skipped when in-memory dynamic_title did not change: {events:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "WindowRegistry must be skipped when in-memory dynamic_title did not change: {events:?}"
     );
 }
 
@@ -1029,19 +1093,19 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "first sync should broadcast WindowCanvasState: {first:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "first sync should broadcast WindowRegistry: {first:?}"
     );
 
     // Second sync with the same projection: nothing diffs, so the
-    // WindowCanvasState broadcast must be suppressed to avoid forcing a
+    // WindowRegistry broadcast must be suppressed to avoid forcing a
     // full frontend re-render on busy projections (Codex review P2).
     let second = runtime.apply_workspace_projection_title_sync(&repo, &projection);
     assert!(
         !second
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "second sync with identical title must not broadcast WindowCanvasState: {second:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "second sync with identical title must not broadcast WindowRegistry: {second:?}"
     );
     // ActiveWorkProjection still commits on the background continuation.
     assert!(second
@@ -1066,7 +1130,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
     let projection = apply_title_sync_sample_projection(
         &repo,
         &window_id,
-        Some("Pane heading via WindowCanvasState"),
+        Some("Pane heading via WindowRegistry"),
         Some("triggered by workspace.update params.purpose"),
     );
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -1075,13 +1139,13 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
     let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
     // The original handler returned only ActiveWorkProjection. Phase
-    // U-2 promotes it to also broadcast WindowCanvasState in one batch so
+    // U-2 promotes it to also broadcast WindowRegistry in one batch so
     // the pane heading refreshes immediately after `workspace.update`.
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "handle_workspace_projection_changed_events must broadcast WindowCanvasState: {events:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "handle_workspace_projection_changed_events must broadcast WindowRegistry: {events:?}"
     );
     assert!(
         events
@@ -1135,8 +1199,8 @@ fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "canonical Project State root updates must broadcast WindowCanvasState: {events:?}"
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "canonical Project State root updates must broadcast WindowRegistry: {events:?}"
     );
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab.workspace.window("agent-1").expect("agent window");
@@ -1480,7 +1544,7 @@ fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "non-structural runtime hook state changes must not force a full workspace_state"
     );
     assert!(events
@@ -1600,7 +1664,7 @@ fn app_runtime_board_projection_change_preserves_all_view_for_live_updates() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1710,7 +1774,7 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1784,6 +1848,7 @@ fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_w
         context: runtime.project_context("tab-1"),
         events: Vec::new(),
         milestone: Some((repo.clone(), projection)),
+        ..Default::default()
     });
 
     assert_eq!(
@@ -1793,7 +1858,7 @@ fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_w
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "the milestone must still refresh the pane heading: {events:?}"
     );
     let tab = runtime.tab("tab-1").expect("tab");

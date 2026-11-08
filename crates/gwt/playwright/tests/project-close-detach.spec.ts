@@ -1,13 +1,14 @@
 /* Run against the browser-check isolated checkout, never a resident server.
  * A custom shell Agent supplies a real runtime/PTY without contacting an
  * external provider. The detach test requires the /bin/sh -i fixture. */
-import { execFileSync } from "node:child_process";
-import { dirname } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
 import {
-  gotoLiveGwt, liveGwtProjectUrl, openLiveLaunchWizardForBranch,
+  focusLiveWindow, gotoLiveGwt, liveGwtProjectUrl,
   readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+
+useManagedBrowserSource(test);
 
 function capture(page: Page) {
   const errors: string[] = [];
@@ -43,13 +44,17 @@ async function wizardAction(page: Page, action: unknown, bounds?: CanvasBounds) 
 }
 async function launchAgent(page: Page, agentId: string, bounds?: CanvasBounds) {
   const existing = await page.evaluate((agentId) => {
-    const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
+    const messages = (window as any).__gwtPlaywrightMessages ?? [];
+    const state = messages.findLast((entry: any) => entry.payload.kind === "workspace_state");
     return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
-      .find((entry: any) => entry.agent_id === agentId && ["running", "idle"].includes(entry.status))?.id;
+      .find((entry: any) => entry.agent_id === agentId && ["running", "idle"].includes(
+        messages.findLast((message: any) => message.sequence > state.sequence
+          && message.payload.kind === "terminal_status" && message.payload.id === entry.id)?.payload.status ?? entry.status))?.id;
   }, agentId);
   if (existing) return existing as string;
   const after = await cursor(page);
-  const fixture = await openLiveLaunchWizardForBranch(page);
+  await sendLiveGwtEvent(page, { kind: 'open_active_work_launch_wizard',
+    branch_name: process.env.GWT_PLAYWRIGHT_BRANCH_NAME, linked_issue_number: null });
   await latestWizard(page, after, true);
   await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" }, bounds);
   let state = await wizardAction(page, { kind: "set_agent", agent_id: agentId }, bounds);
@@ -64,11 +69,13 @@ async function launchAgent(page: Page, agentId: string, bounds?: CanvasBounds) {
     }
   }
   expect(state.wizard).toBeNull();
-  if (bounds) await fixture.cleanup();
   return (await page.waitForFunction((agentId) => {
-    const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
+    const messages = (window as any).__gwtPlaywrightMessages ?? [];
+    const state = messages.findLast((entry: any) => entry.payload.kind === "workspace_state");
     return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
-      .find((entry: any) => entry.agent_id === agentId && ["running", "idle"].includes(entry.status))?.id;
+      .find((entry: any) => entry.agent_id === agentId && ["running", "idle"].includes(
+        messages.findLast((message: any) => message.sequence > state.sequence
+          && message.payload.kind === "terminal_status" && message.payload.id === entry.id)?.payload.status ?? entry.status))?.id;
   }, agentId, { timeout: 30_000 })).jsonValue() as Promise<string>;
 }
 async function shell(page: Page) {
@@ -78,75 +85,43 @@ async function shell(page: Page) {
   await expect.poll(created).toHaveLength(1);
   return (await created())[0];
 }
+async function revealTerminal(page: Page, id: string) {
+  await page.bringToFront();
+  if (await page.locator(`.workspace-window[data-id="${id}"]`).isVisible()
+    || await page.locator(`.works-full .works-terminal[data-window-id="${id}"]`).isVisible()) return;
+  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  if (await page.locator('.works-surface:not(.works-surface--preview) .works-full:not([hidden])').isVisible()) {
+    await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+  }
+  const preset = await page.waitForFunction(id => {
+    const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === 'workspace_state');
+    return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows).find((pane: any) => pane.id === id)?.preset;
+  }, id).then(handle => handle.jsonValue());
+  const work = page.locator(`.work-row[data-window-id="${id}"]`);
+  if (preset === 'agent') {
+    await expect(work).toBeVisible();
+    await work.getByRole('button', { name: 'Open terminal', exact: true }).click();
+    await expect(page.locator(`.works-full .works-terminal[data-window-id="${id}"] .xterm-helper-textarea`)).toBeVisible();
+  } else {
+    await focusLiveWindow(page, id);
+  }
+}
 async function terminalReady(page: Page, id: string) {
+  await revealTerminal(page, id);
   await expect.poll(() => page.evaluate((id) => (window as any).__gwtTerminalTestApi?.bufferText(id)?.trim() ?? "", id), { timeout: 30_000 }).toMatch(/[^\n]+[>$#%]$/);
 }
 async function command(page: Page, id: string, command: string, expected: string) {
+  await revealTerminal(page, id);
   await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: `${command}\r` });
   await expect.poll(() => page.evaluate((id) => (window as any).__gwtTerminalTestApi.bufferText(id), id), { timeout: 15_000 }).toContain(expected);
 }
+async function actualViewReady(page: Page) {
+  await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
+    ?.filter((entry: any) => entry.payload.kind === 'project_execution_status').at(-1)?.payload.status.view_state)).toBe('open');
+}
 
-test("new Agent canvas right edge stays reachable without camera movement", async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
-  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
-  const agentId = process.env.GWT_PLAYWRIGHT_CLOSE_AGENT_ID;
-  test.skip(!base || !agentId, "requires isolated server and custom shell Agent fixture");
-  await page.setViewportSize({ width: 1024, height: 1000 });
-  await withLiveGwtBackendLock(base!, testInfo, async () => {
-    const observations = capture(page);
-    await gotoLiveGwt(page, base!, { enableTestBridge: true });
-    const canvas = page.locator("#canvas");
-    const stage = page.locator("#canvas-stage");
-    await expect(canvas).toBeVisible();
-    await expect(page.locator("html")).toHaveAttribute("data-theme",
-      testInfo.project.name.includes("light") ? "light" : "dark");
-    const bounds = await page.evaluate(() => {
-      const canvas = document.getElementById("canvas")!;
-      const stage = document.getElementById("canvas-stage")!;
-      const matrix = new DOMMatrix(getComputedStyle(stage).transform);
-      return { x: -matrix.e / matrix.a, y: -matrix.f / matrix.a,
-        width: canvas.clientWidth / matrix.a, height: canvas.clientHeight / matrix.a };
-    });
-    expect(bounds.width).toBeGreaterThanOrEqual(420);
-    expect(bounds.width).toBeLessThan(1280);
-    expect(bounds.height).toBeGreaterThanOrEqual(800);
-    const cameraBefore = await stage.evaluate((element: HTMLElement) => element.style.transform);
-    const existing = new Set(await page.locator(".workspace-window").evaluateAll((nodes) =>
-      nodes.map((node) => (node as HTMLElement).dataset.id)));
-    let id = "";
-    try {
-      id = await launchAgent(page, agentId!, bounds);
-      expect(existing.has(id), "the test must exercise a newly placed Agent").toBe(false);
-      const frame = page.locator(`.workspace-window[data-id="${id}"]`);
-      await expect(frame).toBeVisible();
-      const canvasBox = (await canvas.boundingBox())!;
-      for (const target of [frame.locator('[data-action="close"]'), frame.locator(".resize-handle")]) {
-        await expect(target).toBeVisible();
-        const box = (await target.boundingBox())!;
-        expect(box.x).toBeGreaterThanOrEqual(canvasBox.x);
-        expect(box.y).toBeGreaterThanOrEqual(canvasBox.y);
-        expect(box.x + box.width).toBeLessThanOrEqual(canvasBox.x + canvasBox.width);
-        expect(box.y + box.height).toBeLessThanOrEqual(canvasBox.y + canvasBox.height);
-        expect(await target.evaluate((element) => {
-          const box = element.getBoundingClientRect();
-          const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-          return hit === element || element.contains(hit);
-        })).toBe(true);
-      }
-      expect(await stage.evaluate((element: HTMLElement) => element.style.transform)).toBe(cameraBefore);
-      await expect(frame.locator('[data-action="maximize"], [data-action="snap"]')).toHaveCount(0);
-      await page.screenshot({ path: testInfo.outputPath("agent-visible-right-edge.png") });
-    } finally {
-      if (id && !existing.has(id)) {
-        await sendLiveGwtEvent(page, { kind: "close_window", id });
-        await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
-      }
-    }
-    expect(observations.errors).toEqual([]);
-  });
-});
-
-test("live detach preserves the Agent; explicit close reaches all A tabs and leaves B running", async ({ page, context }, testInfo) => {
+// PW1 acceptance uses the real isolated backend, real PTY, and real choices.
+test("live Project view close, Continue, ACK reconciliation and Stop preserve the other project", async ({ page, context }, testInfo) => {
   test.setTimeout(180_000);
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   const agentId = process.env.GWT_PLAYWRIGHT_CLOSE_AGENT_ID;
@@ -155,117 +130,133 @@ test("live detach preserves the Agent; explicit close reaches all A tabs and lea
   await withLiveGwtBackendLock(base!, testInfo, async () => {
     const catalog = await readLiveHubCatalog(page, base!);
     expect(catalog.projects.length).toBeGreaterThanOrEqual(2);
-    const projectRoot = dirname(execFileSync("git", ["-C", process.env.GWT_PLAYWRIGHT_PROJECT_ROOT!,
-      "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
-    const aKey = catalog.recent_projects.find((entry) => entry.path === projectRoot)?.project_key;
-    const a = catalog.projects.find((entry) => entry.project_key === aKey);
+    const a = catalog.projects.find(entry => entry.project_key === process.env.GWT_PLAYWRIGHT_PROJECT_KEY)!;
     expect(a, "the launch checkout must be present in the isolated catalog").toBeTruthy();
-    const b = catalog.projects.find((entry) => entry.project_key !== a!.project_key)!;
-    const mirror = await context.newPage();
-    const other = await context.newPage();
-    const hub = await context.newPage();
+    const b = catalog.projects.find(entry => entry.project_key !== a.project_key)!;
+    const mirror = await context.newPage(), other = await context.newPage(), hub = await context.newPage();
     const observations = [page, mirror, other, hub].map(capture);
-    let agent = "";
-    let bShell = "";
-    let detached = false;
-    let reopened: Page | undefined;
+    let agent = "", bShell = "", reopened: Page | undefined;
     try {
-      await gotoLiveGwt(page, base!, { projectKey: a!.project_key, enableTestBridge: true });
-      await gotoLiveGwt(mirror, base!, { projectKey: a!.project_key, enableTestBridge: true });
-      await gotoLiveGwt(other, base!, { projectKey: b.project_key, enableTestBridge: true });
+      for (const [current, key] of [[page, a.project_key], [mirror, a.project_key], [other, b.project_key]] as const) {
+        await current.bringToFront();
+        await gotoLiveGwt(current, base!, { projectKey: key, enableTestBridge: true });
+        await expect.poll(() => current.evaluate(() => {
+          const observations = (window as any).__gwtPlaywrightMessages?.filter((entry: any) => entry.payload.kind === 'project_execution_status') || [];
+          return observations.length >= 2 && observations.at(-1).payload.status.view_state === 'open'
+            && observations.at(-1).payload.status.view_set_revision > observations[0].payload.status.view_set_revision;
+        })).toBe(true);
+      }
       await gotoLiveGwt(hub, base!, { hub: true });
-      for (const current of [page, mirror, other, hub]) {
-        await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
-      }
-      agent = await launchAgent(page, agentId!);
-      await terminalReady(page, agent);
-      await command(page, agent, "GWT_DETACH_4539=$$; printf 'GWT_%s\\n' 'AGENT_READY'", "GWT_AGENT_READY");
-      await expect(mirror.locator(`.workspace-window[data-id="${agent}"]`)).toBeVisible();
-      bShell = await shell(other);
-      await terminalReady(other, bShell);
-      await command(other, bShell, "GWT_B_4539=$$; printf 'GWT_%s\\n' 'B_READY'", "GWT_B_READY");
-      await expect(page.locator('.project-tab-close')).toHaveCount(0);
-      await expect(page.locator('#close-project-button')).toBeVisible();
+      for (const current of [page, mirror, other, hub]) await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.bringToFront();
+      agent = await launchAgent(page, agentId!); await terminalReady(page, agent);
+      await command(page, agent, "GWT_PW1=$$; printf 'GWT_%s\\n' 'AGENT_READY'", "GWT_AGENT_READY");
+      await other.bringToFront();
+      bShell = await shell(other); await terminalReady(other, bShell);
+      await command(other, bShell, "GWT_PW1_B=$$; printf 'GWT_%s\\n' 'B_READY'", "GWT_B_READY");
 
-      // The removed app shortcut cannot send a destructive action.
-      const before = observations[0].sent.length;
-      const modifier = process.platform === "darwin" ? "Meta" : "Control";
-      for (const key of ["ArrowUp", "ArrowDown", "p"]) {
-        await page.keyboard.press(`${modifier}+Shift+${key}`);
-      }
-      expect(observations[0].sent.slice(before).filter((event) => /close.*project|select_project_tab/.test(event.kind))).toEqual([]);
+      // A normal close with another actual view detaches only this client.
+      await page.bringToFront();
+      await page.locator('#close-project-button').click();
+      await expect(page.locator('[data-hub]')).toBeVisible();
       await expect(page.locator('#close-project-modal')).toBeHidden();
-      let dialogs = 0;
-      page.on("dialog", async (dialog) => { dialogs += 1; await dialog.dismiss(); });
-      await page.close({ runBeforeUnload: true });
-      detached = true;
-      expect(dialogs).toBe(0);
-      await expect(mirror.locator(`.workspace-window[data-id="${agent}"]`)).toBeVisible();
-      await command(mirror, agent, "test \"$GWT_DETACH_4539\" = \"$$\" && printf 'GWT_%s\\n' 'SAME_AGENT'", "GWT_SAME_AGENT");
-      reopened = await context.newPage();
-      observations.push(capture(reopened));
-      await gotoLiveGwt(reopened, base!, { projectKey: a!.project_key, enableTestBridge: true });
-      await expect(reopened.locator("html")).toHaveAttribute("data-theme", theme);
-      await expect(reopened.locator(`.workspace-window[data-id="${agent}"]`)).toBeVisible();
-      await command(reopened, agent, "test \"$GWT_DETACH_4539\" = \"$$\" && printf 'GWT_%s\\n' 'REOPEN_SAME_AGENT'", "GWT_REOPEN_SAME_AGENT");
+      await command(mirror, agent, "test \"$GWT_PW1\" = \"$$\" && printf 'GWT_%s\\n' 'SAME_AGENT'", "GWT_SAME_AGENT");
+      let dialogs = 0; mirror.on('dialog', async dialog => { dialogs += 1; await dialog.dismiss(); });
+      await mirror.close({ runBeforeUnload: true }); expect(dialogs).toBe(0);
+      await expect(hub.locator(`[data-project-execution="${a.project_key}"]`).first()).toContainText(/Selection pending|Unknown/);
 
-      const close = reopened.locator('#close-project-button');
-      await close.click();
-      const dialog = reopened.getByRole('dialog', { name: 'Close Project?' });
-      await expect(dialog).toBeVisible();
-      await expect(dialog).toHaveAttribute('aria-modal', 'true');
-      await expect(dialog.locator('li')).toHaveCount(1);
-      await expect(dialog.locator('li')).toContainText('Close detach fixture');
-      const cancel = dialog.locator('[data-role="close-project-cancel"]');
-      const confirm = dialog.locator('[data-role="close-project-confirm"]');
-      await expect(cancel).toBeFocused();
-      await reopened.keyboard.press('Shift+Tab');
-      await expect(confirm).toBeFocused();
-      await reopened.keyboard.press('Tab');
-      await expect(cancel).toBeFocused();
-      await reopened.keyboard.press('Escape');
-      await expect(dialog).toBeHidden();
-      await expect(close).toBeFocused();
-      await command(reopened, agent, "printf 'GWT_%s\\n' 'AFTER_CANCEL'", "GWT_AFTER_CANCEL");
-      await close.click();
-      await expect(dialog).toBeVisible();
-      await reopened.screenshot({ path: testInfo.outputPath('running-agent-warning.png') });
-      await confirm.click();
-      for (const current of [reopened, mirror]) {
-        await expect(current.locator('[data-hub]')).toBeVisible();
-        await expect(current).toHaveURL(new URL('/', base!).toString());
-      }
-      await expect(hub.locator(`[data-hub-list="open"] a[href="/p/${a!.project_key}"]`)).toHaveCount(0);
-      await command(other, bShell, "test \"$GWT_B_4539\" = \"$$\" && printf 'GWT_%s\\n' 'B_UNCHANGED'", "GWT_B_UNCHANGED");
-      expect(other.url()).toBe(liveGwtProjectUrl(base!, b.project_key));
-      await reopened.close();
-
-      // A has no running Agent after reopening: no confirmation dialog.
-      await gotoLiveGwt(mirror, base!, { projectKey: a!.project_key, enableTestBridge: true });
-      await mirror.waitForFunction((key) => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
-        entry.payload.kind === "workspace_state"
-        && entry.payload.workspace.tabs.some((tab: any) => tab.project_key === key)), a!.project_key);
-      await mirror.locator('#close-project-button').click();
-      await expect(mirror.locator('[data-hub]')).toBeVisible({ timeout: 15_000 });
-      expect(observations[1].sent.filter((event) => event.kind === 'confirm_close_project').length).toBeGreaterThan(0);
-      await expect(mirror.locator('#close-project-modal')).toBeHidden();
-    } catch (error) {
-      const diagnosticPage = page.isClosed() ? mirror : page;
-      if (!diagnosticPage.isClosed()) {
-        await testInfo.attach("live-backend-messages", {
-          body: JSON.stringify(await diagnosticPage.evaluate(() => (window as any).__gwtPlaywrightMessages)),
-          contentType: "application/json",
+      reopened = await context.newPage(); observations.push(capture(reopened));
+      let dropAck = false, dropped = 0;
+      const confirmations: any[] = [];
+      await reopened.routeWebSocket(url => url.pathname === '/ws' && url.searchParams.get('repo_hash') === a.project_key, ws => {
+        const server = ws.connectToServer();
+        ws.onMessage(message => {
+          try { const event = JSON.parse(String(message)); if (event.kind === 'confirm_close_project') confirmations.push(event); } catch { /* binary forwarding */ }
+          server.send(message);
         });
-      }
+        server.onMessage(message => {
+          let event: any; try { event = JSON.parse(String(message)); } catch { /* binary forwarding */ }
+          if (dropAck && ['project_view_closed', 'project_closed', 'project_execution_status'].includes(event?.kind)) { dropped += 1; return; }
+          ws.send(message);
+        });
+      });
+      await reopened.bringToFront();
+      await gotoLiveGwt(reopened, base!, { projectKey: a.project_key, enableTestBridge: true });
+      await actualViewReady(reopened);
+      await command(reopened, agent, "test \"$GWT_PW1\" = \"$$\" && printf 'GWT_%s\\n' 'REOPEN_SAME_AGENT'", "GWT_REOPEN_SAME_AGENT");
+      const dialog = reopened.getByRole('dialog', { name: 'Close Project?' });
+      const close = reopened.locator('#close-project-button');
+      await close.click(); await expect(dialog).toBeVisible();
+      const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
+      const stop = dialog.getByRole('button', { name: 'Stop', exact: true });
+      await expect(cancel).toBeFocused(); await reopened.keyboard.press('Shift+Tab'); await expect(stop).toBeFocused();
+      await reopened.keyboard.press('Tab'); await expect(cancel).toBeFocused();
+      await reopened.keyboard.press('Escape'); await expect(dialog).toBeHidden(); await expect(close).toBeFocused();
+      await command(reopened, agent, "printf 'GWT_%s\\n' 'AFTER_CANCEL'", "GWT_AFTER_CANCEL");
+      await reopened.setViewportSize({ width: 400, height: 820 });
+      await close.click(); await expect(dialog).toBeVisible();
+      expect(await dialog.evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(400);
+      await reopened.screenshot({ path: testInfo.outputPath(`project-choice-400-${theme}.png`) });
+      dropAck = true;
+      await dialog.getByRole('button', { name: 'Continue', exact: true }).click();
+      await expect.poll(() => dropped).toBeGreaterThan(0);
+      // The server committed the exact intent. Reload drops the ACK and
+      // restores only its read-only status reconciliation, never a new choice.
+      dropAck = false; await reopened.reload();
+      await expect(reopened.locator('[data-hub]')).toBeVisible({ timeout: 30_000 });
+      expect(confirmations).toHaveLength(1); expect(confirmations[0].choice).toBe('continue');
+      await expect(hub.locator(`[data-project-execution="${a.project_key}"]`).first()).toContainText(/Saved choice: Continue/);
+
+      await reopened.bringToFront();
+      await gotoLiveGwt(reopened, base!, { projectKey: a.project_key, enableTestBridge: true });
+      await actualViewReady(reopened);
+      await command(reopened, agent, "test \"$GWT_PW1\" = \"$$\" && printf 'GWT_%s\\n' 'AFTER_CONTINUE'", "GWT_AFTER_CONTINUE");
+      await reopened.setViewportSize({ width: 1440, height: 900 });
+      await reopened.locator('.op-rail__surface[data-surface="agents"]').click();
+      await expect(reopened.locator('.agents-surface [data-project-execution-status]')).toContainText('Saved choice: Continue');
+      await reopened.locator('.agents-surface').getByRole('button', { name: 'Project Manager settings', exact: true }).click();
+      await expect(reopened.locator('[data-settings-panel="project-manager"] [data-project-execution-status]').first()).toContainText('Saved choice: Continue');
+      await reopened.screenshot({ path: testInfo.outputPath(`project-execution-settings-${theme}.png`) });
+
+      // Hub close is explicitly project-wide, even with an actual view left.
+      await hub.bringToFront();
+      await hub.locator(`[data-close-project="${a.project_key}"]`).click();
+      const hubDialog = hub.getByRole('dialog', { name: 'Close Project?' });
+      await expect(hubDialog).toBeVisible(); await hubDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await command(reopened, agent, "printf 'GWT_%s\\n' 'AFTER_HUB_CANCEL'", "GWT_AFTER_HUB_CANCEL");
+      await hub.bringToFront();
+      await hub.locator(`[data-close-project="${a.project_key}"]`).click();
+      await hubDialog.getByRole('button', { name: 'Stop', exact: true }).click();
+      await expect(reopened.locator('[data-hub]')).toBeVisible({ timeout: 30_000 });
+      await expect(hub.locator(`[data-project-execution="${a.project_key}"]`).first()).toContainText(/Stopped.*Saved choice: Stop/);
+      const reconcileDialog = hub.getByRole('dialog', { name: 'Check Project Choice' });
+      if (await reconcileDialog.isVisible()) await reconcileDialog.getByRole('button', { name: 'Check status', exact: true }).click();
+      await expect(reconcileDialog).toBeHidden();
+      await command(other, bShell, "test \"$GWT_PW1_B\" = \"$$\" && printf 'GWT_%s\\n' 'B_UNCHANGED'", "GWT_B_UNCHANGED");
+      expect(other.url()).toBe(liveGwtProjectUrl(base!, b.project_key));
+      await hub.screenshot({ path: testInfo.outputPath(`project-stopped-${theme}.png`) });
+    } catch (error) {
+      const diagnosticPage = reopened && !reopened.isClosed() ? reopened : !page.isClosed() ? page : other;
+      console.log('Project close lifecycle observations', JSON.stringify(await diagnosticPage.evaluate(() => {
+        const messages = (window as any).__gwtPlaywrightMessages ?? [];
+        return {
+          workspace: messages.findLast((entry: any) => entry.payload.kind === 'workspace_state')?.payload.workspace,
+          terminal: messages.filter((entry: any) => entry.payload.kind === 'terminal_status').slice(-8),
+        };
+      })));
+      await diagnosticPage.screenshot({ path: testInfo.outputPath('failure.png') }).catch(() => {});
+      await testInfo.attach('live-backend-messages', { body: JSON.stringify(await diagnosticPage.evaluate(() => (window as any).__gwtPlaywrightMessages) ?? []), contentType: 'application/json' });
       throw error;
     } finally {
       if (bShell) await sendLiveGwtEvent(other, { kind: 'close_window', id: bShell }).catch(() => {});
-      // Restore the catalog for the next theme/spec without relaunching agents.
-      await gotoLiveGwt(mirror, base!, { projectKey: a!.project_key, enableTestBridge: true }).catch(() => {});
-      if (agent) await sendLiveGwtEvent(mirror, { kind: 'close_window', id: agent }).catch(() => {});
+      // Restore only this test's custom Agent and views for the next theme.
+      if (agent) {
+        const cleanup = reopened && !reopened.isClosed() ? reopened : page;
+        await gotoLiveGwt(cleanup, base!, { projectKey: a.project_key, enableTestBridge: true }).catch(() => {});
+        await sendLiveGwtEvent(cleanup, { kind: 'close_window', id: agent }).catch(() => {});
+      }
       await Promise.all([mirror.close(), other.close(), hub.close(), reopened?.close()]);
-      if (!detached) await page.close();
     }
-    expect(observations.flatMap((entry) => entry.errors)).toEqual([]);
+    expect(observations.flatMap(entry => entry.errors)).toEqual([]);
   });
 });

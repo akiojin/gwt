@@ -57,6 +57,7 @@ impl Manifest {
 }
 
 fn manifest_path(worktree_dir: &Path, scope: &str) -> PathBuf {
+    let scope = if scope == "specs" { "issues" } else { scope };
     // The manifest sits in the worktree-level directory. Accept either the
     // worktree-level dir or a scope-leaf dir (e.g. `.../files`); both are
     // normalized to the worktree level so writers and readers always agree.
@@ -152,6 +153,11 @@ mod tests {
         write_manifest(&db, "files", entries.clone()).unwrap();
         let loaded = read_manifest(&db, "files").unwrap();
         assert_eq!(loaded, entries);
+        let issues = tmp.path().join("issues");
+        assert_eq!(
+            manifest_path(&issues, "specs"),
+            manifest_path(&issues, "issues")
+        );
     }
 
     #[test]

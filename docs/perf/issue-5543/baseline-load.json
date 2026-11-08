@@ -1,0 +1,27 @@
+{
+  "limitations": [
+    "Controlled debug build under shared-host load; not a measurement of the installed GUI or the original one-hour fleet.",
+    "The temporary ignored profiling test was removed after measurement.",
+    "A preceding run used Cargo automatic test HOME isolation and loaded zero rows; that invalid run is excluded.",
+    "Cache and assembly timings are sequential wall times, not CPU attribution."
+  ],
+  "first_response_budget_ms": 60000,
+  "home_isolation": "copied corpus under the OS user temporary directory; no production state writes",
+  "work_file_bytes": 19216340,
+  "issue": 5543,
+  "measurement": "read-only direct cache load followed by full related-work augmentation",
+  "result": "critical path exceeds the unchanged frontend deadline",
+  "timings_ms": {
+    "first_response_critical_path": 121725.036,
+    "revision": 320.844,
+    "related_assembly": 93392.499,
+    "cache_read": 28011.472
+  },
+  "issue_rows": 1613,
+  "work_items": 1250,
+  "session_files_approx": 5920,
+  "source_sha": "490a2b310ca3e4440144faa2bc59b58a60af3ab2",
+  "project_root": "E:\\gwt",
+  "binary_sha256": "4e417851c797a51cd3e6f2d9c0371f46cabcb17597102212bcc83dca1223addf",
+  "binary_role": "temporary ignored profiler test executable; production load and augmentation source unchanged from source_sha"
+}

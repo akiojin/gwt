@@ -378,7 +378,7 @@ pub(crate) fn with_write_lease_for_resolved_dir<T>(
     with_write_lease_for_resolved_dir_wait(trusted_dir, WRITE_LEASE_WAIT, operation)
 }
 
-fn with_write_lease_for_resolved_dir_wait<T>(
+pub(crate) fn with_write_lease_for_resolved_dir_wait<T>(
     dir: &Path,
     wait: Duration,
     operation: impl FnOnce() -> io::Result<T>,
@@ -459,6 +459,9 @@ pub fn under_trusted_management(worktree: &Path) -> bool {
 pub(crate) fn init_git_repo_with_origin(dir: &Path) {
     for args in [
         vec!["init", "-q"],
+        // Fixture commits must not launch detached cleanup during worktree setup.
+        vec!["config", "maintenance.auto", "false"],
+        vec!["config", "gc.auto", "0"],
         vec!["config", "user.email", "t@example.com"],
         vec!["config", "user.name", "t"],
         vec![

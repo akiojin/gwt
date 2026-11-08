@@ -1,0 +1,925 @@
+{
+  "captured_utc": "2026-10-16T04:28:30.146152+00:00",
+  "checkout": "E:\\gwt\\work\\issue-5598",
+  "home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home",
+  "binary": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final\\gwtd.exe",
+    "bytes": 65567232,
+    "sha256": "3a28d7b25cc5c2dc9bdc257bbc0845a957bbd8846546a94738aa9e94f56cb6e0"
+  },
+  "runtime_runner": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\runtime\\runners\\chroma_index_runner-efd8f94c0c9113ce.py",
+    "bytes": 395021,
+    "sha256": "efd8f94c0c9113ceb8d244a6c11586e643ece8d2a0cd1acfa33363aa359d4914"
+  },
+  "boundary": "Owned direct subprocess creation through exit; no model or index operations",
+  "cpu_boundary": "Windows GetProcessTimes kernel+user for the direct child only; descendant CPU excluded",
+  "percentile": "nearest rank over all requests",
+  "count": 12,
+  "driver_priority_value": 16384,
+  "host_before": {
+    "captured_utc": "2026-10-16T04:28:30.646432+00:00",
+    "logical_cpus": 32,
+    "total_memory_kib": 133952588,
+    "free_memory_kib": 22659044,
+    "cpu_load_percent": [
+      69
+    ]
+  },
+  "commands": {
+    "version": {
+      "argv": [
+        "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final\\gwtd.exe",
+        "--version"
+      ],
+      "stdin": null,
+      "sequential": {
+        "started_utc": "2026-10-16T04:28:39.354856+00:00",
+        "finished_utc": "2026-10-16T04:28:39.474364+00:00",
+        "wall_ms": 119.48049999955401,
+        "direct_process_cpu": {
+          "available": true,
+          "kernel_ms": 31.25,
+          "user_ms": 31.25,
+          "total_ms": 62.5
+        },
+        "pid": 43796,
+        "initial_priority_value": 16384,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "expected_exit": true,
+        "timed_out": false,
+        "stdout": "gwtd 9.125.0\n",
+        "stderr": ""
+      },
+      "burst": {
+        "summary": {
+          "count": 12,
+          "expected_exits": 12,
+          "mean_wall_ms": 182.72661666651402,
+          "min_wall_ms": 152.156100000866,
+          "p95_wall_ms": 208.39859999978216,
+          "max_wall_ms": 208.39859999978216,
+          "mean_direct_process_cpu_ms": 28.645833333333332,
+          "total_direct_process_cpu_ms": 343.75
+        },
+        "samples": [
+          {
+            "request": 0,
+            "started_utc": "2026-10-16T04:28:39.491831+00:00",
+            "finished_utc": "2026-10-16T04:28:39.700248+00:00",
+            "wall_ms": 208.39859999978216,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 46.875,
+              "total_ms": 62.5
+            },
+            "pid": 46440,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 1,
+            "started_utc": "2026-10-16T04:28:39.491887+00:00",
+            "finished_utc": "2026-10-16T04:28:39.694096+00:00",
+            "wall_ms": 202.19379999980447,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 44192,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 2,
+            "started_utc": "2026-10-16T04:28:39.492016+00:00",
+            "finished_utc": "2026-10-16T04:28:39.689057+00:00",
+            "wall_ms": 197.02929999948537,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 31.25,
+              "total_ms": 31.25
+            },
+            "pid": 41568,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 3,
+            "started_utc": "2026-10-16T04:28:39.492199+00:00",
+            "finished_utc": "2026-10-16T04:28:39.700525+00:00",
+            "wall_ms": 208.3169999987149,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 35184,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 4,
+            "started_utc": "2026-10-16T04:28:39.492062+00:00",
+            "finished_utc": "2026-10-16T04:28:39.683611+00:00",
+            "wall_ms": 191.53279999954975,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 45580,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 5,
+            "started_utc": "2026-10-16T04:28:39.492100+00:00",
+            "finished_utc": "2026-10-16T04:28:39.687840+00:00",
+            "wall_ms": 195.72929999958433,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 30032,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 6,
+            "started_utc": "2026-10-16T04:28:39.492135+00:00",
+            "finished_utc": "2026-10-16T04:28:39.673297+00:00",
+            "wall_ms": 181.14930000047025,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 29384,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 7,
+            "started_utc": "2026-10-16T04:28:39.491930+00:00",
+            "finished_utc": "2026-10-16T04:28:39.655450+00:00",
+            "wall_ms": 163.508699999511,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 31.25,
+              "total_ms": 31.25
+            },
+            "pid": 25660,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 8,
+            "started_utc": "2026-10-16T04:28:39.492247+00:00",
+            "finished_utc": "2026-10-16T04:28:39.655133+00:00",
+            "wall_ms": 162.8560999997717,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 15.625,
+              "total_ms": 15.625
+            },
+            "pid": 53852,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 9,
+            "started_utc": "2026-10-16T04:28:39.492391+00:00",
+            "finished_utc": "2026-10-16T04:28:39.656729+00:00",
+            "wall_ms": 164.32830000121612,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 30784,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 10,
+            "started_utc": "2026-10-16T04:28:39.492498+00:00",
+            "finished_utc": "2026-10-16T04:28:39.658028+00:00",
+            "wall_ms": 165.5200999994122,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 30188,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          },
+          {
+            "request": 11,
+            "started_utc": "2026-10-16T04:28:39.491708+00:00",
+            "finished_utc": "2026-10-16T04:28:39.643894+00:00",
+            "wall_ms": 152.156100000866,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 15.625,
+              "total_ms": 15.625
+            },
+            "pid": 53168,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "gwtd 9.125.0\n",
+            "stderr": ""
+          }
+        ]
+      }
+    },
+    "unknown_operation": {
+      "argv": [
+        "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final\\gwtd.exe"
+      ],
+      "stdin": "{\"schema_version\": 1, \"operation\": \"__issue5598_invalid_probe__\", \"params\": {}}\n",
+      "sequential": {
+        "started_utc": "2026-10-16T04:28:39.715545+00:00",
+        "finished_utc": "2026-10-16T04:28:39.862858+00:00",
+        "wall_ms": 147.29049999914423,
+        "direct_process_cpu": {
+          "available": true,
+          "kernel_ms": 46.875,
+          "user_ms": 0.0,
+          "total_ms": 46.875
+        },
+        "pid": 39016,
+        "initial_priority_value": 16384,
+        "exit_code": 2,
+        "expected_exit_code": 2,
+        "expected_exit": true,
+        "timed_out": false,
+        "stdout": "",
+        "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+      },
+      "burst": {
+        "summary": {
+          "count": 12,
+          "expected_exits": 12,
+          "mean_wall_ms": 753.9444499998353,
+          "min_wall_ms": 320.5101999992621,
+          "p95_wall_ms": 898.0733000007604,
+          "max_wall_ms": 898.0733000007604,
+          "mean_direct_process_cpu_ms": 33.854166666666664,
+          "total_direct_process_cpu_ms": 406.25
+        },
+        "samples": [
+          {
+            "request": 0,
+            "started_utc": "2026-10-16T04:28:39.914325+00:00",
+            "finished_utc": "2026-10-16T04:28:40.812410+00:00",
+            "wall_ms": 898.0733000007604,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 46.875,
+              "total_ms": 62.5
+            },
+            "pid": 26116,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 1,
+            "started_utc": "2026-10-16T04:28:39.914419+00:00",
+            "finished_utc": "2026-10-16T04:28:40.680123+00:00",
+            "wall_ms": 765.6862000003457,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 12640,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 2,
+            "started_utc": "2026-10-16T04:28:39.914892+00:00",
+            "finished_utc": "2026-10-16T04:28:40.801638+00:00",
+            "wall_ms": 886.7315999996208,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 31.25,
+              "user_ms": 0.0,
+              "total_ms": 31.25
+            },
+            "pid": 22752,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 3,
+            "started_utc": "2026-10-16T04:28:39.915656+00:00",
+            "finished_utc": "2026-10-16T04:28:40.681187+00:00",
+            "wall_ms": 765.5084999987594,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 53824,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 4,
+            "started_utc": "2026-10-16T04:28:39.916048+00:00",
+            "finished_utc": "2026-10-16T04:28:40.714116+00:00",
+            "wall_ms": 798.0602000006911,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 31.25,
+              "user_ms": 31.25,
+              "total_ms": 62.5
+            },
+            "pid": 1940,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 5,
+            "started_utc": "2026-10-16T04:28:39.917863+00:00",
+            "finished_utc": "2026-10-16T04:28:40.689483+00:00",
+            "wall_ms": 771.5982999998232,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 30288,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 6,
+            "started_utc": "2026-10-16T04:28:39.915970+00:00",
+            "finished_utc": "2026-10-16T04:28:40.713962+00:00",
+            "wall_ms": 797.9773000006389,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 26648,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 7,
+            "started_utc": "2026-10-16T04:28:40.079363+00:00",
+            "finished_utc": "2026-10-16T04:28:40.718268+00:00",
+            "wall_ms": 638.885800000935,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 0.0,
+              "total_ms": 0.0
+            },
+            "pid": 52200,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 8,
+            "started_utc": "2026-10-16T04:28:39.922899+00:00",
+            "finished_utc": "2026-10-16T04:28:40.243449+00:00",
+            "wall_ms": 320.5101999992621,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 31.25,
+              "user_ms": 15.625,
+              "total_ms": 46.875
+            },
+            "pid": 45872,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 9,
+            "started_utc": "2026-10-16T04:28:39.920844+00:00",
+            "finished_utc": "2026-10-16T04:28:40.760622+00:00",
+            "wall_ms": 839.756599998509,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 46.875,
+              "total_ms": 62.5
+            },
+            "pid": 40208,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 10,
+            "started_utc": "2026-10-16T04:28:39.927108+00:00",
+            "finished_utc": "2026-10-16T04:28:40.769363+00:00",
+            "wall_ms": 688.9792999991187,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 52204,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          },
+          {
+            "request": 11,
+            "started_utc": "2026-10-16T04:28:39.914257+00:00",
+            "finished_utc": "2026-10-16T04:28:40.789910+00:00",
+            "wall_ms": 875.5660999995598,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 31.25,
+              "user_ms": 0.0,
+              "total_ms": 31.25
+            },
+            "pid": 51620,
+            "initial_priority_value": 16384,
+            "exit_code": 2,
+            "expected_exit_code": 2,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "",
+            "stderr": "gwtd: unknown subcommand: __issue5598_invalid_probe__\n"
+          }
+        ]
+      }
+    },
+    "git_remote": {
+      "argv": [
+        "git",
+        "remote",
+        "-v"
+      ],
+      "stdin": null,
+      "sequential": {
+        "started_utc": "2026-10-16T04:28:40.829264+00:00",
+        "finished_utc": "2026-10-16T04:28:40.925012+00:00",
+        "wall_ms": 95.72710000065854,
+        "direct_process_cpu": {
+          "available": true,
+          "kernel_ms": 31.25,
+          "user_ms": 0.0,
+          "total_ms": 31.25
+        },
+        "pid": 27576,
+        "initial_priority_value": 16384,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "expected_exit": true,
+        "timed_out": false,
+        "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+        "stderr": ""
+      },
+      "burst": {
+        "summary": {
+          "count": 12,
+          "expected_exits": 12,
+          "mean_wall_ms": 347.2987333331427,
+          "min_wall_ms": 308.85419999867736,
+          "p95_wall_ms": 371.414499999446,
+          "max_wall_ms": 371.414499999446,
+          "mean_direct_process_cpu_ms": 14.322916666666666,
+          "total_direct_process_cpu_ms": 171.875
+        },
+        "samples": [
+          {
+            "request": 0,
+            "started_utc": "2026-10-16T04:28:40.970257+00:00",
+            "finished_utc": "2026-10-16T04:28:41.279134+00:00",
+            "wall_ms": 308.85419999867736,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 48276,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 1,
+            "started_utc": "2026-10-16T04:28:40.959478+00:00",
+            "finished_utc": "2026-10-16T04:28:41.330757+00:00",
+            "wall_ms": 371.2579999992158,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 31.25,
+              "user_ms": 0.0,
+              "total_ms": 31.25
+            },
+            "pid": 46136,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 2,
+            "started_utc": "2026-10-16T04:28:40.958717+00:00",
+            "finished_utc": "2026-10-16T04:28:41.315087+00:00",
+            "wall_ms": 356.31439999997383,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 0.0,
+              "total_ms": 0.0
+            },
+            "pid": 56804,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 3,
+            "started_utc": "2026-10-16T04:28:40.960136+00:00",
+            "finished_utc": "2026-10-16T04:28:41.301217+00:00",
+            "wall_ms": 341.0684000009496,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 31.25,
+              "user_ms": 0.0,
+              "total_ms": 31.25
+            },
+            "pid": 46788,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 4,
+            "started_utc": "2026-10-16T04:28:40.958940+00:00",
+            "finished_utc": "2026-10-16T04:28:41.330393+00:00",
+            "wall_ms": 371.414499999446,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 15.625,
+              "total_ms": 15.625
+            },
+            "pid": 43832,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 5,
+            "started_utc": "2026-10-16T04:28:40.959138+00:00",
+            "finished_utc": "2026-10-16T04:28:41.301449+00:00",
+            "wall_ms": 342.2430999999051,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 0.0,
+              "total_ms": 0.0
+            },
+            "pid": 42252,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 6,
+            "started_utc": "2026-10-16T04:28:40.959385+00:00",
+            "finished_utc": "2026-10-16T04:28:41.282251+00:00",
+            "wall_ms": 322.85769999907643,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 56704,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 7,
+            "started_utc": "2026-10-16T04:28:40.959341+00:00",
+            "finished_utc": "2026-10-16T04:28:41.281566+00:00",
+            "wall_ms": 322.1393000003445,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 15.625,
+              "total_ms": 31.25
+            },
+            "pid": 38420,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 8,
+            "started_utc": "2026-10-16T04:28:40.963070+00:00",
+            "finished_utc": "2026-10-16T04:28:41.330270+00:00",
+            "wall_ms": 367.1825000001263,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 0.0,
+              "total_ms": 0.0
+            },
+            "pid": 52488,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 9,
+            "started_utc": "2026-10-16T04:28:40.959617+00:00",
+            "finished_utc": "2026-10-16T04:28:41.315340+00:00",
+            "wall_ms": 355.71189999973285,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 0.0,
+              "total_ms": 0.0
+            },
+            "pid": 53008,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 10,
+            "started_utc": "2026-10-16T04:28:40.959711+00:00",
+            "finished_utc": "2026-10-16T04:28:41.298399+00:00",
+            "wall_ms": 338.67780000036873,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 15.625,
+              "user_ms": 0.0,
+              "total_ms": 15.625
+            },
+            "pid": 52876,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          },
+          {
+            "request": 11,
+            "started_utc": "2026-10-16T04:28:40.958539+00:00",
+            "finished_utc": "2026-10-16T04:28:41.328448+00:00",
+            "wall_ms": 369.8629999998957,
+            "direct_process_cpu": {
+              "available": true,
+              "kernel_ms": 0.0,
+              "user_ms": 15.625,
+              "total_ms": 15.625
+            },
+            "pid": 56624,
+            "initial_priority_value": 16384,
+            "exit_code": 0,
+            "expected_exit_code": 0,
+            "expected_exit": true,
+            "timed_out": false,
+            "stdout": "origin\thttps://github.com/akiojin/gwt (fetch)\norigin\thttps://github.com/akiojin/gwt (push)\n",
+            "stderr": ""
+          }
+        ]
+      }
+    }
+  },
+  "fixture_before": [
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\issues\\meta.json",
+      "bytes": 364,
+      "sha256": "2fa90d2361630c89ddd6a192f4f2c075c4e83d43f987268b9488861a60383aea"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\issues.gen\\active.json",
+      "bytes": 157,
+      "sha256": "6a8dc96e4bdeacd3611acc18f79b729d07fa15440a06b1cb96778ea91de15aa5"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\manifest-issues.json",
+      "bytes": 207660,
+      "sha256": "3443fa0eb9a699c0c4f3dba798dd9c9ba82065e984ea137d787991376e67cd53"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\cache\\issues\\99a8660247f5bc49\\source-revision",
+      "bytes": 36,
+      "sha256": "7764e8edda6b7c31011df8369644c47887f8978e3d860687f78c8f8aaaec74a3"
+    }
+  ],
+  "fixture_after": [
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\issues\\meta.json",
+      "bytes": 364,
+      "sha256": "2fa90d2361630c89ddd6a192f4f2c075c4e83d43f987268b9488861a60383aea"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\issues.gen\\active.json",
+      "bytes": 157,
+      "sha256": "6a8dc96e4bdeacd3611acc18f79b729d07fa15440a06b1cb96778ea91de15aa5"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\manifest-issues.json",
+      "bytes": 207660,
+      "sha256": "3443fa0eb9a699c0c4f3dba798dd9c9ba82065e984ea137d787991376e67cd53"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\cache\\issues\\99a8660247f5bc49\\source-revision",
+      "bytes": 36,
+      "sha256": "7764e8edda6b7c31011df8369644c47887f8978e3d860687f78c8f8aaaec74a3"
+    }
+  ],
+  "fixture_bytes_unchanged": true,
+  "host_after": {
+    "captured_utc": "2026-10-16T04:28:41.334259+00:00",
+    "logical_cpus": 32,
+    "total_memory_kib": 133952588,
+    "free_memory_kib": 23016140,
+    "cpu_load_percent": [
+      51
+    ]
+  }
+}

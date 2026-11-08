@@ -369,13 +369,24 @@ where
         descriptors.sort_by(|left, right| left.path.cmp(&right.path));
     }
 
+    let last_use = commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.as_str(), index))
+        .collect::<HashMap<_, _>>();
     let descriptor_matrix = commits
         .iter()
-        .map(|commit| {
-            descriptors_by_commit
-                .get(commit)
-                .cloned()
-                .unwrap_or_default()
+        .enumerate()
+        .map(|(index, commit)| {
+            // Only repeated input aliases need another owned descriptor row.
+            if last_use[commit.as_str()] == index {
+                descriptors_by_commit.remove(commit).unwrap_or_default()
+            } else {
+                descriptors_by_commit
+                    .get(commit)
+                    .cloned()
+                    .unwrap_or_default()
+            }
         })
         .collect::<Vec<_>>();
     let available_blob_oids = descriptor_matrix
@@ -406,15 +417,16 @@ where
     }
 
     descriptor_matrix
-        .iter()
+        .into_iter()
         .map(|descriptors| {
             descriptors
-                .iter()
+                .into_iter()
                 .map(|descriptor| {
+                    let content = blob_contents.get(&descriptor.oid).cloned();
                     Ok(WorkEventBlob {
-                        path: descriptor.path.clone(),
-                        oid: descriptor.oid.clone(),
-                        content: blob_contents.get(&descriptor.oid).cloned(),
+                        path: descriptor.path,
+                        oid: descriptor.oid,
+                        content,
                     })
                 })
                 .collect()
@@ -1382,7 +1394,8 @@ mod tests {
             .args(["commit", "-m", "shared event tree"])
             .current_dir(repo));
 
-        let commits = distinct_commit_oids_with_head_tree(repo, 25);
+        let mut commits = distinct_commit_oids_with_head_tree(repo, 25);
+        commits.push(commits[0].clone());
 
         let shared_tree_oids = [
             "HEAD^{tree}",
@@ -1401,12 +1414,16 @@ mod tests {
         });
         let spawn_count = std::sync::atomic::AtomicUsize::new(0);
         let query_counts = std::sync::Mutex::new(HashMap::<String, usize>::new());
+        let selected_path_allocation = std::cell::Cell::new(std::ptr::null());
         let blobs = work_event_blobs_batch_with_hooks(
             repo,
             &commits,
             ".gwt/work/events.jsonl",
             ".gwt/work/events",
-            |descriptors| HashSet::from([descriptors[0][0].oid.clone()]),
+            |descriptors| {
+                selected_path_allocation.set(descriptors[0][0].path.as_ptr());
+                HashSet::from([descriptors[0][0].oid.clone()])
+            },
             || {
                 spawn_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             },
@@ -1431,6 +1448,7 @@ mod tests {
         }
         assert_eq!(blobs.len(), commits.len());
         assert!(blobs.iter().all(|entries| entries.len() == 1));
+        assert_eq!(blobs[0][0].path.as_ptr(), selected_path_allocation.get());
         for entries in blobs.iter().skip(1) {
             assert_eq!(entries[0].oid, blobs[0][0].oid);
             assert!(

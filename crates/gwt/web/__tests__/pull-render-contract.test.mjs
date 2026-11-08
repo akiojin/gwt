@@ -5,9 +5,536 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parseHTML } from "linkedom";
 import { scanModule, assertBaseline, checkRepository } from "../../../../scripts/check-pull-render.mjs";
+import { createUiStateStore } from "../ui-state-store.js";
+import { applyBranchEntriesEvent } from "../branch-list-state.js";
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
+
+test("Workspace snapshots commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/workspace_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.workspace.app_version;',
+    'frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);']) {
+    const mutated = app.replace('case "workspace_state": {', `case "workspace_state": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Hub open results commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/hub-app.js';
+  const hub = readFileSync(new URL('../hub-app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding => finding.root === 'receive');
+  const clean = findings(hub);
+  assert.deepEqual(clean.filter(finding => /receive>(showNotice|showError)(>|$)/.test(finding.path)), []);
+  const existing = new Set(keys(clean));
+  for (const [kind, bypass] of [
+    ['project_opened', 'notice.hidden = false;'],
+    ['project_opened', 'showNotice(event);'],
+    ['project_open_error', 'error.textContent = event.message;'],
+    ['project_open_error', 'showError(event.message);'],
+  ]) {
+    const marker = `if (event.kind === "${kind}") {`;
+    const mutated = hub.replace(marker, `${marker} ${bypass}`);
+    assert.notEqual(mutated, hub);
+    assert.ok(findings(mutated).some(finding => !existing.has(finding.key)));
+  }
+});
+
+test("Hub catalog receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/hub-app.js';
+  const hub = readFileSync(new URL('../hub-app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding => finding.root === 'receive');
+  const clean = findings(hub);
+  assert.deepEqual(clean.filter(finding => finding.path.includes('>receiveCatalog')), []);
+  const existing = new Set(keys(clean));
+  for (const bypass of ['version.textContent = event.hub.app_version;', 'receiveCatalog(event.hub);']) {
+    const mutated = hub.replace('if (event.kind === "hub_state") {',
+      `if (event.kind === "hub_state") { ${bypass}`);
+    assert.notEqual(mutated, hub);
+    assert.ok(findings(mutated).some(finding => !existing.has(finding.key)));
+  }
+});
+
+test("Project hub catalog receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/hub_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.hub.app_version;',
+    'receiveHubState(event.hub);']) {
+    const mutated = app.replace('case "hub_state": {', `case "hub_state": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Recovery Center Board receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/recovery_center_board_entry');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.error;',
+    'recoveryCenterController?.handleBoardEntry(event);']) {
+    const mutated = app.replace('case "recovery_center_board_entry":',
+      `case "recovery_center_board_entry": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Recovery Center state receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/recovery_center_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.status;',
+    'recoveryCenterController?.handleState(event);']) {
+    const mutated = app.replace('case "recovery_center_state":',
+      `case "recovery_center_state": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Launch wizard state receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
+  const surface = readFileSync(new URL('../launch-wizard-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([[surfaceFile, surface]]),
+  }).filter(finding => finding.context === '/launch_wizard_state');
+  assert.equal(findings(app).length, 0);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'applyLaunchWizardStateEvent(event);']) {
+    const mutated = app.replace('case "launch_wizard_state":',
+      `case "launch_wizard_state": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Launch wizard open error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
+  const surface = readFileSync(new URL('../launch-wizard-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([[surfaceFile, surface]]),
+  }).filter(finding => finding.context === '/launch_wizard_open_error');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'applyLaunchWizardOpenErrorEvent(event);']) {
+    const mutated = app.replace('case "launch_wizard_open_error":',
+      `case "launch_wizard_open_error": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Work advisory receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.context === '/work_advisory_result');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'applyWorkAdvisoryResultEvent(event);']) {
+    const mutated = app.replace('case "work_advisory_result":', `case "work_advisory_result": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Project open error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.context === '/project_open_error');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'frontendUnits.projectWorkspaceShell.renderProjectPicker();']) {
+    const mutated = app.replace('case "project_open_error":', `case "project_open_error": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Remote branch receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/remote_start_work_branches');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'workspaceOverviewSurface.applyRemoteStartWorkBranches(event);']) {
+    const mutated = app.replace('case "remote_start_work_branches":',
+      `case "remote_start_work_branches": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Session resume receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && /^\/(workspace_resumable_agents|workspace_resume_agent_(error|started))(\||\/|$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const start = app.indexOf('function receive(event)');
+  assert.ok(start > 0);
+  for (const kind of ['workspace_resumable_agents', 'workspace_resume_agent_error', 'workspace_resume_agent_started']) {
+    const handler = kind === 'workspace_resumable_agents'
+      ? 'workspaceResumePicker.handleAgentsList(event);' : 'handleWorkspaceResumeAgentOutcome(event);';
+    for (const bypass of ['document.body.textContent = event.message;', handler]) {
+      const mutated = app.slice(0, start) + app.slice(start)
+        .replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
+test("Continue work outcome receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/continue_work_outcome');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;', 'handleContinueWorkOutcome(event);']) {
+    const mutated = app.replace('case "continue_work_outcome":', `case "continue_work_outcome": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Work Projection Prune receivers commit shared state and reject bypass alerts", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && /^\/workspace_projection_prune_(result|error)$/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['workspace_projection_prune_result', 'workspace_projection_prune_error']) {
+    for (const bypass of ['window.alert(event.message);', 'renderWorkspaceProjectionPruneFeedback(event);']) {
+      const mutated = app.replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
+test("Project not-found receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/project_not_found');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.kind;', 'showProjectRouteNotFound();']) {
+    const mutated = app.replace('case "project_not_found": {', `case "project_not_found": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Active Work projection receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const modelFile = 'crates/gwt/web/issue-other-surface.js';
+  const model = readFileSync(new URL('../issue-other-surface.js', import.meta.url), 'utf8');
+  const activityFile = 'crates/gwt/web/agent-activity-model.js';
+  const activity = readFileSync(new URL('../agent-activity-model.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file, { modules: new Map([[modelFile, model], [activityFile, activity]]) }).filter(finding =>
+    /^\/active_work_projection(?:_patch)?(?:\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['active_work_projection', 'active_work_projection_patch']) {
+    for (const bypass of ['document.body.textContent = event.kind;',
+      'workspaceOverviewSurface.renderWindows();']) {
+      const mutated = app.replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
+test("Runtime hook Board receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file)
+    .filter(finding => finding.context === '/runtime_hook_event');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.event.kind;',
+    'frontendUnits.boardSurface.handleRuntimeHookEvent(event);']) {
+    const mutated = app.replace('case "runtime_hook_event":', `case "runtime_hook_event": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Attachment progress receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const file = 'crates/gwt/web/terminal-attachments.js';
+  const attachments = readFileSync(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([[file, source]]),
+  }).filter(finding => finding.context === '/attachment_progress');
+  assert.deepEqual(findings(attachments), []);
+  for (const bypass of ['document.body.textContent = event.phase;',
+    'renderAttachmentProgress(event);']) {
+    const mutated = attachments.replace('function handleAttachmentProgress(event) {',
+      `function handleAttachmentProgress(event) { ${bypass}`);
+    assert.notEqual(mutated, attachments);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Terminal status receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => ['/terminal_status', '/window_state'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['terminal_status', 'window_state']) {
+    for (const bypass of ['document.body.textContent = event.status;',
+      'applyStatus(event.id, event.status, event.detail);']) {
+      const mutated = app.replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
+test("Launch progress receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const attachments = readFileSync(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/terminal-attachments.js', attachments]]),
+  }).filter(finding => finding.context === '/launch_progress');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'updateTerminalOverlayCopyState(document.body);']) {
+    const mutated = app.replace('case "launch_progress": {', `case "launch_progress": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Open Project result receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/project-clone-modal.js';
+  const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
+  const findings = code => scanModule(code, file)
+    .filter(finding => finding.root === 'applyOpenProjectPathResultReceiveEvent');
+  assert.match(source, /receive: applyOpenProjectPathResultReceiveEvent/);
+  assert.deepEqual(findings(source), []);
+  const bypass = source.replace('function applyOpenProjectPathResultReceiveEvent(event) {',
+    'function applyOpenProjectPathResultReceiveEvent(event) { status.textContent = event.message;');
+  assert.notEqual(bypass, source);
+  assert.ok(findings(bypass).length > 0);
+  const shell = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const delegated = controller => scanModule(shell, 'crates/gwt/web/project-shell-surface.js',
+    { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyProjectOpenReceiveEvent');
+  assert.deepEqual(delegated(source), []);
+  assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const fromApp = controller => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-shell-surface.js', shell], [file, controller]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/project_opened');
+  assert.deepEqual(fromApp(source), []);
+  assert.ok(fromApp(bypass).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Clone Project receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/project-clone-modal.js', readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyCloneProjectReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['clone_project_parent_selected', 'github_repository_search_results', 'github_repository_search_error', 'clone_project_progress', 'clone_project_done', 'clone_project_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderProjectCloneModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Migration receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/migration-modal.js', readFileSync(new URL('../migration-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyMigrationReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['migration_detected', 'migration_progress', 'migration_done', 'migration_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderMigrationModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update availability and auto-apply receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_state', '/update_auto_apply'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_state', 'update_auto_apply']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update staged-ready receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_ready', '/update_apply_pending_persisted'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_ready', 'update_apply_pending_persisted']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update apply error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_apply_error');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_apply_error":',
+    'case "update_apply_error": document.body.textContent = event.reason;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Update progress receiver commits model data and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_progress');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_progress":',
+    'case "update_progress": document.body.textContent = event.downloaded;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Project metadata receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const metadata = readFileSync(new URL('../project-page-metadata.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-page-metadata.js', metadata]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/project_agent_aggregate');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "project_agent_aggregate":',
+    'case "project_agent_aggregate": document.body.textContent = event.aggregate.revision;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Runtime health receiver updates shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.root === 'receive' && finding.context === '/runtime_health');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "runtime_health":',
+    'case "runtime_health": document.body.textContent = event.snapshot.state;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("System Settings receivers update the shared model and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', surface]]),
+  }).filter(finding => finding.root === 'receive' && /^\/system_settings(?:\|system_settings_updated|_updated|_error)?$/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "system_settings_updated":',
+    'case "system_settings_updated": document.body.textContent = event.language;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Board auth receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', surface]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/board_auth_status');
+  assert.deepEqual(findings(app), [], 'Board auth replies update the shared model without drawing');
+  const bypass = app.replace('case "board_auth_status":',
+    'case "board_auth_status": document.body.textContent = event.message;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Agent Backend receivers commit model data and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', settings]]),
+  }).filter(finding => finding.root === 'receive'
+    && /\/agent_backend_(list|saved|deleted|error)(\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "agent_backend_list":',
+    'case "agent_backend_list": document.body.textContent = event.agent;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Custom Agent receivers only commit model data and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', settings]]),
+  }).filter(finding => finding.root === 'receive'
+    && /\/(custom_agent_(list|saved|deleted|error)|backend_connection_result)(\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('applyCustomAgentsReceiveEvent(event);',
+    'applyCustomAgentsReceiveEvent(event); document.body.textContent = event.message;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Autostart receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', settings]]),
+  }).filter(finding => finding.root === 'receive' && /^\/autostart_(status|error)$/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('applyAutostartError(event);',
+    'applyAutostartError(event); document.body.textContent = event.message;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Monitor notification receiver only commits model data and rejects direct history rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const monitorFindings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.root === 'receive' && finding.context === '/issue_monitor_toast');
+  assert.deepEqual(monitorFindings(app), []);
+  const bypass = app.replace('issueMonitorNotificationModel.update(() => ({ ...event }));',
+    'notificationCenter.record(event);');
+  assert.notEqual(bypass, app);
+  assert.ok(monitorFindings(bypass).length > 0);
+});
 
 test("receiver extraction survives strings, templates, and nested breaks", () => {
   const findings = scanModule(`function receive(event) {
@@ -44,6 +571,39 @@ test("model updates, subscriptions, and uncalled local handlers are legal", () =
   assert.deepEqual(findings, []);
 });
 
+test("rewritten shared models fail closed per lexical binding", () => {
+  const inspect = (mutation, call = "model") => scanModule(`
+    import { createUiStateStore } from "./ui-state-store.js";
+    let model = createUiStateStore(null);
+    const stable = createUiStateStore(null);
+    ${mutation}
+    function receive(event) { ${call}.update(event); }`, "entry.js");
+  assert.deepEqual(inspect(""), []);
+  assert.deepEqual(inspect("function unrelated(model) { model.update = external; }"), []);
+  assert.deepEqual(inspect("model.update = external;", "stable"), []);
+  for (const mutation of ["model = external;", "model.update = external;"]) {
+    assert.ok(inspect(mutation).some(finding =>
+      finding.kind === "unresolved-call" && finding.path === "receive"), mutation);
+  }
+});
+
+test("lexical loop headers shadow shared models only within the loop", () => {
+  for (const header of ["for (const model of values)", "for (let model in values)",
+    "for (let model = value; model; model = null)"]) {
+    const findings = scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+      const model = createUiStateStore(null);
+      ${header} {
+        function receive(event) { model.update(event); }
+      }
+      function applyIssueMonitorStatus(event) { model.update(event); }`, "entry.js");
+    assert.deepEqual(findings.map(finding => [finding.root, finding.kind]),
+      [["receive", "unresolved-call"]], header);
+  }
+  assert.deepEqual(scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+    for (var model = createUiStateStore(null); false;) {}
+    function receive(event) { model.update(event); }`, "entry.js"), []);
+});
+
 test("factory return aliases resolve model handlers without trusting controller.update", () => {
   const module = `import { createUiStateStore } from "./ui-state-store.js";
     export function createSurface() {
@@ -52,18 +612,122 @@ test("factory return aliases resolve model handlers without trusting controller.
       function applySnapshot(value) { model.update(() => value); }
       return { applySnapshot };
     }`;
-  const source = `import { createSurface } from "./surface.js";
-    const { applySnapshot: applyInbox } = createSurface();
-    function receive(event) { applyInbox(event.value); }`;
   const modules = new Map([["surface.js", module]]);
-  assert.deepEqual(scanModule(source, "entry.js", { modules }), []);
-  modules.set("surface.js", module.replace("model.update(() => value)", "element.textContent = value"));
-  assert.ok(scanModule(source, "entry.js", { modules }).some(finding => finding.kind === "dom-write"));
+  const entry = body => `import { createSurface } from "./surface.js"; ${body}`;
+  for (const body of [
+    'const { applySnapshot: applyInbox } = createSurface(); function receive(event) { applyInbox(event.value); }',
+    'const controller = createSurface(); function receive(event) { controller.applySnapshot(event.value); }',
+  ]) {
+    modules.set("surface.js", module);
+    assert.deepEqual(scanModule(entry(body), "entry.js", { modules }), []);
+    modules.set("surface.js", module.replace("model.update(() => value)", "element.textContent = value"));
+    assert.ok(scanModule(entry(body), "entry.js", { modules }).some(finding => finding.kind === "dom-write"));
+  }
+  for (const body of [
+    'const controller = createSurface(); function receive(event) { controller.unknown(event); }',
+    'const controller = createSurface(); function receive(event) { controller[event.method](event); }',
+    'const controller = createSurface(); function receive(event, controller) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event, { controller }) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event, controller = external) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event) { const { controller } = external; controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event) { try { throw external; } catch (controller) { controller.applySnapshot(event); } }',
+    'const controller = createSurface(); function receive(event) { class controller {} controller.applySnapshot(event); }',
+    'const controller = createSurface(); const wrapper = function controller() { function receive(event) { controller.applySnapshot(event); } };',
+    'let controller = createSurface(); function receive(event) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); controller.applySnapshot = external; function receive(event) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); ({ replacement: controller.applySnapshot } = external); function receive(event) { controller.applySnapshot(event); }',
+  ]) assert.ok(scanModule(entry(body), "entry.js", { modules }).some(finding => finding.kind === "unresolved-call"));
+  modules.set("surface.js", module.replace('model.update(() => value)', 'external.applySnapshot(value)'));
+  assert.ok(scanModule(entry('const controller = createSurface(); function receive(event) { controller.applySnapshot(event); }'),
+    "entry.js", { modules }).some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule("function receive(event) { view.controller.update(event.snapshot); }", "entry.js")
     .some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule(`function createUiStateStore() { return external; }
     const model = createUiStateStore(); function receive(event) { model.update(event); }`, "entry.js")
     .some(finding => finding.kind === "unresolved-call"));
+});
+
+test("reassigned factory handler aliases fail closed per lexical binding", () => {
+  const inspect = (mutation, call = "apply") => scanModule(`import { createSurface } from "./surface.js";
+    let { applySnapshot: apply } = createSurface();
+    const { applySnapshot: stable } = createSurface();
+    ${mutation}
+    function receive(event) { ${call}(event); }`, "entry.js", {
+    modules: new Map([["surface.js", `export function createSurface() {
+      function applySnapshot(value) { return String(value); } return { applySnapshot };
+    }`]]),
+  });
+  assert.deepEqual(inspect(""), []);
+  assert.deepEqual(inspect("function unrelated() { let apply; apply = external; }"), []);
+  assert.deepEqual(inspect("apply = external;", "stable"), []);
+  assert.ok(inspect("apply = event => { element.textContent = event.value; };")
+    .some(finding => finding.kind === "unresolved-call" && finding.path === "receive"));
+});
+
+test("direct named imports follow exported function bodies for at most two module hops", () => {
+  const entry = `import { selectValue as select } from "./data.js";
+    function receive(event) { select(event); }`;
+  const data = `export function selectValue(event) { return normalize(event.value); }
+    function normalize(value) { return String(value).trim(); }`;
+  const second = "export function normalize(value) { return String(value); }";
+  const twoHops = 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }';
+  const inspect = (source = entry, module = data, dependency = second) => scanModule(source, "entry.js", {
+    modules: new Map([["data.js", module], ["second.js", dependency], ["third.js", second]]),
+  });
+  assert.deepEqual(inspect(), []);
+  assert.deepEqual(inspect(entry, data + '\nfunction unrelated() { let normalize = () => {}; normalize = external; }'), []);
+  const dirty = inspect(entry, data.replace("return String(value).trim();", "element.textContent = value;"));
+  assert.ok(dirty.some(finding => finding.kind === "dom-write" && finding.file === "data.js"
+    && finding.root === "receive" && finding.path.includes("selectValue>normalize")));
+  assert.deepEqual(inspect(entry, twoHops), []);
+  assert.ok(inspect(entry, twoHops, second.replace('return String(value);', 'element.textContent = value;'))
+    .some(finding => finding.kind === 'dom-write' && finding.file === 'second.js' && finding.root === 'receive'));
+  for (const dependency of [
+    'import { normalize as next } from "./third.js"; export function normalize(value) { return next(value); }',
+    'import { selectValue } from "./data.js"; export function normalize(value) { return selectValue(value); }',
+  ]) assert.ok(inspect(entry, twoHops, dependency).some(finding => finding.kind === 'unresolved-call'));
+  for (const [source, module] of [
+    [entry, data.replace("export function", "function")],
+    [entry, "export function other() {}"],
+    [entry.replace("receive(event)", "receive(event, select)"), data],
+    [entry, data + "\nselectValue = external;"],
+  ]) assert.ok(inspect(source, module).some(finding => finding.kind === "unresolved-call"));
+  assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
+});
+
+test("Board receipt and Branch subscriber data imports reject DOM mutations in their helpers", () => {
+  for (const [sourceName, dependencyName, exportedName, marker, context] of [
+    ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
+    ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
+  ]) {
+    const source = readFileSync(new URL(`../${sourceName}.js`, import.meta.url), "utf8");
+    const dependency = readFileSync(new URL(`../${dependencyName}.js`, import.meta.url), "utf8");
+    const file = `crates/gwt/web/${dependencyName}.js`;
+    const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
+      modules: new Map([[file, module]]),
+      rootName: sourceName === 'app' ? 'renderBranchEntries' : 'applyBoardReceipt',
+    }).filter(finding => finding.context === (sourceName === 'app' ? '' : context)
+      && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
+    assert.deepEqual(inspect(dependency), []);
+    const mutated = dependency.replace(marker, `${marker} document.body.textContent = "bypass";`);
+    assert.notEqual(mutated, dependency);
+    assert.ok(inspect(mutated).some(finding => finding.kind === "dom-write" && finding.file === file));
+  }
+});
+
+test("imported function parameter defaults retain the receiver boundary", () => {
+  const findings = scanModule('import { select } from "./data.js"; function receive(event) { select(event); }', "entry.js", {
+    modules: new Map([["data.js", 'export function select(event, value = (document.body.textContent = event.value)) { return value; }']]),
+  });
+  assert.ok(findings.some(finding => finding.kind === "dom-write"));
+});
+
+test("imported functions cannot trust reassigned local helpers", () => {
+  const findings = scanModule('import { select } from "./data.js"; function receive(event) { select(event); }', "entry.js", {
+    modules: new Map([["data.js", `export function select(event) { normalize(event); }
+      function normalize(event) {} normalize = event => { document.body.textContent = event.value; };`]]),
+  });
+  assert.ok(findings.some(finding => finding.kind === "unresolved-call"));
 });
 
 test("synchronous and scheduled callbacks retain the receiver boundary", () => {
@@ -117,13 +781,30 @@ test("baseline cannot grow and first introduction is bounded by base source find
 });
 
 test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () => {
-  for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js"]) {
+  for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js", "operator-shell.js"]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
     const migrated = scanModule(source, file).filter(finding =>
       /^(applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/.test(finding.root)
       && finding.kind.startsWith("dom-"));
     assert.deepEqual(migrated, [], file);
   }
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const bridge = app.match(/applyIssueMonitorStatus:\s*([^\n]+),/)[1];
+  const committed = [];
+  const applyStatus = new Function('applyKnowledgeIssueMonitorStatus', 'applyIssueMonitorStatus', 'document',
+    `return (${bridge});`)(status => committed.push(status),
+      () => assert.fail('the public status bridge must not bypass the shared Issue model'), {});
+  const status = { enabled: true, state: 'active' };
+  applyStatus(status);
+  assert.deepEqual(committed, [status]);
+});
+
+test("Monitor renderer remains a DOM sink when reached from a receiver", () => {
+  const file = 'operator-shell.js';
+  const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+  const bypass = source + '\nfunction receive(event) { renderIssueMonitorStatus(document, event); }';
+  assert.ok(scanModule(bypass, file).some(finding =>
+    finding.root === 'receive' && finding.kind.startsWith('dom-')));
 });
 
 test("Reports and raw terminal receivers resolve only shared model updates", () => {
@@ -135,6 +816,257 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
   const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Index health receiver resolves only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file, { rootName: 'setIndexStatus' }), []);
+  const bypass = source.replace('function setIndexStatus(projectRoot, status) {',
+    'function setIndexStatus(projectRoot, status) { renderProjectIndexWindows();');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, { rootName: 'setIndexStatus' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Index search receivers resolve only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  for (const name of ['handleProjectIndexSearchResults', 'handleProjectIndexSearchError']) {
+    assert.deepEqual(scanModule(source, file, { rootName: name }), []);
+    const bypass = source.replace(`function ${name}(event) {`,
+      `function ${name}(event) { renderProjectIndexSearch(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(scanModule(bypass, file, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Release notes receivers resolve only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/release-notes-window.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../release-notes-window.js', import.meta.url), 'utf8');
+  const receivers = source => scanModule(source, appFile, { modules: new Map([[surfaceFile, surface]]) })
+    .filter(finding => finding.root === 'receive' && /^\/release_notes_(payload|error)$/.test(finding.context));
+  assert.deepEqual(receivers(app), []);
+  for (const name of ['handlePayload', 'handleError']) {
+    assert.deepEqual(scanModule(surface, surfaceFile, { rootName: name }), []);
+    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message) {',
+        `function ${name}(${name === 'handlePayload' ? 'payload' : 'message'}) { renderSidebar(model.read());`);
+    assert.notEqual(bypass, surface);
+    assert.ok(scanModule(bypass, surfaceFile, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Workspace state notice receiver resolves only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const noticeFile = 'crates/gwt/web/workspace-state-notice.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const notice = readFileSync(new URL('../workspace-state-notice.js', import.meta.url), 'utf8');
+  const receiverFindings = source => scanModule(source, appFile, { modules: new Map([[noticeFile, notice]]) })
+    .filter(finding => finding.root === 'receive' && finding.context === '/workspace_state_notice');
+  assert.deepEqual(scanModule(notice, noticeFile), []);
+  assert.deepEqual(receiverFindings(app), []);
+  const bypass = app.replace('case "workspace_state_notice":',
+    'case "workspace_state_notice": element.textContent = event.kind;');
+  assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
+  const directRender = notice.replace('function receive(notice) {',
+    'function receive(notice) { render(notice);');
+  assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
+  assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("UI trace feedback receivers resolve only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const traceFile = 'crates/gwt/web/ui-trace-wiring.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const trace = readFileSync(new URL('../ui-trace-wiring.js', import.meta.url), 'utf8');
+  const receivers = source => scanModule(source, appFile, { modules: new Map([[traceFile, trace]]) })
+    .filter(finding => finding.root === 'receive' && /^\/ui_trace_(saved|error)(\||\/|$)/.test(finding.context));
+  assert.deepEqual(receivers(app), []);
+  const bypass = app.replace('case "ui_trace_saved":',
+    'case "ui_trace_saved": window.alert(event.path);');
+  assert.notEqual(bypass, app);
+  assert.ok(receivers(bypass).length > 0);
+  const directRender = trace.replace('function receive(event) {',
+    'function receive(event) { alert(event.message);');
+  assert.notEqual(directRender, trace);
+  assert.ok(scanModule(directRender, traceFile).length > 0);
+});
+
+test("PM settings receiver resolves only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const panelFile = 'crates/gwt/web/pm-settings-panel.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const panel = readFileSync(new URL('../pm-settings-panel.js', import.meta.url), 'utf8');
+  const modules = new Map([[panelFile, panel]]);
+  const receiverFindings = source => scanModule(source, appFile, { modules })
+    .filter(finding => finding.root === 'receive' && /^\/pm_status(\/|$)/.test(finding.context));
+  assert.deepEqual(receiverFindings(app), []);
+  const bypass = app.replace('applyPmSettingsReceiveEvent(event);',
+    'applyPmSettingsReceiveEvent(event); element.textContent = event.kind;');
+  assert.notEqual(bypass, app, 'mutation must target the real PM settings receiver');
+  assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
+
+  const directRender = panel.replace('function applyPmSettingsReceiveEvent(status) {',
+    'function applyPmSettingsReceiveEvent(status) { renderView(mounts.values().next().value, model.read());');
+  assert.notEqual(directRender, panel, 'mutation must target the factory receiver');
+  assert.ok(scanModule(directRender, panelFile, { rootName: 'applyPmSettingsReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Profile receivers resolve only shared model updates", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const appFile = 'crates/gwt/web/app.js';
+  const profileFile = 'crates/gwt/web/profile-window-surface.js';
+  const profile = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[profileFile, profile]]);
+  const profileReceivers = findings => findings.filter(finding => finding.root === 'receive'
+    && /^\/profile_(snapshot|error)(\/|$)/.test(finding.context));
+  const moduleFindings = scanModule(profile, profileFile, { rootName: 'applyProfileReceiveEvent' });
+  assert.equal(moduleFindings.length, 0, 'Profile module receiver must contain no DOM or unresolved calls');
+  assert.deepEqual(profileReceivers(scanModule(app, appFile, { modules })), []);
+
+  const directRender = profile.replace('function applyProfileReceiveEvent(event) {',
+    'function applyProfileReceiveEvent(event) { renderProfile(event.id);');
+  assert.notEqual(directRender, profile, 'the direct-render mutation must target the real receiver');
+  assert.ok(scanModule(directRender, profileFile, { rootName: 'applyProfileReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(profileReceivers(scanModule(app, appFile, { modules: new Map([[profileFile, directRender]]) }))
+    .some(finding => finding.kind.startsWith('dom-')), 'factory tracing must detect the old rendering path');
+  const bypass = app.replace('applyProfileReceiveEvent(event);',
+    'applyProfileReceiveEvent(event); element.textContent = event.kind;');
+  assert.ok(profileReceivers(scanModule(bypass, appFile, { modules }))
+    .some(finding => finding.kind === 'dom-write'));
+});
+
+test("Profile reconnect preserves newer edits while a sent rename is unconfirmed", async t => {
+  const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
+    .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
+  const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body><div class="pane"><div class="window-body"></div></div></body></html>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const pane = document.querySelector('.pane'), sends = [];
+  const surface = createProfileWindowSurface({
+    send: event => sends.push(event), windowMap: new Map([['profile', pane]]),
+    createNode(tag, className, text = '') {
+      const node = document.createElement(tag);
+      node.className = className; node.textContent = text; return node;
+    },
+    focusWindowLocally() {}, sendWindowFocus() {},
+  });
+  t.after(() => surface.disposeProfileWindow('profile'));
+  const snapshot = name => ({ active_profile: name, selected_profile: name, os_env: [],
+    profiles: [{ name, description: 'saved', env_vars: [], disabled_env: [] }] });
+  surface.mountProfileWindow({ id: 'profile' }, pane.firstChild);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot: snapshot('review') });
+  const name = pane.querySelector('.profile-field input');
+  name.value = 'renamed'; name.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  assert.equal(sends.at(-1).name, 'renamed');
+  // The backend commits this rename, but its reply is lost. Undoing the name
+  // locally does not restore the server identity used by the next save.
+  name.value = 'review'; name.dispatchEvent(new window.Event('input'));
+  const description = pane.querySelector('.profile-textarea');
+  description.value = 'newer unsaved draft'; description.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  assert.equal(sends.at(-1).current_name, 'review');
+  surface.applyProfileReceiveEvent({ kind: 'profile_error', id: 'profile', message: 'profile not found: review' });
+  const currentInput = pane.querySelector('.profile-textarea');
+  const before = sends.length;
+
+  surface.resyncProfile(['profile']);
+
+  assert.equal(sends.length, before, 'a recovery read cannot resolve an unconfirmed rename');
+  assert.equal(pane.querySelector('.profile-textarea'), currentInput);
+  assert.equal(currentInput.value, 'newer unsaved draft');
+  assert.equal(pane.querySelector('.profile-status').textContent, 'profile not found: review');
+  // A confirmed rename releases the local uncertainty; ordinary reads resume.
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot: snapshot('renamed') });
+  surface.resyncProfile(['profile']);
+  assert.deepEqual(sends.at(-1), { kind: 'load_profile', id: 'profile' });
+  assert.equal(sends.length, before + 1);
+  const nextName = pane.querySelector('.profile-field input');
+  nextName.value = 'next-rename'; nextName.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  const pending = sends.length;
+  surface.resyncProfile(['profile']);
+  assert.equal(sends.length, pending);
+  pane.querySelector('[data-action="refresh-profile"]').click();
+  assert.equal(sends.length, pending + 1, 'explicit refresh releases the lost rename loading owner');
+  assert.deepEqual(sends.at(-1), { kind: 'load_profile', id: 'profile' });
+});
+
+test("Profile disposal cancels pending saves and remounts without closed-window data", async t => {
+  const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
+    .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
+  const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body></body></html>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sends = [], windowMap = new Map();
+  const surface = createProfileWindowSurface({
+    send: message => sends.push(message),
+    createNode: (tag, className, text = '') => {
+      const node = document.createElement(tag);
+      node.className = className;
+      node.textContent = text;
+      return node;
+    },
+    windowMap,
+    focusWindowLocally() {},
+    sendWindowFocus() {},
+  });
+  const mount = () => {
+    const pane = document.createElement('div');
+    pane.innerHTML = '<div class="window-body"></div>';
+    windowMap.set('profile', pane);
+    surface.mountProfileWindow({ id: 'profile' }, pane.firstChild);
+    return pane;
+  };
+  const snapshot = {
+    active_profile: 'default', selected_profile: 'default', os_env: [],
+    profiles: [{ name: 'default', description: 'Original', env_vars: [], disabled_env: [] }],
+  };
+  const pane = mount();
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  const input = pane.querySelector('.profile-field input');
+  input.value = 'pending';
+  input.dispatchEvent(new window.Event('input'));
+  surface.disposeProfileWindow('profile');
+  windowMap.delete('profile');
+  t.mock.timers.tick(1000);
+  assert.equal(sends.filter(message => message.kind === 'save_profile').length, 0);
+  assert.equal(surface.profileStateMap.has('profile'), false);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  surface.applyProfileReceiveEvent({ kind: 'profile_error', id: 'profile', message: 'late error' });
+  assert.equal(surface.profileStateMap.has('profile'), false);
+  const remounted = mount();
+  assert.equal(sends.filter(message => message.kind === 'load_profile').length, 2);
+  assert.equal(remounted.querySelector('.profile-field input'), null);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  assert.equal(remounted.querySelector('.profile-field input').value, 'default');
+  assert.match(remounted.querySelector('.profile-status').textContent, /^Active /);
+  surface.disposeProfileWindow('profile');
+});
+
+test("workspace receivers cannot manually sync Agents or Split outside the catalog", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const workspace = app.slice(app.indexOf('function renderWorkspace('), app.indexOf('const socketTransport'));
+  assert.doesNotMatch(workspace, /(?:splitSurfaces|agentsSurface)\??\.sync\s*\(/);
+  const bypasses = source => {
+    const lines = source.split('\n');
+    return scanModule(source, 'crates/gwt/web/app.js').filter(finding =>
+      /(?:splitSurfaces|agentsSurface).*\.sync\s*\(/.test(lines[finding.line - 1]));
+  };
+  assert.deepEqual(bypasses(app), []);
+  const bypass = app.replace('case "workspace_state":',
+    'case "workspace_state": splitSurfaces.sync(); agentsSurface.sync(event.windows);');
+  assert.ok(bypasses(bypass).length > 0, "the old fan-out must be detected even inside an allowed receiver");
 });
 
 test("unrelated remote advances leave the default comparison stable; explicit CI bases still apply", t => {
@@ -185,4 +1117,384 @@ test("unrelated remote advances leave the default comparison stable; explicit CI
 
 test("checkout baseline satisfies the live and Git base contracts", () => {
   checkRepository();
+});
+
+
+test("cleanup and branch error receivers commit shared data and reject direct rendering", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
+  const knowledgeFile = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
+  const knowledge = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[surfaceFile, surface], [knowledgeFile, knowledge]]);
+  const selected = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').some(kind =>
+      /^(branch_cleanup_(progress|result)|branch_error)$/.test(kind)));
+  assert.deepEqual(selected(scanModule(knowledge, knowledgeFile)), []);
+  assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
+  assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
+  const bypass = surface.replace('case "branch_cleanup_result": {',
+    'case "branch_cleanup_result": { renderBranches(event.id);');
+  assert.notEqual(bypass, surface);
+  assert.ok(selected(scanModule(bypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const errorBypass = surface.replace('case "branch_error": {',
+    'case "branch_error": { renderBranches(event.id);');
+  assert.notEqual(errorBypass, surface);
+  assert.ok(selected(scanModule(errorBypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(selected(scanModule(app, appFile, { modules: new Map([[surfaceFile, errorBypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Knowledge list completions retain shared rendering and reject receiver bypasses", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const lists = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_entries'));
+  const local = text => lists(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => lists(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // The full list receipt crosses the immutable store before synchronous ingestion.
+  for (const findings of [local(source), delegated(app)]) {
+    assert.deepEqual(findings, []);
+  }
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'renderKnowledgeBoardView(event.id, windowMap.get(event.id), knowledgeBridgeStateMap.get(event.id));']) {
+    const mutated = source.replace('case "knowledge_entries": {', `case "knowledge_entries": { ${bypass}`);
+    assert.notEqual(mutated, source);
+    assert.ok(local(mutated).some(finding => finding.kind.startsWith('dom-')));
+    assert.ok(delegated(app, mutated).some(finding => finding.kind.startsWith('dom-')));
+  }
+  for (const label of ['knowledge_entries', 'knowledge_search_results', 'knowledge_detail', 'terminal_preview']) {
+    const mutated = app.replace(`case "${label}":`, `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(mutated, app);
+    assert.ok(delegated(mutated).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Knowledge search completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const searches = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_search_results'));
+  const local = text => searches(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => searches(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // The full receipt crosses the immutable store before synchronous ingestion.
+  for (const findings of [local(source), delegated(app)]) {
+    assert.deepEqual(findings, []);
+  }
+  const bypass = source.replace('case "knowledge_search_results": {',
+    'case "knowledge_search_results": { renderKnowledgeBridge(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).some(finding => finding.path.includes('>renderKnowledgeBridge')));
+  assert.ok(delegated(app, bypass).some(finding => finding.path.includes('>renderKnowledgeBridge')));
+  // app groups this event with three other receivers; test both its label
+  // and the common group tail so a later direct write cannot evade the guard.
+  for (const label of ['knowledge_search_results', 'terminal_preview']) {
+    const appBypass = app.replace(`case "${label}":`,
+      `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Knowledge phase completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const phases = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_bridge_phase_updated'));
+  const local = text => phases(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => phases(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  assert.deepEqual(local(source), []);
+  assert.deepEqual(delegated(app), []);
+  const bypass = source.replace('case "knowledge_bridge_phase_updated": {',
+    'case "knowledge_bridge_phase_updated": { renderKnowledgeBridge(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).length > 0);
+  assert.ok(delegated(app, bypass).length > 0);
+  const appBypass = app.replace('case "knowledge_bridge_phase_updated":',
+    'case "knowledge_bridge_phase_updated": document.body.textContent = event.kind;');
+  assert.notEqual(appBypass, app);
+  assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Board response receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  for (const kind of ['board_entries', 'board_history_page', 'board_error']) {
+    const responses = findings => findings.filter(finding =>
+      finding.context.split('/').at(-1).split('|').includes(kind));
+    const local = text => responses(scanModule(text, file, { rootName: 'applyBoardLogsReceiveEvent' }));
+    const delegated = (text, surface = source) => responses(scanModule(text, appFile,
+      { modules: new Map([[file, surface]]) }));
+    assert.deepEqual(local(source), [], kind);
+    assert.deepEqual(delegated(app), [], kind);
+    const receiver = source.indexOf('function applyBoardLogsReceiveEvent(event)');
+    const bypass = source.slice(0, receiver) + source.slice(receiver).replace(`case "${kind}": {`,
+      `case "${kind}": { renderBoard(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(local(bypass).length > 0, kind);
+    assert.ok(delegated(app, bypass).length > 0, kind);
+    const appBypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')), kind);
+  }
+});
+
+test("Logs live receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const live = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('log_entry_appended'));
+  assert.deepEqual(live(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' })), []);
+  assert.deepEqual(live(scanModule(app, appFile, { modules: new Map([[file, source]]) })), []);
+  const bypass = source.replace('case "log_entry_appended":',
+    'case "log_entry_appended": renderLogs(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(live(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(live(scanModule(app, appFile, { modules: new Map([[file, bypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const appBypass = app.replace('case "log_entry_appended":',
+    'case "log_entry_appended": document.body.textContent = event.kind;');
+  assert.notEqual(appBypass, app);
+  assert.ok(live(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Logs snapshot receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const snapshots = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('log_entries'));
+  assert.deepEqual(snapshots(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' })), []);
+  assert.deepEqual(snapshots(scanModule(app, appFile, { modules: new Map([[file, source]]) })), []);
+  const bypass = source.replace('case "log_entries": {', 'case "log_entries": { renderLogs(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(snapshots(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(snapshots(scanModule(app, appFile, { modules: new Map([[file, bypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  for (const kind of ['log_entries', 'log_entry_appended']) {
+    const appBypass = app.replace(`case "${kind}":`, `case "${kind}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(snapshots(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+      .some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Logs error receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const errors = findings => findings.filter(finding => /(?:\/|\|)log_error$/.test(finding.context));
+  assert.deepEqual(errors(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' })), []);
+  assert.deepEqual(errors(scanModule(app, appFile, { modules: new Map([[file, source]]) })), []);
+  const bypass = source.replace('case "log_error": {', 'case "log_error": { renderLogs(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(errors(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(errors(scanModule(app, appFile, { modules: new Map([[file, bypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const appBypass = app.replace('case "log_error":', 'case "log_error": document.body.textContent = event.message;');
+  assert.notEqual(appBypass, app);
+  assert.ok(errors(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+
+test("Close Project receiver commits shared data and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/close-project-confirm-modal.js';
+  const source = readFileSync(new URL('../close-project-confirm-modal.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file), []);
+  const bypass = source.replace("if (event.kind === 'project_closed') {",
+    "if (event.kind === 'project_closed') { hide();");
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
+  for (const entry of ['app.js', 'hub-app.js']) {
+    const code = readFileSync(new URL(`../${entry}`, import.meta.url), 'utf8');
+    const findings = controller => scanModule(code, `crates/gwt/web/${entry}`,
+      { modules: new Map([[file, controller]]) }).filter(finding => finding.file === file);
+    assert.deepEqual(findings(source), []);
+    assert.ok(findings(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+
+test("Board destination receiver commits shared state and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const options = { rootName: 'applyProjectBoardConfigEventToBoard' };
+  assert.deepEqual(scanModule(source, file, options), []);
+  const bypass = source.replace('function applyProjectBoardConfigEventToBoard(event) {',
+    'function applyProjectBoardConfigEventToBoard(event) { renderBoard("board");');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, options).some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("folder picker receiver commits shared state and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/project-clone-modal.js';
+  const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
+  assert.match(source, /receive: applyFolderPickerReceiveEvent/);
+  const options = { rootName: 'applyFolderPickerReceiveEvent' };
+  assert.deepEqual(scanModule(source, file, options), []);
+  const bypass = source.replace('function applyFolderPickerReceiveEvent(event) {',
+    'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
+  const shell = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const delegated = controller => scanModule(shell, 'crates/gwt/web/project-shell-surface.js',
+    { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyPickerReceiveEvent');
+  assert.deepEqual(delegated(source), []);
+  assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const fromApp = controller => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-shell-surface.js', shell], [file, controller]]),
+  }).filter(finding => finding.root === 'receive'
+    && finding.context === '/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy');
+  assert.deepEqual(fromApp(source), []);
+  assert.ok(fromApp(bypass).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Knowledge detail completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const details = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_detail'));
+  const local = text => details(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => details(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // The full receipt crosses the immutable store before synchronous ingestion.
+  for (const findings of [local(source), delegated(app)]) {
+    assert.deepEqual(findings, []);
+  }
+  const bypass = source.replace('case "knowledge_detail": {',
+    'case "knowledge_detail": { renderKnowledgeSelection(event.id, state, null);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).some(finding => finding.path.includes('>renderKnowledgeSelection')));
+  assert.ok(delegated(app, bypass).some(finding => finding.path.includes('>renderKnowledgeSelection')));
+  for (const label of ['knowledge_detail', 'terminal_preview']) {
+    const appBypass = app.replace(`case "${label}":`,
+      `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Active card preview receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const previews = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('terminal_preview'));
+  const local = text => previews(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => previews(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  assert.deepEqual(local(source), []);
+  assert.deepEqual(delegated(app), []);
+  const bypass = source.replace('case "terminal_preview": {',
+    'case "terminal_preview": { document.body.textContent = event.text;');
+  assert.notEqual(bypass, source);
+  for (const findings of [local(bypass), delegated(app, bypass)]) {
+    assert.ok(findings.some(finding => finding.kind === 'dom-write'));
+  }
+  const appBypass = app.replace('case "terminal_preview":',
+    'case "terminal_preview": document.body.textContent = event.text;');
+  assert.notEqual(appBypass, app);
+  assert.ok(delegated(appBypass).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Knowledge error completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const errors = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_error'));
+  const local = text => errors(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => errors(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  const directRender = finding => /(?:^|>)applyKnowledgeReceiveEvent>renderKnowledge(?:Bridge|StatusOnly)(?:>|$)/.test(finding.path);
+  // The full error receipt enters the store before synchronous recovery.
+  for (const findings of [local(source), delegated(app)]) {
+    assert.deepEqual(findings, []);
+  }
+  for (const call of ['renderKnowledgeBridge(event.id);', 'document.body.textContent = event.message;']) {
+    const bypass = source.replace('case "knowledge_error": {', `case "knowledge_error": { ${call}`);
+    assert.notEqual(bypass, source);
+    for (const findings of [local(bypass), delegated(app, bypass)]) {
+      assert.ok(findings.some(finding => finding.kind.startsWith('dom-') || directRender(finding)));
+    }
+  }
+  for (const label of ['knowledge_error']) {
+    const bypass = app.replace(`case "${label}":`, `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(bypass, app);
+    assert.ok(delegated(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+
+test("Branch entry receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/branch_entries');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.id;',
+    'frontendUnits.branchesFileTreeSurface.renderBranches(event.id);']) {
+    const mutated = app.replace('case "branch_entries": {', `case "branch_entries": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Branch receipts isolate entries and cleanup before synchronous ingestion", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const model = app.slice(app.indexOf('const branchEntriesViewModel ='),
+    app.indexOf('\n\n', app.indexOf('branchEntriesViewModel.subscribe(')));
+  const arm = app.match(/case "branch_entries": \{[\s\S]*?\n          \}/)[0];
+  const states = new Map(), counts = [];
+  const frontendUnits = { branchesFileTreeSurface: {
+    ensureBranchListState(id) {
+      if (!states.has(id)) states.set(id, { entries: [] });
+      return states.get(id);
+    },
+    renderBranches() {},
+  } };
+  const receive = new Function('createUiStateStore', 'applyBranchEntriesEvent', 'frontendUnits',
+    'syncBranchSelectionState', 'applyOperatorTelemetryCounts', `${model}\nreturn event => { switch(event.kind) { ${arm} } };`)(
+    createUiStateStore, applyBranchEntriesEvent, frontendUnits, () => {}, value => counts.push(value.branches));
+  const event = { kind: 'branch_entries', id: 'branches', load_id: 2, phase: 'hydrated',
+    entries: [{ name: 'work/accepted', cleanup_ready: true, cleanup: { availability: 'safe' } }] };
+  receive(event);
+  event.entries[0].name = 'changed';
+  event.entries[0].cleanup.availability = 'blocked';
+  const state = states.get('branches');
+  assert.equal(state.entries[0].name, 'work/accepted');
+  assert.equal(state.lastHydratedByName.get('work/accepted').availability, 'safe');
+  receive({ ...event, load_id: 1, entries: [] });
+  assert.equal(state.entries.length, 1);
+  receive({ ...event, load_id: 3, entries: [] });
+  assert.deepEqual(counts, [1, 0]);
 });

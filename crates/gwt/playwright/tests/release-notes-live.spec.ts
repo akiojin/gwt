@@ -24,6 +24,7 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const RELEASE_NOTES_VISIBLE_TIMEOUT_MS = 15_000;
 const PROJECT_ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd();
 const CURRENT_VERSION = currentGwtVersion();
+const errorsByPage = new WeakMap<Page, string[]>();
 
 // `serial` because every test in this file talks to the same live backend.
 // In parallel mode the chromium-dark and chromium-light projects race against
@@ -33,17 +34,28 @@ const CURRENT_VERSION = currentGwtVersion();
 test.describe.serial("Release Notes window (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, info) => {
+    const errors: string[] = [];
+    errorsByPage.set(page, errors);
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    const theme = info.project.name.includes('light') ? 'light' : 'dark';
+    await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
     await suppressInitialFrontendReady(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     await injectReleaseNotesWorkspace(page, CURRENT_VERSION);
     await expect(page.locator("#op-briefing")).toBeHidden();
     await expect(page.locator("#project-picker")).toBeHidden();
   });
 
+  test.afterEach(async ({ page }) => {
+    expect(errorsByPage.get(page)).toEqual([]);
+  });
+
   test("clicking #app-version opens the Release Notes window with the label target focused", async ({
     page,
-  }) => {
+  }, info) => {
     const label = page.locator("#app-version");
     await expect(label).toBeVisible();
     const labelText = (await label.textContent())?.trim() ?? "";
@@ -76,6 +88,7 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(
       window.locator(".release-notes-content h2"),
     ).toHaveText(`v${expectedVersion}`);
+    await page.screenshot({ path: info.outputPath("release-notes.png") });
   });
 
   test("selecting a different version in the sidebar updates the content pane", async ({
@@ -101,16 +114,27 @@ test.describe.serial("Release Notes window (live backend)", () => {
     ).toHaveText(`v${target}`);
   });
 
-  test("rendered notes omit merge and develop-sync noise", async ({ page }) => {
+  test("rendered notes recover from an error without merge or develop-sync noise", async ({ page }) => {
     await page.locator("#app-version").click();
     const window = page.locator("#release-notes-window");
     await expect(window).toBeVisible();
     await expect(window.locator(".release-notes-content")).not.toContainText(
       /Merge .*develop|develop sync|sync develop|develop.*(sync|同期)|Developを同期/i,
     );
+    await page.evaluate(() => {
+      globalThis.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "release_notes_error", message: "Release notes fixture unavailable" },
+      }));
+    });
+    await expect(window.locator(".release-notes-empty")).toContainText("Release notes fixture unavailable");
+    await expect(window.locator(".release-notes-sidebar-item")).toHaveCount(0);
+    await page.locator("#app-version").click();
+    await expect(window.locator(".release-notes-empty")).toHaveCount(0);
+    await expect(window.locator(".release-notes-sidebar-item.is-selected")).toHaveCount(1);
+    await expect(window.locator(".release-notes-content h2")).toHaveText(`v${CURRENT_VERSION}`);
   });
 
-  test("close button removes the window and isOpen reflects that", async ({
+  test("close and Escape release the window and allow the same controller to reopen", async ({
     page,
   }) => {
     await page.locator("#app-version").click();
@@ -120,6 +144,14 @@ test.describe.serial("Release Notes window (live backend)", () => {
     });
     await window.locator(".release-notes-close").click();
     await expect(window).toHaveCount(0);
+    await page.locator("#app-version").click();
+    await expect(window).toBeVisible();
+    await window.press("Escape");
+    await expect(window).toHaveCount(0);
+    await expect(page.locator("#app-version")).toBeFocused();
+    await page.locator("#app-version").press("Enter");
+    await expect(window).toHaveCount(1);
+    await expect(window.locator(".release-notes-content h2")).toHaveText(`v${CURRENT_VERSION}`);
   });
 
   test("keyboard activation (Enter on #app-version) opens the window", async ({
@@ -134,6 +166,73 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(page.locator("#release-notes-window")).toBeVisible({
       timeout: RELEASE_NOTES_VISIBLE_TIMEOUT_MS,
     });
+  });
+
+  test("payload bursts share one render and closed windows stay closed with pending frames", async ({ page }, info) => {
+    await page.locator("#app-version").click();
+    const notes = page.locator("#release-notes-window");
+    await expect(notes.locator(".release-notes-content h2")).toBeVisible();
+    const burst = await page.evaluate(async () => {
+      const content = document.querySelector(".release-notes-content")!;
+      const previous = content.firstChild;
+      const focused = document.activeElement;
+      let renders = 0;
+      const observer = new MutationObserver(records => {
+        renders += records.flatMap(record => [...record.addedNodes])
+          .filter(node => node instanceof Element && node.matches(".release-notes-version-header")).length;
+      });
+      observer.observe(content, { childList: true });
+      try {
+        for (let index = 1; index <= 50; index++) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "release_notes_payload", current_version: "9.0.50",
+            entries: [{ version: `9.0.${index}`, sections: [] }],
+          } }));
+        }
+        const deferred = content.firstChild === previous;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        const header = content.firstChild;
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "runtime_health", snapshot: {},
+        } }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { deferred, renders, heading: content.querySelector("h2")?.textContent,
+          selected: document.querySelector(".release-notes-sidebar-item.is-selected")?.getAttribute("data-version"),
+          unrelatedPreserved: content.firstChild === header,
+          focusPreserved: document.activeElement === focused };
+      } finally { observer.disconnect(); }
+    });
+    expect(burst).toEqual({ deferred: true, renders: 1, heading: "v9.0.50",
+      selected: "9.0.50", unrelatedPreserved: true, focusPreserved: true });
+    await info.attach("release-notes-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+    await page.evaluate(async () => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+        kind: "release_notes_error", message: "Pending error",
+      } }));
+      (document.querySelector(".release-notes-close") as HTMLButtonElement).click();
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    });
+    await expect(notes).toHaveCount(0);
+    await expect(page.locator("#app-version")).toBeFocused();
+    await page.locator("#app-version").click();
+    await expect(notes.locator(".release-notes-content h2")).toHaveText(`v${CURRENT_VERSION}`);
+    await page.evaluate(() => {
+      (window as any).__releaseNotesRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      (window as any).__releaseNotesFallbackStart = performance.now();
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+        kind: "release_notes_error", message: "Fallback release notes error",
+      } }));
+    });
+    try {
+      await expect(notes.locator(".release-notes-empty")).toContainText("Fallback release notes error", { timeout: 1000 });
+      const elapsed = await page.evaluate(() => performance.now() - (window as any).__releaseNotesFallbackStart);
+      expect(elapsed).toBeLessThan(1000);
+      await info.attach("release-notes-frame-fallback", { body: JSON.stringify({ elapsed }), contentType: "application/json" });
+      await page.screenshot({ path: info.outputPath("release-notes-frame.png") });
+    } finally {
+      await page.evaluate(() => { window.requestAnimationFrame = (window as any).__releaseNotesRaf; });
+    }
   });
 });
 

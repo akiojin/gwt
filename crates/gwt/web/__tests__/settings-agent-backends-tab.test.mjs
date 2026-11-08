@@ -64,7 +64,7 @@ test("renderSettingsWindow sends list_agent_backends for both built-ins on open"
 test("renderAgentBackendsPanel builds per-built-in sections", () => {
   assert.match(
     settingsSource,
-    /function renderAgentBackendsPanel\(panel\)\s*\{/,
+    /function renderAgentBackendsPanel\(panel, state = agentBackendsModel\.read\(\)\)\s*\{/,
     "expected renderAgentBackendsPanel function definition",
   );
   assert.match(
@@ -138,10 +138,10 @@ test("knowledgeSettingsSurface exports renderAgentBackendsPanel", () => {
   );
 });
 
-test("agentBackendsState seeds empty lists for both built-ins", () => {
+test("agentBackendsModel seeds empty lists for both built-ins", () => {
   assert.match(
     settingsSource,
-    /const agentBackendsState\s*=\s*\{[\s\S]*?backends:\s*\{\s*claudeCode:\s*\[\],\s*codex:\s*\[\]\s*\}/,
-    "agentBackendsState must seed backends.claudeCode and backends.codex",
+    /const agentBackendsModel\s*=\s*createUiStateStore\(\{[\s\S]*?backends:\s*\{\s*claudeCode:\s*\[\],\s*codex:\s*\[\]\s*\}/,
+    "agentBackendsModel must seed backends.claudeCode and backends.codex",
   );
 });

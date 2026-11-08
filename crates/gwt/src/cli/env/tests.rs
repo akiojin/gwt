@@ -54,6 +54,7 @@ fn sample_pr_status() -> PrStatus {
 
 fn sample_issue_snapshot(number: u64, labels: &[&str]) -> gwt_github::client::IssueSnapshot {
     gwt_github::client::IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Issue {number}"),
         body: "Body".to_string(),
@@ -70,7 +71,7 @@ fn sample_issue_snapshot(number: u64, labels: &[&str]) -> gwt_github::client::Is
 
 fn compile_fake_gh(bin_dir: &Path) {
     let source = r###"
-use std::{env, process::ExitCode};
+use std::{env, io::Write, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
 format!(
@@ -80,7 +81,22 @@ format!(
 
 fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
+if args.first().is_some_and(|argument| argument == "api") && args.iter().any(|argument| argument.contains("/actions/")) {
+    if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(log, "{args:?}").unwrap();
+    }
+}
 match args.as_slice() {
+    [pr, view, _number, json_flag, fields, ..]
+        if pr == "pr" && view == "view" && json_flag == "--json" && fields.contains("headRefOid") =>
+    {
+        if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+            std::fs::write(path, args.join("\n")).unwrap();
+        }
+        println!("{}", r#"{"number":12,"title":"Completion PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/12","isDraft":true,"headRefName":"feature/coverage","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"develop","isCrossRepository":false,"body":"Agent Visual Check: n/a (no UI surface)","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED"}"#);
+        ExitCode::SUCCESS
+    }
     [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
         let mut pr = pr_json("12", "Current PR");
         pr.pop();
@@ -154,26 +170,43 @@ match args.as_slice() {
         print!("job log 91");
         ExitCode::SUCCESS
     }
-    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/runs/90" => {
-        println!("{{\"id\":90,\"repository\":{{\"full_name\":\"akiojin/gwt\"}}}}");
-        ExitCode::SUCCESS
-    }
-    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91" => {
-        println!("{{\"id\":91,\"run_url\":\"https://api.github.com/repos/akiojin/gwt/actions/runs/90\"}}");
-        ExitCode::SUCCESS
-    }
     [api, endpoint]
-        if api == "api" && endpoint.starts_with("/repos/akiojin/gwt/actions/") =>
+        if api == "api" && (endpoint.starts_with("/repos/akiojin/gwt/actions/") || endpoint.starts_with("/repos/other/project/actions/")) =>
     {
-        eprintln!("gh: Not Found (HTTP 404)");
-        ExitCode::FAILURE
+        let body = match endpoint.as_str() {
+            "/repos/akiojin/gwt/actions/runs/90" => r#"{"id":90,"repository":{"full_name":"akiojin/gwt"},"workflow_id":10,"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/91" => r#"{"id":91,"run_id":90,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
+            "/repos/akiojin/gwt/actions/runs/92" => r#"{"id":92,"repository":{"full_name":"akiojin/gwt"},"workflow_id":11,"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/akiojin/gwt/actions/runs/94" => r#"{"id":94,"repository":{"full_name":"akiojin/gwt"},"workflow_id":11,"path":".github/workflows/windows-diagnostic.yml@refs/heads/develop"}"#,
+            "/repos/akiojin/gwt/actions/runs/106" => r#"{"id":106,"repository":{"full_name":"akiojin/gwt"},"workflow_id":12,"path":".github/workflows/windows-diagnostic.yml@canary.yml@refs/heads/fix@canary"}"#,
+            "/repos/akiojin/gwt/actions/workflows/10" => r#"{"id":10,"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/workflows/11" => r#"{"id":11,"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/akiojin/gwt/actions/workflows/12" => r#"{"id":12,"path":".github/workflows/windows-diagnostic.yml@canary.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/93" => r#"{"id":93,"run_id":94,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/94"}"#,
+            "/repos/akiojin/gwt/actions/jobs/95" => r#"{"id":95,"run_id":0,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
+            "/repos/akiojin/gwt/actions/jobs/96" => r#"{"id":96,"run_id":98,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/98"}"#,
+            "/repos/akiojin/gwt/actions/runs/98" => r#"{"id":98,"repository":{"full_name":"akiojin/gwt"}}"#,
+            "/repos/akiojin/gwt/actions/jobs/97" => r#"{"id":97,"run_id":99,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/99"}"#,
+            "/repos/akiojin/gwt/actions/runs/99" => r#"{"id":100,"repository":{"full_name":"akiojin/gwt"},"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/101" => r#"{"id":101,"run_id":102,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/102"}"#,
+            "/repos/akiojin/gwt/actions/runs/102" => r#"{"id":102,"repository":{"full_name":"foreign/repo"},"path":".github/workflows/test.yml"}"#,
+            "/repos/akiojin/gwt/actions/jobs/105" => r#"{"id":105,"run_id":90,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/94"}"#,
+            "/repos/other/project/actions/runs/90" => r#"{"id":90,"repository":{"full_name":"other/project"},"path":".github/workflows/windows-diagnostic.yml"}"#,
+            "/repos/other/project/actions/jobs/91" => r#"{"run_url":"https://api.github.com/repos/other/project/actions/runs/90"}"#,
+            _ => { eprintln!("gh: Not Found (HTTP 404)"); return ExitCode::FAILURE; }
+        };
+        println!("{body}");
+        ExitCode::SUCCESS
     }
     [api, method_flag, method, endpoint]
         if api == "api"
             && method_flag == "--method"
             && method == "POST"
             && (endpoint == "/repos/akiojin/gwt/actions/runs/90/rerun-failed-jobs"
-                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun") =>
+                || endpoint == "/repos/akiojin/gwt/actions/runs/106/rerun"
+                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun"
+                || endpoint == "/repos/other/project/actions/runs/90/rerun"
+                || endpoint == "/repos/other/project/actions/jobs/91/rerun") =>
     {
         println!("{{}}");
         ExitCode::SUCCESS
@@ -309,6 +342,833 @@ fn lazy_issue_client_defers_resolution_until_first_issue_call() {
         Err(gwt_github::client::ApiError::Unauthorized)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn diagnostic_workflow_id_requires_the_durable_request_route() {
+    use axum::http::{Method, StatusCode, Uri};
+    use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_config_path(),
+        "[allowed_workflows]\n\"akiojin/gwt\"=[\"windows-diagnostic.yml\"]\n\"other/project\"=[\"windows-diagnostic.yml\"]\n",
+    )
+    .unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let captured = requests.clone();
+    let app = axum::Router::new().fallback(move |method: Method, uri: Uri| {
+        captured.fetch_add(1, Ordering::SeqCst);
+        async move {
+            match (method.as_str(), uri.path()) {
+                ("GET", "/repos/akiojin/gwt/actions/workflows/42") => (
+                    StatusCode::OK,
+                    r#"{"path":".github/workflows/windows-diagnostic.yml"}"#,
+                ),
+                (
+                    "GET",
+                    "/repos/other/project/contents/.github/workflows/windows-diagnostic.yml",
+                ) => (
+                    StatusCode::OK,
+                    "name: Other workflow\non: workflow_dispatch\n",
+                ),
+                (
+                    "POST",
+                    "/repos/other/project/actions/workflows/windows-diagnostic.yml/dispatches",
+                ) => (StatusCode::NO_CONTENT, ""),
+                _ => (StatusCode::NOT_FOUND, ""),
+            }
+        }
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let repo = tempfile::tempdir().unwrap();
+    let factory: Arc<IssueClientFactory> = Arc::new(move |owner, repo| {
+        HttpIssueClient::with_transport(
+            ReqwestTransport::new().unwrap(),
+            "fixture".into(),
+            owner,
+            repo,
+        )
+        .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
+    });
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        factory.clone(),
+    );
+    let error = env
+        .dispatch_actions(crate::cli::ActionsDispatchCall {
+            workflow: "42".into(),
+            git_ref: "develop".into(),
+            inputs: Default::default(),
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("actions.diagnostic.request"),
+        "{error}"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    fs::create_dir_all(repo.path().join(".github/workflows")).unwrap();
+    fs::write(
+        repo.path().join(".github/workflows/windows-diagnostic.yml"),
+        "name: Other workflow\non: workflow_dispatch\n",
+    )
+    .unwrap();
+    let mut other = DefaultCliEnv::new_with_client_factory(
+        "other",
+        "project",
+        repo.path().to_path_buf(),
+        factory,
+    );
+    assert_eq!(
+        other
+            .dispatch_actions(crate::cli::ActionsDispatchCall {
+                workflow: "windows-diagnostic.yml".into(),
+                git_ref: "develop".into(),
+                inputs: Default::default()
+            })
+            .unwrap(),
+        "workflow dispatch requested"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn dispatch_default_denial_does_not_initialize_github_client() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let repo = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        failing_factory(calls.clone()),
+    );
+    let call = crate::cli::ActionsDispatchCall {
+        workflow: "prepare-release.yml".into(),
+        git_ref: "develop".into(),
+        inputs: Default::default(),
+    };
+    let error = env.dispatch_actions(call.clone()).unwrap_err();
+    assert!(error.to_string().contains("allowed_workflows"));
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_home().join("config.toml"),
+        "[allowed_workflows]\n\"akiojin/gwt\" = [\"prepare-release.yml\"]\n",
+    )
+    .unwrap();
+    let mut denied = call.clone();
+    denied.workflow = "denied.yml".into();
+    let error = env.dispatch_actions(denied).unwrap_err();
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("allowed_workflows"), "{diagnostic}");
+    assert!(diagnostic.contains("prepare-release.yml"), "{diagnostic}");
+    let error = env.dispatch_actions(call).unwrap_err();
+    assert!(error.to_string().contains("does not exist"), "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dispatch_prepare_release_uses_allowed_loopback_http_and_rejects_invalid_inputs() {
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+    use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
+    fs::write(
+        gwt_core::paths::gwt_home().join("config.toml"),
+        "[allowed_workflows]\n\"akiojin/gwt\" = [\"日本語 Release.yml\"]\n",
+    )
+    .unwrap();
+    let yaml = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.github/workflows/prepare-release.yml"
+    ));
+    let repo = tempfile::tempdir().unwrap();
+    assert!(gwt_core::process::hidden_command("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap()
+        .success());
+    let subdirectory = repo.path().join("crates/gwt");
+    fs::create_dir_all(&subdirectory).unwrap();
+    fs::create_dir_all(repo.path().join(".github/workflows")).unwrap();
+    fs::write(
+        repo.path().join(".github/workflows/日本語 Release.yml"),
+        yaml,
+    )
+    .unwrap();
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let app = axum::Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: String| {
+            let captured = captured.clone();
+            async move {
+                let response = match (method.as_str(), uri.path()) {
+                    ("GET", "/repos/akiojin/gwt/actions/workflows/1234") => (
+                        StatusCode::OK,
+                        r#"{"path":".github/workflows/日本語 Release.yml"}"#.to_string(),
+                    ),
+                    (
+                        "GET",
+                        "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml",
+                    ) => (StatusCode::OK, yaml.to_string()),
+                    (
+                        "POST",
+                        "/repos/akiojin/gwt/actions/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml/dispatches",
+                    ) => (StatusCode::NO_CONTENT, String::new()),
+                    _ => (StatusCode::NOT_FOUND, String::new()),
+                };
+                captured.lock().unwrap().push((method, uri, headers, body));
+                response
+            }
+        },
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let factory: Arc<IssueClientFactory> = Arc::new(move |owner, repo| {
+        HttpIssueClient::with_transport(
+            ReqwestTransport::new().unwrap(),
+            "loopback-token".into(),
+            owner,
+            repo,
+        )
+        .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
+    });
+    let mut env = DefaultCliEnv::new_with_client_factory("akiojin", "gwt", subdirectory, factory);
+    let mut call = crate::cli::ActionsDispatchCall {
+        workflow: "日本語 Release.yml".into(),
+        git_ref: "develop".into(),
+        inputs: serde_json::json!({"bump": "auto"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    assert_eq!(
+        env.dispatch_actions(call.clone()).unwrap(),
+        "workflow dispatch requested"
+    );
+    call.workflow = "1234".into();
+    assert_eq!(
+        env.dispatch_actions(call.clone()).unwrap(),
+        "workflow dispatch requested"
+    );
+    call.workflow = "日本語 Release.yml".into();
+    call.inputs
+        .insert("bump".into(), serde_json::Value::Bool(true));
+    assert!(env
+        .dispatch_actions(call)
+        .unwrap_err()
+        .to_string()
+        .contains("inputs do not match"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, uri, _, _)| (method.as_str(), uri.path()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "GET",
+                "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml"
+            ),
+            (
+                "POST",
+                "/repos/akiojin/gwt/actions/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml/dispatches"
+            ),
+            ("GET", "/repos/akiojin/gwt/actions/workflows/1234"),
+            (
+                "GET",
+                "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml"
+            ),
+            (
+                "POST",
+                "/repos/akiojin/gwt/actions/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml/dispatches"
+            ),
+            (
+                "GET",
+                "/repos/akiojin/gwt/contents/.github/workflows/%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release.yml"
+            ),
+        ]
+    );
+    for (method, uri, headers, body) in requests.iter() {
+        assert_eq!(headers["authorization"], "Bearer loopback-token");
+        if uri.path().contains("/contents/") {
+            assert_eq!(uri.query(), Some("ref=develop"));
+            assert_eq!(headers["accept"], "application/vnd.github.raw+json");
+        }
+        if method == Method::POST {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                serde_json::json!({"ref": "develop", "inputs": {"bump": "auto"}})
+            );
+        }
+    }
+}
+
+#[test]
+fn release_policy_checkout_bootstrap_uses_the_existing_host_proof_with_inspection_pm() {
+    use axum::{http::HeaderMap, routing::post, Json};
+    use gwt_core::{
+        pm_authorization::{self as authority, OperationIntent},
+        test_support::{ScopedEnvVar, ScopedGwtHome},
+    };
+    use serde_json::{json, Value};
+    use std::sync::atomic::AtomicBool;
+
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedGwtHome::set(home.path());
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let mut session = gwt_agent::Session::new(repo.path(), "develop", gwt_agent::AgentId::Codex);
+    session.status = gwt_agent::AgentStatus::Running;
+    session.project_state_root = Some(repo.path().to_path_buf());
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    assert!(
+        session.execution_binding.is_none(),
+        "PM inspection is not producing authority"
+    );
+    let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+    let prefs = serde_json::from_value(json!({"registration":{
+        "session_id":session.id, "agent_id":"codex", "worktree_path":repo.path(),
+    }}))
+    .unwrap();
+    crate::pm_registry::save_pm_prefs(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(repo.path()),
+        &prefs,
+    )
+    .unwrap();
+
+    let proofs = Arc::new(AtomicUsize::new(0));
+    let malformed = Arc::new(AtomicBool::new(false));
+    let (count, corrupt, host_session) = (proofs.clone(), malformed.clone(), session.id.clone());
+    let app = axum::Router::new().route(
+        "/internal/host-contract",
+        post(
+            move |headers: HeaderMap, Json(request): Json<crate::AgentHostContractRequest>| {
+                let (count, corrupt, host_session) =
+                    (count.clone(), corrupt.clone(), host_session.clone());
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer release-policy-fixture");
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let mut receipt = crate::describe_authenticated_host_contract(
+                        &request,
+                        &host_session,
+                        "fixture-original-host",
+                        0,
+                    )
+                    .unwrap();
+                    if corrupt.load(Ordering::SeqCst) {
+                        receipt.nonce = "foreign-proof".into();
+                    }
+                    Json(receipt)
+                }
+            },
+        ),
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let bridge = format!(
+        "http://{}/internal/hook-live",
+        listener.local_addr().unwrap()
+    );
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let _url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, bridge);
+    let _token = ScopedEnvVar::set(
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+        "release-policy-fixture",
+    );
+    let github_clients = Arc::new(AtomicUsize::new(0));
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        failing_factory(github_clients.clone()),
+    );
+    let run = |env: &mut DefaultCliEnv, operation: &str, params: Value| {
+        crate::cli::run_collect(
+            env,
+            crate::cli::json_envelope::parse_operation(operation, &params).unwrap(),
+        )
+    };
+    let (code, output) = run(&mut env, "actions.release_policy.status", json!({})).unwrap();
+    assert_eq!(code, 0);
+    let status: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(status["current"]["host_verified"], true);
+    assert_eq!(status["current"]["context"]["capability_generation"], 0);
+    assert_eq!(
+        status["current"]["context"]["host_instance_id"],
+        "fixture-original-host"
+    );
+    let intent = OperationIntent {
+        operation: "actions.release_policy.add".into(),
+        params: json!({"request_id":uuid::Uuid::new_v4().to_string(),
+            "expected_token":status["token"],"reason":"Fixture release workflow permission"}),
+    };
+    // Fixture authority proves the production route, not real native consent.
+    let approval = authority::record_approval(
+        repo.path(),
+        &intent,
+        "Fixture release workflow permission",
+        "Rollback the fixture addition",
+        false,
+    )
+    .unwrap();
+    let mut params = intent.params.clone();
+    params["approval_id"] = approval.id.clone().into();
+    let audit_before = fs::read(authority::audit_path(repo.path())).unwrap();
+    let config = gwt_core::paths::gwt_config_path();
+    session.repo_hash = Some("foreign-repository".into());
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    assert!(run(&mut env, &intent.operation, params.clone()).is_err());
+    session.repo_hash =
+        gwt_core::repo_hash::detect_repo_hash(repo.path()).map(|hash| hash.as_str().to_owned());
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    {
+        let _foreign_session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "unregistered-fixture");
+        assert!(run(&mut env, &intent.operation, params.clone()).is_err());
+    }
+    malformed.store(true, Ordering::SeqCst);
+    assert!(run(&mut env, &intent.operation, params.clone()).is_err());
+    assert!(
+        !config.exists(),
+        "rejected context/proof must not write policy"
+    );
+    assert!(
+        !gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("project-state/release-policy")
+            .exists(),
+        "rejected context/proof must not create a request receipt"
+    );
+    assert_eq!(
+        fs::read(authority::audit_path(repo.path())).unwrap(),
+        audit_before
+    );
+    assert!(!authority::approvals(repo.path()).unwrap()[0].consumed);
+    malformed.store(false, Ordering::SeqCst);
+    let (code, output) = run(&mut env, &intent.operation, params).unwrap();
+    assert_eq!(code, 0);
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["outcome"], "succeeded");
+    assert!(gwt_config::Settings::load_from_path(&config)
+        .unwrap()
+        .allowed_workflows["akiojin/gwt"]
+        .contains(&"prepare-release.yml".into()));
+    assert_eq!(
+        proofs.load(Ordering::SeqCst),
+        4,
+        "status, malformed proof and two fresh add proofs"
+    );
+    assert_eq!(
+        github_clients.load(Ordering::SeqCst),
+        0,
+        "configuration bootstrap must not instantiate GitHub or dispatch"
+    );
+}
+
+#[test]
+fn pm_settings_operations_reach_loopback_http_through_the_production_env() {
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+    use gwt_core::{
+        pm_authorization::{self as authority, OperationIntent},
+        test_support::{ScopedEnvVar, ScopedGwtHome},
+    };
+    use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+    use serde_json::{json, Value};
+
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedGwtHome::set(home.path());
+    let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "pm-settings-loopback");
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/akiojin/gwt.git",
+    ]);
+
+    let prefs = serde_json::from_value(json!({"registration":{
+        "session_id":"pm-settings-loopback", "agent_id":"codex",
+        "worktree_path":repo.path(),
+    }}))
+    .unwrap();
+    crate::pm_registry::save_pm_prefs(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(repo.path()),
+        &prefs,
+    )
+    .unwrap();
+
+    let checks_before = json!({"strict":true,"checks":[
+        {"context":"Rust","app_id":73},{"context":"Old","app_id":-1}
+    ]});
+    let checks_after = json!({"strict":true,"checks":[
+        {"context":"Rust","app_id":73},{"context":"Frontend","app_id":null}
+    ]});
+    let audit_path = authority::audit_path(repo.path());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let initial_checks = checks_before.clone();
+    let server_audit_path = audit_path.clone();
+    let app = axum::Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: String| {
+            let captured = captured.clone();
+            let initial_checks = initial_checks.clone();
+            let audit_path = server_audit_path.clone();
+            async move {
+                let payload: Value = if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str(&body).unwrap()
+                };
+                let response = match (method.as_str(), uri.path()) {
+                    ("POST", "/graphql")
+                        if payload["query"]
+                            .as_str()
+                            .unwrap()
+                            .contains("createDiscussion") =>
+                    {
+                        json!({"data":{"createDiscussion":{"discussion":{
+                            "id":"D_17","number":17,
+                            "url":"https://github.com/akiojin/gwt/discussions/17"
+                        }}}})
+                    }
+                    ("POST", "/graphql") => json!({"data":{"repository":{
+                        "id":"R_gwt","discussionCategories":{
+                            "nodes":[{"id":"C_general","name":"General"}],
+                            "pageInfo":{"endCursor":null,"hasNextPage":false}
+                        }
+                    }}}),
+                    (
+                        "GET",
+                        "/repos/akiojin/gwt/branches/develop/protection/required_status_checks",
+                    ) => initial_checks,
+                    (
+                        "PATCH",
+                        "/repos/akiojin/gwt/branches/develop/protection/required_status_checks",
+                    ) => {
+                        let mut updated = initial_checks;
+                        updated["checks"] = payload["checks"].clone();
+                        for check in updated["checks"].as_array_mut().unwrap() {
+                            if check.get("app_id").is_none() { check["app_id"] = Value::Null; }
+                        }
+                        updated
+                    },
+                    ("GET", "/repos/akiojin/gwt/pulls/7") => json!({"number":7,"state":"closed","merged":false,"base":{"repo":{"full_name":"akiojin/gwt"}}}),
+                    ("PATCH", "/repos/akiojin/gwt/pulls/7") => json!({"number":7,"state":"open","merged":false,"base":{"repo":{"full_name":"akiojin/gwt"}}}),
+                    ("GET", "/repos/akiojin/gwt/pulls/8") => json!({"number":8,"state":"open","merged":false,"base":{"repo":{"full_name":"akiojin/gwt"}}}),
+                    ("POST", "/repos/akiojin/gwt/pulls/8/reviews") => json!({"id":29,"state":"COMMENTED","body":"Review notes","pull_request_url":"https://api.github.com/repos/akiojin/gwt/pulls/8"}),
+                    ("GET", "/repos/akiojin/gwt/releases/tags/v1") => json!({"id":17,"url":"https://api.github.com/repos/akiojin/gwt/releases/17","tag_name":"v1","target_commitish":"main","draft":false,"body":"Old notes"}),
+                    ("PATCH", "/repos/akiojin/gwt/releases/17") => json!({"id":17,"url":"https://api.github.com/repos/akiojin/gwt/releases/17","tag_name":"v1","target_commitish":"main","draft":false,"body":"Corrected notes"}),
+                    ("GET", "/repos/akiojin/gwt") => json!({"id":42,"full_name":"akiojin/gwt","description":"Old","has_discussions":false,"allow_merge_commit":true}),
+                    ("PATCH", "/repos/akiojin/gwt") => json!({"id":42,"full_name":"akiojin/gwt","description":"Updated","has_discussions":true,"allow_merge_commit":true}),
+                    _ => Value::Null,
+                };
+                let status = if response.is_null() {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::OK
+                };
+                let audit: Value = fs::read_to_string(audit_path)
+                    .unwrap()
+                    .lines()
+                    .last()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .unwrap();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((method, uri, headers, payload, audit));
+                (status, response.to_string())
+            }
+        },
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let factory: Arc<IssueClientFactory> = Arc::new(move |owner, repo| {
+        HttpIssueClient::with_transport(
+            ReqwestTransport::new().unwrap(),
+            "loopback-token".into(),
+            owner,
+            repo,
+        )
+        .with_test_endpoints(base.clone(), format!("{base}/graphql"), true)
+    });
+    let mut env = DefaultCliEnv::new_with_client_factory(
+        "akiojin",
+        "gwt",
+        repo.path().to_path_buf(),
+        factory.clone(),
+    );
+    let run = |env: &mut DefaultCliEnv, intent: &OperationIntent, approval_id: &str| {
+        let mut params = intent.params.clone();
+        params["approval_id"] = approval_id.into();
+        let command = crate::cli::pm_authorization::parse(&intent.operation, &params).unwrap();
+        crate::cli::run_collect(env, crate::cli::CliCommand::PmAuthorization(command))
+    };
+    // Scoped authority is test setup, not evidence of native human consent.
+    let approve = |intent: &OperationIntent| {
+        authority::record_approval(
+            repo.path(),
+            intent,
+            "Loopback acceptance fixture",
+            "Restore fixture settings",
+            false,
+        )
+        .unwrap()
+    };
+    let discussion = OperationIntent {
+        operation: "discussion.create".into(),
+        params: json!({"title":"Coordination","body":"Board updates",
+            "category":"General","sync_board":true}),
+    };
+    let approval = approve(&discussion);
+    let (code, output) = run(&mut env, &discussion, &approval.id).unwrap();
+    assert_eq!(code, 0);
+    let discussion_result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        discussion_result["before"],
+        json!({"provider":"local","github_discussion":null})
+    );
+    assert_eq!(
+        discussion_result["after"]["board_binding"]["status"],
+        "bound"
+    );
+    let config = gwt_config::ProjectBoardConfig::load_from_work_dir(
+        &gwt_core::paths::gwt_repo_local_work_dir(repo.path()),
+    );
+    let binding = config.github_discussion.unwrap();
+    assert_eq!(
+        (
+            binding.owner.as_str(),
+            binding.repo.as_str(),
+            binding.number
+        ),
+        ("akiojin", "gwt", 17)
+    );
+
+    let checks = OperationIntent {
+        operation: "repository.required_checks.update".into(),
+        params: json!({"branch":"develop","add":["Frontend"],"remove":["Old"]}),
+    };
+    let approval = approve(&checks);
+    let (code, output) = run(&mut env, &checks, &approval.id).unwrap();
+    assert_eq!(code, 0);
+    let checks_result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(checks_result["before"], checks_before);
+    assert_eq!(checks_result["after"], checks_after);
+
+    let mut results = vec![discussion_result, checks_result];
+    for (operation, params, changed_key, expected) in [
+        ("pr.reopen", json!({"number":7}), "state", json!("open")),
+        (
+            "pr.review.submit",
+            json!({"number":8,"event":"COMMENT","body":"Review notes"}),
+            "state",
+            json!("COMMENTED"),
+        ),
+        (
+            "release.metadata.set",
+            json!({"tag":"v1","body":"Corrected notes"}),
+            "body",
+            json!("Corrected notes"),
+        ),
+        (
+            "repository.settings.set",
+            json!({"description":"Updated","has_discussions":true}),
+            "description",
+            json!("Updated"),
+        ),
+    ] {
+        let intent = OperationIntent {
+            operation: operation.into(),
+            params,
+        };
+        let approval = approve(&intent);
+        let (code, output) = run(&mut env, &intent, &approval.id).unwrap();
+        assert_eq!(code, 0, "{operation}: {output}");
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["after"][changed_key], expected, "{operation}");
+        results.push(result);
+    }
+
+    let audit: Vec<Value> = fs::read_to_string(&audit_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let completed: Vec<_> = audit
+        .iter()
+        .filter(|entry| entry["event"] == "succeeded")
+        .collect();
+    assert_eq!(completed.len(), results.len());
+    for (entry, result) in completed.iter().zip(&results) {
+        assert_eq!(entry["attempt_id"], result["attempt_id"]);
+        assert_eq!(entry["before"], result["before"]);
+        assert_eq!(entry["after"], result["after"]);
+    }
+
+    let unused = approve(&discussion);
+    let request_count = requests.lock().unwrap().len();
+    let mut foreign =
+        DefaultCliEnv::new_with_client_factory("other", "gwt", repo.path().to_path_buf(), factory);
+    assert!(run(&mut foreign, &discussion, &unused.id)
+        .unwrap_err()
+        .to_string()
+        .contains("canonical GitHub repository"));
+    git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/other/fork.git",
+    ]);
+    assert!(run(&mut env, &discussion, &unused.id)
+        .unwrap_err()
+        .to_string()
+        .contains("canonical GitHub repository"));
+    git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/akiojin/gwt.git",
+    ]);
+    assert!(
+        !authority::approvals(repo.path())
+            .unwrap()
+            .iter()
+            .find(|entry| entry.id == unused.id)
+            .unwrap()
+            .consumed
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        request_count,
+        "repository refusals must make zero HTTP writes or reads"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, uri, _, _, _)| (method.as_str(), uri.path()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("POST", "/graphql"),
+            ("POST", "/graphql"),
+            (
+                "GET",
+                "/repos/akiojin/gwt/branches/develop/protection/required_status_checks"
+            ),
+            (
+                "PATCH",
+                "/repos/akiojin/gwt/branches/develop/protection/required_status_checks"
+            ),
+            ("GET", "/repos/akiojin/gwt/pulls/7"),
+            ("PATCH", "/repos/akiojin/gwt/pulls/7"),
+            ("GET", "/repos/akiojin/gwt/pulls/8"),
+            ("POST", "/repos/akiojin/gwt/pulls/8/reviews"),
+            ("GET", "/repos/akiojin/gwt/releases/tags/v1"),
+            ("PATCH", "/repos/akiojin/gwt/releases/17"),
+            ("GET", "/repos/akiojin/gwt"),
+            ("PATCH", "/repos/akiojin/gwt"),
+        ]
+    );
+    assert_eq!(
+        requests[0].3["variables"],
+        json!({"owner":"akiojin","repo":"gwt","after":null})
+    );
+    assert_eq!(
+        requests[1].3["variables"],
+        json!({"repositoryId":"R_gwt","categoryId":"C_general","title":"Coordination","body":"Board updates"})
+    );
+    assert_eq!(
+        requests[3].3,
+        json!({"checks":[{"context":"Rust","app_id":73},{"context":"Frontend"}]})
+    );
+    assert_eq!(requests[5].3, json!({"state":"open"}));
+    assert_eq!(
+        requests[7].3,
+        json!({"event":"COMMENT","body":"Review notes"})
+    );
+    assert_eq!(requests[9].3, json!({"body":"Corrected notes"}));
+    assert_eq!(
+        requests[11].3,
+        json!({"description":"Updated","has_discussions":true})
+    );
+    for (index, operation) in [
+        (1, "discussion.create"),
+        (3, "repository.required_checks.update"),
+        (5, "pr.reopen"),
+        (7, "pr.review.submit"),
+        (9, "release.metadata.set"),
+        (11, "repository.settings.set"),
+    ] {
+        assert_eq!(
+            requests[index].4["event"], "authorized",
+            "authorization audit must precede the HTTP write"
+        );
+        assert_eq!(
+            requests[index].4["attempt"]["scope"]["operation"],
+            operation
+        );
+    }
+    for (_, _, headers, _, _) in requests.iter() {
+        assert_eq!(headers["authorization"], "Bearer loopback-token");
+    }
 }
 
 #[test]
@@ -510,13 +1370,13 @@ fn test_env_records_io_and_pr_side_effects() {
     );
     assert_eq!(env.fetch_pr_review_threads(7).expect("threads").len(), 3);
     assert_eq!(
-        env.reply_and_resolve_pr_review_threads(7, "done")
+        env.reply_and_resolve_pr_review_threads(7, "done", None)
             .expect("reply"),
         2
     );
     assert_eq!(
         env.pr_reply_and_resolve_call_log,
-        vec![(7, "done".to_string())]
+        vec![(7, "done".to_string(), None)]
     );
 
     env.seed_pr_checks(
@@ -619,9 +1479,10 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
-    let stable_hook_bin = temp
-        .path()
-        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
+    let stable_hook_bin = temp.path().join(format!(
+        "stable O'Brien gwtd{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
@@ -675,6 +1536,121 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
         health["slow_handlers"][0]["handler"].as_str(),
         Some("workflow-policy")
     );
+
+    let paths = [
+        temp.path().join(".claude/settings.local.json"),
+        temp.path().join(".codex/hooks.json"),
+    ];
+    let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    let runtime_bin = temp.path().join("runtime-gwtd");
+    let _runtime_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_BIN_PATH", runtime_bin.as_os_str());
+    let opt_in_profile = temp.path().join("opt-in-profile.jsonl");
+    let _profile = crate::cli::test_support::ScopedEnvVar::set(
+        "GWT_HOOK_PROFILE_PATH",
+        opt_in_profile.as_os_str(),
+    );
+    for explicit_profile in [Some(&profile_path), None] {
+        env.stdout.clear();
+        env.stdin = serde_json::json!({
+            "schema_version": 1, "operation": "hook.doctor",
+            "params": {"profile_path": explicit_profile}
+        })
+        .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let audit = &doctor["configuration_audit"];
+        assert_eq!(audit["asset_root"], serde_json::json!(temp.path()));
+        assert_eq!(audit["gwt_bin_path"], serde_json::json!(runtime_bin));
+        assert_eq!(audit["gwt_hook_bin"], serde_json::json!(stable_hook_bin));
+        assert_eq!(
+            audit["profile_path"],
+            serde_json::json!(explicit_profile.unwrap_or(&opt_in_profile))
+        );
+        let configs = audit["configs"]
+            .as_array()
+            .expect("configuration observations");
+        assert_eq!(configs.len(), 2);
+        for (config, provider) in configs.iter().zip(["claude", "codex"]) {
+            assert_eq!(config["provider"], provider);
+            assert_eq!(config["state"], "present");
+            assert!(config["error"].is_null());
+            let binaries = config["event_binaries"].as_array().unwrap();
+            assert_eq!(binaries.len(), 5);
+            assert_eq!(
+                binaries
+                    .iter()
+                    .map(|entry| entry["event"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PostToolUse",
+                    "Stop"
+                ]
+            );
+            assert!(binaries
+                .iter()
+                .all(|entry| entry["fallback_binary"] == serde_json::json!(stable_hook_bin)));
+        }
+        assert!(!opt_in_profile.exists(), "audit must not enable profiling");
+        for (path, original) in paths.iter().zip(&before) {
+            assert_eq!(fs::read(path).unwrap(), *original);
+        }
+    }
+}
+
+#[test]
+fn hook_doctor_configuration_audit_distinguishes_read_failures() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(".claude/settings.local.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for state in ["missing", "invalid_json", "unreadable"] {
+        if state == "invalid_json" {
+            fs::write(&path, "{invalid").unwrap();
+        }
+        if state == "unreadable" {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        }
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = serde_json::json!({"schema_version":1,"operation":"hook.doctor","params":{}})
+            .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let config = &doctor["configuration_audit"]["configs"][0];
+        assert_eq!(config["path"], serde_json::json!(path));
+        assert_eq!(config["state"], state);
+        assert!(config["error"].is_string());
+        assert_eq!(config["event_binaries"], serde_json::json!([]));
+    }
+}
+
+#[test]
+fn hook_doctor_managed_browser_fails_closed_without_current_source() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join(".gwt"));
+    let _session = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_ID");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({"schema_version":1, "operation":"hook.doctor", "params":{"purpose":"managed_browser"}}).to_string();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(doctor["preflight"]["result"], "unknown");
+    assert_eq!(doctor["preflight"]["context"], "missing");
+    assert!(doctor["health"].is_object());
 }
 
 #[test]
@@ -683,6 +1659,7 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
+    let _runtime = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let codex_home = temp.path().join("codex-home");
     let _codex_home =
         crate::cli::test_support::ScopedEnvVar::set("CODEX_HOME", codex_home.as_os_str());
@@ -699,6 +1676,7 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
         serde_json::json!("gwtd hook event SessionStart");
     fs::write(&hooks_path, serde_json::to_string(&hooks).unwrap()).unwrap();
+    let hooks_before = fs::read(&hooks_path).unwrap();
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = serde_json::json!({
         "schema_version": 1,
@@ -710,6 +1688,31 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks", "regenerate_managed_provider_configs"],
+            "user_actions": ["verify_codex_hook_trust"],
+            "new_session_actions": ["start_new_agent_session"]
+        })
+    );
+    let audit = &doctor["codex_hook_audit"];
+    assert_eq!(audit["discovery_mode"], "both");
+    assert_eq!(
+        audit["expected_hook_paths"],
+        serde_json::json!([hooks_path])
+    );
+    assert_eq!(audit["trust"]["wrote_trust_state"], false);
+    let observation = &doctor["configuration_audit"]["configs"][1];
+    assert_eq!(observation["path"], serde_json::json!(hooks_path));
+    assert_eq!(observation["state"], "present");
+    assert_eq!(observation["event_binaries"][0]["event"], "SessionStart");
+    assert_eq!(observation["event_binaries"][0]["fallback_binary"], "gwtd");
+    assert_eq!(
+        doctor["managed_hook_bin"].as_str(),
+        Some(stable_hook_bin.to_str().unwrap()),
+        "doctor must expose the same fallback selected by ordinary materialization"
+    );
     // Join the decoded issue strings: serializing the array would JSON-escape
     // Windows `\` separators and hide the trust key from a substring match.
     let issues = doctor["health"]["issues"]
@@ -738,7 +1741,54 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     );
     assert!(issues.contains("command mismatch") && issues.contains("expected_command="));
     assert!(issues.contains("actual_command=`gwtd hook event SessionStart`"));
+    assert_eq!(
+        audit["trust"]["modified_gwt_hooks"],
+        serde_json::json!([session_start_key])
+    );
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_before);
     assert!(!codex_home.join("config.toml").exists());
+
+    for (kind, command) in [
+        (
+            "command",
+            "echo private-value; gwtd hook event SessionStart",
+        ),
+        (
+            "command",
+            r#"printf '%s' "gwt_fallback='private-value';"; gwtd hook event SessionStart"#,
+        ),
+        (
+            "command",
+            r#"gwt_fallback='/opt/first'; gwt_fallback='/opt/second'; "$gwt_fallback" hook event SessionStart"#,
+        ),
+        ("prompt", "gwtd hook event SessionStart"),
+    ] {
+        // A displayed assignment or a reassigned variable is not a known binary.
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["type"] = serde_json::json!(kind);
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] = serde_json::json!(command);
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        let before = fs::read(&hooks_path).unwrap();
+        env.stdout.clear();
+        env.stdin = serde_json::json!({"schema_version":1,"operation":"hook.doctor","params":{}})
+            .to_string();
+        assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        let doctor: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        let observations = &doctor["configuration_audit"];
+        let binaries = observations["configs"][1]["event_binaries"]
+            .as_array()
+            .unwrap();
+        if kind == "command" {
+            assert!(binaries[0]["fallback_binary"].is_null(), "{command}");
+        } else {
+            assert!(!binaries
+                .iter()
+                .any(|entry| entry["event"] == "SessionStart"));
+        }
+        assert!(!observations.to_string().contains("private-value"));
+        assert_eq!(fs::read(&hooks_path).unwrap(), before);
+    }
 }
 
 #[test]
@@ -746,7 +1796,9 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
     let _env_lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set("gwtd");
     let temp = tempfile::tempdir().unwrap();
+    let _runtime = crate::cli::test_support::ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let repo = temp.path().join("project");
     let gitdir = repo.join("project.git/worktrees/linked");
     let worktree = repo.join("work/linked");
@@ -767,17 +1819,125 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
     .unwrap();
     assert!(repo.join(".codex/hooks.json").exists());
     assert!(!worktree.join(".codex").exists());
-    let mut env = TestEnv::new(worktree);
-    env.stdin = serde_json::json!({
+    let mut env = TestEnv::new(worktree.clone());
+    let doctor_request = serde_json::json!({
         "schema_version": 1, "operation": "hook.doctor", "params": {}
     })
     .to_string();
+    env.stdin = doctor_request.clone();
     assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
     assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+    assert!(doctor["codex_hook_audit"].is_null());
+    assert_eq!(
+        doctor["configuration_audit"]["asset_root"],
+        serde_json::json!(worktree)
+    );
+    let configs = doctor["configuration_audit"]["configs"].as_array().unwrap();
+    assert_eq!(
+        configs[1]["path"],
+        serde_json::json!(worktree.join(".codex/hooks.json"))
+    );
+    assert_eq!(configs[1]["state"], "missing");
+    assert_eq!(
+        configs[2]["path"],
+        serde_json::json!(repo.join(".codex/hooks.json"))
+    );
+    assert_eq!(configs[2]["state"], "present");
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks"],
+            "user_actions": [],
+            "new_session_actions": []
+        })
+    );
     assert!(!codex_home.join("config.toml").exists());
+
+    // A materialized local surface must audit both discovery paths even when
+    // no runtime sidecar exists and the shared hooks file has disappeared.
+    gwt_skills::generate_codex_hooks_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+    )
+    .unwrap();
+    fs::remove_dir_all(repo.join(".codex")).unwrap();
+    let hooks_path = worktree.join(".codex/hooks.json");
+    let hooks_before = fs::read(&hooks_path).unwrap();
+    env.stdout.clear();
+    env.stdin = doctor_request.clone();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    let audit = &doctor["codex_hook_audit"];
+    assert_eq!(audit["discovery_mode"], "both");
+    assert_eq!(
+        audit["expected_hook_paths"],
+        serde_json::json!([
+            worktree.join(".codex/hooks.json"),
+            repo.join(".codex/hooks.json")
+        ])
+    );
+    assert_eq!(
+        audit["trust"]["missing_managed_events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert!(audit["trust"]["missing_managed_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry
+            .as_str()
+            .unwrap()
+            .starts_with(repo.join(".codex/hooks.json").to_str().unwrap())));
+    assert_eq!(fs::read(hooks_path).unwrap(), hooks_before);
+    assert!(!codex_home.join("config.toml").exists());
+
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
+        .unwrap();
+    let config = codex_home.join("config.toml");
+    gwt_skills::register_codex_managed_hook_trust_for_mode(
+        &worktree,
+        &config,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+    )
+    .unwrap();
+    let config_before = fs::read(&config).unwrap();
+    let hooks_path = worktree.join(".codex/hooks.json");
+    let mut hooks: serde_json::Value =
+        serde_json::from_slice(&fs::read(&hooks_path).unwrap()).unwrap();
+    hooks["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+    hooks["hooks"]["Stop"].as_array_mut().unwrap().push(
+        serde_json::json!({"matcher":"*","hooks":[{"type":"command","command":"echo user hook"}]}),
+    );
+    fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+    let hooks_before = fs::read(&hooks_path).unwrap();
+    env.stdout.clear();
+    env.stdin = doctor_request.clone();
+    assert_eq!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    let doctor: serde_json::Value =
+        serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    let trust = &doctor["codex_hook_audit"]["trust"];
+    assert_eq!(
+        trust["missing_managed_events"],
+        serde_json::json!([format!(
+            "{}:PreToolUse",
+            gwt_skills::codex_hook_trust_key_path(&hooks_path)
+                .unwrap()
+                .display()
+        )])
+    );
+    assert_eq!(trust["trusted_entries"].as_array().unwrap().len(), 9);
+    assert_eq!(trust["modified_gwt_hooks"], serde_json::json!([]));
+    assert_eq!(fs::read(hooks_path).unwrap(), hooks_before);
+    assert_eq!(fs::read(config).unwrap(), config_before);
 }
 
 #[test]
@@ -823,6 +1983,22 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
+    assert_eq!(
+        doctor["repair_plan"],
+        serde_json::json!({
+            "automatic": ["materialize_managed_git_hooks", "regenerate_managed_provider_configs"],
+            "user_actions": ["verify_codex_hook_trust"],
+            "new_session_actions": ["start_new_agent_session"]
+        })
+    );
+    assert_eq!(
+        doctor["repair_writer"]["pid"].as_u64(),
+        Some(u64::from(std::process::id()))
+    );
+    assert_eq!(
+        doctor["repair_writer"]["executable"].as_str(),
+        std::env::current_exe().unwrap().to_str()
+    );
     let guarantee = doctor["repair_guarantee"].as_str().unwrap_or_default();
     assert!(
         guarantee.contains("managed hook configuration")
@@ -1042,7 +2218,33 @@ fn dispatch_json_envelope_issue_create_uses_body_param() {
 
 #[test]
 fn dispatch_json_envelope_pr_create_uses_body_param() {
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: fixture",
+        ],
+        vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.seed_created_pr(sample_pr_status());
     env.stdin = r#"{
@@ -1054,7 +2256,7 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
             "title": "Wire JSON envelope",
             "body": "PR body supplied directly through params.body",
             "labels": ["agent"],
-            "draft": true
+            "draft": false
         }
     }"#
     .to_string();
@@ -1074,7 +2276,7 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
     assert_eq!(call.title, "Wire JSON envelope");
     assert_eq!(call.body, "PR body supplied directly through params.body");
     assert_eq!(call.labels, vec!["agent"]);
-    assert!(call.draft);
+    assert!(!call.draft);
 }
 
 fn issue_3693_transport_env(repo_path: &Path) -> DefaultCliEnv {
@@ -1093,6 +2295,49 @@ fn issue_3693_recorded_argv(path: &Path) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+#[test]
+fn issue_4323_pr_view_names_a_confirmed_issue_and_preserves_other_failures() {
+    crate::cli::test_support::with_fake_gh("issue-4323", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let mut env = DefaultCliEnv::new("akiojin", "gwt", repo_path.to_path_buf());
+
+        let error = env.fetch_pr(4323).unwrap_err().to_string();
+        assert!(error.contains("Issue #4323"), "{error}");
+        assert!(error.contains("issue.view"), "{error}");
+        assert!(!error.contains("Could not resolve"), "{error}");
+
+        // A PR, failed probe, invalid JSON, or mismatched number is not proof
+        // that the requested number is an Issue.
+        for number in [4122, 404, 403, 502, 17, 18, 19] {
+            let error = env.fetch_pr(number).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "Could not resolve to a PullRequest with the number of {number}"
+                )),
+                "{error}"
+            );
+            assert!(!error.contains("issue.view"), "{error}");
+        }
+    });
+}
+
+#[test]
+fn issue_4323_successful_pr_view_does_not_probe_the_issue_endpoint() {
+    crate::cli::test_support::with_fake_gh("issue-4323", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let log_path = repo_path.join("gh-argv");
+        let _log = crate::cli::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log_path);
+        let mut env = DefaultCliEnv::new("akiojin", "gwt", repo_path.to_path_buf());
+
+        assert_eq!(env.fetch_pr(12).unwrap().number, 12);
+        let calls = issue_3693_recorded_argv(&log_path);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("[\"pr\", \"view\""), "{calls:?}");
+    });
 }
 
 #[test]
@@ -1292,6 +2537,19 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             failing_factory(Arc::new(AtomicUsize::new(0))),
         );
 
+        {
+            let log = repo_path.join("completion-pr-argv");
+            let _ambient = gwt_core::test_support::ScopedEnvVar::set("GH_REPO", "other/unrelated");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            let snapshot = env.fetch_completion_pr(12).expect("completion snapshot");
+            assert_eq!(snapshot.inventory.number, 12);
+            let argv = fs::read_to_string(log).unwrap();
+            assert!(
+                argv.contains("--repo\ngithub.com/akiojin/gwt"),
+                "completion evidence must use the mutation repository: {argv}"
+            );
+        }
+
         let linked = env.fetch_linked_prs(IssueNumber(42)).expect("linked prs");
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].number, 12);
@@ -1345,7 +2603,7 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
         assert_eq!(threads[0].path, "src/lib.rs");
 
         assert_eq!(
-            env.reply_and_resolve_pr_review_threads(12, "done")
+            env.reply_and_resolve_pr_review_threads(12, "done", None)
                 .expect("reply and resolve"),
             1
         );
@@ -1376,6 +2634,13 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
             .expect("rerun job")
             .contains("job 91"));
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 106,
+                failed_only: false,
+            })
+            .expect("a distinct workflow containing @ remains rerunnable")
+            .contains("run 106"));
         let refused = env
             .rerun_actions(crate::cli::ActionsRerunTarget::Run {
                 run_id: 777,
@@ -1388,6 +2653,64 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
                 .contains("run 777 does not belong to akiojin/gwt"),
             "unexpected error: {refused}"
         );
+
+        {
+            let log = repo_path.join("refused-rerun-argv");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            for target in [
+                crate::cli::ActionsRerunTarget::Run {
+                    run_id: 92,
+                    failed_only: false,
+                },
+                crate::cli::ActionsRerunTarget::Run {
+                    run_id: 92,
+                    failed_only: true,
+                },
+                crate::cli::ActionsRerunTarget::Run {
+                    run_id: 94,
+                    failed_only: false,
+                },
+                crate::cli::ActionsRerunTarget::Job { job_id: 93 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 95 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 96 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 97 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 101 },
+                crate::cli::ActionsRerunTarget::Job { job_id: 105 },
+            ] {
+                let refused = env
+                    .rerun_actions(target)
+                    .expect_err("fixed or unconfirmed workflow must not be rerun");
+                assert!(refused.to_string().contains("actions.rerun"), "{refused}");
+            }
+            assert!(!fs::read_to_string(log).unwrap().contains("\"POST\""));
+        }
+        let mut other = DefaultCliEnv::new("other", "project", repo_path.to_path_buf());
+        assert!(
+            other
+                .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                    run_id: 90,
+                    failed_only: false
+                })
+                .is_ok(),
+            "the diagnostic filename remains ordinary in another repository"
+        );
+        {
+            let log = repo_path.join("ordinary-job-rerun-argv");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            assert!(other
+                .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
+                .is_ok());
+            let calls = fs::read_to_string(log).unwrap();
+            assert_eq!(
+                calls.lines().count(),
+                2,
+                "an ordinary job keeps one lookup and one POST"
+            );
+            assert!(
+                !calls.contains("/actions/runs/"),
+                "an ordinary job needs no parent lookup"
+            );
+        }
 
         let note_path = repo_path.join("note.md");
         fs::write(&note_path, "hello").expect("write note");

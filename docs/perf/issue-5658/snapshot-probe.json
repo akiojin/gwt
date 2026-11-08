@@ -1,0 +1,19 @@
+{
+  "method": "12 Pane PTYs; 1200 styled lines each; 40 rows x 120 columns; one warm snapshot, then 60 repeated snapshots per pane",
+  "probe_source_sha256": "5BDBEC740489A689956B924434470CF57AA0E1084BE4705ECC90FC50067CF9E9",
+  "observations": [
+    {
+      "variant": "uncached",
+      "binary_sha256": "8CE7ADEE5C7937A2875537D6943D271FFC6EF95D31A2582FC87FF72DC5CB5FAB",
+      "observed": "12 panes x 60 syncs: 89909280 bytes in 18.603050s",
+      "at": "2026-10-16T18:27:33.8588771Z"
+    },
+    {
+      "variant": "cached",
+      "binary_sha256": "224EBE10FA02877A30025231A609D626EB5DBEE69767354D3D60349BF9B3D325",
+      "observed": "12 panes x 60 syncs: 89909280 bytes in 0.003436s",
+      "at": "2026-10-16T18:27:45.3029192Z"
+    }
+  ],
+  "note": "Wall-clock microbenchmark on a shared host, not whole-GUI CPU acceptance evidence"
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure merged-PR CI throughput using read-only GitHub data or a saved snapshot."""
+"""Measure CI throughput and queue delays using read-only GitHub data or saved snapshots."""
 import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -42,6 +42,7 @@ def summarize(snapshot):
         raise ValueError("no merged PRs in snapshot")
     cycles, waits, required_waits = [], [], []
     durations, job_waits = defaultdict(list), defaultdict(list)
+    step_durations = defaultdict(lambda: defaultdict(list))
     excluded, missing, run_ids, unavailable_waits = Counter(), [], [], []
     required = set(snapshot.get("required_check_names", []))
     for pr in prs:
@@ -62,6 +63,10 @@ def summarize(snapshot):
                 continue
             if job.get("started_at"):
                 durations[job["name"]].append(minutes(job["started_at"], job["completed_at"]))
+                for step in job.get("steps", []):
+                    if step.get("conclusion") == "success" and step.get("started_at") and step.get("completed_at"):
+                        step_durations[job["name"]][step["name"]].append(
+                            minutes(step["started_at"], step["completed_at"]))
                 if job.get("created_at") and timestamp(job["created_at"]) <= timestamp(job["started_at"]):
                     wait = minutes(job["created_at"], job["started_at"])
                     waits.append(wait)
@@ -94,6 +99,8 @@ def summarize(snapshot):
         "required_runner_wait_minutes": distribution(required_waits),
         "unavailable_runner_wait_jobs": unavailable_waits,
         "jobs": {name: {"duration_minutes": distribution(values),
+                        "step_duration_minutes": {step: distribution(times)
+                                                  for step, times in sorted(step_durations[name].items())},
                         "runner_wait_minutes": distribution(job_waits[name])}
                  for name, values in sorted(durations.items())},
         "excluded_runs": dict(sorted(excluded.items())), "missing_workflow_prs": missing,
@@ -196,29 +203,101 @@ def collect(repo, base, limit, before, root, workflow):
     return snapshot
 
 
+def collect_queue(repo, limit, before, workflow):
+    endpoint = f"actions/workflows/{workflow}/runs" if workflow else "actions/runs"
+    runs, page = [], 1
+    while len(runs) < limit:
+        rows = api(repo, endpoint, status="completed", created=f"<={before}",
+                   per_page=min(limit, 100), page=page)["workflow_runs"]
+        runs.extend(row for row in rows if row["status"] == "completed"
+                    and timestamp(row["created_at"]) <= timestamp(before))
+        if len(rows) < min(limit, 100):
+            break
+        page += 1
+    runs.sort(key=lambda row: (timestamp(row["created_at"]), row["id"]), reverse=True)
+    if len(runs) < limit:
+        raise ValueError(f"requested {limit} completed runs but only found {len(runs)}")
+    for run in runs[:limit]:
+        run["jobs"] = paged(repo, f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
+    return {"schema_version": 1, "repo": repo, "before": before,
+            "collected_at": datetime.now(timezone.utc).isoformat(), "runs": runs[:limit]}
+
+
+def summarize_queue(snapshot):
+    if snapshot["schema_version"] != 1 or not snapshot["runs"]:
+        raise ValueError("expected a schema_version 1 snapshot with completed runs")
+    queues, scheduling, unavailable, rows = [], [], [], []
+    for run in snapshot["runs"]:
+        jobs, waits, delays = [], [], []
+        for job in run["jobs"]:
+            if job["conclusion"] in ("skipped", "cancelled") or not job.get("completed_at"):
+                continue
+            created, started = job.get("created_at"), job.get("started_at")
+            if not created or not started or not (
+                    timestamp(run["created_at"]) <= timestamp(created) <= timestamp(started)
+                    and timestamp(run["run_started_at"]) <= timestamp(started)):
+                unavailable.append(job["id"])
+                continue
+            waits.append(minutes(created, started))
+            if timestamp(created) >= timestamp(run["run_started_at"]):
+                delays.append(minutes(run["run_started_at"], created))
+            jobs.append({"name": job["name"], "duration_minutes": minutes(started, job["completed_at"])})
+        queues.extend(waits)
+        scheduling.extend(delays)
+        rows.append({"id": run["id"], "workflow": run["name"], "head_sha": run["head_sha"],
+                     "run_attempt": run["run_attempt"], "created_at": run["created_at"],
+                     "conclusion": run["conclusion"],
+                     "run_queue_minutes": (minutes(run["created_at"], run["run_started_at"])
+                                           if run["run_attempt"] == 1 else None),
+                     "run_execution_minutes": minutes(run["run_started_at"], run["updated_at"]),
+                     "job_queue_minutes": distribution(waits),
+                     "dependency_scheduling_minutes": distribution(delays),
+                     "longest_job": max(jobs, key=lambda job: job["duration_minutes"]) if jobs else None})
+    return {"repo": snapshot["repo"], "before": snapshot["before"], "run_count": len(rows),
+            "method": {"selection": "Latest completed runs by created_at; all conclusions retained",
+                       "run_queue": "run created_at -> run_started_at; unavailable for reruns",
+                       "job_queue": "job created_at -> started_at; includes job concurrency admission",
+                       "dependency_scheduling": "run_started_at -> job created_at; includes needs and scheduling",
+                       "exclusions": "Skipped/cancelled jobs and unavailable/reused attempt timestamps",
+                       "limitation": "API timings alone cannot distinguish hosted capacity from concurrency waiting",
+                       "units": "minutes; p50 median, p90 nearest rank"},
+            "run_queue_minutes": distribution(row["run_queue_minutes"] for row in rows
+                                               if row["run_queue_minutes"] is not None),
+            "job_queue_minutes": distribution(queues),
+            "dependency_scheduling_minutes": distribution(scheduling),
+            "unavailable_job_ids": unavailable, "runs": rows}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path, help="Replay saved JSON without GitHub or Git")
-    source.add_argument("--repo", help="GitHub owner/repo; requires authenticated gh and local merge history")
+    source.add_argument("--repo", help="GitHub owner/repo; requires authenticated gh (merge mode also needs Git history)")
     parser.add_argument("--base", default="develop")
-    parser.add_argument("--limit", type=int, default=25)
+    parser.add_argument("--limit", type=int, help="Sample size (default: 25 merged PRs or 50 queue runs)")
+    parser.add_argument("--queue", action="store_true", help="Measure latest completed workflow runs, without Git history")
     parser.add_argument("--before", default=datetime.now(timezone.utc).isoformat(), help="Inclusive timezone-aware cutoff")
-    parser.add_argument("--workflow", default="test.yml")
+    parser.add_argument("--workflow", help="Workflow filename (default: test.yml; all workflows with --queue)")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--save", type=Path, help="Save collected input JSON for reproducible offline replay")
     args = parser.parse_args()
-    if args.limit < 1:
+    limit = args.limit if args.limit is not None else (50 if args.queue else 25)
+    if limit < 1:
         parser.error("--limit must be positive")
     if args.input and args.save:
         parser.error("--save applies to collection, not replay")
     try:
-        data = json.loads(args.input.read_text(encoding="utf-8")) if args.input else collect(
-            args.repo, args.base, args.limit, args.before, args.root, args.workflow)
+        if args.input:
+            data = json.loads(args.input.read_text(encoding="utf-8"))
+        elif args.queue:
+            data = collect_queue(args.repo, limit, args.before, args.workflow)
+        else:
+            data = collect(args.repo, args.base, limit, args.before, args.root, args.workflow or "test.yml")
         if args.save:
             args.save.parent.mkdir(parents=True, exist_ok=True)
             args.save.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(json.dumps(summarize(data), indent=2, ensure_ascii=False))
+        report = summarize_queue(data) if "runs" in data else summarize(data)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"ci_throughput: {error}\n")
 

@@ -1,0 +1,726 @@
+{
+  "observed_at": "2026-10-15T06:48:03.8210238Z",
+  "threads": [
+    {
+      "id": 38112,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 8.84375,
+      "elapsed_seconds": 15.1001133
+    },
+    {
+      "id": 36776,
+      "name": "gwt-monitor-runtime",
+      "cpu_seconds": 8.0625,
+      "elapsed_seconds": 15.1019369
+    },
+    {
+      "id": 29756,
+      "name": "gwt-agent-capacity",
+      "cpu_seconds": 1.625,
+      "elapsed_seconds": 15.1018666
+    },
+    {
+      "id": 37744,
+      "name": "gwt-runtime-daemon-publish-worker",
+      "cpu_seconds": 1.21875,
+      "elapsed_seconds": 15.1086739
+    },
+    {
+      "id": 30840,
+      "name": "",
+      "cpu_seconds": 0.984375,
+      "elapsed_seconds": 15.1033989
+    },
+    {
+      "id": 29952,
+      "name": "main",
+      "cpu_seconds": 0.71875,
+      "elapsed_seconds": 15.0856328
+    },
+    {
+      "id": 17144,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.125,
+      "elapsed_seconds": 15.100024
+    },
+    {
+      "id": 11472,
+      "name": "",
+      "cpu_seconds": 0.078125,
+      "elapsed_seconds": 15.1077272
+    },
+    {
+      "id": 36108,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0625,
+      "elapsed_seconds": 15.1093498
+    },
+    {
+      "id": 14468,
+      "name": "frontend-dispatch-watchdog",
+      "cpu_seconds": 0.03125,
+      "elapsed_seconds": 15.1021819
+    },
+    {
+      "id": 37276,
+      "name": "",
+      "cpu_seconds": 0.03125,
+      "elapsed_seconds": 15.1090172
+    },
+    {
+      "id": 33296,
+      "name": "gwt-daemon-subscriber",
+      "cpu_seconds": 0.03125,
+      "elapsed_seconds": 15.1059238
+    },
+    {
+      "id": 3700,
+      "name": "",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.1090834
+    },
+    {
+      "id": 6720,
+      "name": "",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.1108138
+    },
+    {
+      "id": 29988,
+      "name": "gwt-daemon-subscriber",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.1059944
+    },
+    {
+      "id": 32248,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.1071875
+    },
+    {
+      "id": 34724,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.0959549
+    },
+    {
+      "id": 37600,
+      "name": "",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.1100086
+    },
+    {
+      "id": 4540,
+      "name": "",
+      "cpu_seconds": 0.015625,
+      "elapsed_seconds": 15.1099441
+    },
+    {
+      "id": 37156,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1064713
+    },
+    {
+      "id": 31200,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1107497
+    },
+    {
+      "id": 30196,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1084619
+    },
+    {
+      "id": 17164,
+      "name": "gwt-daemon-subscriber",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1063228
+    },
+    {
+      "id": 36624,
+      "name": "tracing-appender",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1076378
+    },
+    {
+      "id": 35568,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1063958
+    },
+    {
+      "id": 34964,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1108793
+    },
+    {
+      "id": 27960,
+      "name": "tracing-appender",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.107532
+    },
+    {
+      "id": 33456,
+      "name": "tracing-appender",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.107446
+    },
+    {
+      "id": 33460,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1073454
+    },
+    {
+      "id": 24120,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1085858
+    },
+    {
+      "id": 34540,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1070122
+    },
+    {
+      "id": 26448,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1069455
+    },
+    {
+      "id": 11140,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1068784
+    },
+    {
+      "id": 35048,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1067745
+    },
+    {
+      "id": 29296,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1066976
+    },
+    {
+      "id": 31024,
+      "name": "gwt-daemon-subscriber",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.106542
+    },
+    {
+      "id": 10092,
+      "name": "tracing-appender",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1072709
+    },
+    {
+      "id": 25036,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1070774
+    },
+    {
+      "id": 30236,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1106061
+    },
+    {
+      "id": 21472,
+      "name": "gwt-board-watch-llmlb",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1102709
+    },
+    {
+      "id": 21552,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.110138
+    },
+    {
+      "id": 26204,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1100717
+    },
+    {
+      "id": 29216,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1098805
+    },
+    {
+      "id": 28176,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1098143
+    },
+    {
+      "id": 7872,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.109742
+    },
+    {
+      "id": 12676,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1096771
+    },
+    {
+      "id": 27644,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1096111
+    },
+    {
+      "id": 33976,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1095468
+    },
+    {
+      "id": 22484,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1094805
+    },
+    {
+      "id": 38012,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1094152
+    },
+    {
+      "id": 35504,
+      "name": "gwt-workspace-watch-llmlb",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1103374
+    },
+    {
+      "id": 12344,
+      "name": "gwt-error-reporter",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1092849
+    },
+    {
+      "id": 5732,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1092174
+    },
+    {
+      "id": 10768,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1104048
+    },
+    {
+      "id": 36868,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1104706
+    },
+    {
+      "id": 4896,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1091507
+    },
+    {
+      "id": 22548,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1105386
+    },
+    {
+      "id": 19220,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1089496
+    },
+    {
+      "id": 31468,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1088829
+    },
+    {
+      "id": 34196,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1088136
+    },
+    {
+      "id": 12340,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1087427
+    },
+    {
+      "id": 28808,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1106833
+    },
+    {
+      "id": 35912,
+      "name": "tracing-appender",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1102049
+    },
+    {
+      "id": 2728,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1048073
+    },
+    {
+      "id": 37380,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.105056
+    },
+    {
+      "id": 13644,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0996878
+    },
+    {
+      "id": 9084,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0980656
+    },
+    {
+      "id": 13176,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0979223
+    },
+    {
+      "id": 25140,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0977741
+    },
+    {
+      "id": 16912,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0976712
+    },
+    {
+      "id": 29780,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0975877
+    },
+    {
+      "id": 31060,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0974984
+    },
+    {
+      "id": 19188,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0973978
+    },
+    {
+      "id": 34856,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0972969
+    },
+    {
+      "id": 30168,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0971763
+    },
+    {
+      "id": 4612,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.097086
+    },
+    {
+      "id": 28228,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0998711
+    },
+    {
+      "id": 24612,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0970027
+    },
+    {
+      "id": 38340,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0968209
+    },
+    {
+      "id": 32936,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0967507
+    },
+    {
+      "id": 34204,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.096681
+    },
+    {
+      "id": 24492,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0965946
+    },
+    {
+      "id": 10252,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0963901
+    },
+    {
+      "id": 5464,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0962475
+    },
+    {
+      "id": 38460,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0961394
+    },
+    {
+      "id": 35476,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0960302
+    },
+    {
+      "id": 37376,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0958694
+    },
+    {
+      "id": 16524,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0957827
+    },
+    {
+      "id": 38372,
+      "name": "tracing-appender",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0955897
+    },
+    {
+      "id": 18468,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0968962
+    },
+    {
+      "id": 23216,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.0999495
+    },
+    {
+      "id": 16888,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1002327
+    },
+    {
+      "id": 17256,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1003085
+    },
+    {
+      "id": 27436,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1048731
+    },
+    {
+      "id": 33308,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1109438
+    },
+    {
+      "id": 36036,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1047426
+    },
+    {
+      "id": 21844,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1046755
+    },
+    {
+      "id": 1880,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1046074
+    },
+    {
+      "id": 22352,
+      "name": "notify-rs debouncer loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.104539
+    },
+    {
+      "id": 13660,
+      "name": "gwt-workspace-watch-unity-cli",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1044446
+    },
+    {
+      "id": 33352,
+      "name": "gwt-workspace-watch-KeibaSuite",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1043032
+    },
+    {
+      "id": 34504,
+      "name": "gwt-workspace-watch-160-Idina",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1042343
+    },
+    {
+      "id": 33020,
+      "name": "gwt-workspace-watch-gwt",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1041654
+    },
+    {
+      "id": 22708,
+      "name": "gwt-board-watch-unity-cli",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.104081
+    },
+    {
+      "id": 22724,
+      "name": "gwt-board-watch-KeibaSuite",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1039189
+    },
+    {
+      "id": 3500,
+      "name": "gwt-board-watch-160-Idina",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1036893
+    },
+    {
+      "id": 16936,
+      "name": "gwt-board-watch-gwt",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.103622
+    },
+    {
+      "id": 4352,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1035364
+    },
+    {
+      "id": 27692,
+      "name": "gwt-pane-close-process-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1033328
+    },
+    {
+      "id": 12152,
+      "name": "tokio-rt-worker",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1032602
+    },
+    {
+      "id": 3660,
+      "name": "runtime-namespace-gc",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1030969
+    },
+    {
+      "id": 34492,
+      "name": "frontend-dispatch-warnings",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1020735
+    },
+    {
+      "id": 24308,
+      "name": "gwt-index-refresh-drain",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1020056
+    },
+    {
+      "id": 33128,
+      "name": "gwt-verification-cap-relief",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1017683
+    },
+    {
+      "id": 36316,
+      "name": "terminal-convergence-tick",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1016901
+    },
+    {
+      "id": 27736,
+      "name": "runtime-daemon-ensure-tick",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1015237
+    },
+    {
+      "id": 30052,
+      "name": "issue-monitor-claim-renewal-tick",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1004447
+    },
+    {
+      "id": 36048,
+      "name": "issue-monitor-scheduled-tick",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.100376
+    },
+    {
+      "id": 33628,
+      "name": "notify-rs windows loop",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1058333
+    },
+    {
+      "id": 36768,
+      "name": "",
+      "cpu_seconds": 0.0,
+      "elapsed_seconds": 15.1110093
+    }
+  ],
+  "gui_pid": 32708
+}

@@ -1,0 +1,28 @@
+{
+  "observed_at": "2026-10-15T09:25:55.6206195Z",
+  "instrumented": false,
+  "profile": "diagnostic opt-level=0, existing target/debug dependencies",
+  "baseline_sha256": "e1a7f70534cbe5c2cd5a86287469113ea4bb931121dd9449557fb9d707ddb22f",
+  "current_sha256": "50f27f774c109ebb846d01de0e521ecfae75f95312c5046a6731cceaf3e06782",
+  "sessions_dir": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\sessions",
+  "roots": [
+    "E:\\gwt",
+    "E:\\160-Idina",
+    "E:\\KeibaSuite",
+    "E:\\unity-cli",
+    "E:\\llmlb"
+  ],
+  "instrumentation_note": "Instrumented CPU includes GetProcessTimes overhead per load; use an uninstrumented comparison for the improvement ratio.",
+  "gwt_library": "E:\\gwt\\work\\issue-5489\\target\\debug\\deps\\libgwt-61842958423a5674.rlib",
+  "gwt_library_sha256": "10aef7cbb35194f996f997dbb14b1e8e3344c5bbc1c23ea6df81cafb4306f6c4",
+  "source_commit": "598b8f0ff5c1222d2c26f684269ce828f5218c2d",
+  "shared_issue_monitor_sha256": "ef84f579e80eec14e07320b154580364336cd8f108512d492cd16732f4db7baf",
+  "dependency_base_commit": "4cb8fe4a032bf8b26908bae2cec0ed34e0f6c982",
+  "dependencies": [
+    "Issue #5498 / PR #5511",
+    "Issue #5499 / PR #5508"
+  ],
+  "monitor_baseline_sha256": "d12bb588b0fe798660d255bd2f524f0ba6509087b694c00a6b0e73f256cf3458",
+  "monitor_current_sha256": "bb105d9c2bc76fe46ec14485a3080bc78eb52f38db32cec344e5479ba3639742",
+  "prefs_manifest": "integrated-worker-prefs-manifest.json"
+}

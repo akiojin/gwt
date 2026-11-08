@@ -31,6 +31,8 @@ pub enum RunStatus {
 pub struct RunLifecycle {
     pub status: RunStatus,
     pub runner_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_started_at: Option<u64>,
     /// The private pipe carries the token; only its digest reaches a record.
     /// A record ID from a diagnostic mirror does not authorize interruption.
     pub watchdog_token_hash: String,
@@ -49,11 +51,42 @@ impl RunLifecycle {
         Self {
             status: RunStatus::Running,
             runner_pid: std::process::id(),
+            runner_started_at: crate::process::host_process_start_time(std::process::id()),
             watchdog_token_hash: token_hash(token),
             current_command: None,
             reason: None,
             external_terminations: None,
         }
+    }
+}
+
+/// A reused PID is not the old runner. Unreadable process identity retains
+/// the runner; only definite absence or an observed mismatch permits recovery.
+pub(super) fn runner_is_alive(
+    pid: u32,
+    started_at: Option<u64>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !crate::process::is_host_process_alive(pid) {
+        return false;
+    }
+    if let Some(expected) = started_at {
+        return crate::process::host_process_start_time(pid)
+            .is_none_or(|actual| actual == expected);
+    }
+    // Legacy records have no opaque identity. A strictly later process start
+    // proves reuse on platforms with stable epoch timestamps. Linux/WSL boot
+    // time can move while a process lives, so never use its epoch for identity.
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::process::host_process_start_epoch_secs(pid)
+            .and_then(|start| chrono::DateTime::from_timestamp(i64::try_from(start).ok()?, 0))
+            .is_none_or(|start| start <= created_at)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = created_at;
+        true
     }
 }
 
@@ -84,7 +117,11 @@ pub(super) fn previous_external_terminations(
         .as_ref()
         .filter(|lifecycle| lifecycle.status == RunStatus::Running)
     {
-        if crate::process::is_host_process_alive(lifecycle.runner_pid) {
+        if runner_is_alive(
+            lifecycle.runner_pid,
+            lifecycle.runner_started_at,
+            record.created_at,
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the previous verification runner is unsettled; wait for its terminal result before retrying (its watchdog may still be recording an external termination)",
@@ -113,6 +150,7 @@ pub(super) fn previous_external_terminations(
 pub(super) struct Watchdog {
     child: Child,
     pipe: Option<ChildStdin>,
+    detached: bool,
 }
 
 impl Watchdog {
@@ -133,7 +171,11 @@ impl Watchdog {
             .stderr(Stdio::null())
             .spawn()?;
         let pipe = child.stdin.take();
-        let mut watchdog = Self { child, pipe };
+        let mut watchdog = Self {
+            child,
+            pipe,
+            detached: false,
+        };
         let pipe = watchdog.pipe.as_mut().expect("piped stdin");
         pipe.write_all(token.as_bytes())?;
         pipe.write_all(b"\n")?;
@@ -147,6 +189,31 @@ impl Watchdog {
         }
         Ok(watchdog)
     }
+
+    /// Leave the already authenticated companion observing capacity after a
+    /// bounded deferral. It holds no lease and never executes the matrix.
+    pub(super) fn resume_after_deferral(&mut self) -> io::Result<()> {
+        if std::env::var_os(gwt_agent::GWT_PANE_WS_URL_ENV).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "self-pane endpoint unavailable",
+            ));
+        }
+        self.pipe.as_mut().expect("watchdog pipe").write_all(b"D")?;
+        drop(self.pipe.take());
+        self.detached = true;
+        Ok(())
+    }
+
+    /// Observe the original pane without blocking the admitted command or its
+    /// return. Keep the pipe open so runner death and cancellation still settle.
+    pub(super) fn resume_when_idle(&mut self) -> io::Result<()> {
+        if !self.detached && std::env::var_os(gwt_agent::GWT_PANE_WS_URL_ENV).is_some() {
+            self.pipe.as_mut().expect("watchdog pipe").write_all(b"A")?;
+            self.detached = true;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Watchdog {
@@ -156,7 +223,9 @@ impl Drop for Watchdog {
             // process death. A killed runner cannot send this byte.
             let _ = pipe.write_all(b"R");
         }
-        let _ = self.child.wait();
+        if !self.detached {
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -176,11 +245,32 @@ pub fn run_watchdog(worktree: &Path, record_id: &str) -> io::Result<()> {
     }
     io::stdout().write_all(READY.as_bytes())?;
     io::stdout().flush()?;
-    let mut returned = [0];
-    let normal_return = input.read(&mut returned)? != 0;
     if record_id.starts_with("vat-") {
-        super::cancellation::settle_watchdog(worktree, record_id, token, normal_return)
+        std::thread::scope(|scope| {
+            let mut observer = None;
+            loop {
+                let mut returned = [0];
+                let normal_return = input.read(&mut returned)? != 0;
+                if normal_return && returned[0] == b'A' {
+                    if observer.is_none() {
+                        observer = Some(scope.spawn(|| {
+                            if let Err(error) = super::admission_resume::run_admitted(worktree, record_id, token) {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }));
+                    }
+                    continue;
+                }
+                super::cancellation::settle_watchdog(worktree, record_id, token, normal_return)?;
+                if !normal_return || returned[0] == b'D' {
+                    super::admission_resume::run(worktree, record_id, token)?;
+                }
+                return Ok(());
+            }
+        })
     } else {
+        let mut returned = [0];
+        let normal_return = input.read(&mut returned)? != 0;
         settle_interrupted(worktree, record_id, token, normal_return)
     }
 }
@@ -369,6 +459,38 @@ mod tests {
             msg.to_string().contains("replaced or interrupted"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn legacy_reused_runner_pid_is_recovered_from_later_process_creation() {
+        let fixture = isolated_git_worktree();
+        let worktree = fixture.dir.path();
+        let mut record = super::super::tests::passing_record("predecessor", "unused");
+        record.lifecycle = Some(RunLifecycle::running("token"));
+        record.created_at = chrono::DateTime::from_timestamp(
+            crate::process::host_process_start_epoch_secs(std::process::id()).unwrap() as i64 - 1,
+            0,
+        )
+        .unwrap();
+        let mut document = serde_json::to_value(record).unwrap();
+        document["lifecycle"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runner_started_at");
+        let record = serde_json::from_value(document).unwrap();
+        save(worktree, &record).unwrap();
+        let count = crate::cli::trusted_store::with_write_lease(worktree, || {
+            previous_external_terminations(worktree, None)
+        })
+        .unwrap();
+        assert_eq!(count, None);
+        let recovered = load(worktree).unwrap().unwrap();
+        assert_eq!(
+            recovered.lifecycle.as_ref().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert!(!recovered.all_passed);
     }
 
     #[test]

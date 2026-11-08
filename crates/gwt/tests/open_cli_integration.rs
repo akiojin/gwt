@@ -175,8 +175,19 @@ impl Fixture {
             .expect("lock metadata")
             .permissions()
             .mode();
-        let payload = serde_json::from_str(&std::fs::read_to_string(&lock).expect("read lock"))
-            .expect("lock json");
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let payload = loop {
+            // set_url rewrites the locked file in place. Readiness can race
+            // that rewrite, so observe a complete payload before asserting it.
+            let contents = std::fs::read_to_string(&lock).expect("read lock");
+            match serde_json::from_str(&contents) {
+                Ok(payload) => break payload,
+                Err(error) if error.is_eof() && Instant::now() < deadline => {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Err(error) => panic!("lock json: {error}"),
+            }
+        };
         (payload, mode & 0o777)
     }
 }

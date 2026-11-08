@@ -8,6 +8,7 @@
 // its original app.js indentation.
 import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
 import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+import { createUiStateStore } from "/ui-state-store.js";
 
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -118,9 +119,17 @@ export function createTerminalAttachments({
       }
 
       const attachmentProgressControllers = new Map();
+      const attachmentProgressModel = createUiStateStore(null);
+      // This surface shares the app's document lifetime. Keep only the latest
+      // received snapshot; upload controllers and timers stay outside the model.
+      attachmentProgressModel.subscribe(progress => progress, progress => {
+        if (progress) renderAttachmentProgress(progress);
+      });
 
       function ensureAttachmentProgressSurface(windowId) {
-        const host = workspaceWindowElement(windowId) || document.body;
+        const terminalHost = terminalMap.get(windowId)?.terminalContainer;
+        const host = terminalHost?.dataset.windowId === windowId
+          ? terminalHost : workspaceWindowElement(windowId) || document.body;
         let surface = host.querySelector(".attachment-progress");
         if (surface) {
           return surface;
@@ -276,6 +285,19 @@ export function createTerminalAttachments({
       }
 
       function handleAttachmentProgress(event) {
+        if (!event?.operation_id) return;
+        attachmentProgressModel.update(() => ({
+          id: event.id,
+          operation_id: event.operation_id,
+          phase: event.phase,
+          filename: event.filename,
+          bytes_total: event.bytes_total,
+          bytes_done: event.bytes_done,
+          message: event.message,
+        }));
+      }
+
+      function renderAttachmentProgress(event) {
         const operationId = event?.operation_id || "";
         if (!operationId) {
           return;
@@ -318,6 +340,10 @@ export function createTerminalAttachments({
               throw new Error("attachment upload token missing");
             }
             return payload.token;
+          }).catch((error) => {
+            // A transient failure must not poison every later user paste/drop.
+            attachmentUploadTokenPromise = null;
+            throw error;
           });
         }
         return attachmentUploadTokenPromise;
@@ -344,7 +370,8 @@ export function createTerminalAttachments({
               const xhr = new XMLHttpRequest();
               xhr.open("POST", `/internal/attachments/upload?${params.toString()}`);
               xhr.setRequestHeader("x-gwt-upload-token", token);
-              xhr.responseType = "json";
+              // Keep failure bodies too: storage errors are plain-text responses.
+              xhr.responseType = "text";
               xhr.upload.onprogress = (event) => {
                 onProgress?.({
                   loaded: event.loaded || 0,
@@ -353,12 +380,18 @@ export function createTerminalAttachments({
               };
               xhr.onload = () => {
                 if (xhr.status < 200 || xhr.status >= 300) {
-                  reject(new Error(`upload failed: ${xhr.status}`));
+                  const detail = typeof xhr.response === "string" ? xhr.response : xhr.responseText;
+                  reject(new Error(`HTTP ${xhr.status}: ${detail || xhr.statusText || "attachment upload failed"}`));
                   return;
                 }
-                resolve(xhr.response || JSON.parse(xhr.responseText || "{}"));
+                try {
+                  resolve(typeof xhr.response === "object" && xhr.response
+                    ? xhr.response : JSON.parse(xhr.responseText || xhr.response || "{}"));
+                } catch (error) {
+                  reject(new Error(`Invalid attachment upload response (HTTP ${xhr.status}): ${error.message}`));
+                }
               };
-              xhr.onerror = () => reject(new Error("upload failed"));
+              xhr.onerror = () => reject(new Error("attachment upload network error (HTTP 0)"));
               xhr.onabort = () => reject(new Error("upload aborted"));
               signal?.addEventListener("abort", () => xhr.abort(), { once: true });
               xhr.send(file);
@@ -412,9 +445,12 @@ export function createTerminalAttachments({
             filename: uploaded.filename || file.name || filename || null,
             size: uploaded.size ?? file.size ?? 0,
           });
-        } catch (_error) {
-          progress.fail(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
-          showFileDropAlert(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
+        } catch (error) {
+          const message = `${IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE} ${error?.message || String(error)}`;
+          progress.fail(message);
+          send({ kind: "attachment_upload_failed", id: windowId,
+            operation_id: progress.operationId, message });
+          showFileDropAlert(message);
         }
       }
 
@@ -583,14 +619,15 @@ export function createTerminalAttachments({
           return false;
         });
 
-        terminalRoot.addEventListener("mousedown", handleMouseDown);
+        // xterm stops forced-selection mousedown from bubbling in mouse mode.
+        terminalRoot.addEventListener("mousedown", handleMouseDown, true);
         window.addEventListener("mousemove", handleMouseMove, true);
         window.addEventListener("mouseup", handleMouseUp, true);
         window.addEventListener("blur", handleWindowBlur);
 
         return () => {
           terminal.attachCustomKeyEventHandler(() => true);
-          terminalRoot.removeEventListener("mousedown", handleMouseDown);
+          terminalRoot.removeEventListener("mousedown", handleMouseDown, true);
           window.removeEventListener("mousemove", handleMouseMove, true);
           window.removeEventListener("mouseup", handleMouseUp, true);
           window.removeEventListener("blur", handleWindowBlur);
@@ -671,6 +708,8 @@ export function createTerminalAttachments({
           document,
           window,
           terminalRoot,
+          hasSelection: () => terminal.hasSelection(),
+          copySelection: () => copyTerminalSelection(windowId),
           readClipboardText: readNavigatorClipboardText,
           readClipboardItems: readNavigatorClipboardItems,
           supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
@@ -694,14 +733,21 @@ export function createTerminalAttachments({
         };
       }
 
+      function attachmentWindowIdFromElement(element) {
+        const full = element?.closest?.(".works-full");
+        if (full && !full.hidden && !full.closest(".works-surface--preview")) {
+          return full.querySelector(".works-terminal[data-window-id]")?.dataset.windowId || null;
+        }
+        return element?.closest?.(".workspace-window")?.dataset?.id || null;
+      }
+
       function terminalWindowIdFromPoint(x, y) {
         if (!Number.isFinite(x) || !Number.isFinite(y)) {
           return null;
         }
         const target = document.elementFromPoint(x, y);
         const terminalRoot = target?.closest?.(".terminal-root");
-        const windowElement = terminalRoot?.closest?.(".workspace-window");
-        const windowId = windowElement?.dataset?.id || null;
+        const windowId = attachmentWindowIdFromElement(terminalRoot);
         if (!windowId || !terminalMap.has(windowId)) {
           return null;
         }
@@ -709,8 +755,7 @@ export function createTerminalAttachments({
       }
 
       function workspaceWindowIdFromDropEvent(event) {
-        const targetWindow = event.target?.closest?.(".workspace-window");
-        const targetWindowId = targetWindow?.dataset?.id || null;
+        const targetWindowId = attachmentWindowIdFromElement(event.target);
         if (targetWindowId) {
           return targetWindowId;
         }
@@ -720,8 +765,7 @@ export function createTerminalAttachments({
           return null;
         }
         const pointTarget = document.elementFromPoint(x, y);
-        const pointWindow = pointTarget?.closest?.(".workspace-window");
-        return pointWindow?.dataset?.id || null;
+        return attachmentWindowIdFromElement(pointTarget);
       }
 
       function eventTargetsPmReports(event) {

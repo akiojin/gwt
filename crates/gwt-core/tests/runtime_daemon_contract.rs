@@ -947,3 +947,35 @@ fn bootstrap_retires_a_live_daemon_of_another_version_instead_of_reusing_it() {
         "a dead stale-version daemon is simply replaced: {dead:?}"
     );
 }
+
+#[test]
+fn daemon_endpoint_preserves_startup_intent_and_defaults_legacy_to_standalone() {
+    let root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "abcdef0123456789",
+        "feedfacecafebeef",
+        root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope,
+        42,
+        "fixture.sock".into(),
+        "token".into(),
+        "test".into(),
+    );
+    let mut legacy = serde_json::to_value(&endpoint).unwrap();
+    legacy.as_object_mut().unwrap().remove("startup_intent");
+    let decoded: DaemonEndpoint = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["startup_intent"],
+        "standalone"
+    );
+    legacy["startup_intent"] = json!("gui_managed");
+    let decoded: DaemonEndpoint = serde_json::from_value(legacy).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["startup_intent"],
+        "gui_managed"
+    );
+}

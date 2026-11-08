@@ -2,6 +2,8 @@
 
 #[path = "../agent_process_resolution_contract_test.rs"]
 mod agent_process_resolution_contract_test;
+#[path = "../agent_switch_checkpoint_test.rs"]
+mod agent_switch_checkpoint_test;
 #[path = "../autostart_protocol_test.rs"]
 mod autostart_protocol_test;
 #[path = "../branch_cleanup_protocol_test.rs"]
@@ -12,6 +14,8 @@ mod branch_cleanup_reconnect_test;
 mod branch_cleanup_test;
 #[path = "../branch_list_test.rs"]
 mod branch_list_test;
+#[path = "../daemon_logging_test.rs"]
+mod daemon_logging_test;
 #[path = "../daemon_project_root_test.rs"]
 mod daemon_project_root_test;
 #[path = "../daemon_runtime_hook_test.rs"]
@@ -20,10 +24,6 @@ mod daemon_runtime_hook_test;
 mod daemon_socket_path_limit_test;
 #[path = "../daemon_supervisor_test.rs"]
 mod daemon_supervisor_test;
-#[path = "../file_content_test.rs"]
-mod file_content_test;
-#[path = "../file_tree_test.rs"]
-mod file_tree_test;
 #[path = "../gui_single_instance_test.rs"]
 mod gui_single_instance_test;
 #[path = "../index_bootstrap_test.rs"]
@@ -42,6 +42,14 @@ mod index_search_public_api_test;
 mod index_status_batch_test;
 #[path = "../knowledge_bridge_test.rs"]
 mod knowledge_bridge_test;
+#[path = "../launch_authority_test.rs"]
+mod launch_authority_test;
+#[path = "../launch_payload_test.rs"]
+mod launch_payload_test;
+#[path = "../launch_readiness_test.rs"]
+mod launch_readiness_test;
+#[path = "../launch_recovery_test.rs"]
+mod launch_recovery_test;
 #[path = "../managed_assets_test.rs"]
 mod managed_assets_test;
 #[path = "../migration_e2e_test.rs"]
@@ -50,8 +58,12 @@ mod migration_e2e_test;
 mod migration_single_branch_test;
 #[path = "../perf_regression_test.rs"]
 mod perf_regression_test;
+#[path = "../pm_planning_state_test.rs"]
+mod pm_planning_state_test;
 #[path = "../project_open_e2e_contract_test.rs"]
 mod project_open_e2e_contract_test;
+#[path = "../project_runtime_owner_test.rs"]
+mod project_runtime_owner_test;
 #[path = "../project_runtime_ownership_test.rs"]
 mod project_runtime_ownership_test;
 #[path = "../pty_start_gate_console_test.rs"]

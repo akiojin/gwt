@@ -1,0 +1,26 @@
+{
+  "workers": 12,
+  "duration_seconds": 90.04969059998984,
+  "rounds": 18,
+  "binary": "E:\\gwt\\work\\issue-5542\\target\\issue-5542-baseline.exe",
+  "test_budget_override_ms": 500,
+  "binary_sha256": "2c132912f359ae9029f91109124bbb0bd5c10ebc49c6d36e40989f6cda450670",
+  "source_sha": "490a2b310ca3e4440144faa2bc59b58a60af3ab2",
+  "workload": "isolated cold-process transport; not a real agent fleet",
+  "modes": {
+    "current": {
+      "samples": 216,
+      "failures": 0,
+      "p50_ms": 10.6226,
+      "p95_ms": 121.8286,
+      "max_ms": 407.2342
+    },
+    "plain": {
+      "samples": 216,
+      "failures": 0,
+      "p50_ms": 6.2186,
+      "p95_ms": 86.72059999999999,
+      "max_ms": 309.3575
+    }
+  }
+}

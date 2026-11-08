@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "owner_issue": 5390,
+  "slice": "empty execution observation",
+  "agent_name": "サチコ",
+  "baseline": {
+    "label": "before",
+    "head": "2f13aab11494bd572f9265f0e707326526a78206",
+    "source_sha256": "54a3eda53bbb48c0e7a439c864979438f9f5771f808001f56e9f05b6fc70d11e",
+    "probe_source_sha256": "214c1ef9a9af4e0ed1277396e3e452e2ccb45f3c7ea04107b0b4ac38fd317ffa",
+    "binary_sha256": "5ca138e3dd6c03dba25bdd26e8dc7bedc7c0b425ba60e69a8d63616a76467754",
+    "started_utc": "2026-11-01T08:45:00.6017399Z",
+    "ended_utc": "2026-11-01T08:45:06.4053656Z",
+    "result": {
+      "input_issues": [],
+      "project_root": "E:\\llmlb",
+      "samples": [
+        {
+          "cpu_seconds": 0.90625,
+          "index": 0,
+          "result_count": 0,
+          "wall_ms": 938.4819
+        },
+        {
+          "cpu_seconds": 0.25,
+          "index": 1,
+          "result_count": 0,
+          "wall_ms": 240.3447
+        },
+        {
+          "cpu_seconds": 0.21875,
+          "index": 2,
+          "result_count": 0,
+          "wall_ms": 231.34650000000002
+        },
+        {
+          "cpu_seconds": 0.234375,
+          "index": 3,
+          "result_count": 0,
+          "wall_ms": 229.3259
+        },
+        {
+          "cpu_seconds": 0.234375,
+          "index": 4,
+          "result_count": 0,
+          "wall_ms": 227.14880000000002
+        },
+        {
+          "cpu_seconds": 0.21875,
+          "index": 5,
+          "result_count": 0,
+          "wall_ms": 235.4503
+        },
+        {
+          "cpu_seconds": 0.234375,
+          "index": 6,
+          "result_count": 0,
+          "wall_ms": 230.91039999999998
+        },
+        {
+          "cpu_seconds": 0.21875,
+          "index": 7,
+          "result_count": 0,
+          "wall_ms": 230.18189999999998
+        },
+        {
+          "cpu_seconds": 0.234375,
+          "index": 8,
+          "result_count": 0,
+          "wall_ms": 238.0663
+        },
+        {
+          "cpu_seconds": 0.21875,
+          "index": 9,
+          "result_count": 0,
+          "wall_ms": 227.4459
+        },
+        {
+          "cpu_seconds": 0.21875,
+          "index": 10,
+          "result_count": 0,
+          "wall_ms": 219.23989999999998
+        },
+        {
+          "cpu_seconds": 0.21875,
+          "index": 11,
+          "result_count": 0,
+          "wall_ms": 216.00369999999998
+        }
+      ]
+    }
+  },
+  "fixed": {
+    "label": "after",
+    "head": "2f13aab11494bd572f9265f0e707326526a78206",
+    "source_sha256": "ffd9702e76c550c9eb8817c6e803450ba9ce84bebcf5f7de606a729fe4ddef3d",
+    "probe_source_sha256": "214c1ef9a9af4e0ed1277396e3e452e2ccb45f3c7ea04107b0b4ac38fd317ffa",
+    "binary_sha256": "0c01e38f4a0f9462ef2e05192436bae05214ee8cff002612551830a3a93b962e",
+    "started_utc": "2026-11-01T08:54:19.4592195Z",
+    "ended_utc": "2026-11-01T08:54:21.5167823Z",
+    "result": {
+      "input_issues": [],
+      "project_root": "E:\\llmlb",
+      "samples": [
+        {
+          "cpu_seconds": 0.0,
+          "index": 0,
+          "result_count": 0,
+          "wall_ms": 0.0374
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 1,
+          "result_count": 0,
+          "wall_ms": 0.00039999999999999996
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 2,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 3,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 4,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 5,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 6,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 7,
+          "result_count": 0,
+          "wall_ms": 0.00019999999999999998
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 8,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 9,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 10,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        },
+        {
+          "cpu_seconds": 0.0,
+          "index": 11,
+          "result_count": 0,
+          "wall_ms": 0.0003
+        }
+      ]
+    }
+  },
+  "probe_source": "use std::{path::PathBuf, time::Instant};\nuse windows::Win32::{\n    Foundation::FILETIME,\n    System::Threading::{GetCurrentProcess, GetProcessTimes},\n};\n\nfn cpu_seconds() -> f64 {\n    let (mut created, mut exited, mut kernel, mut user) = (\n        FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default(),\n    );\n    unsafe {\n        GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user).unwrap();\n    }\n    let ticks = |time: FILETIME| ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;\n    (ticks(kernel) + ticks(user)) as f64 / 10_000_000.0\n}\n\nfn main() {\n    let root = PathBuf::from(std::env::args_os().nth(1).expect(\"project root\"));\n    let mut samples = Vec::new();\n    for index in 0..12 {\n        let cpu = cpu_seconds();\n        let started = Instant::now();\n        let result = gwt::issue_monitor_worker::read_execution_observations(&root, &[]);\n        let elapsed = started.elapsed().as_secs_f64() * 1000.0;\n        let cpu = cpu_seconds() - cpu;\n        assert!(result.is_empty());\n        samples.push(serde_json::json!({\"index\":index,\"wall_ms\":elapsed,\"cpu_seconds\":cpu,\"result_count\":result.len()}));\n    }\n    println!(\"{}\", serde_json::json!({\"project_root\":root,\"input_issues\":[],\"samples\":samples}));\n}\n",
+  "red": "   Compiling gwt v9.146.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 58s\r\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt-a3ce5d46eaaaa590.exe)\r\n\r\nrunning 1 test\r\n\r\nthread 'issue_monitor_worker::tests::empty_execution_observations_skip_runtime_and_git_reads' (47880) panicked at crates\\gwt\\src\\issue_monitor_worker.rs:3878:9:\r\nassertion `left == right` failed: no owners means no runtime census or worktree lookup is needed\r\n  left: 1\r\n right: 0\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\ntest issue_monitor_worker::tests::empty_execution_observations_skip_runtime_and_git_reads ... FAILED\r\n\r\nfailures:\r\n\r\nfailures:\r\n    issue_monitor_worker::tests::empty_execution_observations_skip_runtime_and_git_reads\r\n\r\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4973 filtered out; finished in 2.32s\r\n\r\nerror: test failed, to rerun pass `-p gwt --lib`\r\n",
+  "green": "   Compiling gwt v9.146.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 56s\r\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt-a3ce5d46eaaaa590.exe)\r\n\r\nrunning 1 test\r\ntest issue_monitor_worker::tests::empty_execution_observations_skip_runtime_and_git_reads ... ok\r\n\r\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4973 filtered out; finished in 0.00s\r\n\r\n",
+  "live_process_observation": {
+    "raw_sha256": "621401d10a9888f9b42ee140d20d1111a7ce34b60e69ac6b14045b9deb8fd8a9",
+    "binary_sha256": "e1d81adafce0bbe733a4d57c9bfd87bfb5a95045bfea529eee84c6804e787d25",
+    "cpu_seconds": 51.265625,
+    "process_id": 38952,
+    "sample_started_at": "2026-11-01T08:33:13.981746Z",
+    "process_started_at": "2026-10-31T01:31:25.3381116Z",
+    "sample_ended_at": "2026-11-01T08:33:44.0483463Z",
+    "elapsed_seconds": 30.0667689
+  },
+  "preflight": {
+    "context": "current",
+    "convergence": "converged",
+    "diagnostics": [],
+    "normal_completion": "missing",
+    "reasons": [
+      "ledger_unavailable",
+      "completion_missing"
+    ],
+    "result": "unknown",
+    "schema_version": 1
+  },
+  "preflight_raw_sha256": "9636ca689f7377d88a5eb6bde37574318a9689f4caeb5277889f45082f490492",
+  "feedback": {
+    "issue": 6635,
+    "state": "sent",
+    "request_id": "088595ed-b766-4b46-8421-fb97bab7b820"
+  },
+  "limitations": [
+    "The native probe runs a read-only empty input against the real E:/llmlb and current Session store. It is not a scan replay, a fixed fleet or a GUI CPU measurement.",
+    "The before executable was compiled from the recorded HEAD before adding the cfg(test)-only regression. source_sha256 is the worktree file at sample time. The after worktree adds the three-line guard. Probe source SHA256 is identical.",
+    "GetProcessTimes measures the probe process, excluding child Git and compiler CPU. Zero after ticks means below its observed resolution in the short loop, not zero GUI CPU.",
+    "Only the new regression directly measures the Git spawn count (1 -> 0). Skipping runtime census is established by the guard preceding all inventory and worker construction.",
+    "The independent scan log summaries have no per-call owner count/PID and may be nested. Do not treat 478 calls / 79619.8195ms as all empty, removed latency or GUI CPU.",
+    "The installed process observation remains about 1.705 cores. No production GUI was stopped, replaced or restarted. Noninvasive/no-suspend stack capture had no product symbols; CPU causation remains unproven.",
+    "The parent AC-1/2/3, real eight-Agent 60-minute and four-hour budgets, installed rollout and PM prompt availability remain unproven.",
+    "The managed-browser preflight returned unknown. Per PM ruling db103f30, proceed with backend canonical verification and retain the headed gate until Issue #6622 is delivered. No Ready PR or overall delivery claim is supported by these measurements."
+  ]
+}

@@ -116,6 +116,7 @@ fn emit_docker_end(spawn_id: u64, action: &str, exit_code: Option<i32>, duration
     gwt_core::process::push_command_summary_to_hub(
         gwt_core::process_console::ProcessKind::Docker,
         spawn_id,
+        action,
         exit_code,
         duration_ms,
     );

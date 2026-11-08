@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import chroma_index_runner as runner
+from tests.git_fixture import git_fixture_env
 
 
 class IndexPathPolicyTests(unittest.TestCase):
@@ -35,7 +36,10 @@ class IndexPathPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
-            subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "init", str(root)], check=True, capture_output=True,
+                env=git_fixture_env(),
+            )
             (root / ".git" / "info" / "exclude").write_text(
                 "local-secret.txt\n",
                 encoding="utf-8",

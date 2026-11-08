@@ -45,7 +45,6 @@ function createPicker(fixture, { sent = [], launchPending, createOperationId } =
     dialogEl: fixture.dialogEl,
     createNode: fixture.createNode,
     send: (message) => sent.push(message),
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
     createOperationId: createOperationId || (() => defaultOperationId),
   });

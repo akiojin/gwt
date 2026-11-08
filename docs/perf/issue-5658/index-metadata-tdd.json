@@ -1,0 +1,36 @@
+{
+  "task": "T-5658-8",
+  "changed_file": "crates/gwt/src/index_worker.rs",
+  "incremental_diff": {"added": 86, "removed": 4},
+  "red": {
+    "command": "cargo test -p gwt --lib index_worker::tests::source_poll_detects_edits_in_each_registered_worktree -- --exact --nocapture",
+    "exit_code": 1,
+    "failed": 1,
+    "failure": "regular file parent metadata probe actual 1, expected 0",
+    "build_seconds": 394,
+    "test_seconds": 5.77
+  },
+  "green": [
+    {
+      "command": "cargo test -p gwt --lib index_worker::tests::source_poll_detects_edits_in_each_registered_worktree -- --exact --nocapture",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "build_seconds": 330,
+      "test_seconds": 12.23
+    },
+    {
+      "command": "cargo test -p gwt --lib index_worker::tests::reports_refresh_observes_both_durable_sources_and_coalesces_noop -- --exact --nocapture",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "build_seconds": 10.67,
+      "test_seconds": 0.14
+    }
+  ],
+  "diff_check": "PASS",
+  "candidate_rustfmt": "PASS",
+  "applied_source_matches_reviewed_candidate": true,
+  "cargo_active_at_handoff": false,
+  "scope": "Windows per-snapshot metadata reuse, existing fingerprint/quiet-window/cadence contracts unchanged; whole GUI measurement pending"
+}

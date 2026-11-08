@@ -2,6 +2,31 @@
 //!
 //! These functions return the owned pane. Callers install it and retain the
 //! handshake guard through publication or uncertain-launch reconciliation.
+pub mod agent_dispatch;
+pub mod agent_frontend;
+pub(crate) mod agent_switch;
+pub mod client;
+pub mod continuation;
+pub mod events;
+pub mod installation;
+pub mod launch;
+pub mod launch_authority;
+pub mod launch_finalization;
+pub mod launch_output_mirror;
+pub mod launch_payload;
+pub mod launch_readiness;
+pub mod monitor;
+pub(crate) mod owner;
+pub mod pm_delivery;
+pub(crate) mod presence;
+pub mod runtime_events;
+pub mod startup;
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[doc(hidden)]
+pub mod test_support;
+pub(crate) mod transport;
+pub mod workspace;
+
 use gwt_terminal::{
     pty::{ProcessPolicy, SpawnConfig},
     Pane,
@@ -113,16 +138,43 @@ impl Drop for ActiveLaunchHandshakeCleanup {
 }
 
 /// Spawn a shell or unbound agent, recording physical observation when supplied.
+/// Required observations must be durable before releasing a gated target.
 pub fn spawn_unbound_pane(
     id: &str,
     spawn_config: SpawnConfig,
     policy_gate: Option<(ProcessPolicy, PathBuf, Vec<String>)>,
     incarnation: u64,
     observation: Option<(&Path, &str)>,
+    require_observation: bool,
 ) -> Result<Pane, String> {
-    let record_observation = |child_pid: Option<u32>| {
+    spawn_unbound_pane_with_attempt_observer(
+        id,
+        spawn_config,
+        policy_gate,
+        incarnation,
+        observation,
+        require_observation,
+        || {},
+    )
+}
+
+/// Observe the OS child-spawn boundary of an unbound or gated pane.
+pub fn spawn_unbound_pane_with_attempt_observer(
+    id: &str,
+    spawn_config: SpawnConfig,
+    policy_gate: Option<(ProcessPolicy, PathBuf, Vec<String>)>,
+    incarnation: u64,
+    observation: Option<(&Path, &str)>,
+    require_observation: bool,
+    on_attempt: impl FnOnce(),
+) -> Result<Pane, String> {
+    let record_observation = |child_pid: Option<u32>| -> Result<(), String> {
         let Some((sessions_dir, session_id)) = observation else {
-            return;
+            return if require_observation {
+                Err("required agent process observation has no Session target".into())
+            } else {
+                Ok(())
+            };
         };
         // Unbound launches and automatic restores need the same physical
         // process observation as producing launches. This does not grant
@@ -161,28 +213,46 @@ pub fn spawn_unbound_pane(
         if let Err(error) = observation {
             tracing::warn!(window_id = %id, session_id = %session_id, %error,
                     "agent process observation could not be persisted");
+            if require_observation {
+                return Err(format!(
+                    "required agent process observation could not be persisted: {error}"
+                ));
+            }
         }
+        Ok(())
     };
     // SPEC #1921 Phase 86 (#3813): a policy-bearing AgentBootstrap launch
     // goes through the start gate so priority / Job limits exist before
     // the target can create its first descendant. Shell panes stay direct.
     let pane = if let Some((policy, gate_program, gate_args)) = policy_gate {
-        let pending = Pane::new_pending_with_spawn_config(
+        let pending = Pane::new_pending_with_spawn_config_and_attempt_observer(
             id.to_string(),
             spawn_config,
             gate_program,
             gate_args,
             uuid::Uuid::new_v4().to_string(),
+            on_attempt,
         )
         .map_err(|error| error.to_string())?;
         best_effort_apply_policy(id, &pending, policy);
         // Finish the Session lease transaction before SessionStart can run.
-        record_observation(pending.process_id());
+        record_observation(pending.process_id())?;
         pending.release().map_err(|error| error.to_string())?
     } else {
-        let pane = Pane::new_with_spawn_config(id.to_string(), spawn_config)
-            .map_err(|error| error.to_string())?;
-        record_observation(pane.pty().process_id());
+        let pane = Pane::new_with_spawn_config_and_attempt_observer(
+            id.to_string(),
+            spawn_config,
+            on_attempt,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Err(error) = record_observation(pane.pty().process_id()) {
+            let cleanup = pane
+                .kill()
+                .err()
+                .map(|error| format!("; owned pane cleanup failed: {error}"))
+                .unwrap_or_default();
+            return Err(format!("{error}{cleanup}"));
+        }
         pane
     };
     Ok(pane)
@@ -198,13 +268,38 @@ pub fn spawn_bound_pane(
     expected: &gwt_agent::SessionExecutionIdentity,
     handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
 ) -> Result<Pane, String> {
+    spawn_bound_pane_with_attempt_observer(
+        id,
+        spawn_config,
+        resource_policy,
+        gate,
+        incarnation,
+        expected,
+        handshake_cleanup,
+        || {},
+    )
+}
+
+/// Observe the gated producing child's OS spawn attempt before proof publication.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_bound_pane_with_attempt_observer(
+    id: &str,
+    spawn_config: SpawnConfig,
+    resource_policy: Option<ProcessPolicy>,
+    gate: (PathBuf, Vec<String>),
+    incarnation: u64,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
+    on_attempt: impl FnOnce(),
+) -> Result<Pane, String> {
     let (gate_program, gate_args) = gate;
-    let pending = Pane::new_pending_with_spawn_config(
+    let pending = Pane::new_pending_with_spawn_config_and_attempt_observer(
         id.to_string(),
         spawn_config,
         gate_program,
         gate_args,
         uuid::Uuid::new_v4().to_string(),
+        on_attempt,
     )
     .map_err(|error| error.to_string())?;
     let child_pid = pending.process_id().ok_or_else(|| {
@@ -263,18 +358,30 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn physical_spawn_completes_without_gui_runtime() {
+        use std::io::Read;
+
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cwd = tempfile::tempdir().expect("isolated child directory");
         let config = gwt_terminal::pty::SpawnConfig {
             command: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exit 0".to_string()],
+            args: vec!["-c".to_string(), "printf '%65536s' ''; exit 0".to_string()],
             cols: 80,
             rows: 24,
             env: Default::default(),
             remove_env: Vec::new(),
-            cwd: None,
+            cwd: Some(cwd.path().to_path_buf()),
         };
-        let mut pane = super::spawn_unbound_pane("shared-spawn", config, None, 1, None)
+        let mut pane = super::spawn_unbound_pane("shared-spawn", config, None, 1, None, false)
             .expect("spawn without AppRuntime or event loop");
         assert!(pane.pty().process_id().is_some());
+        // Match the production reader: undrained PTY output can prevent exit.
+        let mut reader = pane.reader().expect("child output reader");
+        let output = std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while reader.read(&mut buffer).is_ok_and(|read| read > 0) {}
+        });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if *pane.check_status().expect("check child status")
@@ -289,5 +396,55 @@ mod tests {
             pane.last_exit().is_some(),
             "spawn retains the process exit receipt"
         );
+        output.join().expect("output reader completes");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn required_unbound_observation_refuses_blocked_runtime_publication() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let sessions = home.path().join("sessions");
+        let session = gwt_agent::Session::new(home.path(), "main", gwt_agent::AgentId::Codex);
+        session.save(&sessions).expect("persist Session");
+        std::fs::write(sessions.join("runtime"), b"not a directory")
+            .expect("block runtime publication");
+        let config = || gwt_terminal::pty::SpawnConfig {
+            command: "/bin/cat".into(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            env: Default::default(),
+            remove_env: Vec::new(),
+            cwd: Some(home.path().to_path_buf()),
+        };
+        let failure = match super::spawn_unbound_pane(
+            "required-publication",
+            config(),
+            None,
+            1,
+            Some((&sessions, &session.id)),
+            true,
+        ) {
+            Err(error) => error,
+            Ok(pane) => {
+                pane.kill().expect("clean up unexpected pane");
+                panic!("required runtime publication must refuse the launch");
+            }
+        };
+        assert!(failure.contains("observation"), "{failure}");
+        let pane = super::spawn_unbound_pane(
+            "ordinary-publication",
+            config(),
+            None,
+            2,
+            Some((&sessions, &session.id)),
+            false,
+        )
+        .expect("ordinary observation remains best effort");
+        pane.kill().expect("clean up ordinary pane");
     }
 }

@@ -487,6 +487,7 @@ impl LaunchWizardState {
             LaunchWizardAction::SetLaunchTarget { target } => {
                 self.set_launch_target(target);
             }
+            LaunchWizardAction::SetAgentMember { .. } => {}
             LaunchWizardAction::SetAgent { agent_id } => {
                 self.set_agent_id(&agent_id);
             }

@@ -1,0 +1,30 @@
+{
+  "profile": "shipping release defaults",
+  "git_head": "8d2087d43d989904ae94f38cdd4395c3c1e7c69f",
+  "rejected_native_origin_fastpath_absent": true,
+  "started_at": "2026-11-04T20:50:47.9275034Z",
+  "name": "R5",
+  "compiled_working_tree": true,
+  "source_files": {
+    "crates/gwt/src/cli/tray/lifetime.rs": "e660c0522bda9bb919b6a5b576a6a56f528db663491a27f8c396f14fe877d15f",
+    "crates/gwt/src/cli/daemon/server.rs": "ba711b381b4f61ba543b7c840d6ba3ba649281476cb23f4f4f2313561e1eb51b",
+    "crates/gwt/src/process.rs": "32eecee3f2db15da2ec72aa0cf6c482c0da774319f1333e6901282433d3d1861",
+    "crates/gwt/src/usage_poller.rs": "4c6db06f51cc3438d6c7694b6ba1f7d0f2b2ff80de772add1a43857cd8aad79c",
+    "crates/gwt-core/src/index/path_policy.rs": "cce878463b91533f088c3593797590767d63c737d7f25c74cfb40e8ed01541a5",
+    "crates/gwt/src/session_inventory.rs": "01d1fb1a14904822fe914494a6a92489f5a11bd6b3ac634469c4d1d93aa0cc4b",
+    "crates/gwt/src/monitor_duplicate_runtime.rs": "97e852f58b6559f170b396cb91b2a889e626cb867bfd00c232ac86c7ef7ff80b"
+  },
+  "debug_artifacts": {
+    "gwt.pdb": "6ddcac1c11598ff455c82ad4c57a11d948217fd1246a316b45d65ec408816635",
+    "gwtd.pdb": "aa449331911749fc5bcd232bbea953854410fc6bb7fd31c86b341eff935b197c",
+    "gwtd.exe": "904378f2e96d39998fb86b45e6e03c6eef2ccb9bed3a4953b2a35612cdc98c7c",
+    "gwt.exe": "a9b4e76cce5458bae268fdd687f7168b3812cf5f6c62b1bd56566303042f40d1"
+  },
+  "release_artifacts": {
+    "gwt.pdb": "c3d6f1e1b334b476388c88685d7faaeedaea7cb82174f31efc1ff1d5b380f192",
+    "gwtd.pdb": "3b42f33a2ee2d3a32da0de25d841142943e242504d5b4442e7d3389919b0b372",
+    "gwt.exe": "a6ef5d41be23add7248873d779737478ace39718123b0e204b6dc2af0f3b6057",
+    "gwtd.exe": "ecba6862549735c3ee637675d4c6ace9b9351483b5f0ee3432818ec2c314bef5"
+  },
+  "release_build_completed_at": "2026-11-04T21:14:02.6131500Z"
+}

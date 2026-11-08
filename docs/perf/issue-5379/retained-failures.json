@@ -1,0 +1,550 @@
+{
+  "schema_version": 2,
+  "issue": 5379,
+  "purpose": "Retained failures and partial diagnostics; no retained failure is reclassified as PASS.",
+  "prepared_at_utc": "2026-10-20T07:52:05.263Z",
+  "threshold_ms": 100,
+  "threshold_changed": false,
+  "skip_policy_changed": false,
+  "source_artifact": {
+    "file": "gwt-5379-retained-failures-sena-b6c3041bed7b4a768b572d8ced8454ad.json",
+    "sha256": "ececb56e74924aebd002d2f47b11d4bb987f05e0142a644a637dc09123049ddc"
+  },
+  "raw_row_format": "Unmodified original JSONL row strings, excluding line terminators; source-relative file and original line number retained.",
+  "formal_failure": {
+    "record_id": "vrr-3e8617e35bb84c07996e17da40c61257",
+    "verified_head": "ee9a460bc7113c834b22e825e6478b8096ca2ef7",
+    "all_passed": false,
+    "canonical_record_file": "gwt-5379-failed-416-record.json",
+    "canonical_record_sha256": "2e62205d835a4084df71eb9ce01a326dfc97041dec8c807c99da3561723c7697",
+    "artifact_directory": "gwt-5379-after-7a41ee1666dc41cd8946b26ec043d407",
+    "gui_pid": 28080,
+    "binary_sha256": "2bceadddc28e0487a8e4f41d908ada5e8c8e1325e57476e745bf07c7d5067ccd",
+    "duration_seconds": 10,
+    "failed_command": "pwsh -NoProfile -File scripts/diagnostics/issue-5379-browser-check.ps1 -DurationSeconds 10",
+    "exit_code": 1,
+    "headed_e2e": {
+      "dark_passed": 0,
+      "light_passed": 1,
+      "failed": 1
+    },
+    "runtime_output": {
+      "event": "RuntimeOutput",
+      "count": 100,
+      "stalls": 0,
+      "max_ms": 2
+    },
+    "output_batches": {
+      "count": 50,
+      "stalls": 1,
+      "max_ms": 416
+    },
+    "browser_errors": [],
+    "raw_rows": [
+      {
+        "file": ".gwt/projects/cefba44fde7a44da/logs/gwt.log.2026-10-20",
+        "line": 3,
+        "raw": "{\"fields\":{\"api_error_us\":542,\"approval_us\":45,\"elapsed_ms\":416,\"marker\":\"issue_5379_runtime_output_batch\",\"message\":\"GUI runtime output batch handled\",\"preview_us\":7396,\"quota_us\":410,\"relay_us\":407968,\"scope_us\":336},\"level\":\"DEBUG\",\"project_scope\":\"cefba44fde7a44da\",\"span\":{\"gwt_project_scope\":\"cefba44fde7a44da\",\"name\":\"project_operation\"},\"target\":\"gwt.frontend.timing\",\"timestamp\":\"2026-10-20T13:11:55.677773100+09:00\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 1191,
+        "raw": "{\"timestamp\":\"2026-10-20T13:11:55.678410+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"NewEvents blocked the GUI event loop for 417ms\",\"event\":\"NewEvents\",\"elapsed_ms\":417},\"target\":\"gwt.frontend.timing\"}"
+      }
+    ]
+  },
+  "diagnostic4": {
+    "canonical": false,
+    "artifact_directory": "gwt-5379-after-4fb894fb4ab24b6ca7a1a3433fc8c6fc",
+    "recorded_checkout_head": "ee9a460bc7113c834b22e825e6478b8096ca2ef7",
+    "dirty_probe": true,
+    "dirty_probe_note": "Temporary uncommitted CPU/stage instrumentation in main.rs, app_runtime/mod.rs and app_runtime/runtime_events.rs; removed before final source. Recorded checkout HEAD does not attest modified source bytes.",
+    "diagnostic_source_diff_sha256": "dbb7c6d9868bbcbbeaa76afc89d5d076d384c97903dc01e143e622878f0a8af9",
+    "binary_sha256": "b2203dded5778b72641334d12206c6019164d44cb159bba043d71b88ad3b3dcc",
+    "gui_pid": 32148,
+    "duration_seconds": 600,
+    "observed_context": {
+      "observed_at": "2026-10-20T05:06:17.0493046Z",
+      "gui_pid": 32148,
+      "priority": "BelowNormal",
+      "binary_sha256": "B2203DDED5778B72641334D12206C6019164D44CB159BBA043D71B88AD3B3DCC",
+      "duration_seconds": 600,
+      "trace": "off",
+      "head": "ee9a460bc7113c834b22e825e6478b8096ca2ef7"
+    },
+    "runtime_output": {
+      "event": "RuntimeOutput",
+      "count": 5997,
+      "stalls": 1,
+      "max_ms": 166
+    },
+    "output_batches": {
+      "count": 3003,
+      "stalls": 1,
+      "max_ms": 974
+    },
+    "browser_errors": [],
+    "cleanup": {
+      "test_exit_code": 1,
+      "cleanup_errors": [],
+      "owned_gui_stopped": true,
+      "stopped_at": "2026-10-20T05:16:49.6283251Z"
+    },
+    "raw_rows": [
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 11172,
+        "raw": "{\"timestamp\":\"2026-10-20T14:13:15.994190500+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI dispatch wall and thread CPU probe\",\"marker\":\"issue_5379_dispatch_cpu_probe\",\"event\":\"RuntimeOutput\",\"elapsed_ms\":166,\"cpu_us\":0},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 11173,
+        "raw": "{\"timestamp\":\"2026-10-20T14:13:15.994311100+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"RuntimeOutput envelope probe\",\"marker\":\"issue_5379_runtime_output_envelope_probe\",\"elapsed_ms\":166,\"cpu_us\":0,\"before_handler_us\":43,\"handler_us\":166313,\"fanout_us\":118,\"after_fanout_us\":12},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 11196,
+        "raw": "{\"timestamp\":\"2026-10-20T14:13:17.475555800+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI dispatch wall and thread CPU probe\",\"marker\":\"issue_5379_dispatch_cpu_probe\",\"event\":\"NewEvents\",\"elapsed_ms\":1101,\"cpu_us\":0},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/projects/1f9694a4a361c8bd/logs/gwt.log.2026-10-20",
+        "line": 456,
+        "raw": "{\"fields\":{\"api_error_us\":154,\"approval_us\":29,\"batch_cpu_us\":0,\"elapsed_ms\":974,\"marker\":\"issue_5379_runtime_output_batch\",\"message\":\"GUI runtime output batch handled\",\"output_bytes\":8896,\"preview_us\":30,\"quota_us\":974044,\"relay_clone_us\":1,\"relay_cpu_us\":0,\"relay_us\":43,\"scope_us\":101},\"level\":\"DEBUG\",\"project_scope\":\"1f9694a4a361c8bd\",\"span\":{\"gwt_project_scope\":\"1f9694a4a361c8bd\",\"name\":\"project_operation\"},\"target\":\"gwt.frontend.timing\",\"timestamp\":\"2026-10-20T14:13:17.472495400+09:00\"}"
+      }
+    ]
+  },
+  "clean_a4e_1800s_failure": {
+    "canonical": false,
+    "launch_route": "direct headed fixture, outside verify.run",
+    "artifact_directory": "gwt-5379-after-6b308cb34b4541c08d7947a0dec4e1b8",
+    "source_identity": {
+      "recorded_checkout_head": "a4e24a94fe1b693d91b84d26b29e11a23411cfc6",
+      "dirty_probe": false,
+      "binary_sha256": "1D8FBA7DFE1BA8213FDCE1D7296FAE526F76A60EB7990C8F87A5440760C7F269",
+      "gui_pid": 28408,
+      "gui_started_at": "2026-10-20T06:01:33.7878533Z",
+      "identity_basis": "Owner confirmed a clean A4E source build; fixture records HEAD and binary hash. HEAD alone never attests dirty source bytes."
+    },
+    "trace": "not recorded in retained metadata; no trace.zip was present in the inspected playwright artifacts",
+    "dark": {
+      "passed": false,
+      "duration_seconds": 1800,
+      "full_observation_completed": true,
+      "started_at": "2026-10-20T06:02:26.833Z",
+      "ended_at": "2026-10-20T06:32:27.307Z",
+      "actual_elapsed_ms": 1800474,
+      "runtime_output": {
+        "event": "RuntimeOutput",
+        "count": 17990,
+        "stalls": 0,
+        "max_ms": 27
+      },
+      "output_batches": {
+        "count": 8987,
+        "stalls": 1,
+        "max_ms": 132
+      },
+      "whole_gui": {
+        "samples": 40944,
+        "stalls": 4,
+        "max_ms": 223
+      },
+      "browser_errors": [],
+      "producer_receipts": [
+        {
+          "index": 0,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 1,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 2,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 3,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 4,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        }
+      ],
+      "producer_total_bytes": 73728000
+    },
+    "light": {
+      "passed": true,
+      "duration_seconds": 10,
+      "full_acceptance_observation": false,
+      "runtime_output": {
+        "event": "RuntimeOutput",
+        "count": 100,
+        "stalls": 0,
+        "max_ms": 1
+      },
+      "output_batches": {
+        "count": 50,
+        "stalls": 0,
+        "max_ms": 1
+      },
+      "browser_errors": []
+    },
+    "cleanup": {
+      "test_exit_code": 1,
+      "stopped_at": "2026-10-20T06:33:31.3230171Z",
+      "owned_gui_stopped": true,
+      "cleanup_errors": []
+    },
+    "evidence_files": [
+      {
+        "file": "after-dark.json",
+        "sha256": "5e01b0294e0df09cd902bd623102016bcd91035b04e592228b07be76bb52dced"
+      },
+      {
+        "file": "after-light.json",
+        "sha256": "73334f0275e0d21e367f3d484ba7935e5344948668254cf2d93c96c03698f1c1"
+      },
+      {
+        "file": "shutdown.json",
+        "sha256": "146f364653fbf1bb2cbbbfabd8cc5fe928eb952068e742d82b7ff5f8b435f9b7"
+      }
+    ],
+    "raw_rows": [
+      {
+        "file": ".gwt/projects/a4060b972ebefe10/logs/gwt.log.2026-10-20",
+        "line": 402,
+        "raw": "{\"fields\":{\"api_error_us\":86,\"approval_us\":64,\"elapsed_ms\":132,\"marker\":\"issue_5379_runtime_output_batch\",\"message\":\"GUI runtime output batch handled\",\"preview_us\":123920,\"quota_us\":529,\"relay_us\":147,\"scope_us\":7535},\"level\":\"DEBUG\",\"project_scope\":\"a4060b972ebefe10\",\"span\":{\"gwt_project_scope\":\"a4060b972ebefe10\",\"name\":\"project_operation\"},\"target\":\"gwt.frontend.timing\",\"timestamp\":\"2026-10-20T15:09:11.036833700+09:00\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 10112,
+        "raw": "{\"timestamp\":\"2026-10-20T15:09:10.416009100+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"NewEvents blocked the GUI event loop for 140ms\",\"event\":\"NewEvents\",\"elapsed_ms\":140},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 10131,
+        "raw": "{\"timestamp\":\"2026-10-20T15:09:11.037492+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"NewEvents blocked the GUI event loop for 141ms\",\"event\":\"NewEvents\",\"elapsed_ms\":141},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 15202,
+        "raw": "{\"timestamp\":\"2026-10-20T15:12:55.912156900+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"NewEvents blocked the GUI event loop for 223ms\",\"event\":\"NewEvents\",\"elapsed_ms\":223},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 15220,
+        "raw": "{\"timestamp\":\"2026-10-20T15:12:56.775665500+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"NewEvents blocked the GUI event loop for 124ms\",\"event\":\"NewEvents\",\"elapsed_ms\":124},\"target\":\"gwt.frontend.timing\"}"
+      }
+    ],
+    "interpretation": "The completed 1800s treatment FAILED the unchanged <100ms output-batch assertion. Raw RuntimeOutput dispatch had zero stalls, but this does not override the separate batch failure. No per-stage CPU sample was recorded for this clean binary; CPU-zero observations from other binaries do not apply. preview_us is an elapsed stage interval, not a cause attribution."
+  },
+  "limitations": [
+    "All retained failures remain failures; final-source canonical verification and a qualifying passing 1800s treatment are still missing. The watchdog dirty diagnostic is now completed but remains nonacceptance; its earlier partial snapshot is retained as history.",
+    "Native wall time includes execution and waiting. Windows GetThreadTimes samples in these probes were observed in 15,625us increments; zero does not mean no instructions executed. Wall, CPU and cycle endpoints are adjacent rather than simultaneous.",
+    "CPU-zero values belong only to the instrumented run and interval that emitted them. They cannot be transferred to the clean A4E 132ms batch or the earlier formal 416ms relay interval.",
+    "Quota includes local-time conversion, classification, spans and allocations. Source inspection found a Windows timezone API path, but retained measurements do not identify timezone, scheduler, Job throttling, I/O, allocator or logging as the sole cause, or prove all failures share a cause.",
+    "Diagnostic4 and the watchdog diagnostic record trace=off. Canonical headed capture adds --trace=on and a structured reporter; clean A4E trace is not attested by the metadata inspected. Trace-on/off, instrumentation and launch-route conditions are not interchangeable controls.",
+    "Direct headed fixtures run outside canonical Heavy admission. Current direct GUI8% Job cap is not proof of the effective cap or priority of any earlier direct or canonical GUI.",
+    "The bounded SuspendThread stack experiment is diagnostic only. A callback can complete before capture. Resume precedes unwind; unwind duration is not suspension duration and incomplete/symbol-limited stacks do not establish the stalled code path."
+  ],
+  "dirty_watchdog_diagnostic": {
+    "canonical": false,
+    "diagnostic_only": true,
+    "artifact_directory": "gwt-5379-after-50b1619e0b7a4c5ea358c850cab2dcc8",
+    "status": "Completed 1800s dirty diagnostic: dark FAIL, light PASS, cleanup succeeded. Diagnostic only; not qualifying acceptance evidence.",
+    "full_acceptance_observation": false,
+    "recorded_checkout_head": "a4e24a94fe1b693d91b84d26b29e11a23411cfc6",
+    "dirty_probe": true,
+    "dirty_files": [
+      "crates/gwt/src/app_runtime/runtime_events.rs",
+      "crates/gwt/src/dispatch_watchdog.rs"
+    ],
+    "diagnostic_source_diff_sha256": "16BC0DCE5D2C8D4FB1FCE977A25BEB30B33549055BC2F7A85EE213DC0D537BC7",
+    "binary_sha256": "DC3D5CDD54E5FAC5C9561F0BD011BCDED3D0CD593BC2B5E5064D696632DA0CAF",
+    "gui_pid": 49208,
+    "gui_started_at": "2026-10-20T07:17:05.3295452Z",
+    "intended_duration_seconds": 1800,
+    "trace": "off",
+    "retained_event": {
+      "event": "RuntimeOutput",
+      "watchdog_elapsed_ms": 578.3618,
+      "completed_elapsed_ms": 578,
+      "completed_at": "2026-10-20T16:18:05.892307500+09:00",
+      "capture_utc": "2026-10-20T07:18:06.0202054Z",
+      "completion_to_capture_ms": 127.8979,
+      "interpretation": "The 578ms dispatch completed before capture. Multiple later dispatches completed; capture lies between the retained RedrawEventsCleared and next NewEvents rows. The captured GetMessageW stack describes a later idle wait, not the stalled callback. No watchdog timing/state defect is demonstrated. Event notification carries no dispatch ID or send/receive timestamp, so exact trigger association and delay components remain unproven."
+    },
+    "stack_capture_evidence": {
+      "file": "stall-stacks.jsonl",
+      "line": 2,
+      "raw_row_sha256": "2498af433f2c0cfd2c588fa6c653a3e455c005a1bf78d795a4e6b92a5e89d9d5",
+      "capture_utc": "2026-10-20T07:18:06.0202054Z",
+      "main_tid": 7972,
+      "suspend_elapsed_ms": 2.5415,
+      "resume_succeeded": true,
+      "copied_stack_bytes": 51128,
+      "copy_truncated": false,
+      "unwind_elapsed_ms": 1691.5852,
+      "unwind_status": "stopped_or_unavailable",
+      "target_cpu_delta_100ns": 0,
+      "target_cycles_delta": 73620,
+      "frames": [
+        {
+          "address": "0x7ff8010c1364",
+          "module": "win32u.dll",
+          "module_offset": "0x1364",
+          "symbol": "NtUserGetMessage",
+          "symbol_displacement": "0x14",
+          "symbol_error": null
+        },
+        {
+          "address": "0x7ff8031faea2",
+          "module": "USER32.dll",
+          "module_offset": "0x2aea2",
+          "symbol": "GetMessageW",
+          "symbol_displacement": "0x22",
+          "symbol_error": null
+        },
+        {
+          "address": "0x7ff74d90cbb5",
+          "module": "gwt.exe",
+          "module_offset": "0x47cbb5",
+          "symbol": "windows::Win32::UI::WindowsAndMessaging::GetMessageW",
+          "symbol_displacement": "0x85",
+          "symbol_error": null
+        },
+        {
+          "address": "0x7ff74e0d70e6",
+          "module": "gwt.exe",
+          "module_offset": "0xc470e6",
+          "symbol": "tao::platform_impl::platform::event_loop::EventLoop::run_return<enum2$<gwt::UserEvent>,gwt::main::closure_env$20>",
+          "symbol_displacement": "0xd6",
+          "symbol_error": null
+        },
+        {
+          "address": "0x7ff74e0d73d5",
+          "module": "gwt.exe",
+          "module_offset": "0xc473d5",
+          "symbol": "tao::platform_impl::platform::event_loop::EventLoop::run<enum2$<gwt::UserEvent>,gwt::main::closure_env$20>",
+          "symbol_displacement": "0x45",
+          "symbol_error": null
+        },
+        {
+          "address": "0x7ff74db7e954",
+          "module": "gwt.exe",
+          "module_offset": "0x6ee954",
+          "symbol": "tao::event_loop::EventLoop::run<enum2$<gwt::UserEvent>,gwt::main::closure_env$20>",
+          "symbol_displacement": "0x54",
+          "symbol_error": null
+        }
+      ],
+      "frames_retained": 6,
+      "total_frames": 16,
+      "limitation": "Resume completed before symbol loading/unwind. Unwind uses copied stack and live readonly image data; no live stack reads after resume. Suspension alters timing, and the 1691.5852ms unwind is observer time AFTER target resume, not target suspension. Names may be nearest symbols; inspect displacements. No stack bytes are included."
+    },
+    "job_cap_observation": {
+      "file": "job-membership-exact.json",
+      "sha256": "ebf09db3a856f6fcf9a7eac39ca5ab26ce410c1abe4ede105d797df7ab546892",
+      "target_pid": 49208,
+      "target_started_at_utc": "2026-10-20T07:17:05.3295452Z",
+      "observed_at_utc": "2026-10-20T07:18:09.8941099Z",
+      "containing_jobs": [
+        {
+          "owner_pid": 13508,
+          "owner_name": "gwt.exe",
+          "target_membership_confirmed": true,
+          "control_flags": 5,
+          "cpu_rate_raw": 800,
+          "cpu_rate_percent": 8
+        },
+        {
+          "owner_pid": 32580,
+          "owner_name": "codex.exe",
+          "target_membership_confirmed": true,
+          "control_flags": 0,
+          "cpu_rate_raw": 0,
+          "cpu_rate_percent": null
+        }
+      ],
+      "limitation": "8% enabled hard cap was observed for this exact GUI at this timestamp only. Absence of additional observed caps cannot exclude unobservable handles. This observation is not transferred to GUI28080, GUI32148 or clean A4E GUI28408 and does not prove a scheduling cause."
+    },
+    "raw_rows": [
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 1303,
+        "raw": "{\"timestamp\":\"2026-10-20T16:18:05.892136600+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"frontend dispatch still running\",\"event\":\"RuntimeOutput\",\"elapsed_ms\":578.3618},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 1304,
+        "raw": "{\"timestamp\":\"2026-10-20T16:18:05.892307500+09:00\",\"level\":\"WARN\",\"fields\":{\"message\":\"RuntimeOutput blocked the GUI event loop for 578ms\",\"event\":\"RuntimeOutput\",\"elapsed_ms\":578},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 1335,
+        "raw": "{\"timestamp\":\"2026-10-20T16:18:05.939745900+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"RedrawEventsCleared\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": ".gwt/logs/gwt.log.2026-10-20",
+        "line": 1336,
+        "raw": "{\"timestamp\":\"2026-10-20T16:18:06.061913400+09:00\",\"level\":\"DEBUG\",\"fields\":{\"message\":\"GUI event loop dispatch handled\",\"event\":\"NewEvents\",\"elapsed_ms\":0},\"target\":\"gwt.frontend.timing\"}"
+      },
+      {
+        "file": "stall-stacks.jsonl",
+        "line": 3,
+        "raw": "{\"elapsed_seconds\":1868.4554972,\"captures\":1,\"target_alive\":false,\"type\":\"stall_stack_listener_end\"}"
+      }
+    ],
+    "partial_snapshot_history": {
+      "prepared_at_utc": "2026-10-20T07:39:06.077Z",
+      "status": "Partial snapshot of an ongoing diagnostic; no final dark/light/cleanup aggregate is claimed.",
+      "full_acceptance_observation": false
+    },
+    "completed_observation": {
+      "canonical": false,
+      "diagnostic_only": true,
+      "acceptance_eligible": false,
+      "dark": {
+        "passed": false,
+        "duration_seconds": 1800,
+        "started_at": "2026-10-20T07:18:01.116Z",
+        "ended_at": "2026-10-20T07:48:02.860Z",
+        "actual_elapsed_ms": 1801744,
+        "fixture_full_acceptance_observation_flag": true,
+        "runtime_output": {
+          "event": "RuntimeOutput",
+          "count": 18000,
+          "stalls": 1,
+          "max_ms": 578
+        },
+        "output_batches": {
+          "count": 9001,
+          "stalls": 0,
+          "max_ms": 55
+        },
+        "whole_gui": {
+          "samples": 39919,
+          "stalls": 1,
+          "max_ms": 578
+        },
+        "browser_errors": []
+      },
+      "light": {
+        "passed": true,
+        "duration_seconds": 10,
+        "started_at": "2026-10-20T07:49:00.029Z",
+        "ended_at": "2026-10-20T07:49:11.015Z",
+        "actual_elapsed_ms": 10986,
+        "fixture_full_acceptance_observation_flag": false,
+        "runtime_output": {
+          "event": "RuntimeOutput",
+          "count": 100,
+          "stalls": 0,
+          "max_ms": 4
+        },
+        "output_batches": {
+          "count": 51,
+          "stalls": 0,
+          "max_ms": 0
+        },
+        "whole_gui": {
+          "samples": 256,
+          "stalls": 0,
+          "max_ms": 13
+        },
+        "browser_errors": []
+      },
+      "producer_receipts": [
+        {
+          "index": 0,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 1,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 2,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 3,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        },
+        {
+          "index": 4,
+          "run_id": "after-dark",
+          "sequence": 1800,
+          "bytes": 14745600,
+          "complete": true
+        }
+      ],
+      "producer_total_bytes": 73728000,
+      "cleanup": {
+        "owned_gui_stopped": true,
+        "test_exit_code": 1,
+        "stopped_at": "2026-10-20T07:49:12.7195871Z",
+        "cleanup_errors": []
+      },
+      "listener_end": {
+        "elapsed_seconds": 1868.4554972,
+        "captures": 1,
+        "target_alive": false,
+        "type": "stall_stack_listener_end"
+      },
+      "evidence_files": [
+        {
+          "file": "after-dark.json",
+          "sha256": "a50c115651a471b765d31adaca31172b7970063e284b5cfe502a6ca628107012"
+        },
+        {
+          "file": "after-light.json",
+          "sha256": "04d34e06d7763638f97815ac1680f09460fe7dc2fccf8f46037a8b139ecefc8d"
+        },
+        {
+          "file": "shutdown.json",
+          "sha256": "5d50aecf844078d9d89d0a2e18cbb2215e109156e6908add1fb13e8d10915582"
+        },
+        {
+          "file": "stall-stacks.jsonl",
+          "sha256": "8621f4ecfb48b8b2f99a72caec39d16e8be756565fd410aa69375f0d5fcc3f03"
+        }
+      ],
+      "interpretation": "The fixture completed its intended 1800s interval and FAILED the unchanged <100ms RuntimeOutput assertion. Fixture full_acceptance_observation=true describes interval length, not eligibility: dirty CPU/stack probes and the bounded suspension keep this diagnostic ineligible as final-source acceptance. The single retained capture remains approximately128ms after the 578ms dispatch completion and does not identify its cause. Stack unwind ran after ResumeThread; its duration is not target suspension."
+    }
+  },
+  "completion_update_from": {
+    "file": "gwt-5379-retained-failures-complete-sena-d1bdff160a194ce8bb16bf06085639c2.json",
+    "sha256": "82abf9f5b38c11f05855503d16679e69a290ac511fb388bbc1bd99347f19decf",
+    "prepared_at_utc": "2026-10-20T07:39:06.077Z"
+  }
+}

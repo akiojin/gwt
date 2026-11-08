@@ -20,11 +20,12 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
       workspace: {
         app_version: "playwright",
         tabs: [{
-          id: "tab-1", title: "Disconnected input", project_root: "/fixture", kind: "git",
+          id: "tab-1", title: "Disconnected input", project_key: location.pathname.split("/").filter(Boolean).at(-1), project_root: "/fixture", kind: "git",
           workspace: {
             viewport: { x: 0, y: 0, zoom: 1 },
             windows: [{
               id: "agent-1", title: "Codex", preset: "agent", agent_id: "codex",
+              agent_name: "Codex", session_id: "agent-1-session",
               agent_color: "cyan", status: "idle", z_index: 1,
               geometry: { x: 180, y: 120, width: 720, height: 360 }, geometry_revision: 0,
               minimized: false, maximized: false, pre_maximize_geometry: null, persist: true,
@@ -55,6 +56,9 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
         this.readyState = FixtureWebSocket.OPEN;
         this.dispatchEvent(new Event("open"));
         this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(workspace) }));
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "disconnect-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } }) }));
       }
       send(raw) {
         if (this.readyState !== FixtureWebSocket.OPEN) throw new Error("send on a closed socket");
@@ -81,7 +85,11 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
     };
   });
   await page.goto(appUrl);
-  const terminal = page.locator(".workspace-window[data-id='agent-1'] .xterm-helper-textarea");
+  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+  const tile = page.locator(".works-surface:not(.works-surface--preview) .works-terminal[data-window-id='agent-1']");
+  await expect(tile).toBeVisible();
+  const terminal = tile.locator(".xterm-helper-textarea");
   await expect(terminal).toBeAttached();
   await terminal.focus();
   await page.keyboard.type("before");
@@ -113,6 +121,8 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
   await expect(notice).toContainText("Connection restored");
   await expect(notice).toContainText("Input typed while disconnected was discarded and was not resent. Retype it when ready.");
   expect(await received()).toBe("before");
+  // Disconnect makes membership Unknown; reopening revalidates the fresh census.
+  await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   await terminal.focus();
   await page.keyboard.type("after");
   await expect.poll(received).toBe("beforeafter");

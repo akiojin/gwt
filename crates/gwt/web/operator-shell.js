@@ -26,7 +26,7 @@ export function initOperatorShell(deps = {}) {
   safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
   safeWire("legacy chrome keys", () => removeLegacyChromeKeys(win), markDegraded);
   safeWire("rail commands", () => wireRailCommands({ doc }), markDegraded);
-  safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
+  safeWire("status strip clock", () => wireStatusStripClock({ doc, win }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
   safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
@@ -131,7 +131,7 @@ function wireRailCommands({ doc }) {
 // Status Strip — live clock + counters
 // ------------------------------------------------------------
 
-function wireStatusStripClock({ doc }) {
+export function wireStatusStripClock({ doc, win = doc.defaultView }) {
   const clock = doc.getElementById("op-strip-clock");
   if (!clock) return;
 
@@ -139,7 +139,6 @@ function wireStatusStripClock({ doc }) {
   // mission-control "blink" effect can target only the separators while the
   // numbers stay rock-steady. Clears + rebuilds via DOM nodes (no innerHTML
   // because the security hook flags textContent-as-template-string).
-  const reduced = matchReduced(doc);
   const setClock = (h, m, s) => {
     while (clock.firstChild) clock.removeChild(clock.firstChild);
     const append = (text, isColon) => {
@@ -154,25 +153,18 @@ function wireStatusStripClock({ doc }) {
     append(":", true);
     append(pad2(s), false);
   };
+  let timer = null;
   const tick = () => {
-    const now = new Date();
+    if (timer !== null) win.clearTimeout(timer);
+    timer = null;
+    if (doc.hidden) return;
+    const now = new win.Date();
     setClock(now.getHours(), now.getMinutes(), now.getSeconds());
+    // Re-align on every tick, including callbacks delayed by a busy renderer.
+    timer = win.setTimeout(tick, 1000 - now.getMilliseconds());
   };
+  doc.addEventListener("visibilitychange", tick);
   tick();
-
-  if (reduced.matches) {
-    setInterval(tick, 1000);
-  } else {
-    let last = 0;
-    const loop = (t) => {
-      if (t - last >= 1000) {
-        last = t;
-        tick();
-      }
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  }
 }
 
 export function applyTelemetryCounts(doc, counts = {}) {
@@ -213,8 +205,8 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-running", counts.running ?? 0);
   // Issue #3884 AC-3: break out the running agents that live as inline
   // terminals in the Issue window (SPEC-3671 `issue_preview` placement), so
-  // "RUNNING 6" next to an empty canvas explains itself. Hidden when every
-  // running agent is on the canvas, and for callers that omit the breakdown.
+  // "RUNNING 6" next to an empty Agents view explains itself. Hidden when every
+  // running agent is in Agents, and for callers that omit the breakdown.
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
@@ -233,18 +225,13 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
-  // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
-  if ("windows" in counts) {
-    const badge = doc.getElementById("op-rail-window-count");
-    if (badge) {
-      const value = Number(counts.windows) || 0;
-      badge.textContent = String(value);
-      badge.hidden = value <= 0;
-    }
-  }
 }
 
-export function applyIssueMonitorStatus(doc, status = {}) {
+export function subscribeIssueMonitorStatus(doc, model) {
+  return model.subscribeFrame(state => state.status, status => renderIssueMonitorStatus(doc, status));
+}
+
+export function renderIssueMonitorStatus(doc, status = {}) {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
@@ -253,8 +240,8 @@ export function applyIssueMonitorStatus(doc, status = {}) {
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Issue Monitor: ${view.value}`);
-  cell.setAttribute("title", view.title);
+  cell.setAttribute("aria-label", `Open Monitor: ${view.value}`);
+  cell.setAttribute("title", `Open Monitor | ${view.title}`);
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -351,6 +338,10 @@ function usageProviderLabel(provider) {
 
 function usageSummaryPercent(account) {
   const percentages = (account.windows || [])
+    .filter(
+      (window) => account.provider !== "claude_code" ||
+        window.kind === "five_hour" || window.kind === "weekly",
+    )
     .map((window) => window.used_percent)
     .filter(
       (percent) =>
@@ -520,6 +511,12 @@ const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
 const RUNTIME_HEALTH_CPU_UNITS =
   "Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%.";
 let runtimeHealthHideTimer = null;
+
+export function subscribeRuntimeHealth(doc, model, options = {}) {
+  return model.subscribeFrame(snapshot => snapshot, snapshot => {
+    if (snapshot) applyRuntimeHealth(doc, snapshot, options);
+  });
+}
 
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
@@ -1089,7 +1086,7 @@ function wireMissionBriefing({ doc, win }) {
 
   // SPEC-2356 — let the user dismiss the splash early by pressing any
   // key or clicking through it. The splash is purely decorative and
-  // shouldn't block users who want to get into the canvas immediately.
+  // shouldn't block users who want to get into the workspace immediately.
   let exited = false;
   const exitNow = () => {
     if (exited) return;
@@ -1331,7 +1328,6 @@ function createActionRegistry(doc) {
     { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "open-branches", label: "Open Issues", hint: "Issues and other work", group: "Spawn", handler: dispatch("open-branches") },
-    { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },
     { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
     { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
   ];
@@ -1401,4 +1397,22 @@ function matchReduced(doc) {
 
 function pad2(n) {
   return String(n).padStart(2, "0");
+}
+
+// The project execution owner is independent of the browser's GUI connection.
+export function subscribeProjectOwnerHealth(doc, model) {
+  return model.subscribeFrame(state => state, health => {
+    if (health) applyProjectOwnerHealth(doc, health);
+  });
+}
+
+function applyProjectOwnerHealth(doc, health = {}) {
+  const cell = doc.querySelector("[data-project-owner-health]");
+  if (!cell) return;
+  const state = ["healthy", "degraded"].includes(health.state) ? health.state : "connecting";
+  cell.dataset.state = state;
+  cell.hidden = false;
+  cell.title = health.detail || "";
+  const value = cell.querySelector("[data-project-owner-health-value]");
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "degraded" ? "Unavailable" : "Connecting";
 }

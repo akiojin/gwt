@@ -20,15 +20,19 @@ fn global_broadcast_allows_host_settings_payloads() {
     for event in [
         BackendEvent::SystemSettings {
             language: "ja".into(),
+            auto_apply_updates: false,
             codex_trust_managed_hooks: None,
             board_provider: None,
             agent_resource: None,
+            works_preview_lines: None,
         },
         BackendEvent::SystemSettingsUpdated {
             language: "ja".into(),
+            auto_apply_updates: false,
             codex_trust_managed_hooks: None,
             board_provider: None,
             agent_resource: None,
+            works_preview_lines: None,
         },
         BackendEvent::SystemSettingsError {
             message: "settings".into(),
@@ -55,12 +59,14 @@ fn global_broadcast_host_update_notice_is_an_ownerless_exception() {
     assert!(matches!(notice.target, DispatchTarget::All));
     assert!(matches!(notice.event, BackendEvent::IssueMonitorToast {
         notification_transition: None,
+        notification_transition_id: None,
         issue_number: None, ref level, ref message,
     } if level == "info" && message == "Host update ready"));
     assert!(
         std::panic::catch_unwind(
             || OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 issue_number: None,
                 level: "info".into(),
                 message: "Unscoped producer".into(),
@@ -84,11 +90,18 @@ fn global_broadcast_settings_requests_remain_client_replies() {
             None,
             None,
             None,
+            Some(7),
         ),
     ] {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0].target, DispatchTarget::Client(id) if id == "settings-client"));
     }
+    assert_eq!(
+        gwt_config::Settings::load_from_path(&temp.path().join(".gwt/config.toml"))
+            .unwrap()
+            .works_preview_lines,
+        Some(7)
+    );
 }
 
 #[test]
@@ -129,14 +142,15 @@ fn global_broadcast_direct_all_construction_inventory() {
     // Existing test-only constructions/patterns are inventoried explicitly:
     // embedded_server: broadcast_runtime_hook_event;
     // project_transport: transport_all;
-    // main: transport_all and the update_available_event assertion pattern.
+    // main: transport_all, update_available_event, and the CLI staging-refusal
+    // broadcast assertion pattern.
     // New test fixtures also require deliberate review of this inventory.
     assert_eq!(
         inventory,
         BTreeMap::from([
             ("project_transport.rs".into(), 3),
             ("embedded_server.rs".into(), 1),
-            ("main.rs".into(), 2),
+            ("main.rs".into(), 3),
         ]),
         "new direct All targets must use the audited global constructors"
     );

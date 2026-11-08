@@ -665,7 +665,9 @@ fn save_image_paste_file_with_progress(
 ) -> Result<(), ImagePasteError> {
     if let Some(bytes) = image.bytes.as_ref() {
         return write_attachment_bytes_with_progress(&image.storage_path, bytes, &mut on_progress)
-            .map_err(ImagePasteError::WriteFailed);
+            .map_err(|error| {
+                ImagePasteError::WriteFailed(format!("{}: {error}", image.storage_path.display()))
+            });
     }
     if let Some(source_path) = image.source_path.as_ref() {
         return copy_attachment_file_with_progress(
@@ -674,12 +676,72 @@ fn save_image_paste_file_with_progress(
             image.remove_source_after_save,
             &mut on_progress,
         )
-        .map_err(ImagePasteError::WriteFailed);
+        .map_err(|error| {
+            ImagePasteError::WriteFailed(format!("{}: {error}", image.storage_path.display()))
+        });
     }
     Err(ImagePasteError::EmptyPayload)
 }
 
+fn record_attachment_failure(
+    target: gwt_core::error_ledger::ErrorTarget,
+    operation_id: &str,
+    message: &str,
+) {
+    use gwt_core::error_ledger::{self, ErrorKind, ErrorRecord};
+    let record = ErrorRecord::new(ErrorKind::AttachmentFailure, message, target).with_context(
+        std::collections::BTreeMap::from([("operation_id".to_string(), operation_id.to_string())]),
+    );
+    if let Err(error) = error_ledger::record(record) {
+        tracing::warn!(%error, "failed to record attachment failure");
+    }
+}
+
+fn image_attachment_prompt(
+    image: &ImagePasteFile,
+    worktree_path: &Path,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+) -> String {
+    // Host PM providers run from the instruction runtime, not their worktree.
+    if runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+        && gwt::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_path).is_some()
+    {
+        format!(
+            "{IMAGE_PASTE_PROMPT_PREFIX}{}",
+            image.storage_path.display()
+        )
+    } else {
+        image.prompt_text.clone()
+    }
+}
+
 impl AppRuntime {
+    fn attachment_error_target(&self, id: &str) -> Option<gwt_core::error_ledger::ErrorTarget> {
+        let address = self.window_lookup.get(id)?;
+        let tab = self.tab(&address.tab_id)?;
+        Some(gwt_core::error_ledger::ErrorTarget {
+            window_id: Some(id.to_string()),
+            project_root: Some(tab.project_root.to_string_lossy().into_owned()),
+            session_id: self
+                .active_agent_sessions
+                .get(id)
+                .map(|session| session.session_id.clone()),
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn attachment_upload_failed_events(
+        &self,
+        id: &str,
+        operation_id: &str,
+        message: &str,
+    ) -> Vec<OutboundEvent> {
+        if let Some(target) = self.attachment_error_target(id) {
+            record_attachment_failure(target, operation_id, message);
+        }
+        Vec::new()
+    }
+
     pub(crate) fn inject_attachment_prompt_events(
         &mut self,
         client_id: ClientId,
@@ -697,6 +759,22 @@ impl AppRuntime {
         )
         .filename(filename.clone())
         .outbound(client_id.clone())];
+        if !self.runtimes.contains_key(&window_id) {
+            let message = "failed to inject attachment prompt: terminal runtime not found";
+            self.attachment_upload_failed_events(&window_id, &operation_id, message);
+            events.push(
+                AttachmentProgressUpdate::new(
+                    window_id,
+                    operation_id,
+                    AttachmentProgressPhase::Failed,
+                    file_count,
+                )
+                .filename(filename)
+                .message(message)
+                .outbound(client_id),
+            );
+            return events;
+        }
         let terminal_events = self.terminal_input_events(&window_id, &prompt);
         if terminal_events.is_empty() {
             events.push(
@@ -710,6 +788,11 @@ impl AppRuntime {
                 .outbound(client_id),
             );
         } else {
+            self.attachment_upload_failed_events(
+                &window_id,
+                &operation_id,
+                "failed to inject attachment prompt",
+            );
             events.extend(terminal_events);
             events.push(
                 AttachmentProgressUpdate::new(
@@ -784,7 +867,8 @@ impl AppRuntime {
             agent_path = %image.agent_path,
             "saved pasted image"
         );
-        self.terminal_input_events(id, &image.prompt_text)
+        let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
+        self.terminal_input_events(id, &prompt)
     }
 
     pub(super) fn paste_image_uploaded_operation_events(
@@ -807,7 +891,18 @@ impl AppRuntime {
                 window_id = %id,
                 "uploaded image paste dropped: active agent session not found"
             );
-            return Vec::new();
+            let operation_id =
+                normalize_attachment_operation_id(operation_id, &self.image_paste_sequence);
+            let message = "image paste failed: active Agent session not found";
+            self.attachment_upload_failed_events(&id, &operation_id, message);
+            return vec![AttachmentProgressUpdate::new(
+                id,
+                operation_id,
+                AttachmentProgressPhase::Failed,
+                1,
+            )
+            .message(message)
+            .outbound(client_id)];
         };
         let operation_id =
             normalize_attachment_operation_id(operation_id, &self.image_paste_sequence);
@@ -817,6 +912,7 @@ impl AppRuntime {
             .map(display_attachment_basename)
             .or_else(|| Some(display_attachment_basename("image")));
         let worktree_path = session.worktree_path.clone();
+        let runtime_target = session.runtime_target;
         let upload_store = self.attachment_uploads.clone();
         let proxy = self.proxy.clone();
         let spawner = self.blocking_tasks.clone();
@@ -825,6 +921,9 @@ impl AppRuntime {
         let worker_operation_id = operation_id.clone();
         let worker_filename = display_filename.clone();
         let unique_token = image_paste_unique_token(&self.image_paste_sequence);
+        let error_target = self
+            .attachment_error_target(&id)
+            .expect("resolved attachment window");
 
         spawner.spawn(move || {
             let image = match prepare_uploaded_image_paste_file(
@@ -838,6 +937,11 @@ impl AppRuntime {
             ) {
                 Ok(image) => image,
                 Err(error) => {
+                    record_attachment_failure(
+                        error_target,
+                        &worker_operation_id,
+                        &error.to_string(),
+                    );
                     AttachmentProgressUpdate::new(
                         worker_window_id.clone(),
                         worker_operation_id.clone(),
@@ -874,6 +978,7 @@ impl AppRuntime {
                 .bytes(bytes_done, total)
                 .dispatch(&proxy, &worker_client_id);
             }) {
+                record_attachment_failure(error_target, &worker_operation_id, &error.to_string());
                 AttachmentProgressUpdate::new(
                     worker_window_id.clone(),
                     worker_operation_id.clone(),
@@ -885,11 +990,12 @@ impl AppRuntime {
                 .dispatch(&proxy, &worker_client_id);
                 return;
             }
+            let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
             proxy.send(UserEvent::AttachmentPromptReady {
                 client_id: worker_client_id,
                 window_id: worker_window_id,
                 operation_id: worker_operation_id,
-                prompt: image.prompt_text,
+                prompt,
                 file_count: 1,
                 filename: progress_filename,
             });
@@ -964,7 +1070,8 @@ impl AppRuntime {
             agent_path = %image.agent_path,
             "saved uploaded pasted image"
         );
-        self.terminal_input_events(id, &image.prompt_text)
+        let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
+        self.terminal_input_events(id, &prompt)
     }
 
     pub(super) fn attach_files_operation_events(

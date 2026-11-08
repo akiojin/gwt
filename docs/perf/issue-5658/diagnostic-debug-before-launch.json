@@ -1,0 +1,52 @@
+{
+  "fixture_origin_branch_refs": 1,
+  "user_verification_result": "n/a (autonomous)",
+  "repo_hash": "71bb6a6f594679f1",
+  "ready_requests_per_minute": 66,
+  "git_head": "7a61d9b2ca10747fa5b02cae321edd4fa8cab3b3",
+  "pm_auto_start": false,
+  "project": "<private-home>/project",
+  "sha256": {
+    "crates/gwt/src/session_inventory.rs": "0e42553c90984cc5e9f7dd89acb8c3923c3c64d1e56ec32a46e8237ee22af907",
+    "scripts/diagnostics/issue-5658-cpu.ps1": "dd15b9325a9ea239c775ab96ea426a0cc87a757bc8d5a52d908929206062d489",
+    "target/debug/gwt.exe": "94265bad5b10acdcb149dc5646287e112400b0efda48ddb47aafc5f44a6da218",
+    "crates/gwt/playwright/tests/idle-cpu-live.spec.ts": "3233a2f065b6b416d97231ab984025161e8bc98d9c62d6d5c59467df55c1ef5a",
+    "crates/gwt/src/index_worker.rs": "9d22d3e3e70aefa651e1c4ceb9b7c3049da286dca91b4a1a57b3c5e75911a2bb",
+    "crates/gwt/src/main.rs": "e4cb3cfd01bb80c1e26aeb287895c2a0e41bbd4db7c98022f56ddaf411eb0cda",
+    "target/debug/gwtd.exe": "47d788bdd90e9d61889defefdf8d604098a13aa52115b235d71b9b6b2b7af032",
+    "crates/gwt-terminal/src/test_util.rs": "662b4f97d6cfbb9475fb5cbdff66104c1f7723dce6789c2ebfa13fbc37b1b681",
+    "scripts/diagnostics/issue-5658-browser-check.ps1": "ba2884bf30baec5138d669e59ac4c252ea6b75f1d9c3f59be59bd5a23f80b77d",
+    "crates/gwt/src/agent_capacity.rs": "c2f3b4abb4220d3ef806a9319df7e3014bf310451fd28dbd8773a4b691ebaa6e",
+    "crates/gwt-terminal/src/pane.rs": "ba47a176145abffc337891cebce999e98f8f5db68343488eb0cbb41bcbae5dca",
+    "crates/gwt/src/runtime_health_poller.rs": "abf4fe39513865ef13df030ea81ec969dc6838b309f3c4e4ecd0a4aae92d3641"
+  },
+  "fixture_origin": "<private-home>/origin.git",
+  "sessions_fixture": {
+    "sha256": "232add24b58d1a1b9bf2600d4655acd16fc357f663763ab4551eb18dfb5b6072",
+    "copied": true,
+    "bytes": 36009778,
+    "files": 14841
+  },
+  "gui_started_at": "2026-10-16T22:13:14.2347500Z",
+  "fixture_push_url": "<private-home>/origin.git",
+  "project_key": "71bb6a6f594679f1",
+  "issue_monitor_enabled": false,
+  "agent_count": 12,
+  "provider_sha256": "d65e9cd4fdadcb75fe20ed24f3b7521ea2836c6a6119f50006710f0fe1a9ed42",
+  "fixture_project_origin_branch_refs": 1,
+  "measurement_scope": "steady idle",
+  "daemon_pid": 37424,
+  "gui_pid": 52700,
+  "background_index": "normal",
+  "git_status": [
+    "?? crates/gwt/playwright/tests/idle-cpu-live.spec.ts",
+    "?? docs/perf/issue-5658/",
+    "?? scripts/diagnostics/issue-5658-browser-check.ps1",
+    "?? scripts/diagnostics/issue-5658-cpu.ps1"
+  ],
+  "fixture_clone_sha": "7a61d9b2ca10747fa5b02cae321edd4fa8cab3b3",
+  "evidence_classification": "debug diagnostic; excluded from shipping-profile CPU acceptance",
+  "build_profile": "debug",
+  "omitted_local_lifecycle_event_paths": 13,
+  "sanitization": "Absolute checkout/private HOME/user-profile paths are replaced with relative paths or placeholders; local lifecycle event filenames are omitted. Recorded identities, hashes, counters and errors are retained."
+}

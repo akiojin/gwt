@@ -1,6 +1,6 @@
 // Issue #4538: the single HTML entrypoint for `/` and `/p/<repo-hash>`.
 // The route decides which application loads: the Hub picker never loads the
-// Project workspace (no tabs, no canvas), and a Project tab loads only it.
+// Project workspace (no project surfaces), and a Project tab loads only it.
 import { parseFrontendRoute, renderRouteNotFound } from "./frontend-route.js";
 import { mountHubApp } from "./hub-app.js";
 
@@ -8,7 +8,7 @@ import { mountHubApp } from "./hub-app.js";
 // import(): an inserted script delays the document `load` event until it has
 // run, so "page loaded" keeps meaning "application wired" (dynamic imports do
 // not delay `load`).
-export const PROJECT_APP_MODULE = "/app.js";
+const PROJECT_APP_MODULE = "/app.js";
 
 export function bootFrontendRoute({ window: win, document: doc }) {
   const route = parseFrontendRoute(win.location.pathname);

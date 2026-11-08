@@ -20,7 +20,7 @@ import {
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const CHECK_HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
-const MESSAGE = "旧 backend 設定は自動移行されません。Settings で provider を再登録してください";
+const MESSAGE = "Legacy backend settings are not migrated automatically. Register the provider again in Settings.";
 
 test.describe("Retired backend upgrade (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set");

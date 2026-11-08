@@ -25,6 +25,7 @@ use serde_json::Value;
 use super::claude;
 use super::codex;
 use super::types::UsageProvider;
+use super::types::{MinuteTokenBucket, SessionTelemetry};
 
 /// How many days of files to scan / chart.
 pub const RANGE_DAYS: i64 = 8;
@@ -35,11 +36,27 @@ pub const CHART_DAYS: i64 = 7;
 pub const MAX_FILES: usize = 400;
 
 /// Token consumption split so cache re-reads don't dominate the real numbers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsumptionBreakdown {
     pub input: u64,
     pub output: u64,
     pub cached: u64,
+    #[serde(default)]
+    pub cache_read: Option<u64>,
+    #[serde(default)]
+    pub cache_creation: Option<u64>,
+}
+
+impl Default for ConsumptionBreakdown {
+    fn default() -> Self {
+        Self {
+            input: 0,
+            output: 0,
+            cached: 0,
+            cache_read: Some(0),
+            cache_creation: Some(0),
+        }
+    }
 }
 
 impl ConsumptionBreakdown {
@@ -47,6 +64,11 @@ impl ConsumptionBreakdown {
         self.input += other.input;
         self.output += other.output;
         self.cached += other.cached;
+        self.cache_read = self.cache_read.zip(other.cache_read).map(|(a, b)| a + b);
+        self.cache_creation = self
+            .cache_creation
+            .zip(other.cache_creation)
+            .map(|(a, b)| a + b);
     }
 
     /// Grand total across all three buckets (used for the chart bar height).
@@ -93,6 +115,7 @@ fn parse_ts(value: Option<&Value>) -> Option<DateTime<Utc>> {
 /// cached portion (`input_tokens - cached_input_tokens`).
 pub fn parse_codex_events(jsonl: &str) -> Vec<ConsumptionEvent> {
     let mut events = Vec::new();
+    let mut previous_total = None;
     for line in jsonl.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -110,24 +133,33 @@ pub fn parse_codex_events(jsonl: &str) -> Vec<ConsumptionEvent> {
         };
         let last = payload.get("info").and_then(|i| i.get("last_token_usage"));
         let Some(last) = last else { continue };
-        let input_total = last
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let total = payload
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"));
+        if total.is_some() && total == previous_total.as_ref() {
+            continue;
+        }
+        let Some(input_total) = last.get("input_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
         let cached = last
             .get("cached_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let output = last
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let Some(output) = last.get("output_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        previous_total = total.cloned();
         events.push((
             ts,
             ConsumptionBreakdown {
                 input: input_total.saturating_sub(cached),
                 output,
                 cached,
+                cache_read: last.get("cached_input_tokens").and_then(Value::as_u64),
+                cache_creation: last
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64),
             },
         ));
     }
@@ -155,14 +187,12 @@ pub fn parse_claude_events(jsonl: &str) -> Vec<ConsumptionEvent> {
         let Some(usage) = obj.get("message").and_then(|m| m.get("usage")) else {
             continue;
         };
-        let input = usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let output = usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
         let cache_read = usage
             .get("cache_read_input_tokens")
             .and_then(Value::as_u64)
@@ -177,10 +207,78 @@ pub fn parse_claude_events(jsonl: &str) -> Vec<ConsumptionEvent> {
                 input,
                 output,
                 cached: cache_read + cache_create,
+                cache_read: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+                cache_creation: usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64),
             },
         ));
     }
     events
+}
+
+/// Project one conversation's existing measured events at an injected clock.
+/// An incomplete timestamp history cannot prove either an idle minute or a day total.
+pub fn session_telemetry(
+    provider: UsageProvider,
+    events: &[ConsumptionEvent],
+    observed_at: Option<DateTime<Utc>>,
+    incomplete: bool,
+    now: DateTime<Utc>,
+) -> SessionTelemetry {
+    let first = events.iter().map(|(at, _)| *at).min();
+    let complete = !incomplete
+        && first.is_some()
+        && events.iter().all(|(at, tokens)| {
+            *at <= now
+                && (provider == UsageProvider::Codex
+                    || (tokens.cache_read.is_some() && tokens.cache_creation.is_some()))
+        });
+    let minute = DateTime::from_timestamp(now.timestamp().div_euclid(60) * 60, 0)
+        .expect("rounding a valid timestamp to a minute stays in range");
+    let mut minute_buckets = (0..30)
+        .rev()
+        .map(|offset| {
+            let started_at = minute - Duration::minutes(offset);
+            MinuteTokenBucket {
+                started_at,
+                tokens: (complete
+                    && first.is_some_and(|first| first < started_at + Duration::minutes(1)))
+                .then_some(0),
+            }
+        })
+        .collect::<Vec<_>>();
+    let today_date = now.with_timezone(&Local).date_naive();
+    let mut today = ConsumptionBreakdown::default();
+    if complete {
+        for (at, breakdown) in events {
+            if at.with_timezone(&Local).date_naive() == today_date {
+                today.add(breakdown);
+            }
+            let oldest = minute_buckets[0].started_at;
+            if *at >= oldest && *at < minute + Duration::minutes(1) {
+                let index = at.signed_duration_since(oldest).num_seconds();
+                if let Some(tokens) = &mut minute_buckets[index as usize / 60].tokens {
+                    *tokens += breakdown.total();
+                }
+            }
+        }
+    }
+    SessionTelemetry {
+        source: match provider {
+            UsageProvider::Codex => "codex_rollout",
+            UsageProvider::ClaudeCode => "claude_transcript",
+        }
+        .to_owned(),
+        quality: if complete { "measured" } else { "partial" }.to_owned(),
+        observed_at,
+        today_tokens: complete.then_some(today.total()),
+        today_input_tokens: complete.then_some(today.input + today.cached),
+        today_cache_read_tokens: complete.then_some(today.cache_read).flatten(),
+        today_cache_creation_tokens: complete.then_some(today.cache_creation).flatten(),
+        today_output_tokens: complete.then_some(today.output),
+        minute_buckets,
+    }
 }
 
 /// Aggregate events into Today / This-week / 7-day-series, bucketing by the
@@ -286,6 +384,9 @@ mod tests {
         assert_eq!(ev[0].1.input, 25228 - 9600);
         assert_eq!(ev[0].1.cached, 9600);
         assert_eq!(ev[0].1.output, 78);
+        let wire = serde_json::to_value(ev[0].1).unwrap();
+        assert_eq!(wire["cache_read"], 9600);
+        assert!(wire["cache_creation"].is_null());
     }
 
     #[test]
@@ -296,6 +397,9 @@ mod tests {
         assert_eq!(ev[0].1.input, 100);
         assert_eq!(ev[0].1.output, 20);
         assert_eq!(ev[0].1.cached, 170);
+        let wire = serde_json::to_value(ev[0].1).unwrap();
+        assert_eq!(wire["cache_read"], 140);
+        assert_eq!(wire["cache_creation"], 30);
     }
 
     #[test]
@@ -307,6 +411,7 @@ mod tests {
             input: i,
             output: o,
             cached: c,
+            ..ConsumptionBreakdown::default()
         };
         let events = vec![
             (ts("2026-06-02T01:00:00Z"), b(10, 1, 100)), // maybe today (tz dependent)
@@ -335,6 +440,7 @@ mod tests {
             input: 5,
             output: 0,
             cached: 0,
+            ..ConsumptionBreakdown::default()
         };
         let events = vec![
             (ts("2026-06-02T01:00:00Z"), b), // after week_start
@@ -359,11 +465,13 @@ mod tests {
             input: 3,
             output: 4,
             cached: 5,
+            ..ConsumptionBreakdown::default()
         });
         acc.add(&ConsumptionBreakdown {
             input: 1,
             output: 1,
             cached: 1,
+            ..ConsumptionBreakdown::default()
         });
         assert_eq!(acc.input, 4);
         assert_eq!(acc.output, 5);

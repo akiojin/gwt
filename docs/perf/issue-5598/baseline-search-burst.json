@@ -1,0 +1,1387 @@
+{
+  "label": "baseline",
+  "captured_utc": "2026-10-16T03:34:05.283548+00:00",
+  "binary": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-baseline\\gwtd.exe",
+    "bytes": 65563136,
+    "sha256": "c42374da5699166bec520ecd94eea412176a1be9b802154eb987cf7585cfcafa"
+  },
+  "source_ref": "0b087f0b79dd5578dacadea51165caf467e43598",
+  "runtime_runner": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\runners\\chroma_index_runner-2d0b4f30825a10ed.py",
+    "bytes": 390359,
+    "sha256": "2d0b4f30825a10edd9b3b8aa8ec0c9f25bf8e39f5f7ee0954b72981f4be93581"
+  },
+  "runtime_manifest": {
+    "index_path_policy": {
+      "path": "index_path_policy.json",
+      "sha256_16": "7d1c393e6133a5b0",
+      "versioned_path": "runners/index_path_policy.json"
+    },
+    "requirements": {
+      "path": "project_index_requirements.txt",
+      "sha256_16": "eac269738a090205"
+    },
+    "runner": {
+      "path": "runners/chroma_index_runner-2d0b4f30825a10ed.py",
+      "sha256_16": "2d0b4f30825a10ed"
+    },
+    "schema_version": 1,
+    "venv": {
+      "path": "venvs/chroma-venv-eac269738a090205"
+    }
+  },
+  "source_provenance": {
+    "checkout_head": "0b087f0b79dd5578dacadea51165caf467e43598",
+    "declared_source_ref_resolved": "0b087f0b79dd5578dacadea51165caf467e43598",
+    "embedded_runner_matches_declared_ref_normalized": true,
+    "embedded_runner_matches_current_worktree": false,
+    "current_worktree_sources": [
+      {
+        "path": "E:\\gwt\\work\\issue-5598\\crates\\gwt\\src\\index_search.rs",
+        "bytes": 153788,
+        "sha256": "63e66764698fa5ccbf4b028fe967b2cf33198a512a5d5ab2acbfc7e8dd26be3c"
+      },
+      {
+        "path": "E:\\gwt\\work\\issue-5598\\crates\\gwt\\src\\index_worker.rs",
+        "bytes": 202672,
+        "sha256": "9d22d3e3e70aefa651e1c4ceb9b7c3049da286dca91b4a1a57b3c5e75911a2bb"
+      },
+      {
+        "path": "E:\\gwt\\work\\issue-5598\\crates\\gwt-core\\runtime\\chroma_index_runner.py",
+        "bytes": 394145,
+        "sha256": "04eaf92932fa8080a40e1696ec647a612b3dd07d990439e8d5a28af76b47aaec"
+      }
+    ],
+    "current_worktree_source_status": "M crates/gwt-core/runtime/chroma_index_runner.py",
+    "note": "Working-tree Rust digests are informational; the executable digest identifies what was measured."
+  },
+  "harness": {
+    "path": "E:\\gwt\\work\\issue-5598\\scripts\\diagnostics\\issue-5598-search-burst.py",
+    "bytes": 31295,
+    "sha256": "f1d8d3e63cf77237c03239f7c6a88d2e282d61a43e47140ceb3a51af16ff721c"
+  },
+  "dependency_versions": {
+    "wall_ms": 534.0290000003733,
+    "exit_code": 0,
+    "stdout": "{\"chromadb\": \"1.5.5\", \"sentence-transformers\": \"5.6.0\", \"portalocker\": \"2.10.1\", \"torch\": \"2.13.0\"}\n",
+    "stderr": "",
+    "timed_out": false
+  },
+  "home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home",
+  "query": "search admission index sharing repair performance",
+  "scopes": [
+    "issues"
+  ],
+  "measurement_boundary": "client spawn through gwtd JSON response and process exit",
+  "warm_burst_boundary": "12 fresh outer gwtd clients share the resident worker; this models a restart launch wave when the detached worker survives",
+  "restart_boundary": "cold-worker recovery stress: owned resident worker terminated; new isolated coordinator root; same persisted real index",
+  "limitations": [
+    "CLI uses the GUI's Rust search implementation but does not measure browser or GUI startup.",
+    "GUI restart does not always stop detached resident workers; forced worker termination is a stronger stress condition.",
+    "Host load is observed as-is and is not fixed.",
+    "Cold phases include real model loading and are not included in the warmed phase."
+  ],
+  "host_before": {
+    "captured_utc": "2026-10-16T03:34:05.883631+00:00",
+    "logical_cpus": 32,
+    "total_memory_kib": 133952588,
+    "free_memory_kib": 21654488,
+    "cpu_load_percent": [
+      90
+    ]
+  },
+  "phases": {
+    "cold_burst": {
+      "count": 12,
+      "successes": 0,
+      "p95_ms": 30772.79290000024,
+      "p95_method": "nearest rank over every request, including failures/timeouts",
+      "threshold_ms": 3000,
+      "pass": false,
+      "samples": [
+        {
+          "request": 0,
+          "wall_ms": 12365.494399999989,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 1,
+          "wall_ms": 12407.2599000001,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 2,
+          "wall_ms": 12426.50440000034,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 3,
+          "wall_ms": 12530.695999999807,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 4,
+          "wall_ms": 12494.409099999757,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 5,
+          "wall_ms": 12344.54579999965,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 6,
+          "wall_ms": 12504.496600000493,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 7,
+          "wall_ms": 30772.79290000024,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":null,\\\"ok\\\":false,\\\"reason\\\":\\\"project index runner unavailable\\\",\\\"recovery\\\":\\\"The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":null,\"ok\":false,\"reason\":\"project index runner unavailable\",\"recovery\":\"The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": null,
+            "ok": false,
+            "reason": "project index runner unavailable",
+            "recovery": "The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 8,
+          "wall_ms": 12346.159900000202,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 9,
+          "wall_ms": 12414.06090000055,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 10,
+          "wall_ms": 12401.204199999484,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 11,
+          "wall_ms": 12382.130899999538,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":43196,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":43196,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 43196,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        }
+      ]
+    },
+    "real_model_prewarm": {
+      "wall_ms": 49879.76280000021,
+      "exit_code": 0,
+      "stderr": "",
+      "timed_out": false,
+      "success": true,
+      "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\diagnostics\\issue-5598\\baseline-f590c54a574b40118c097fe5671e7b4c.json",
+      "stdout_sha256": "0bbe19b5b2bb248027cb67fd417dc1d6c53cf23162cee62a2db35054f82c95f2",
+      "output_projection": {
+        "ok": true,
+        "scopes": {
+          "issues": {
+            "state": "fresh"
+          }
+        },
+        "model_load_ms": 36764,
+        "timings_ms": {
+          "index_read": 7153.2398999997895,
+          "model_load": 36764,
+          "query_encode": 1797.706200000117,
+          "query": 760.7066000000486,
+          "assemble": 0.007499999810534064
+        },
+        "worker_pid": 43904
+      },
+      "result_counts": {
+        "issueResults": 3
+      }
+    },
+    "warmup": {
+      "wall_ms": 4811.230799999976,
+      "exit_code": 0,
+      "stderr": "",
+      "timed_out": false,
+      "success": true,
+      "result_count": 3,
+      "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\diagnostics\\issue-5598\\baseline-9c9c777a6fb449b59e7da31a40e48720.json",
+      "stdout_sha256": "67dce0dd71284d37c68c7e1329edcf2dba3caa61df66b30071457070f1506efa",
+      "response_projection": {
+        "exit_code": 0,
+        "ok": true,
+        "operation": "search"
+      },
+      "output_projection": {
+        "ok": true,
+        "result_scopes": [
+          "issues",
+          "issues",
+          "issues"
+        ]
+      }
+    },
+    "warmed_burst": {
+      "count": 12,
+      "successes": 3,
+      "p95_ms": 15939.00080000003,
+      "p95_method": "nearest rank over every request, including failures/timeouts",
+      "threshold_ms": 3000,
+      "pass": false,
+      "samples": [
+        {
+          "request": 0,
+          "wall_ms": 9655.521900000167,
+          "exit_code": 0,
+          "stderr": "",
+          "timed_out": false,
+          "success": true,
+          "result_count": 3,
+          "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\diagnostics\\issue-5598\\baseline-afbba641480a4101be0c7e75819370c8.json",
+          "stdout_sha256": "67dce0dd71284d37c68c7e1329edcf2dba3caa61df66b30071457070f1506efa",
+          "response_projection": {
+            "exit_code": 0,
+            "ok": true,
+            "operation": "search"
+          },
+          "output_projection": {
+            "ok": true,
+            "result_scopes": [
+              "issues",
+              "issues",
+              "issues"
+            ]
+          }
+        },
+        {
+          "request": 1,
+          "wall_ms": 10879.603299999872,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 2,
+          "wall_ms": 10846.03000000061,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 3,
+          "wall_ms": 10884.001200000057,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 4,
+          "wall_ms": 10878.349100000378,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 5,
+          "wall_ms": 10887.31579999967,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 6,
+          "wall_ms": 10863.714500000242,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 7,
+          "wall_ms": 10835.001100000227,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 8,
+          "wall_ms": 10809.32810000013,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 9,
+          "wall_ms": 4993.67919999986,
+          "exit_code": 0,
+          "stderr": "",
+          "timed_out": false,
+          "success": true,
+          "result_count": 3,
+          "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\diagnostics\\issue-5598\\baseline-fe402305e30244bdacc0f65f0842b153.json",
+          "stdout_sha256": "67dce0dd71284d37c68c7e1329edcf2dba3caa61df66b30071457070f1506efa",
+          "response_projection": {
+            "exit_code": 0,
+            "ok": true,
+            "operation": "search"
+          },
+          "output_projection": {
+            "ok": true,
+            "result_scopes": [
+              "issues",
+              "issues",
+              "issues"
+            ]
+          }
+        },
+        {
+          "request": 10,
+          "wall_ms": 10818.652500000098,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":38380,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":38380,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 38380,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 11,
+          "wall_ms": 15939.00080000003,
+          "exit_code": 0,
+          "stderr": "",
+          "timed_out": false,
+          "success": true,
+          "result_count": 3,
+          "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\diagnostics\\issue-5598\\baseline-46a45f2d04104042b658d0788d791fb3.json",
+          "stdout_sha256": "67dce0dd71284d37c68c7e1329edcf2dba3caa61df66b30071457070f1506efa",
+          "response_projection": {
+            "exit_code": 0,
+            "ok": true,
+            "operation": "search"
+          },
+          "output_projection": {
+            "ok": true,
+            "result_scopes": [
+              "issues",
+              "issues",
+              "issues"
+            ]
+          }
+        }
+      ]
+    },
+    "restart_cold_burst": {
+      "count": 12,
+      "successes": 0,
+      "p95_ms": 29619.439399999465,
+      "p95_method": "nearest rank over every request, including failures/timeouts",
+      "threshold_ms": 3000,
+      "pass": false,
+      "samples": [
+        {
+          "request": 0,
+          "wall_ms": 29619.439399999465,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":null,\\\"ok\\\":false,\\\"reason\\\":\\\"project index runner unavailable\\\",\\\"recovery\\\":\\\"The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":null,\"ok\":false,\"reason\":\"project index runner unavailable\",\"recovery\":\"The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": null,
+            "ok": false,
+            "reason": "project index runner unavailable",
+            "recovery": "The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 1,
+          "wall_ms": 10799.94650000026,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 2,
+          "wall_ms": 10874.839600000087,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 3,
+          "wall_ms": 10790.605400000459,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 4,
+          "wall_ms": 10929.920499999753,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 5,
+          "wall_ms": 10911.797799999476,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 6,
+          "wall_ms": 10913.417899999331,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 7,
+          "wall_ms": 10814.301200000045,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 8,
+          "wall_ms": 10979.561599999215,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 9,
+          "wall_ms": 10814.931900000374,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 10,
+          "wall_ms": 10729.877199999464,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        },
+        {
+          "request": 11,
+          "wall_ms": 10782.452999999805,
+          "exit_code": 1,
+          "stdout": "{\"exit_code\":1,\"ok\":false,\"operation\":\"search\",\"output\":\"{\\\"error_code\\\":\\\"SEARCH_UNAVAILABLE\\\",\\\"holder\\\":{\\\"action\\\":\\\"search-multi\\\",\\\"model_load_ms\\\":null,\\\"model_state\\\":null,\\\"owner_pid\\\":27448,\\\"project_root\\\":\\\"E:\\\\\\\\gwt\\\\\\\\work\\\\\\\\issue-5598\\\",\\\"qos\\\":\\\"interactive\\\",\\\"repo_hash\\\":\\\"99a8660247f5bc49\\\"},\\\"ok\\\":false,\\\"reason\\\":\\\"search heavy lease unavailable\\\",\\\"recovery\\\":\\\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\\\",\\\"retry_after_ms\\\":5000,\\\"retryable\\\":true,\\\"start_decision\\\":\\\"known_approved_owner_only\\\"}\\n\"}\n",
+          "stderr": "",
+          "timed_out": false,
+          "response": {
+            "exit_code": 1,
+            "ok": false,
+            "operation": "search",
+            "output": "{\"error_code\":\"SEARCH_UNAVAILABLE\",\"holder\":{\"action\":\"search-multi\",\"model_load_ms\":null,\"model_state\":null,\"owner_pid\":27448,\"project_root\":\"E:\\\\gwt\\\\work\\\\issue-5598\",\"qos\":\"interactive\",\"repo_hash\":\"99a8660247f5bc49\"},\"ok\":false,\"reason\":\"search heavy lease unavailable\",\"recovery\":\"Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.\",\"retry_after_ms\":5000,\"retryable\":true,\"start_decision\":\"known_approved_owner_only\"}\n"
+          },
+          "output": {
+            "error_code": "SEARCH_UNAVAILABLE",
+            "holder": {
+              "action": "search-multi",
+              "model_load_ms": null,
+              "model_state": null,
+              "owner_pid": 27448,
+              "project_root": "E:\\gwt\\work\\issue-5598",
+              "qos": "interactive",
+              "repo_hash": "99a8660247f5bc49"
+            },
+            "ok": false,
+            "reason": "search heavy lease unavailable",
+            "recovery": "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild. For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.",
+            "retry_after_ms": 5000,
+            "retryable": true,
+            "start_decision": "known_approved_owner_only"
+          },
+          "success": false,
+          "result_count": 0
+        }
+      ]
+    }
+  },
+  "cleanup": [
+    {
+      "pid": 43904,
+      "worker_dir": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\search-workers\\43f7bf87c794059e9161f3e07a2490cacef7a45800d149b206eb35c504cfc76f",
+      "stopped": true
+    },
+    {
+      "pid": 50560,
+      "worker_dir": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\search-workers\\43f7bf87c794059e9161f3e07a2490cacef7a45800d149b206eb35c504cfc76f",
+      "stopped": false
+    }
+  ],
+  "coordinators": [
+    {
+      "root": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\index-coordinator",
+      "archived_previous": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\index-coordinator-baseline-cold-archived-1792121654826658700"
+    },
+    {
+      "root": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\index-coordinator",
+      "archived_previous": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\index-coordinator-baseline-restart-archived-1792121760837008100"
+    }
+  ],
+  "host_after": {
+    "captured_utc": "2026-10-16T03:36:37.848004+00:00",
+    "logical_cpus": 32,
+    "total_memory_kib": 133952588,
+    "free_memory_kib": 19144184,
+    "cpu_load_percent": [
+      62
+    ]
+  }
+}

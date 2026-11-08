@@ -43,6 +43,44 @@ pub trait CliEnv {
     fn client(&self) -> &Self::Client;
     fn cache_root(&self) -> PathBuf;
     fn repo_path(&self) -> &std::path::Path;
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::PublicFeedback,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        use gwt_github::client::{http::HttpIssueClient, OwnerMutationError, ResolutionDeadline};
+        let deadline = ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(120),
+        );
+        let client =
+            HttpIssueClient::from_owner_environment_with_deadline("akiojin", "gwt", &deadline)
+                .map_err(OwnerMutationError::PreSubmit)?;
+        super::feedback::send_to_upstream_with_deadline(&client, record, &deadline)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        super::feedback::spawn_worker(self.repo_path(), id)
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        use gwt_core::feedback::auto_report::AutoReason;
+        use gwt_github::client::{http::HttpIssueClient, ResolutionDeadline};
+        let deadline = ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(120),
+        );
+        // Never invoke gh/keyring: even a hidden auth token command can open
+        // an OS credential-store unlock dialog. Missing credentials fail closed.
+        let client = HttpIssueClient::from_noninteractive_env("akiojin", "gwt")
+            .map_err(|_| AutoReason::AuthUnavailable)?;
+        super::feedback::send_auto_to_upstream_with_deadline(
+            &client,
+            snapshot,
+            self.repo_path(),
+            &deadline,
+        )
+    }
     fn stdout(&mut self) -> &mut dyn io::Write;
     fn stderr(&mut self) -> &mut dyn io::Write;
     fn read_stdin(&mut self) -> io::Result<String>;
@@ -57,10 +95,25 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<super::CompletionPrCandidate>>;
     fn fetch_completion_pr(
         &mut self,
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot>;
+    /// Fresh evidence pinned to this project's canonical GitHub repository.
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot>;
+    /// Arm GitHub auto-merge for an already authorized and reviewed head.
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value>;
     fn list_open_prs(
         &mut self,
         options: &gwt_git::PrInventoryOptions,
@@ -76,6 +129,16 @@ pub trait CliEnv {
         labels: &[String],
         draft: bool,
     ) -> io::Result<PrStatus>;
+    /// Canonical remote observations; never accepts caller-supplied CI results.
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        _base: &str,
+        _head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        Err(io::Error::other(
+            "canonical GitHub CI reader is unavailable",
+        ))
+    }
     fn compare_pr_head(
         &mut self,
         base: &str,
@@ -116,13 +179,67 @@ pub trait CliEnv {
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
     fn fetch_pr_reviews(&mut self, number: u64) -> io::Result<Vec<PrReview>>;
     fn fetch_pr_review_threads(&mut self, number: u64) -> io::Result<Vec<PrReviewThread>>;
-    fn reply_and_resolve_pr_review_threads(&mut self, number: u64, body: &str)
-        -> io::Result<usize>;
+    fn reply_and_resolve_pr_review_threads(
+        &mut self,
+        number: u64,
+        body: &str,
+        thread_id: Option<&str>,
+    ) -> io::Result<usize>;
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary>;
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String>;
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
     /// Issue #3515: re-run a failed run or job. Returns the outcome line.
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String>;
+    fn actions_diagnostic(
+        &mut self,
+        command: super::actions::DiagnosticCommand,
+    ) -> io::Result<serde_json::Value> {
+        super::actions::diagnostic::execute(self, command)
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_run_snapshot(&mut self, _run_id: u64) -> io::Result<serde_json::Value> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_artifact(&mut self, _run_id: u64, _artifact_id: u64) -> io::Result<Vec<u8>> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        _git_ref: &str,
+        _inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn github_repository(&self) -> io::Result<(String, String)>;
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        super::actions::release_policy::context(self.repo_path())
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value>;
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value>;
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion>;
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value>;
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value>;
     /// Issue #4188: cancel an active run in the current repository.
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String>;
     /// Issue #4188: list queued runs, including runs without jobs.

@@ -12,6 +12,24 @@ use super::{
 const SUMMARY_LIMIT: usize = 240;
 const TITLE_LIMIT: usize = 96;
 
+pub(super) fn rejected_action_events(
+    client_id: &str,
+    event: &gwt::FrontendEvent,
+) -> Option<Vec<OutboundEvent>> {
+    let gwt::FrontendEvent::OpenRecoveryCenterBoardEntry {
+        request_id,
+        generation,
+        action_handle,
+    } = event
+    else {
+        return None;
+    };
+    Some(vec![OutboundEvent::reply(client_id, BackendEvent::RecoveryCenterBoardEntry {
+        request_id: request_id.clone(), generation: *generation, board_entry_id: None,
+        error: Some(format!("Recovery action handle {action_handle} is invalid: project tab is closed or replaced")),
+    })])
+}
+
 impl AppRuntime {
     pub(super) fn load_recovery_center_events(
         &mut self,
@@ -24,7 +42,9 @@ impl AppRuntime {
         };
         state.recovery_center_generation = state.recovery_center_generation.wrapping_add(1).max(1);
         let generation = state.recovery_center_generation;
-        state.recovery_center_handles.clear();
+        state
+            .recovery_center_handles
+            .retain(|_, action| action.client_id != client_id);
 
         let tab = self.tab(&context.tab_id).cloned();
         let Some(tab) = tab else {
@@ -37,15 +57,21 @@ impl AppRuntime {
             )];
         };
 
-        let loaded = load_project_recovery_records(&self.sessions_dir, &tab);
-        let Ok(records) = loaded else {
-            return vec![recovery_center_state_event(
-                client_id,
-                request_id,
-                generation,
-                gwt::RecoveryCenterLoadStatus::Error,
-                Vec::new(),
-            )];
+        let records = match load_project_recovery_records(&self.sessions_dir, &tab) {
+            Ok(Some(records)) => records,
+            result => {
+                return vec![recovery_center_state_event(
+                    client_id,
+                    request_id,
+                    generation,
+                    if result.is_ok() {
+                        gwt::RecoveryCenterLoadStatus::NotFound
+                    } else {
+                        gwt::RecoveryCenterLoadStatus::Error
+                    },
+                    Vec::new(),
+                )]
+            }
         };
 
         let mut items = Vec::with_capacity(records.len());
@@ -65,6 +91,7 @@ impl AppRuntime {
                 .insert(
                     handle.clone(),
                     RecoveryCenterAction {
+                        client_id: client_id.to_string(),
                         generation,
                         board_entry_id,
                     },
@@ -89,17 +116,32 @@ impl AppRuntime {
         generation: u64,
         action_handle: &str,
     ) -> Vec<OutboundEvent> {
-        let board_entry_id = self
+        let action = self
             .project_state(context)
-            .and_then(|state| state.recovery_center_handles.get(action_handle))
-            .filter(|action| action.generation == generation)
-            .and_then(|action| action.board_entry_id.clone());
+            .and_then(|state| state.recovery_center_handles.get(action_handle));
+        let reason = if !self.project_context_is_current(context) {
+            Some("project tab is closed or replaced")
+        } else {
+            match action {
+                None => Some("unknown or expired handle for this client/project"),
+                Some(action) if action.client_id != client_id => Some("client mismatch"),
+                Some(action) if action.generation != generation => Some("generation mismatch"),
+                _ => None,
+            }
+        };
+        let board_entry_id = reason
+            .is_none()
+            .then(|| action.and_then(|action| action.board_entry_id.clone()))
+            .flatten();
         vec![OutboundEvent::reply(
             client_id,
             BackendEvent::RecoveryCenterBoardEntry {
                 request_id: request_id.to_string(),
                 generation,
                 board_entry_id,
+                error: reason.map(|reason| {
+                    format!("Recovery action handle {action_handle} is invalid: {reason}")
+                }),
             },
         )]
     }
@@ -126,25 +168,35 @@ fn recovery_center_state_event(
 fn load_project_recovery_records(
     sessions_dir: &Path,
     tab: &ProjectTabRuntime,
-) -> Result<Vec<RecoveryRecord>, ()> {
+) -> Result<Option<Vec<RecoveryRecord>>, ()> {
     let sessions = gwt_agent::session_ledger::load_sessions(sessions_dir).map_err(|_| ())?;
     let mut records = Vec::new();
+    let mut found_store = false;
+    let project_hash = gwt_core::paths::project_scope_hash(&tab.project_root);
     for session in sessions {
         if !session_belongs_to_project(&session, tab) {
             continue;
         }
 
-        // `RecoveryStore::for_repo` creates its private directory hierarchy.
-        // Avoid calling it for Sessions that have never owned a recovery so
-        // this read surface cannot materialize an empty Store as a side effect.
-        let intents_root = gwt_core::paths::gwt_project_dir_for_repo_path(&session.worktree_path)
-            .join("recovery")
-            .join("intents");
-        if !intents_root.is_dir() {
-            continue;
+        // Saved identity survives worktree deletion. Never replace a saved key
+        // with path fallback, which could silently select another Store.
+        let saved_hash = match session.repo_hash.as_deref() {
+            Some(hash) => gwt_core::repo_hash::RepoHash::parse(hash).map_err(|_| ())?,
+            None if session.worktree_path.exists() => {
+                gwt_core::paths::project_scope_hash(&session.worktree_path)
+            }
+            None => continue,
+        };
+        if saved_hash != project_hash {
+            return Err(());
         }
-        let store = RecoveryStore::for_repo(&session.worktree_path, &session.id).map_err(|_| ())?;
-        records.extend(store.list().map_err(|_| ())?);
+        let Some(store) =
+            RecoveryStore::open_for_project_if_exists(&saved_hash, &session.id).map_err(|_| ())?
+        else {
+            continue;
+        };
+        found_store = true;
+        records.extend(store.list_read_only().map_err(|_| ())?);
     }
     records.sort_by(|left, right| {
         right
@@ -152,7 +204,7 @@ fn load_project_recovery_records(
             .cmp(&left.updated_at)
             .then_with(|| left.intent.entry.id.cmp(&right.intent.entry.id))
     });
-    Ok(records)
+    Ok(found_store.then_some(records))
 }
 
 fn session_belongs_to_project(session: &gwt_agent::Session, tab: &ProjectTabRuntime) -> bool {

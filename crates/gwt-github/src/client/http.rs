@@ -18,6 +18,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    io::Read,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -41,6 +42,7 @@ pub enum HttpMethod {
     Get,
     Post,
     Patch,
+    Put,
     Delete,
 }
 
@@ -50,6 +52,7 @@ impl HttpMethod {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
             HttpMethod::Patch => "PATCH",
+            HttpMethod::Put => "PUT",
             HttpMethod::Delete => "DELETE",
         }
     }
@@ -72,6 +75,25 @@ pub struct HttpResponse {
     pub body: String,
 }
 
+/// Bounded raw bytes for diagnostic assets and artifact downloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryHttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+const DIAGNOSTIC_BODY_LIMIT: usize = 1024 * 1024;
+
+/// Direct acknowledgment of the fixed diagnostic workflow dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticDispatchAck {
+    pub workflow_run_id: u64,
+    pub run_url: String,
+    pub html_url: String,
+}
+
 /// Transport errors surfaced by [`HttpTransport::execute`].
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -88,6 +110,16 @@ pub enum HttpError {
 /// Abstract HTTP executor used by [`HttpIssueClient`].
 pub trait HttpTransport: Send + Sync {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpError>;
+
+    fn execute_binary(
+        &self,
+        _request: HttpRequest,
+        _max_bytes: usize,
+    ) -> Result<BinaryHttpResponse, HttpError> {
+        Err(HttpError::PreSubmitTransport(
+            "binary diagnostic transport is unavailable".into(),
+        ))
+    }
 
     fn execute_with_deadline(
         &self,
@@ -112,7 +144,12 @@ pub struct FakeTransport {
 struct FakeState {
     recorded: Vec<HttpRequest>,
     recorded_deadlines: Vec<Instant>,
-    canned: std::collections::VecDeque<HttpResponse>,
+    canned: std::collections::VecDeque<FakeResponse>,
+}
+
+enum FakeResponse {
+    Text(HttpResponse),
+    Binary(BinaryHttpResponse),
 }
 
 impl FakeTransport {
@@ -132,7 +169,15 @@ impl FakeTransport {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .canned
-            .push_back(response);
+            .push_back(FakeResponse::Text(response));
+    }
+
+    pub fn enqueue_binary(&self, response: BinaryHttpResponse) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .canned
+            .push_back(FakeResponse::Binary(response));
     }
 
     /// Snapshot of every recorded request so far.
@@ -169,7 +214,38 @@ impl HttpTransport for FakeTransport {
         state
             .canned
             .pop_front()
+            .and_then(|response| match response {
+                FakeResponse::Text(response) => Some(response),
+                FakeResponse::Binary(_) => None,
+            })
             .ok_or_else(|| HttpError::Transport("no canned response available".into()))
+    }
+
+    fn execute_binary(
+        &self,
+        request: HttpRequest,
+        max_bytes: usize,
+    ) -> Result<BinaryHttpResponse, HttpError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.recorded.push(request);
+        let response = match state.canned.pop_front() {
+            Some(FakeResponse::Binary(response)) => response,
+            Some(FakeResponse::Text(response)) => BinaryHttpResponse {
+                status: response.status,
+                headers: response.headers,
+                body: response.body.into_bytes(),
+            },
+            None => return Err(HttpError::Transport("no canned response available".into())),
+        };
+        if response.body.len() > max_bytes.min(DIAGNOSTIC_BODY_LIMIT) {
+            return Err(HttpError::Transport(
+                "diagnostic response exceeds byte limit".into(),
+            ));
+        }
+        Ok(response)
     }
 
     fn execute_with_deadline(
@@ -189,6 +265,10 @@ impl HttpTransport for FakeTransport {
         state
             .canned
             .pop_front()
+            .and_then(|response| match response {
+                FakeResponse::Text(response) => Some(response),
+                FakeResponse::Binary(_) => None,
+            })
             .ok_or_else(|| HttpError::Transport("no canned response available".into()))
     }
 }
@@ -253,6 +333,68 @@ impl HttpTransport for ReqwestTransport {
         execute_reqwest(self.standard_client.as_ref(), request, timeout)
     }
 
+    fn execute_binary(
+        &self,
+        request: HttpRequest,
+        max_bytes: usize,
+    ) -> Result<BinaryHttpResponse, HttpError> {
+        let timeout = ambient_deadline("github diagnostic request")?
+            .map(|deadline| ambient_remaining(deadline, "github diagnostic request"))
+            .transpose()?
+            .unwrap_or(Duration::from_secs(30))
+            .min(Duration::from_secs(30));
+        let mut builder = self
+            .standard_client
+            .request(reqwest::Method::GET, &request.url)
+            .timeout(timeout);
+        if request.method != HttpMethod::Get || request.body.is_some() {
+            return Err(HttpError::PreSubmitTransport(
+                "diagnostic binary requests must be reads".into(),
+            ));
+        }
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let response = builder
+            .send()
+            .map_err(|_| HttpError::Transport("diagnostic request failed".into()))?;
+        let max_bytes = max_bytes.min(DIAGNOSTIC_BODY_LIMIT);
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(HttpError::Transport(
+                "diagnostic response exceeds byte limit".into(),
+            ));
+        }
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let mut body = Vec::new();
+        response
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut body)
+            .map_err(|_| HttpError::Transport("diagnostic response read failed".into()))?;
+        if body.len() > max_bytes {
+            return Err(HttpError::Transport(
+                "diagnostic response exceeds byte limit".into(),
+            ));
+        }
+        Ok(BinaryHttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
     fn execute_with_deadline(
         &self,
         request: HttpRequest,
@@ -296,6 +438,7 @@ fn execute_reqwest(
         HttpMethod::Get => reqwest::Method::GET,
         HttpMethod::Post => reqwest::Method::POST,
         HttpMethod::Patch => reqwest::Method::PATCH,
+        HttpMethod::Put => reqwest::Method::PUT,
         HttpMethod::Delete => reqwest::Method::DELETE,
     };
     let mut builder = client.request(method, &request.url);
@@ -350,13 +493,188 @@ fn execute_reqwest(
 // HttpIssueClient
 // ---------------------------------------------------------------------------
 
+/// A repository-trusted Discussion containing a potential Board root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardDiscussion {
+    pub id: String,
+    pub number: u64,
+    pub body: String,
+}
+
+/// One page of repository Discussions before Board marker decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardDiscussionsPage {
+    pub discussions: Vec<BoardDiscussion>,
+    pub cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
+/// A repository-trusted top-level Discussion comment and its server identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionComment {
+    pub id: String,
+    pub body: String,
+    pub author: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// One page of top-level comments from a GitHub Discussion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscussionCommentsPage {
     pub discussion_id: String,
-    pub bodies: Vec<String>,
+    pub comments: Vec<DiscussionComment>,
     pub cursor: Option<String>,
     pub has_next_page: bool,
+}
+
+/// Identity returned after creating a Discussion in this client's repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedDiscussion {
+    pub id: String,
+    pub number: u64,
+    pub url: String,
+}
+
+fn pm_settings_error(operation: &str, message: &str) -> ApiError {
+    ApiError::Parse {
+        operation: operation.into(),
+        message: message.into(),
+    }
+}
+
+/// Effect parameters accepted by the repository-fixed PM settings operations.
+/// This validator is shared with the JSON front door; it grants no authority.
+pub fn validate_pm_settings(operation: &str, params: &Value) -> Result<(), ApiError> {
+    let invalid = || {
+        pm_settings_error(
+            operation,
+            "unsupported or malformed bounded effect parameters",
+        )
+    };
+    let fields = params
+        .as_object()
+        .filter(|fields| !fields.is_empty())
+        .ok_or_else(invalid)?;
+    let explicit_string = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
+    };
+    match operation {
+        "pr.reopen"
+            if fields.len() == 1 && params["number"].as_u64().is_some_and(|number| number > 0) => {}
+        "pr.review.submit" => {
+            if params["number"].as_u64().is_none_or(|number| number == 0)
+                || !matches!(
+                    params["event"].as_str(),
+                    Some("COMMENT" | "APPROVE" | "REQUEST_CHANGES")
+                )
+                || fields.iter().any(|(key, value)| {
+                    !matches!(key.as_str(), "number" | "event" | "body")
+                        || key == "body" && !value.is_string()
+                })
+                || params["event"] != "APPROVE"
+                    && params["body"]
+                        .as_str()
+                        .is_none_or(|body| body.trim().is_empty())
+            {
+                return Err(invalid());
+            }
+        }
+        "release.metadata.set" => {
+            if !explicit_string(&params["tag"])
+                || fields.len() < 2
+                || fields.iter().any(|(key, value)| match key.as_str() {
+                    "tag" => !explicit_string(value),
+                    "name" | "body" => !value.is_string(),
+                    "prerelease" => !value.is_boolean(),
+                    _ => true,
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        "repository.settings.set" => {
+            if fields.contains_key("topics") {
+                if fields.len() != 1 || !valid_topics(&params["topics"]) {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
+            for (key, value) in fields {
+                let valid = match key.as_str() {
+                    "description" | "homepage" => value.is_string(),
+                    "default_branch" => explicit_string(value),
+                    "archived"
+                    | "has_issues"
+                    | "has_projects"
+                    | "has_wiki"
+                    | "has_discussions"
+                    | "is_template"
+                    | "allow_squash_merge"
+                    | "allow_merge_commit"
+                    | "allow_rebase_merge"
+                    | "allow_auto_merge"
+                    | "allow_update_branch"
+                    | "delete_branch_on_merge"
+                    | "allow_forking" => value.is_boolean(),
+                    "squash_merge_commit_title" => {
+                        matches!(value.as_str(), Some("PR_TITLE" | "COMMIT_OR_PR_TITLE"))
+                    }
+                    "squash_merge_commit_message" => matches!(
+                        value.as_str(),
+                        Some("PR_BODY" | "COMMIT_MESSAGES" | "BLANK")
+                    ),
+                    "merge_commit_title" => {
+                        matches!(value.as_str(), Some("PR_TITLE" | "MERGE_MESSAGE"))
+                    }
+                    "merge_commit_message" => {
+                        matches!(value.as_str(), Some("PR_BODY" | "PR_TITLE" | "BLANK"))
+                    }
+                    "security_and_analysis" => value.as_object().is_some_and(|features| {
+                        !features.is_empty()
+                            && features.iter().all(|(feature, setting)| {
+                                matches!(
+                                    feature.as_str(),
+                                    "advanced_security"
+                                        | "secret_scanning"
+                                        | "secret_scanning_push_protection"
+                                ) && setting.as_object().is_some_and(|setting| {
+                                    setting.len() == 1
+                                        && matches!(
+                                            setting.get("status").and_then(Value::as_str),
+                                            Some("enabled" | "disabled")
+                                        )
+                                })
+                            })
+                    }),
+                    _ => false,
+                };
+                if !valid {
+                    return Err(invalid());
+                }
+            }
+        }
+        _ => return Err(invalid()),
+    }
+    Ok(())
+}
+
+fn valid_topics(value: &Value) -> bool {
+    value.as_array().is_some_and(|names| {
+        let mut seen = HashSet::new();
+        names.len() <= 20
+            && names.iter().all(|name| {
+                name.as_str().is_some_and(|name| {
+                    !name.is_empty()
+                        && name.len() <= 50
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })
+                        && seen.insert(name)
+                })
+            })
+    })
 }
 
 /// Real [`IssueClient`] that talks to GitHub via an [`HttpTransport`].
@@ -384,6 +702,16 @@ const GRAPHQL_BUDGET_ARGS: [&str; 2] = ["api", "graphql"];
 const REST_BUDGET_ARGS: [&str; 2] = ["api", "repos"];
 
 impl HttpIssueClient<ReqwestTransport> {
+    /// Unattended callers must not enter gh's UI-capable keyring fallback.
+    /// Use only credentials already supplied to this process; never start a
+    /// login, credential helper, browser or OS secret-store unlock operation.
+    pub fn from_noninteractive_env(owner: &str, repo: &str) -> Result<Self, ApiError> {
+        let token = noninteractive_token(|name| std::env::var(name).ok())?;
+        let transport =
+            ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
+    }
+
     const OWNER_ENV_KEYS: [&'static str; 4] = [
         "GWT_OWNER_GITHUB_TEST_MODE",
         "GWT_OWNER_GITHUB_REST_BASE",
@@ -574,6 +902,486 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         &self.transport
     }
 
+    /// Resolve a workflow ID or filename to its repository-relative path.
+    pub fn workflow_path(&self, workflow: &str) -> Result<String, ApiError> {
+        let workflow = encode_path_segment(workflow);
+        let body = self.workflow_get(
+            format!(
+                "{}/repos/{}/{}/actions/workflows/{workflow}",
+                self.rest_base, self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        let metadata: Value = serde_json::from_str(&body)
+            .map_err(|_| ApiError::Unexpected("GitHub workflow metadata is invalid".into()))?;
+        metadata
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Unexpected("GitHub workflow path is missing".into()))
+    }
+
+    /// Read the raw workflow YAML at the exact ref selected for dispatch.
+    pub fn workflow_definition(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+    ) -> Result<String, ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/contents/.github/workflows/{workflow_filename}",
+            self.rest_base, self.owner, self.repo
+        ))
+        .map_err(|_| ApiError::Unexpected("GitHub workflow contents URL is invalid".into()))?;
+        url.query_pairs_mut().append_pair("ref", git_ref);
+        self.workflow_get(url.to_string(), "application/vnd.github.raw+json")
+    }
+
+    /// Dispatch a validated workflow without retrying the mutation.
+    pub fn dispatch_workflow(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<(), ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        self.rest_post(
+            &format!(
+                "/repos/{}/{}/actions/workflows/{workflow_filename}/dispatches",
+                self.owner, self.repo
+            ),
+            json!({ "ref": git_ref, "inputs": inputs }),
+        )
+        .map(|_| ())
+        .map_err(sanitize_workflow_error)
+    }
+
+    /// Dispatch the fixed diagnostic workflow once and bind its returned run.
+    pub fn dispatch_diagnostic_workflow(
+        &self,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<DiagnosticDispatchAck, ApiError> {
+        if git_ref.trim().is_empty() {
+            return Err(ApiError::Unexpected(
+                "GitHub diagnostic workflow ref is required".into(),
+            ));
+        }
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "X-GitHub-Api-Version" {
+                        *value = "2026-03-10".into();
+                    }
+                }
+                headers.push(("Content-Type".into(), "application/json".into()));
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Post,
+                        url: format!(
+                            "{}/repos/{}/{}/actions/workflows/windows-diagnostic.yml/dispatches",
+                            self.rest_base, self.owner, self.repo
+                        ),
+                        headers,
+                        body: Some(json!({ "ref": git_ref, "inputs": inputs }).to_string()),
+                    })
+                    .map_err(|_| {
+                        ApiError::Network("GitHub diagnostic workflow request failed".into())
+                    })?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                let invalid = || {
+                    ApiError::Unexpected(
+                        "GitHub diagnostic workflow acknowledgment is invalid".into(),
+                    )
+                };
+                if response.status != 200 {
+                    return Err(invalid());
+                }
+                let ack: DiagnosticDispatchAck =
+                    serde_json::from_str(&response.body).map_err(|_| invalid())?;
+                let run_path = format!(
+                    "{}/{}/actions/runs/{}",
+                    self.owner, self.repo, ack.workflow_run_id
+                );
+                if ack.workflow_run_id == 0
+                    || ack.run_url != format!("https://api.github.com/repos/{run_path}")
+                    || ack.html_url != format!("https://github.com/{run_path}")
+                {
+                    return Err(invalid());
+                }
+                Ok(ack)
+            })(),
+        )
+    }
+
+    /// Observe the fixed workflow and assets at one exact default-branch head.
+    pub fn diagnostic_workflow_context(&self) -> Result<Value, ApiError> {
+        let prefix = format!("/repos/{}/{}", self.owner, self.repo);
+        let repository = self.diagnostic_json_get(&prefix)?;
+        let identity = format!("{}/{}", self.owner, self.repo);
+        let branch = repository["default_branch"]
+            .as_str()
+            .filter(|branch| {
+                !branch.is_empty() && branch.len() <= 255 && !branch.chars().any(char::is_control)
+            })
+            .ok_or_else(diagnostic_invalid)?;
+        if repository["full_name"].as_str() != Some(identity.as_str()) {
+            return Err(diagnostic_invalid());
+        }
+        let head = self.diagnostic_json_get(&format!(
+            "{prefix}/git/ref/heads/{}",
+            encode_path_segment(branch)
+        ))?;
+        let commit = head["object"]["sha"]
+            .as_str()
+            .filter(|sha| valid_diagnostic_commit(sha))
+            .ok_or_else(diagnostic_invalid)?;
+        if head["object"]["type"] != "commit" {
+            return Err(diagnostic_invalid());
+        }
+        let workflow = self.diagnostic_json_get(&format!(
+            "{prefix}/actions/workflows/windows-diagnostic.yml"
+        ))?;
+        let workflow_id = workflow["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(diagnostic_invalid)?;
+        if workflow["path"] != ".github/workflows/windows-diagnostic.yml" {
+            return Err(diagnostic_invalid());
+        }
+        let published = match workflow["state"].as_str() {
+            Some("active") => true,
+            Some("disabled_manually" | "disabled_inactivity" | "disabled_fork" | "deleted") => {
+                false
+            }
+            _ => return Err(diagnostic_invalid()),
+        };
+        let mut context = self.fixed_asset_hashes(commit)?;
+        context.extend(
+            json!({"repository":identity,"default_branch":branch,"workflow_commit":commit,
+            "workflow_id":workflow_id,"published":published})
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        Ok(Value::Object(context))
+    }
+
+    /// Return private provider evidence for one exact diagnostic run.
+    pub fn diagnostic_run_snapshot(&self, run_id: u64) -> Result<Value, ApiError> {
+        let (run, artifacts) = self.diagnostic_run_artifacts(run_id)?;
+        let commit = run["head_sha"].as_str().ok_or_else(diagnostic_invalid)?;
+        let mut snapshot = self.fixed_asset_hashes(commit)?;
+        snapshot.insert("artifacts".into(), Value::Array(artifacts));
+        snapshot.insert("run".into(), run);
+        Ok(Value::Object(snapshot))
+    }
+
+    fn diagnostic_run_artifacts(&self, run_id: u64) -> Result<(Value, Vec<Value>), ApiError> {
+        if run_id == 0 {
+            return Err(diagnostic_invalid());
+        }
+        let prefix = format!("/repos/{}/{}/actions/runs/{run_id}", self.owner, self.repo);
+        let run = self.diagnostic_json_get(&prefix)?;
+        if run["id"].as_u64() != Some(run_id)
+            || run["repository"]["full_name"] != format!("{}/{}", self.owner, self.repo)
+            || !run["path"].as_str().is_some_and(|path| {
+                path.split('@').next() == Some(".github/workflows/windows-diagnostic.yml")
+            })
+            || run["event"] != "workflow_dispatch"
+            || !run["head_sha"]
+                .as_str()
+                .is_some_and(valid_diagnostic_commit)
+        {
+            return Err(diagnostic_invalid());
+        }
+        let workflow = self.diagnostic_json_get(&format!(
+            "/repos/{}/{}/actions/workflows/windows-diagnostic.yml",
+            self.owner, self.repo
+        ))?;
+        let workflow_id = workflow["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(diagnostic_invalid)?;
+        if workflow["path"] != ".github/workflows/windows-diagnostic.yml"
+            || run["workflow_id"].as_u64() != Some(workflow_id)
+        {
+            return Err(diagnostic_invalid());
+        }
+        let page = self.diagnostic_json_get(&format!("{prefix}/artifacts?per_page=100"))?;
+        let artifacts = page["artifacts"]
+            .as_array()
+            .ok_or_else(diagnostic_invalid)?;
+        if artifacts.len() > 100 || page["total_count"].as_u64() != Some(artifacts.len() as u64) {
+            return Err(diagnostic_invalid());
+        }
+        let mut ids = HashSet::new();
+        for artifact in artifacts {
+            let id = artifact["id"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .ok_or_else(diagnostic_invalid)?;
+            if !ids.insert(id) || artifact["workflow_run"]["id"].as_u64() != Some(run_id) {
+                return Err(diagnostic_invalid());
+            }
+        }
+        Ok((run, artifacts.clone()))
+    }
+
+    fn fixed_asset_hashes(&self, commit: &str) -> Result<serde_json::Map<String, Value>, ApiError> {
+        if !valid_diagnostic_commit(commit) {
+            return Err(diagnostic_invalid());
+        }
+        let mut hashes = serde_json::Map::new();
+        for (key, path) in [
+            (
+                "profile_sha256",
+                ".github/diagnostics/windows/4777-restore-f351-v1/profile.json",
+            ),
+            (
+                "patch_sha256",
+                ".github/diagnostics/windows/4777-restore-f351-v1/diagnostic.patch",
+            ),
+            (
+                "workflow_sha256",
+                ".github/workflows/windows-diagnostic.yml",
+            ),
+            (
+                "harness_sha256",
+                ".github/diagnostics/windows/4777-restore-f351-v1/run.ps1",
+            ),
+        ] {
+            let response = self.diagnostic_get(
+                &format!(
+                    "/repos/{}/{}/contents/{path}?ref={commit}",
+                    self.owner, self.repo
+                ),
+                "application/vnd.github.raw+json",
+            )?;
+            if response.status != 200 {
+                return Err(diagnostic_invalid());
+            }
+            hashes.insert(
+                key.into(),
+                Value::String(hex::encode(Sha256::digest(&response.body))),
+            );
+        }
+        Ok(hashes)
+    }
+
+    /// Fetch a fresh repository/run-bound artifact through one signed redirect.
+    pub fn diagnostic_artifact(&self, run_id: u64, artifact_id: u64) -> Result<Vec<u8>, ApiError> {
+        if artifact_id == 0 {
+            return Err(diagnostic_invalid());
+        }
+        let (_, artifacts) = self.diagnostic_run_artifacts(run_id)?;
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact["id"].as_u64() == Some(artifact_id))
+            .ok_or_else(diagnostic_invalid)?;
+        if artifact["expired"] != false
+            || artifact["size_in_bytes"]
+                .as_u64()
+                .is_none_or(|size| size > DIAGNOSTIC_BODY_LIMIT as u64)
+        {
+            return Err(diagnostic_invalid());
+        }
+        let redirect = self.diagnostic_get(
+            &format!(
+                "/repos/{}/{}/actions/artifacts/{artifact_id}/zip",
+                self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        if redirect.status != 302 {
+            return Err(diagnostic_invalid());
+        }
+        let locations = redirect
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("location"))
+            .collect::<Vec<_>>();
+        if locations.len() != 1 {
+            return Err(diagnostic_invalid());
+        }
+        let signed = reqwest::Url::parse(&locations[0].1).map_err(|_| diagnostic_invalid())?;
+        if !diagnostic_artifact_host(&signed) {
+            return Err(diagnostic_invalid());
+        }
+        let response = self.diagnostic_http_get(
+            signed.to_string(),
+            vec![
+                ("Accept".into(), "application/zip".into()),
+                ("User-Agent".into(), "gwt-github/0.1".into()),
+            ],
+        )?;
+        if response.status != 200 {
+            return Err(diagnostic_invalid());
+        }
+        Ok(response.body)
+    }
+
+    fn diagnostic_json_get(&self, path: &str) -> Result<Value, ApiError> {
+        let response = self.diagnostic_get(path, "application/vnd.github+json")?;
+        if response.status != 200
+            || response.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("link") && value.contains("rel=\"next\"")
+            })
+        {
+            return Err(diagnostic_invalid());
+        }
+        serde_json::from_slice(&response.body).map_err(|_| diagnostic_invalid())
+    }
+
+    fn diagnostic_get(&self, path: &str, accept: &str) -> Result<BinaryHttpResponse, ApiError> {
+        let mut headers = self.auth_headers();
+        for (name, value) in &mut headers {
+            if name == "Accept" {
+                *value = accept.into();
+            }
+        }
+        self.diagnostic_http_get(format!("{}{path}", self.rest_base), headers)
+    }
+
+    fn diagnostic_http_get(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+    ) -> Result<BinaryHttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let response = self
+                    .transport
+                    .execute_binary(
+                        HttpRequest {
+                            method: HttpMethod::Get,
+                            url,
+                            headers,
+                            body: None,
+                        },
+                        DIAGNOSTIC_BODY_LIMIT,
+                    )
+                    .map_err(|_| ApiError::Network("GitHub diagnostic read failed".into()))?;
+                if response.body.len() > DIAGNOSTIC_BODY_LIMIT {
+                    return Err(diagnostic_invalid());
+                }
+                if response.status != 302 {
+                    check_status(&HttpResponse {
+                        status: response.status,
+                        headers: response.headers.clone(),
+                        body: String::from_utf8_lossy(&response.body).into_owned(),
+                    })
+                    .map_err(sanitize_workflow_error)?;
+                }
+                Ok(response)
+            })(),
+        )
+    }
+
+    fn workflow_get(&self, url: String, accept: &str) -> Result<String, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "Accept" {
+                        *value = accept.to_string();
+                    }
+                }
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url,
+                        headers,
+                        body: None,
+                    })
+                    .map_err(|_| ApiError::Network("GitHub workflow request failed".into()))?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                Ok(response.body)
+            })(),
+        )
+    }
+
+    /// Discover repository-trusted Board roots through the shared GraphQL budget.
+    pub fn board_discussions(&self, after: Option<&str>) -> Result<BoardDiscussionsPage, ApiError> {
+        let operation = "board discussions";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.to_string(),
+            message: message.to_string(),
+        };
+        let value = self.graphql(
+            r#"query($owner: String!, $repo: String!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                    discussions(first: 50, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
+                        nodes { id number body authorAssociation }
+                        pageInfo { endCursor hasNextPage }
+                    }
+                }
+                rateLimit { cost remaining resetAt }
+            }"#,
+            json!({"owner": self.owner, "repo": self.repo, "after": after}),
+        )?;
+        let connection = value
+            .pointer("/data/repository/discussions")
+            .filter(|connection| connection.is_object())
+            .ok_or_else(|| invalid("repository.discussions missing or invalid"))?;
+        let nodes = connection
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("repository.discussions.nodes missing or invalid"))?;
+        let discussions = nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.get("authorAssociation").and_then(Value::as_str),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                )
+            })
+            .map(|node| {
+                let id = required_string(node, "id", operation)?;
+                if id.is_empty() {
+                    return Err(invalid("discussion.id is empty"));
+                }
+                Ok(BoardDiscussion {
+                    id,
+                    number: required_u64(node, "number", operation)?,
+                    body: required_string(node, "body", operation)?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let page_info = connection
+            .get("pageInfo")
+            .ok_or_else(|| invalid("repository.discussions.pageInfo missing"))?;
+        let has_next_page = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                invalid("repository.discussions.pageInfo.hasNextPage missing or invalid")
+            })?;
+        let cursor = match page_info.get("endCursor") {
+            Some(Value::String(cursor)) if !cursor.is_empty() => Some(cursor.clone()),
+            Some(Value::Null) if !has_next_page => None,
+            _ => {
+                return Err(invalid(
+                    "repository.discussions.pageInfo.endCursor missing or invalid",
+                ))
+            }
+        };
+        Ok(BoardDiscussionsPage {
+            discussions,
+            cursor,
+            has_next_page,
+        })
+    }
+
     /// Read top-level Discussion comments through the shared GraphQL budget.
     pub fn discussion_comments(
         &self,
@@ -591,7 +1399,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     discussion(number: $number) {
                         id
                         comments(first: 100, after: $after) {
-                            nodes { body authorAssociation }
+                            nodes { id body author { login } createdAt authorAssociation }
                             pageInfo { endCursor hasNextPage }
                         }
                     }
@@ -616,7 +1424,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             .get("nodes")
             .and_then(Value::as_array)
             .ok_or_else(|| invalid("discussion.comments.nodes missing or invalid"))?;
-        let bodies = nodes
+        let trusted_comments = nodes
             .iter()
             // Payload metadata is not proof of authority: importing a blocked
             // or resolving post mutates local escalations and PM wake input.
@@ -626,7 +1434,27 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     Some("OWNER" | "MEMBER" | "COLLABORATOR")
                 )
             })
-            .map(|node| required_string(node, "body", operation))
+            .map(|node| {
+                let id = required_string(node, "id", operation)?;
+                let author = node
+                    .pointer("/author/login")
+                    .and_then(Value::as_str)
+                    .filter(|author| !author.is_empty())
+                    .ok_or_else(|| invalid("comment.author.login missing or invalid"))?;
+                if id.is_empty() {
+                    return Err(invalid("comment.id is empty"));
+                }
+                let created_at = required_string(node, "createdAt", operation)?;
+                let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map_err(|_| invalid("comment.createdAt invalid"))?
+                    .with_timezone(&chrono::Utc);
+                Ok(DiscussionComment {
+                    id,
+                    body: required_string(node, "body", operation)?,
+                    author: author.to_string(),
+                    created_at,
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let page_info = comments
             .get("pageInfo")
@@ -648,7 +1476,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         };
         Ok(DiscussionCommentsPage {
             discussion_id,
-            bodies,
+            comments: trusted_comments,
             cursor,
             has_next_page,
         })
@@ -673,6 +1501,434 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 message: "created comment.id missing or invalid".to_string(),
             })?;
         Ok(())
+    }
+
+    /// Create a Discussion only after resolving its category in this repository.
+    pub fn create_github_discussion(
+        &self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<CreatedDiscussion, ApiError> {
+        let operation = "create discussion";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.into(),
+            message: message.into(),
+        };
+        if [category, title, body]
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(invalid("category, title and body must be nonempty"));
+        }
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut repository_id: Option<String> = None;
+        let mut category_id: Option<String> = None;
+        loop {
+            let value = self.graphql(
+                r#"query($owner: String!, $repo: String!, $after: String) {
+                    repository(owner: $owner, name: $repo) {
+                        id
+                        discussionCategories(first: 100, after: $after) {
+                            nodes { id name }
+                            pageInfo { endCursor hasNextPage }
+                        }
+                    }
+                    rateLimit { cost remaining resetAt }
+                }"#,
+                json!({"owner":self.owner,"repo":self.repo,"after":cursor}),
+            )?;
+            let repository = value
+                .pointer("/data/repository")
+                .ok_or_else(|| invalid("repository missing"))?;
+            let id = required_string(repository, "id", operation)?;
+            if id.trim().is_empty()
+                || repository_id
+                    .as_ref()
+                    .is_some_and(|previous| *previous != id)
+            {
+                return Err(invalid(
+                    "repository identity missing or changed during pagination",
+                ));
+            }
+            repository_id = Some(id);
+            let (nodes, has_next, next_cursor) =
+                page_connection(repository, &["discussionCategories"], operation)?;
+            for node in nodes {
+                let id = required_string(node, "id", operation)?;
+                let name = required_string(node, "name", operation)?;
+                if id.trim().is_empty() || name.trim().is_empty() {
+                    return Err(invalid("category identity missing"));
+                }
+                if category == id || category == name {
+                    if category_id.as_ref().is_some_and(|previous| *previous != id) {
+                        return Err(invalid("category is ambiguous in this repository"));
+                    }
+                    category_id = Some(id);
+                }
+            }
+            if !has_next {
+                break;
+            }
+            let next_cursor = next_cursor
+                .filter(|cursor| !cursor.is_empty())
+                .ok_or_else(|| invalid("category pagination cursor missing"))?;
+            if !seen_cursors.insert(next_cursor.to_string()) {
+                return Err(invalid("category pagination cursor repeated"));
+            }
+            cursor = Some(next_cursor.to_string());
+        }
+        let category_id =
+            category_id.ok_or_else(|| invalid("category does not belong to this repository"))?;
+        let value = self.graphql(
+            r#"mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+                createDiscussion(input: {repositoryId: $repositoryId, categoryId: $categoryId, title: $title, body: $body}) {
+                    discussion { id number url }
+                }
+            }"#,
+            json!({"repositoryId":repository_id,"categoryId":category_id,"title":title,"body":body}),
+        )?;
+        let discussion = value
+            .pointer("/data/createDiscussion/discussion")
+            .ok_or_else(|| invalid("created discussion missing"))?;
+        let id = required_string(discussion, "id", operation)?;
+        let number = required_u64(discussion, "number", operation)?;
+        let url = required_string(discussion, "url", operation)?;
+        let expected_url = format!(
+            "https://github.com/{}/{}/discussions/{number}",
+            self.owner, self.repo
+        );
+        if id.trim().is_empty() || number == 0 || !url.eq_ignore_ascii_case(&expected_url) {
+            return Err(invalid(
+                "created discussion identity or repository URL is invalid",
+            ));
+        }
+        Ok(CreatedDiscussion { id, number, url })
+    }
+
+    /// Read the dedicated required-status-check protection for develop or main.
+    pub fn required_status_checks(&self, branch: &str) -> Result<Value, ApiError> {
+        let path = self.required_status_checks_path(branch)?;
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url: format!("{}{}", self.rest_base, path),
+                        headers: self.auth_headers(),
+                        body: None,
+                    })
+                    .map_err(|error| ApiError::Network(error.to_string()))?;
+                check_status(&response)?;
+                parse_status_checks_response(&response.body)
+            })(),
+        )
+    }
+
+    /// Patch only required status checks, retaining the supplied app bindings.
+    pub fn update_required_status_checks(
+        &self,
+        branch: &str,
+        settings: &Value,
+    ) -> Result<Value, ApiError> {
+        let path = self.required_status_checks_path(branch)?;
+        validate_status_checks_patch(settings)?;
+        let response = self.rest_patch(&path, settings.clone())?;
+        parse_status_checks_response(&response.body)
+    }
+
+    fn required_status_checks_path(&self, branch: &str) -> Result<String, ApiError> {
+        if !matches!(branch, "develop" | "main") {
+            return Err(ApiError::PermissionDenied {
+                message: "required status checks are scoped to develop or main".into(),
+            });
+        }
+        Ok(format!(
+            "/repos/{}/{}/branches/{branch}/protection/required_status_checks",
+            self.owner, self.repo
+        ))
+    }
+
+    /// Read only the selected effect fields and validated remote identity for audit/rollback.
+    pub fn pm_settings_snapshot(&self, operation: &str, params: &Value) -> Result<Value, ApiError> {
+        validate_pm_settings(operation, params)?;
+        let root = format!("/repos/{}/{}", self.owner, self.repo);
+        let path = match operation {
+            "pr.reopen" | "pr.review.submit" => format!("{root}/pulls/{}", params["number"]),
+            "release.metadata.set" => format!(
+                "{root}/releases/tags/{}",
+                encode_path_segment(params["tag"].as_str().expect("validated tag"))
+            ),
+            "repository.settings.set" if params.get("topics").is_some() => format!("{root}/topics"),
+            "repository.settings.set" => root,
+            _ => unreachable!("validated operation"),
+        };
+        let body = self.workflow_get(
+            format!("{}{path}", self.rest_base),
+            "application/vnd.github+json",
+        )?;
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|_| pm_settings_error(operation, "invalid settings response JSON"))?;
+        self.pm_settings_projection(operation, params, &value)
+    }
+
+    /// Mutate only a named effect through its dedicated endpoint, then verify its response.
+    pub fn pm_settings_mutate(
+        &self,
+        operation: &str,
+        params: &Value,
+        before: &Value,
+    ) -> Result<Value, ApiError> {
+        validate_pm_settings(operation, params)?;
+        let invalid = || {
+            pm_settings_error(operation, "settings identity or requested change was not confirmed; inspect remote state before retrying")
+        };
+        let topics = operation == "repository.settings.set" && params.get("topics").is_some();
+        if topics && before["repository"].as_str() != Some(&format!("{}/{}", self.owner, self.repo))
+        {
+            return Err(invalid());
+        }
+        let before = self.pm_settings_projection(operation, params, before)?;
+        let root = format!("/repos/{}/{}", self.owner, self.repo);
+        let (path, patch) = match operation {
+            "pr.reopen" => {
+                if before["merged"] != false {
+                    return Err(invalid());
+                }
+                (
+                    format!("{root}/pulls/{}", params["number"]),
+                    json!({"state":"open"}),
+                )
+            }
+            "pr.review.submit" => {
+                let mut patch = params.clone();
+                patch
+                    .as_object_mut()
+                    .expect("validated object")
+                    .remove("number");
+                (format!("{root}/pulls/{}/reviews", params["number"]), patch)
+            }
+            "release.metadata.set" => {
+                let mut patch = params.clone();
+                patch
+                    .as_object_mut()
+                    .expect("validated object")
+                    .remove("tag");
+                (format!("{root}/releases/{}", before["id"]), patch)
+            }
+            "repository.settings.set" if topics => {
+                (format!("{root}/topics"), json!({"names":params["topics"]}))
+            }
+            "repository.settings.set" => (root.clone(), params.clone()),
+            _ => unreachable!("validated operation"),
+        };
+        let response = if operation == "pr.review.submit" {
+            self.rest_post(&path, patch)?
+        } else if topics {
+            self.rest_put(&path, patch)?
+        } else {
+            self.rest_patch(&path, patch)?
+        };
+        let value: Value = serde_json::from_str(&response.body).map_err(|_| invalid())?;
+        if operation == "pr.review.submit" {
+            let expected_state = match params["event"].as_str().expect("validated event") {
+                "APPROVE" => "APPROVED",
+                "REQUEST_CHANGES" => "CHANGES_REQUESTED",
+                _ => "COMMENTED",
+            };
+            let path = format!("{root}/pulls/{}", params["number"]);
+            if value["id"].as_u64().is_none_or(|id| id == 0)
+                || value["state"] != expected_state
+                || !value["pull_request_url"].as_str().is_some_and(|url| {
+                    [
+                        format!("https://api.github.com{path}"),
+                        format!("{}{path}", self.rest_base),
+                    ]
+                    .iter()
+                    .any(|expected| expected.eq_ignore_ascii_case(url))
+                })
+                || !value["body"].is_string()
+                || params
+                    .get("body")
+                    .is_some_and(|body| value["body"] != *body)
+            {
+                return Err(invalid());
+            }
+            return Ok(
+                json!({"repository":before["repository"],"number":params["number"],"id":value["id"],"state":value["state"],"body":value["body"]}),
+            );
+        }
+        let after = self.pm_settings_projection(operation, params, &value)?;
+        let confirmed = match operation {
+            "pr.reopen" => after["state"] == "open" && after["merged"] == false,
+            "release.metadata.set" => {
+                ["id", "url", "tag_name", "draft", "target_commitish"]
+                    .iter()
+                    .all(|key| after[key] == before[key])
+                    && params
+                        .as_object()
+                        .expect("validated object")
+                        .iter()
+                        .filter(|(key, _)| *key != "tag")
+                        .all(|(key, value)| after[key] == *value)
+            }
+            "repository.settings.set" if topics => {
+                let names = |value: &Value| {
+                    value
+                        .as_array()
+                        .expect("validated topics")
+                        .iter()
+                        .map(|value| value.as_str().expect("validated topic").to_owned())
+                        .collect::<HashSet<_>>()
+                };
+                names(&after["names"]) == names(&params["topics"])
+            }
+            "repository.settings.set" => {
+                after["id"] == before["id"]
+                    && params
+                        .as_object()
+                        .expect("validated object")
+                        .iter()
+                        .all(|(key, value)| after[key] == *value)
+            }
+            _ => false,
+        };
+        if !confirmed {
+            return Err(invalid());
+        }
+        Ok(after)
+    }
+
+    fn pm_settings_projection(
+        &self,
+        operation: &str,
+        params: &Value,
+        value: &Value,
+    ) -> Result<Value, ApiError> {
+        let invalid = || {
+            pm_settings_error(
+                operation,
+                "remote settings snapshot has incomplete or foreign identity/fields",
+            )
+        };
+        let repository = format!("{}/{}", self.owner, self.repo);
+        let mut projected = match operation {
+            "pr.reopen" | "pr.review.submit" => {
+                let repo = value
+                    .pointer("/base/repo/full_name")
+                    .or_else(|| value.get("repository"))
+                    .and_then(Value::as_str);
+                if !repo.is_some_and(|repo| repo.eq_ignore_ascii_case(&repository))
+                    || value["number"] != params["number"]
+                    || !value["merged"].is_boolean()
+                    || !matches!(value["state"].as_str(), Some("open" | "closed"))
+                {
+                    return Err(invalid());
+                }
+                return Ok(
+                    json!({"repository":repository,"number":value["number"],"state":value["state"],"merged":value["merged"]}),
+                );
+            }
+            "release.metadata.set" => {
+                let id = value["id"]
+                    .as_u64()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(invalid)?;
+                let path = format!("/repos/{}/{}/releases/{id}", self.owner, self.repo);
+                let url = value["url"].as_str().ok_or_else(invalid)?;
+                if ![
+                    format!("https://api.github.com{path}"),
+                    format!("{}{path}", self.rest_base),
+                ]
+                .iter()
+                .any(|expected| expected.eq_ignore_ascii_case(url))
+                    || value["tag_name"] != params["tag"]
+                    || !value["draft"].is_boolean()
+                    || value["target_commitish"]
+                        .as_str()
+                        .is_none_or(|target| target.is_empty())
+                {
+                    return Err(invalid());
+                }
+                json!({"id":id,"url":url,"tag_name":value["tag_name"],"draft":value["draft"],"target_commitish":value["target_commitish"]})
+            }
+            "repository.settings.set" if params.get("topics").is_some() => {
+                if !valid_topics(&value["names"]) {
+                    return Err(invalid());
+                }
+                return Ok(json!({"repository":repository,"names":value["names"]}));
+            }
+            "repository.settings.set" => {
+                if !value["full_name"]
+                    .as_str()
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(&repository))
+                    || value["id"].as_u64().is_none_or(|id| id == 0)
+                {
+                    return Err(invalid());
+                }
+                json!({"id":value["id"],"full_name":value["full_name"]})
+            }
+            _ => return Err(invalid()),
+        };
+        for (key, requested) in params.as_object().expect("validated params") {
+            if key == "tag" {
+                continue;
+            }
+            let actual = value.get(key).ok_or_else(invalid)?;
+            if key == "security_and_analysis" {
+                let mut security = serde_json::Map::new();
+                for feature in requested
+                    .as_object()
+                    .expect("validated security settings")
+                    .keys()
+                {
+                    let setting = actual
+                        .get(feature)
+                        .filter(|setting| {
+                            matches!(setting["status"].as_str(), Some("enabled" | "disabled"))
+                        })
+                        .ok_or_else(invalid)?;
+                    security.insert(feature.clone(), json!({"status":setting["status"]}));
+                }
+                projected[key] = Value::Object(security);
+            } else {
+                let nullable = matches!(key.as_str(), "name" | "body" | "description" | "homepage");
+                if !(nullable && actual.is_null())
+                    && (requested.is_string() != actual.is_string()
+                        || requested.is_boolean() != actual.is_boolean())
+                {
+                    return Err(invalid());
+                }
+                projected[key] = actual.clone();
+            }
+        }
+        Ok(projected)
+    }
+
+    fn rest_put(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                headers.push(("Content-Type".into(), "application/json".into()));
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Put,
+                        url: format!("{}{}", self.rest_base, path),
+                        headers,
+                        body: Some(body.to_string()),
+                    })
+                    .map_err(|error| ApiError::Network(error.to_string()))?;
+                check_status(&response)?;
+                Ok(response)
+            })(),
+        )
     }
 
     fn auth_headers(&self) -> Vec<(String, String)> {
@@ -788,6 +2044,22 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
         if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // These numbered reads use the shared Issue/PR namespace. Only
+            // a NOT_FOUND at that exact resource path proves absence;
+            // permission, rate-limit and other GraphQL failures stay intact.
+            if matches!(query, FETCH_ISSUE_QUERY | FETCH_ISSUE_UPDATED_AT_QUERY)
+                && errs.as_array().is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.iter().all(|error| {
+                            error["type"] == "NOT_FOUND"
+                                && error["path"] == json!(["repository", "issue"])
+                        })
+                })
+            {
+                if let Some(number) = variables["number"].as_u64() {
+                    return Err(ApiError::NotFound(IssueNumber(number)));
+                }
+            }
             // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
             // and a `RATE_LIMIT` entry in the response body, so a status-only
             // check sees a healthy call. Classifying it here — the way the
@@ -966,6 +2238,95 @@ impl<T: HttpTransport> HttpIssueClient<T> {
 // Status / parsing helpers
 // ---------------------------------------------------------------------------
 
+fn validate_status_checks_patch(settings: &Value) -> Result<(), ApiError> {
+    let invalid = || ApiError::Parse {
+        operation: "update required status checks".into(),
+        message: "only strict:boolean and checks:[{context:string, app_id:integer}] are permitted"
+            .into(),
+    };
+    let fields = settings.as_object().ok_or_else(invalid)?;
+    if fields.is_empty()
+        || fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "strict" | "checks"))
+        || fields
+            .get("strict")
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid());
+    }
+    if let Some(checks) = fields.get("checks") {
+        for check in checks.as_array().ok_or_else(invalid)? {
+            let check = check.as_object().ok_or_else(invalid)?;
+            if check
+                .keys()
+                .any(|key| !matches!(key.as_str(), "context" | "app_id"))
+                || check
+                    .get("context")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty())
+                || check
+                    .get("app_id")
+                    .is_some_and(|value| value.as_i64().is_none_or(|id| id < -1))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_status_checks_response(body: &str) -> Result<Value, ApiError> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| ApiError::Parse {
+            operation: "required status checks".into(),
+            message: "required status checks response must be a JSON object".into(),
+        })
+}
+
+fn sanitize_workflow_error(error: ApiError) -> ApiError {
+    match error {
+        error
+        @ (ApiError::RateLimited { .. } | ApiError::Unauthorized | ApiError::BodyTooLarge) => error,
+        ApiError::PermissionDenied { .. } => ApiError::PermissionDenied {
+            message: "GitHub workflow access is forbidden".into(),
+        },
+        ApiError::Network(_) => ApiError::Network("GitHub workflow request failed".into()),
+        _ => ApiError::Unexpected("GitHub workflow request was rejected".into()),
+    }
+}
+
+fn diagnostic_invalid() -> ApiError {
+    ApiError::Unexpected("GitHub diagnostic evidence is invalid or incomplete".into())
+}
+
+fn valid_diagnostic_commit(commit: &str) -> bool {
+    commit.len() == 40
+        && commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn diagnostic_artifact_host(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    let storage = host
+        .strip_prefix("productionresultssa")
+        .and_then(|host| host.strip_suffix(".blob.core.windows.net"))
+        .is_some_and(|account| {
+            !account.is_empty()
+                && account.len() <= 5
+                && account.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && (host == "results-receiver.actions.githubusercontent.com" || storage)
+}
+
 fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
     let lowercase_body = resp.body.to_ascii_lowercase();
     let retry_after = response_header(resp, "retry-after").and_then(|value| value.parse().ok());
@@ -1112,6 +2473,16 @@ fn resolve_gh_token() -> Result<String, ApiError> {
     Ok(token)
 }
 
+fn noninteractive_token(
+    mut lookup: impl FnMut(&'static str) -> Option<String>,
+) -> Result<String, ApiError> {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .filter_map(&mut lookup)
+        .find(|token| !token.trim().is_empty())
+        .ok_or(ApiError::Unauthorized)
+}
+
 fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<String, ApiError> {
     deadline.remaining("gh auth token")?;
     let hub = gwt_core::process_console::global();
@@ -1144,6 +2515,34 @@ fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<Strin
 
 #[cfg(test)]
 mod transport_tests {
+    #[test]
+    fn unattended_auth_uses_only_existing_environment_credentials() {
+        let mut consulted = Vec::new();
+        assert!(matches!(
+            super::noninteractive_token(|name| {
+                consulted.push(name);
+                None
+            }),
+            Err(crate::client::ApiError::Unauthorized)
+        ));
+        assert_eq!(consulted, ["GH_TOKEN", "GITHUB_TOKEN"]);
+        assert_eq!(
+            super::noninteractive_token(
+                |name| (name == "GITHUB_TOKEN").then(|| "dummy-fallback".into())
+            )
+            .unwrap(),
+            "dummy-fallback"
+        );
+        assert_eq!(
+            super::noninteractive_token(|name| {
+                assert_eq!(name, "GH_TOKEN", "preferred token needs no fallback");
+                Some("dummy-preferred".into())
+            })
+            .unwrap(),
+            "dummy-preferred"
+        );
+    }
+
     #[cfg(unix)]
     use std::{ffi::OsString, sync::Mutex};
     use std::{
@@ -1494,6 +2893,11 @@ fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
         .unwrap_or_default();
     Ok(IssueSnapshot {
         number: IssueNumber(number),
+        author_login: issue
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -1539,6 +2943,11 @@ fn parse_rest_issue(json: &Value) -> Result<IssueSnapshot, ApiError> {
         .unwrap_or_default();
     Ok(IssueSnapshot {
         number: IssueNumber(number),
+        author_login: json
+            .pointer("/user/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -1885,12 +3294,15 @@ const FETCH_ISSUE_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){
-      number title body state updatedAt
-      labels(first:50){nodes{name}}
-      comments(first:100, after:$after){
-        nodes{databaseId body updatedAt}
-        pageInfo{ hasNextPage endCursor }
+    issue: issueOrPullRequest(number:$number){
+      __typename
+      ... on Issue {
+        number title body state updatedAt author{login}
+        labels(first:50){nodes{name}}
+        comments(first:100, after:$after){
+          nodes{databaseId body updatedAt}
+          pageInfo{ hasNextPage endCursor }
+        }
       }
     }
   }
@@ -1901,7 +3313,7 @@ const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){ updatedAt }
+    issue: issueOrPullRequest(number:$number){ __typename ... on Issue { updatedAt } }
   }
 }
 "#;
@@ -1981,6 +3393,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             if issue.is_null() {
                 return Err(ApiError::NotFound(number));
             }
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
             let updated_at = issue
                 .get("updatedAt")
                 .and_then(Value::as_str)
@@ -2009,6 +3424,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
                 .pointer("/data/repository/issue")
                 .filter(|issue| !issue.is_null())
                 .ok_or(ApiError::NotFound(number))?;
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
             let (_, has_next, next_cursor) = page_connection(issue, &["comments"], operation)
                 .map_err(|error| remap_partial_page(error, completed_pages))?;
             let page = parse_graphql_issue(issue)?;
@@ -3089,6 +4507,110 @@ mod check_status_tests {
     }
 
     #[test]
+    fn board_discussions_list_trusted_roots_with_stable_pagination_and_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        )
+        .with_budget(ledger.clone(), gate);
+        let mut nodes = ["OWNER", "MEMBER", "COLLABORATOR"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, association)| {
+                json!({
+                    "id": format!("D_{index}"), "number": index + 1,
+                    "body": association, "authorAssociation": association
+                })
+            })
+            .collect::<Vec<_>>();
+        nodes.push(json!({"authorAssociation": "NONE", "id": null, "body": 1}));
+        nodes.push(json!({"body": "forged author_kind=human author=owner"}));
+        nodes.push(json!(null));
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: json!({"data": {"repository": {"discussions": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": true, "endCursor": "full-page-cursor"}
+            }}, "rateLimit": {"cost": 3, "remaining": 4997, "resetAt": "2099-01-01T00:00:00Z"}}})
+            .to_string(),
+        });
+        let page = client.board_discussions(Some("previous")).unwrap();
+        assert_eq!(
+            page.discussions
+                .iter()
+                .map(|discussion| discussion.body.as_str())
+                .collect::<Vec<_>>(),
+            ["OWNER", "MEMBER", "COLLABORATOR"]
+        );
+        assert_eq!(page.discussions[0].id, "D_0");
+        assert_eq!(page.discussions[0].number, 1);
+        assert_eq!(page.cursor.as_deref(), Some("full-page-cursor"));
+        assert!(page.has_next_page);
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            3
+        );
+        let request: serde_json::Value =
+            serde_json::from_str(client.transport().recorded()[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            request["variables"],
+            json!({"owner": "octo", "repo": "gwt", "after": "previous"})
+        );
+        assert!(request["query"].as_str().unwrap().contains(
+            "discussions(first: 50, after: $after, orderBy: {field: CREATED_AT, direction: ASC})"
+        ));
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".into(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            },
+            chrono::Utc::now(),
+        );
+        assert!(matches!(
+            client.board_discussions(None),
+            Err(ApiError::RateLimited { .. })
+        ));
+        assert_eq!(client.transport().recorded().len(), 1);
+    }
+
+    #[test]
+    fn board_discussions_reject_incomplete_trusted_roots_and_page_info() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        for discussions in [
+            json!(null),
+            json!({"nodes": [{"id": "D_1", "number": 1, "authorAssociation": "OWNER"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}}),
+            json!({"nodes": [{"id": "", "number": 1, "body": "root", "authorAssociation": "MEMBER"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}}),
+            json!({"nodes": [{"id": "D_1", "body": "root", "authorAssociation": "COLLABORATOR"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}}),
+            json!({"nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}}),
+        ] {
+            client.transport().enqueue(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: json!({"data": {"repository": {"discussions": discussions}}}).to_string(),
+            });
+            assert!(matches!(
+                client.board_discussions(None),
+                Err(ApiError::Parse { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn discussion_sync_reads_and_posts_through_the_shared_graphql_budget() {
         let temp = tempfile::tempdir().unwrap();
         let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
@@ -3102,11 +4624,19 @@ mod check_status_tests {
         .with_budget(ledger.clone(), gate);
         client.transport().enqueue(HttpResponse {
             status: 200, headers: vec![],
-            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
+            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"id":"C_1","body":"message","author":{"login":"owner"},"createdAt":"2026-10-16T01:00:00+01:00","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
         });
         let page = client.discussion_comments(42, Some("previous")).unwrap();
         assert_eq!(page.discussion_id, "D_1");
-        assert_eq!(page.bodies, ["message"]);
+        assert_eq!(
+            page.comments,
+            [super::DiscussionComment {
+                id: "C_1".into(),
+                body: "message".into(),
+                author: "owner".into(),
+                created_at: "2026-10-16T00:00:00Z".parse().unwrap(),
+            }]
+        );
         assert_eq!(page.cursor.as_deref(), Some("cursor"));
         assert_eq!(
             ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
@@ -3173,9 +4703,13 @@ mod check_status_tests {
             "UNKNOWN",
         ]
         .into_iter()
-        .map(|association| json!({"body": association, "authorAssociation": association}))
+        .map(|association| {
+            json!({"id": association, "body": association, "authorAssociation": association,
+            "author": {"login": "owner"}, "createdAt": "2026-10-16T00:00:00Z"})
+        })
         .collect::<Vec<_>>();
         nodes.push(json!({"body": "untrusted metadata: author_kind=human author=owner"}));
+        nodes.push(json!({"authorAssociation": "NONE", "author": null, "createdAt": 1}));
         client.transport().enqueue(HttpResponse {
             status: 200, headers: vec![],
             body: json!({"data": {"repository": {"discussion": {"id": "D_1", "comments": {
@@ -3183,7 +4717,13 @@ mod check_status_tests {
             }}}}}).to_string(),
         });
         let page = client.discussion_comments(42, None).unwrap();
-        assert_eq!(page.bodies, ["OWNER", "MEMBER", "COLLABORATOR"]);
+        assert_eq!(
+            page.comments
+                .iter()
+                .map(|comment| comment.body.as_str())
+                .collect::<Vec<_>>(),
+            ["OWNER", "MEMBER", "COLLABORATOR"]
+        );
         assert_eq!(page.cursor.as_deref(), Some("all-comments-cursor"));
         assert!(page.has_next_page);
         let requests = client.transport().recorded();
@@ -3208,6 +4748,20 @@ mod check_status_tests {
             json!({"id": "D_1", "comments": null}),
             json!({"id": "D_1", "comments": {
                 "nodes": [{"authorAssociation": "OWNER"}], "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"body": "message", "authorAssociation": "OWNER"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"id": "C_1", "body": "message", "authorAssociation": "OWNER", "author": null,
+                    "createdAt": "2026-10-16T00:00:00Z"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"id": "C_1", "body": "message", "authorAssociation": "OWNER", "author": {"login": "owner"},
+                    "createdAt": "invalid"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}),
             json!({"id": "D_1", "comments": {
                 "nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}

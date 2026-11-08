@@ -9,13 +9,23 @@ from __future__ import annotations
 
 import datetime
 import json
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
 import chroma_index_runner as runner
+
+
+def _hold_issue_build(db: str, fingerprint: str, started):
+    with runner.acquire_lock(Path(db) / "build", exclusive=True):
+        runner._issue_build_failure(Path(db), fingerprint, "full", "BUILD_INCOMPLETE", 0, 1)
+        started.set()
+        time.sleep(60)  # Parent kills this owned process after observing readiness.
 
 
 class IssueTtlTests(unittest.TestCase):
@@ -41,8 +51,12 @@ class IssueTtlTests(unittest.TestCase):
             db_root = Path(tmp) / "index_root"
             cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
             self._write_cached_issue(cache_root, 1, "First issue", "Body of issue 1", ["bug"])
+            revision = str(uuid.uuid4())
+            (cache_root / "source-revision").write_text(revision, encoding="utf-8")
 
             with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                legacy_fingerprint = runner._issue_source_fingerprint(
+                    runner._load_cached_issue_documents("abc1234567890def"))
                 result = runner.action_index_issues_v2(
                     repo_hash="abc1234567890def",
                     project_root=tmp,
@@ -60,6 +74,31 @@ class IssueTtlTests(unittest.TestCase):
             self.assertEqual(meta.get("ttl_minutes"), 15)
             self.assertRegex(meta.get("source_cache_fingerprint", ""), r"^[0-9a-f]{64}$")
             self.assertEqual(meta.get("source_document_count"), 1)
+            self.assertEqual(meta.get("source_cache_revision"), revision)
+            self.assertEqual(meta.get("issue_cache_fingerprint"), legacy_fingerprint)
+
+    def test_build_does_not_stamp_records_with_a_revision_changed_during_read(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            repo = "abc1234567890def"
+            cache = root / ".gwt/cache/issues" / repo
+            self._write_cached_issue(cache, 1, "First issue", "Body", ["bug"])
+            stamp = cache / "source-revision"
+            stamp.write_text(str(uuid.uuid4()), encoding="utf-8")
+            load_records = runner._load_issue_records
+
+            def load_then_advance(repo_hash):
+                records = load_records(repo_hash)
+                stamp.write_text(str(uuid.uuid4()), encoding="utf-8")
+                return records
+
+            with mock.patch.object(runner, "_load_issue_records", side_effect=load_then_advance):
+                result = runner.action_index_issues_v2(repo, tmp, db_root=root / "index")
+            self.assertTrue(result["ok"], result)
+            meta = runner._read_issue_meta(root / "index" / repo / "issues")
+            self.assertNotIn("source_cache_revision", meta)
+            self.assertEqual(meta.get("issue_cache_fingerprint"), runner._issue_source_fingerprint(
+                runner._load_cached_issue_documents(repo)))
 
     def test_status_reports_source_cache_changed_when_cached_issue_state_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,6 +140,7 @@ class IssueTtlTests(unittest.TestCase):
             issues_root.mkdir(parents=True)
             (issues_root / runner.META_FILENAME).write_text("{}")
             indexed_meta = {
+                "record_layout": runner.ISSUE_RECORD_LAYOUT,
                 "document_count": 1,
                 "source_document_count": 1,
                 "source_cache_fingerprint": "indexed",
@@ -142,6 +182,7 @@ class IssueTtlTests(unittest.TestCase):
             issues_root.mkdir(parents=True)
             (issues_root / runner.META_FILENAME).write_text("{}")
             indexed_meta = {
+                "record_layout": runner.ISSUE_RECORD_LAYOUT,
                 "document_count": 3,
                 "source_document_count": 3,
                 "source_cache_fingerprint": "indexed",
@@ -253,10 +294,8 @@ class IssueTtlTests(unittest.TestCase):
                 collection.delete(ids=["1", "2"])
             finally:
                 runner._close_chroma_client(client)
-            with mock.patch.object(runner, "_load_cached_issue_documents", wraps=runner._load_cached_issue_documents) as load:
-                recovered = runner.action_index_issues_v2(**args, respect_ttl=True)
+            recovered = runner.action_index_issues_v2(**args, respect_ttl=True)
             self.assertEqual(recovered.get("indexed"), 2, recovered)
-            self.assertEqual(load.call_count, 1)
 
     def test_empty_cache_is_failure_and_explicit_repair_recovers(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
@@ -283,7 +322,7 @@ class IssueTtlTests(unittest.TestCase):
             })
             health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
             self.assertFalse(health["healthy"], health)
-            self.assertEqual(health["reason"], "empty_corpus")
+            self.assertEqual(health["reason"], "record_layout_changed")
             result = runner.action_index_issues_v2(**args, respect_ttl=True)
             self.assertFalse(result["ok"], result)
             self.assertEqual(result["error_code"], "EMPTY_CORPUS")
@@ -360,7 +399,137 @@ class IssueTtlTests(unittest.TestCase):
                     self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
                 create.assert_not_called()
 
-    def test_interrupted_build_leaves_marker_and_stops_same_source(self):
+    def test_publication_os_error_preserves_active_generation_and_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            self._write_cached_issue(cache, 1, "First", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+            pointer_before = runner.active_pointer_path(db).read_bytes()
+            meta_before = (db / runner.META_FILENAME).read_bytes()
+            replace = os.replace
+            error = PermissionError("[WinError 5] staging handle is still open")
+
+            def fail_staging(source, destination):
+                if Path(source) == runner._staging_dir_for(db):
+                    raise error
+                return replace(source, destination)
+
+            with mock.patch.object(runner.os, "replace", side_effect=fail_staging):
+                result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertEqual(result["error_code"], "PUBLISH_FAILED", result)
+            self.assertIn(str(error), result["error"])
+            self.assertIn(str(error), runner._read_issue_repair(db)["error"])
+            self.assertEqual(runner.active_pointer_path(db).read_bytes(), pointer_before)
+            self.assertEqual((db / runner.META_FILENAME).read_bytes(), meta_before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows native publication contract")
+    def test_native_incremental_refresh_publishes_1622_issues_after_ttl(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+            "HOME": tmp, "GWT_INDEX_COORDINATOR_ROOT": str(Path(tmp) / "coordinator")
+        }):
+            issues = [{"number": number, "title": f"Issue {number}", "body": "body",
+                       "state": "open", "labels": []} for number in range(1, 1623)]
+            fake = runner._FakeEmbeddingModel()
+            model = mock.Mock()
+            # Keep native Chroma/SQLx/HNSW, with the production E5 vector size.
+            model.encode.side_effect = lambda texts: [vector * 24 for vector in fake.encode(texts)]
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=Path(tmp) / "index")
+            with mock.patch.object(runner, "_load_cached_issue_documents", return_value=issues), mock.patch.object(
+                runner, "_get_embedding_model", return_value=model
+            ), mock.patch.object(runner, "emit_progress"):
+                baseline = runner.action_index_issues_v2(**args)
+                self.assertTrue(baseline["ok"], baseline)
+                db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+                pointer_before = runner.active_pointer_path(db).read_bytes()
+                meta = runner._read_issue_meta(db)
+                meta["last_full_refresh"] = "2000-01-01T00:00:00Z"
+                runner._write_issue_meta(db, meta)
+                issues[0]["body"] = "updated body"
+                issues[-1] = dict(issues[-1], number=1623)
+                result = runner.action_index_issues_v2(**args, mode="incremental", respect_ttl=True)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["mode"], "incremental")
+                self.assertEqual(result["indexed"], 1622)
+                self.assertEqual(result["newly_embedded"], 2)
+                self.assertNotEqual(runner.active_pointer_path(db).read_bytes(), pointer_before)
+                self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
+
+    def test_building_serves_previous_generation(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            self._write_cached_issue(cache, 1, "Published", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            self._write_cached_issue(cache, 1, "Pending", "body changed", [])
+            create = runner._make_chroma_collection_repairing
+
+            def inspect_active_build(*create_args, **kwargs):
+                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+                self.assertEqual(health["reason"], "building", health)
+                result = runner.action_search_multi_v2(
+                    **args, worktree_hash=None, query="Published", n_results=5, scopes=["issues"])
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["scopes"]["issues"]["state"], "stale", result)
+                self.assertEqual(result["issueResults"][0]["title"], "Published")
+                direct = runner.action_search_v2(
+                    **args, action="search-issues", worktree_hash=None,
+                    query="Published", n_results=5, no_auto_build=True)
+                self.assertTrue(direct["ok"], direct)
+                self.assertEqual(direct["issueResults"][0]["title"], "Published")
+                return create(*create_args, **kwargs)
+
+            with mock.patch.object(runner, "_make_chroma_collection_repairing", side_effect=inspect_active_build):
+                self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+
+    def test_build_started_after_recovery_probe_is_building(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "Published", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = root / "index/abc1234567890def/issues"
+            fingerprint = runner._read_issue_meta(db)["source_cache_fingerprint"]
+
+            def start_after_probe(_db):
+                runner._issue_build_failure(db, fingerprint, "full", "BUILD_INCOMPLETE", 0, 1)
+                return False
+
+            with mock.patch.object(runner, "_recover_issue_build", side_effect=start_after_probe):
+                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+            self.assertEqual(health["reason"], "building", health)
+            self.assertTrue(health["healthy"], health)
+
+    def test_status_recovers_sentinel_after_builder_process_dies(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "Published", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = root / "index/abc1234567890def/issues"
+            fingerprint = runner._read_issue_meta(db)["source_cache_fingerprint"]
+            ctx = multiprocessing.get_context("spawn")
+            started = ctx.Event()
+            process = ctx.Process(target=_hold_issue_build, args=(str(db), fingerprint, started))
+            process.start()
+            try:
+                self.assertTrue(started.wait(30), "builder did not acquire its lock")
+                self.assertEqual(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["reason"], "building")
+                process.terminate()
+                process.join(30)
+                self.assertFalse(process.is_alive())
+                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+                self.assertTrue(health["healthy"], health)
+                self.assertFalse((db / "repair.json").exists())
+            finally:
+                if process.is_alive():
+                    process.terminate()
+                process.join(30)
+
+    def test_interrupted_build_leaves_marker_and_next_build_recovers(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             root = Path(tmp)
             self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "First", "body", [])
@@ -371,10 +540,7 @@ class IssueTtlTests(unittest.TestCase):
             db = root / "index/abc1234567890def/issues"
             marker = runner._read_issue_repair(db)
             self.assertEqual(marker.get("last_error"), "BUILD_INCOMPLETE")
-            with mock.patch.object(runner, "_make_chroma_collection_repairing") as create:
-                self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
-            create.assert_not_called()
-            self.assertTrue(runner.action_index_issues_v2(**args, repair=True)["ok"])
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
             self.assertFalse((db / "repair.json").exists())
 
     def test_incremental_reuses_unchanged_and_removes_deleted(self):
@@ -400,6 +566,70 @@ class IssueTtlTests(unittest.TestCase):
                 self.assertIn("Changed\nnew body", records["documents"])
             finally:
                 runner._close_chroma_client(client)
+
+    def test_spec_chunks_share_the_issue_store_and_filter_before_top_k(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            repo = "abc1234567890def"
+            cache = root / ".gwt/cache/issues" / repo
+            self._write_cached_issue(cache, 1, "Shared alpha", "alpha issue", ["bug"])
+            self._write_cached_issue(cache, 2, "Shared alpha", "body wrapper", ["GWT-SPEC"])
+            sections = cache / "2/sections"
+            sections.mkdir()
+            spec = sections / "spec.md"
+            spec.write_text("## Alpha\nalpha requirements\n## Omega\nomega requirements", encoding="utf-8")
+            args = dict(repo_hash=repo, project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_specs_v2(worktree_hash=None, **args)["ok"])
+            db = runner.resolve_db_path(repo, None, "issues", args["db_root"])
+            self.assertNotIn("source_cache_revision", runner._read_issue_meta(db))
+            self.assertEqual(runner.resolve_db_path(repo, None, "specs", args["db_root"]), db)
+            self.assertEqual(runner.read_manifest(db, "specs"), runner.read_manifest(db, "issues"))
+            client, collection = runner._open_chroma_collection(runner.resolve_active_store(db), "issues")
+            try:
+                records = collection.get()
+                self.assertEqual(set(records["ids"]), {"1", "spec-2:chunk-0", "spec-2:chunk-1"})
+                self.assertEqual(sorted(meta["record_kind"] for meta in records["metadatas"]), ["issue", "spec", "spec"])
+            finally:
+                runner._close_chroma_client(client)
+            result = runner.action_search_multi_v2(
+                repo, None, tmp, "alpha", 1, ["specs", "issues"], db_root=args["db_root"])
+            self.assertEqual(result["specResults"][0]["spec_id"], "2", result)
+            self.assertEqual(result["issueResults"][0]["number"], 1, result)
+            self.assertTrue(all(scope["state"] == "fresh" for scope in result["scopes"].values()), result)
+
+            # A section edit outside the truncated Issue body must invalidate
+            # the shared source, then reuse the unchanged issue and chunk.
+            spec.write_text("## Alpha\nalpha requirements\n## Omega\nchanged requirements", encoding="utf-8")
+            self.assertTrue(runner._issue_status_v2(repo, args["db_root"])["source_drift"])
+            rebuilt = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertEqual(rebuilt["newly_embedded"], 1, rebuilt)
+            self._write_cached_issue(cache, 2, "Plain now", "ordinary body", [])
+            rebuilt = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertEqual(rebuilt["newly_embedded"], 1, rebuilt)
+            result = runner.action_search_multi_v2(
+                repo, None, tmp, "alpha", 5, ["specs", "issues"], db_root=args["db_root"])
+            self.assertEqual(result["specResults"], [], result)
+            self.assertEqual({item["number"] for item in result["issueResults"]}, {1, 2}, result)
+
+    def test_old_issue_layout_is_not_served_as_a_unified_store(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            repo = "abc1234567890def"
+            self._write_cached_issue(root / ".gwt/cache/issues" / repo, 1, "First", "body", [])
+            args = dict(repo_hash=repo, project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(repo, None, "issues", args["db_root"])
+            meta = runner._read_issue_meta(db)
+            meta.pop("record_layout", None)
+            runner._write_issue_meta(db, meta)
+            for action in ("search-issues", "search-specs"):
+                result = runner.action_search_v2(
+                    action=action, worktree_hash=None, query="First", no_auto_build=True, **args)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["status"]["reason"], "record_layout_changed")
+            rebuilt = runner.action_index_issues_v2(**args, mode="incremental", respect_ttl=True)
+            self.assertTrue(rebuilt["ok"], rebuilt)
+            self.assertEqual(rebuilt["mode"], "full", rebuilt)
 
     def test_cancel_prevents_publish_and_explicit_repair_clears_flag(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):

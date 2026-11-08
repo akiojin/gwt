@@ -138,3 +138,112 @@ fn index_path_policy_denies_common_generated_directories() {
         );
     }
 }
+
+#[test]
+fn builtin_path_batch_preserves_order_and_single_path_policy() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/keep.rs"), "keep").unwrap();
+    let paths = [
+        "src/keep.rs",
+        "target/debug/app",
+        ".gwt/config",
+        "src/missing.rs",
+        "src/fixture.SNAP",
+    ]
+    .map(|name| root.join(name))
+    .to_vec();
+    let policy = default_index_path_policy();
+    let expected: Vec<_> = paths
+        .iter()
+        .filter(|path| !policy.is_builtin_denied_path(root, path))
+        .cloned()
+        .collect();
+    assert_eq!(policy.filter_builtin_denied_paths(root, paths), expected);
+    assert_eq!(
+        expected,
+        [root.join("src/keep.rs"), root.join("src/missing.rs")]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_path_batch_resolves_changed_root_and_file_symlinks() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    for root in [&first, &second] {
+        fs::create_dir_all(root.join(".gwt")).unwrap();
+        fs::write(root.join(".gwt/config"), "deny").unwrap();
+        fs::write(root.join("keep.rs"), "keep").unwrap();
+    }
+    let root = dir.path().join("root");
+    let file = first.join("link.rs");
+    symlink(&first, &root).unwrap();
+    symlink(first.join("keep.rs"), &file).unwrap();
+    let policy = default_index_path_policy();
+    assert_eq!(
+        policy
+            .filter_builtin_denied_paths(&root, vec![file.clone()])
+            .as_slice(),
+        std::slice::from_ref(&file)
+    );
+    fs::remove_file(&file).unwrap();
+    symlink(first.join(".gwt/config"), &file).unwrap();
+    assert!(policy
+        .filter_builtin_denied_paths(&root, vec![file])
+        .is_empty());
+    fs::remove_file(&root).unwrap();
+    symlink(&second, &root).unwrap();
+    assert!(policy
+        .filter_builtin_denied_paths(&root, vec![second.join(".gwt/config")])
+        .is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn builtin_path_batch_preserves_junction_targets_and_changes() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for directory in ["src", ".gwt", "TARGET"] {
+        fs::create_dir(root.join(directory)).unwrap();
+        fs::write(root.join(directory).join("value.rs"), "value").unwrap();
+    }
+    let junction = |link: &std::path::Path, target: &std::path::Path| {
+        let output = gwt_core::process::hidden_command("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link.components().collect::<std::path::PathBuf>())
+            .arg(target.components().collect::<std::path::PathBuf>())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction: {output:?}");
+    };
+    let outward = root.join(".gwt/redirect");
+    let inward = root.join("src/redirect");
+    junction(&outward, &root.join("src"));
+    junction(&inward, &root.join(".gwt"));
+    let paths = vec![
+        outward.join("value.rs"),
+        inward.join("value.rs"),
+        root.join("target/value.rs"),
+    ];
+    let policy = default_index_path_policy();
+    let expected: Vec<_> = paths
+        .iter()
+        .filter(|path| !policy.is_builtin_denied_path(root, path))
+        .cloned()
+        .collect();
+    let actual = policy.filter_builtin_denied_paths(root, paths.clone());
+    fs::remove_dir(&outward).unwrap();
+    junction(&outward, &root.join(".gwt"));
+    let after_change = policy.filter_builtin_denied_paths(root, vec![paths[0].clone()]);
+    let scalar_after_change = policy.is_builtin_denied_path(root, &paths[0]);
+    fs::remove_dir(&outward).unwrap();
+    fs::remove_dir(&inward).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(expected, [paths[0].clone(), paths[2].clone()]);
+    assert!(scalar_after_change);
+    assert!(after_change.is_empty());
+}

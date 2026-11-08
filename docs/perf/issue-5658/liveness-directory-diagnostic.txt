@@ -1,0 +1,9 @@
+probe_pid=59108 rows=5698
+direct calls=7133 unique_queried=3814 opened=252 invalid_pid=6864 uncertain=17 alive_rows=134
+memo calls=3814 unique_queried=3814 opened=92 invalid_pid=3707 uncertain=15 mismatched_results=0
+phase=direct_liveness iterations=12 wall_ms=78.545 cpu_ms=78.125 sum=1595
+phase=per_sweep_pid_memo_liveness iterations=12 wall_ms=89.087 cpu_ms=93.750 sum=1560
+namespace_directories=2647
+phase=root_open_iterate iterations=12 wall_ms=15.387 cpu_ms=15.625 sum=31764
+phase=namespace_open_drop iterations=12 wall_ms=871.004 cpu_ms=859.375 sum=31764
+phase=namespace_open_iterate iterations=12 wall_ms=1358.059 cpu_ms=1359.375 sum=80160

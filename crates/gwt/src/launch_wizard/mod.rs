@@ -6,6 +6,7 @@ use std::{
 use crate::BranchListEntry;
 
 mod launch_request;
+mod memory_cache;
 mod options;
 mod profiles;
 mod quick_start;
@@ -15,6 +16,8 @@ mod test_support;
 mod view_model;
 
 use options::*;
+
+pub use memory_cache::LaunchWizardMemoryCache;
 
 pub use options::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,
@@ -132,6 +135,40 @@ pub struct LaunchWizardOptionView {
     /// SPEC #2133 FR-009.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<gwt_agent::AgentColor>,
+}
+
+/// Read-only input assistance for the saved Issue Monitor candidate pool.
+/// These choices do not normalize or replace any saved profile fields.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorProfileChoices {
+    pub agents: Vec<IssueMonitorAgentChoices>,
+    pub docker_services: Vec<String>,
+    pub default_docker_service: Option<String>,
+    pub windows_shell_supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorAgentChoices {
+    pub id: String,
+    pub name: String,
+    pub is_custom: bool,
+    pub models: Vec<IssueMonitorModelChoices>,
+    pub model_suggestions: Vec<String>,
+    pub default_model: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub default_reasoning: Option<String>,
+    pub supports_model_input: bool,
+    pub supports_fast_mode: bool,
+    pub supports_skip_permissions: bool,
+    pub session_modes: Vec<gwt_agent::SessionMode>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorModelChoices {
+    pub value: String,
+    pub label: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub default_reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -338,6 +375,7 @@ pub struct LaunchWizardIssueMonitorPoolView {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardIssueMonitorPoolSetView {
+    pub agent_member_id: Option<String>,
     pub agent_id: String,
     /// Read-only rows for a set the form is not editing.
     pub summary: Vec<LaunchWizardSummaryView>,
@@ -377,6 +415,8 @@ pub struct LaunchWizardView {
     pub launch_target_options: Vec<LaunchWizardOptionView>,
     pub selected_launch_target: String,
     pub agent_options: Vec<LaunchWizardOptionView>,
+    pub agent_member_options: Vec<LaunchWizardOptionView>,
+    pub selected_agent_member_id: Option<String>,
     pub selected_agent_id: String,
     pub model_options: Vec<LaunchWizardOptionView>,
     pub selected_model: String,
@@ -595,7 +635,7 @@ struct AgentLaunchDraft {
     codex_fast_mode: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShellLaunchConfig {
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
@@ -794,9 +834,20 @@ impl LaunchWizardLaunchRequest {
     /// leaves the window.
     ///
     /// A no-op for non-agent (shell) launches.
-    pub fn set_review_dispatch_context(&mut self) {
+    pub fn set_review_dispatch_context(&mut self, reviewed_sha: &str) {
         if let LaunchWizardLaunchRequest::Agent(config) = self {
             config.suppress_execution_control = true;
+            config.is_ephemeral = true;
+            config.ephemeral_base_ref = Some(reviewed_sha.to_string());
+            // Hydration selected the implementation worktree. The existing
+            // ephemeral resolver must materialize the review's detached cwd.
+            config.working_dir = None;
+            config.branch = None;
+            config.base_branch = None;
+            config.display_name = format!(
+                "Review · Issue #{}",
+                config.linked_issue_number.unwrap_or_default()
+            );
             config.env_vars.insert(
                 crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV.to_string(),
                 "1".to_string(),
@@ -901,7 +952,13 @@ mod autonomous_launch_tests {
     #[test]
     fn review_dispatch_launch_marks_the_review_contract() {
         let mut request = agent_request(false);
-        request.set_review_dispatch_context();
+        if let LaunchWizardLaunchRequest::Agent(config) = &mut request {
+            config.working_dir = Some(std::path::PathBuf::from("implementation"));
+            config.branch = Some("work/issue-42".to_string());
+            config.base_branch = Some("develop".to_string());
+            config.linked_issue_number = Some(42);
+        }
+        request.set_review_dispatch_context("reviewed-commit");
         match request {
             LaunchWizardLaunchRequest::Agent(config) => {
                 assert!(
@@ -915,6 +972,18 @@ mod autonomous_launch_tests {
                         .map(String::as_str),
                     Some("1")
                 );
+                assert!(config.is_ephemeral, "review must leave the owner worktree");
+                assert_eq!(
+                    config.ephemeral_base_ref.as_deref(),
+                    Some("reviewed-commit")
+                );
+                assert!(config.working_dir.is_none());
+                assert!(config.branch.is_none());
+                assert!(
+                    config.base_branch.is_none(),
+                    "review must not start owner Work"
+                );
+                assert!(config.display_name.contains("Review"));
             }
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }
@@ -1047,6 +1116,9 @@ pub enum LaunchWizardAction {
     },
     SetAgent {
         agent_id: String,
+    },
+    SetAgentMember {
+        agent_member_id: String,
     },
     SetModel {
         model: String,

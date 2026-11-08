@@ -11,7 +11,7 @@ const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8"
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
 
-function fixture() {
+function fixture(action = "", popupBlocked = false) {
   const { document, window } = parseHTML(indexHtml);
   const sockets = [];
   class FakeSocket {
@@ -29,14 +29,23 @@ function fixture() {
     deliver(event) { this.handlers.message({ data: JSON.stringify(event) }); }
   }
   const timers = [];
+  const tabs = [];
   const win = Object.assign(window, {
-    location: { href: "http://127.0.0.1:4545/", pathname: "/" },
+    location: { href: `http://127.0.0.1:4545/${action}`, pathname: "/" },
     WebSocket: FakeSocket,
     setTimeout: (callback) => { timers.push(callback); return timers.length; },
     clearTimeout() {},
+    open(url, target) {
+      assert.equal(url, "about:blank");
+      assert.equal(target, "_blank");
+      if (popupBlocked) return null;
+      const tab = { opener: {}, location: { href: url }, closed: false, close() { this.closed = true; } };
+      tabs.push(tab);
+      return tab;
+    },
   });
   const app = mountHubApp({ window: win, document });
-  return { app, document, sockets, timers };
+  return { app, document, sockets, timers, tabs };
 }
 
 function hubState(projects, recent = []) {
@@ -117,8 +126,8 @@ test("a failed open is reported without a link", () => {
   assert.equal(document.querySelector(".gwt-hub__notice").hidden, true);
 });
 
-test("Clone uses the shared modal dialog and closes when the clone lands", () => {
-  const { document, sockets } = fixture();
+test("Clone reserves a tab on submit and opens the committed Project", () => {
+  const { document, sockets, tabs } = fixture();
   sockets[0].open();
   document.querySelector('[data-hub-action="clone"]').click();
   const modal = document.getElementById("clone-project-modal");
@@ -131,13 +140,72 @@ test("Clone uses the shared modal dialog and closes when the clone lands", () =>
   document.getElementById("clone-project-url-input").value = "https://github.com/o/r.git";
   document.getElementById("clone-project-url-input").dispatchEvent(new document.defaultView.Event("input"));
   document.getElementById("clone-project-start").click();
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].opener, null);
+  assert.equal(tabs[0].location.href, "about:blank", "wait for the committed Project identity");
   assert.deepEqual(sockets[0].sent.at(-1), {
     kind: "clone_project_start",
     url: "https://github.com/o/r.git",
     parent_path: "/tmp/parent",
   });
-  sockets[0].deliver({ kind: "clone_project_done" });
+  sockets[0].deliver({ kind: "clone_project_done", project_key: projectB.project_key });
   assert.equal(modal.classList.contains("open"), false);
+  assert.equal(tabs[0].location.href, "http://127.0.0.1:4545/p/fedcba9876543210");
+  assert.equal(document.querySelector(".gwt-hub__notice a").getAttribute("href"), "/p/fedcba9876543210");
+});
+
+function submitClone(document) {
+  document.querySelector('[data-hub-action="clone"]').click();
+  for (const [id, value] of [["clone-project-url-input", "https://github.com/o/r.git"], ["clone-project-parent-input", "/tmp/parent"]]) {
+    const input = document.getElementById(id);
+    input.value = value;
+    input.dispatchEvent(new document.defaultView.Event("input"));
+  }
+  document.getElementById("clone-project-start").click();
+}
+
+test("a registered clone closes its reserved tab and offers the existing Project", () => {
+  const { document, sockets, tabs } = fixture();
+  sockets[0].open();
+  submitClone(document);
+  sockets[0].deliver({ kind: "clone_project_error", message: "Repository is already registered.", existing_project_key: projectA.project_key });
+  assert.ok(tabs[0], "Clone submission reserves a tab");
+  assert.equal(tabs[0].closed, true);
+  const dialog = document.querySelector('#clone-project-modal [role="dialog"]');
+  assert.match(dialog.textContent, /Repository is already registered/);
+  const link = dialog.querySelector("a");
+  assert.equal(link.textContent, "Open existing project");
+  assert.equal(link.getAttribute("href"), "/p/0123456789abcdef");
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noopener");
+  [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Cancel").click();
+  document.querySelector('[data-hub-action="clone"]').click();
+  assert.equal(Boolean(dialog.querySelector("a")), false, "a reopened dialog clears the previous duplicate result");
+});
+
+test("clone failure and disconnect close the unused reserved tab", () => {
+  const { document, sockets, tabs } = fixture();
+  sockets[0].open();
+  submitClone(document);
+  sockets[0].deliver({ kind: "clone_project_error", message: "Clone failed." });
+  assert.ok(tabs[0], "Clone submission reserves a tab");
+  assert.equal(tabs[0].closed, true);
+  assert.match(document.querySelector('#clone-project-modal').textContent, /Clone failed/);
+  document.getElementById("clone-project-start").click();
+  sockets[0].handlers.close();
+  assert.equal(tabs[1].closed, true);
+  assert.equal(document.getElementById("clone-project-start").disabled, false);
+});
+
+test("a blocked popup retains the explicit committed Project link", () => {
+  const { document, sockets, tabs } = fixture("", true);
+  sockets[0].open();
+  submitClone(document);
+  sockets[0].deliver({ kind: "clone_project_done", project_key: projectB.project_key });
+  assert.equal(tabs.length, 0);
+  const notice = document.querySelector(".gwt-hub__notice");
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.querySelector("a").getAttribute("href"), "/p/fedcba9876543210");
 });
 
 test("the Hub reconnects after its socket closes", () => {
@@ -235,18 +303,33 @@ test("manual open and clone destination work without a native picker", () => {
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'clone_project_start', url: url.value, parent_path: parent.value });
 });
 
-test("Hub Close Project previews the selected key and removes only a closed project", () => {
+test("Hub Close Project requires a choice and preserves the project execution row", () => {
   const { document, sockets } = fixture();
-  sockets[0].open();
-  sockets[0].deliver(hubState([projectA, projectB]));
+  sockets[0].open(); sockets[0].deliver(hubState([projectA, projectB]));
   document.querySelector(`[data-close-project="${projectA.project_key}"]`).click();
-  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key, project_wide: true });
   const token = { project_key: projectA.project_key, generation: 1, nonce: 'test' };
-  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [] });
-  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'confirm_close_project', token });
+  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [], choice_required: true,
+    policy_revision: 1, view_set_revision: 2, view_count: 2, project_wide: true });
+  assert.equal(sockets[0].sent.length, 2);
+  document.querySelector('[data-role="close-project-continue"]').click();
+  assert.equal(sockets[0].sent.at(-1).choice, 'continue');
   sockets[0].deliver({ kind: 'project_closed', project_key: projectA.project_key });
-  assert.equal(document.querySelector(`[data-close-project="${projectA.project_key}"]`), null);
+  assert.ok(document.querySelector(`[data-close-project="${projectA.project_key}"]`));
   assert.ok(document.querySelector(`[data-close-project="${projectB.project_key}"]`));
+});
+
+test("Hub shares project execution observations and marks a disconnect unknown", () => {
+  const { document, sockets } = fixture(); sockets[0].open();
+  sockets[0].deliver(hubState([{ ...projectA, execution: { project_key: projectA.project_key, generation: 2, revision: 4,
+    choice: 'continue', effective_state: 'waiting', start_reason: 'user_continue', observed_at: '2026-11-03T10:00:00Z', degraded: false } }, projectB], [{ ...projectA, path: '/fixture/alpha' }]));
+  const a = document.querySelector(`[data-project-execution="${projectA.project_key}"]`);
+  assert.match(a?.textContent || '', /Alpha.*Waiting.*Continue.*2026-11-03/);
+  assert.equal(a.querySelector('[data-project-execution-status]').dataset.state, 'waiting');
+  const b = document.querySelector(`[data-project-execution="${projectB.project_key}"]`);
+  assert.match(b?.textContent || '', /Unknown/);
+  sockets[0].handlers.close();
+  assert.match(a.textContent, /Unknown.*Last known: Waiting/);
 });
 
 test("Hub retries Close after its preview connection is lost", () => {
@@ -259,5 +342,85 @@ test("Hub retries Close after its preview connection is lost", () => {
   timers.at(-1)();
   sockets[1].open();
   close.click();
-  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key, project_wide: true });
+});
+
+
+test("tray Open Project URL starts the existing picker once, after frontend readiness", () => {
+  const { document, sockets, timers } = fixture("?action=open-folder");
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }, { kind: "open_project_dialog" }]);
+  assert.equal(document.querySelector('[data-hub-action="open-folder"]').textContent, "Choosing folder…");
+  sockets[0].handlers.close();
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+});
+
+test("tray Open Project discards its queued picker when the initial connection fails", () => {
+  const { document, sockets, timers } = fixture("?action=open-folder");
+  const open = document.querySelector('[data-hub-action="open-folder"]');
+  sockets[0].handlers.close();
+  assert.equal(open.textContent, "Open Folder…");
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+  open.click();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: "open_project_dialog" });
+});
+
+test("tray Clone URL opens the existing accessible clone dialog without starting a clone", () => {
+  const { document, sockets } = fixture("?action=clone");
+  assert.equal(document.querySelector('#clone-project-modal').classList.contains("open"), true);
+  assert.ok(document.querySelector('#clone-project-modal .modal-shell[role="dialog"][aria-modal="true"]'));
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
+});
+
+test("unknown Hub actions retain the ordinary picker", () => {
+  const { document, sockets } = fixture("?action=unknown");
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
+  assert.equal(document.querySelector('#clone-project-modal').getAttribute("aria-hidden"), "true");
+});
+
+// AC-5: one owner's failure must leave another project's row usable.
+test("project owner health updates only the matching Hub project", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([
+    { ...projectA, owner_health: { project_key: projectA.project_key, state: "degraded", detail: "Project connection lost" } },
+    { ...projectB, owner_health: { project_key: projectB.project_key, state: "healthy", detail: null } },
+  ]));
+  const a = document.querySelector(`[data-project-health="${projectA.project_key}"]`);
+  const b = document.querySelector(`[data-project-health="${projectB.project_key}"]`);
+  assert.equal(a?.dataset.state, "degraded");
+  assert.match(a.textContent, /unavailable/i);
+  assert.equal(b?.dataset.state, "healthy");
+  assert.equal(document.querySelector(`a[data-project-key="${projectB.project_key}"]`)?.getAttribute("href"), `/p/${projectB.project_key}`);
+});
+
+test("Hub retries an observed draining project with an opaque single-use token while Beta remains usable", () => {
+  const { document, sockets } = fixture();
+  const socket = sockets[0];
+  socket.open();
+  const state = hubState([projectB]);
+  state.hub.orphan_daemons = [{ project_key: projectA.project_key, title: "Alpha", detail: "終了処理の再試行が必要です", observation_token: "observation-once" }];
+  socket.deliver(state);
+  const retry = document.querySelector('[data-orphan-retry]');
+  assert.ok(retry);
+  assert.equal(retry.textContent, "Retry shutdown");
+  retry.click();
+  assert.deepEqual(socket.sent.at(-1), { kind: "reap_orphan_daemon", observation_token: "observation-once" });
+  assert.equal(retry.disabled, true);
+  socket.deliver({ kind: "orphan_daemon_result", message: "観測が古くなりました。再確認してください。" });
+  assert.match(document.querySelector('[role="alert"]').textContent, /観測が古く/);
+  assert.equal(document.querySelector(`[data-project-key="${projectB.project_key}"]`).getAttribute("href"), `/p/${projectB.project_key}`);
+  assert.doesNotMatch(document.body.innerHTML, /auth_token|host_instance_id|started_at|\bpid\b/);
+  const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+  const detailStyle = css.match(/\.gwt-hub__orphan-detail\s*\{([^}]+)\}/)?.[1];
+  assert.match(detailStyle, /color:\s*var\(--color-text-muted\)/);
+  assert.match(detailStyle, /font-size:\s*var\(--type-sm\)/);
+  document.querySelector('[data-hub-action="refresh-orphans"]').click();
+  assert.deepEqual(socket.sent.at(-1), { kind: "refresh_orphan_daemons" });
 });

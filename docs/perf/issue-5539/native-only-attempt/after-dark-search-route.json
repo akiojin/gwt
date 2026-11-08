@@ -1,0 +1,309 @@
+{
+  "label": "after",
+  "theme": "dark",
+  "process_id": 6352,
+  "query": "Search route responsiveness acceptance",
+  "scope": "memory",
+  "warmup": {
+    "request_id": 553901,
+    "wall_ms": 1401.4601000000002,
+    "result_count": 1
+  },
+  "sequential": {
+    "samples": [
+      {
+        "request_id": 553902,
+        "wall_ms": 2698.2914,
+        "result_count": 1
+      },
+      {
+        "request_id": 553903,
+        "wall_ms": 1726.7916999999998,
+        "result_count": 1
+      },
+      {
+        "request_id": 553904,
+        "wall_ms": 852.7420999999995,
+        "result_count": 1
+      },
+      {
+        "request_id": 553905,
+        "wall_ms": 1362.1607000000004,
+        "result_count": 1
+      },
+      {
+        "request_id": 553906,
+        "wall_ms": 916.3583999999992,
+        "result_count": 1
+      },
+      {
+        "request_id": 553907,
+        "wall_ms": 961.6201000000001,
+        "result_count": 1
+      },
+      {
+        "request_id": 553908,
+        "wall_ms": 811.8090000000011,
+        "result_count": 1
+      },
+      {
+        "request_id": 553909,
+        "wall_ms": 2533.9660000000003,
+        "result_count": 1
+      },
+      {
+        "request_id": 553910,
+        "wall_ms": 915.5901999999987,
+        "result_count": 1
+      },
+      {
+        "request_id": 553911,
+        "wall_ms": 2164.800299999999,
+        "result_count": 1
+      },
+      {
+        "request_id": 553912,
+        "wall_ms": 2389.2761000000028,
+        "result_count": 1
+      },
+      {
+        "request_id": 553913,
+        "wall_ms": 2407.5269000000008,
+        "result_count": 1
+      },
+      {
+        "request_id": 553914,
+        "wall_ms": 1063.640800000001,
+        "result_count": 1
+      },
+      {
+        "request_id": 553915,
+        "wall_ms": 2505.457599999998,
+        "result_count": 1
+      },
+      {
+        "request_id": 553916,
+        "wall_ms": 2336.5000999999975,
+        "result_count": 1
+      },
+      {
+        "request_id": 553917,
+        "wall_ms": 971.6604999999981,
+        "result_count": 1
+      },
+      {
+        "request_id": 553918,
+        "wall_ms": 1053.8087999999989,
+        "result_count": 1
+      },
+      {
+        "request_id": 553919,
+        "wall_ms": 1713.9686999999976,
+        "result_count": 1
+      },
+      {
+        "request_id": 553920,
+        "wall_ms": 1635.2251000000033,
+        "result_count": 1
+      },
+      {
+        "request_id": 553921,
+        "wall_ms": 1535.056199999999,
+        "result_count": 1
+      }
+    ],
+    "p95_ms": 2533.9660000000003,
+    "threshold_ms": 2000,
+    "cpu": {
+      "cpu_seconds": 32.328125,
+      "wall_seconds": 36.615
+    },
+    "snapshots": {
+      "start": {
+        "timestamp_utc": "2026-10-15T19:17:34.6832636Z",
+        "started_utc": "2026-10-15T19:17:09.2276986Z",
+        "cpu_seconds": 11.546875,
+        "process_id": 6352
+      },
+      "end": {
+        "timestamp_utc": "2026-10-15T19:18:11.2985938Z",
+        "started_utc": "2026-10-15T19:17:09.2276986Z",
+        "cpu_seconds": 43.875,
+        "process_id": 6352
+      }
+    }
+  },
+  "concurrent": {
+    "count": 8,
+    "observation_limit_ms": 45000,
+    "timed_out": false,
+    "sent": [
+      {
+        "kind": "search_project_index",
+        "request_id": 553922,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.2892,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553923,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.3006,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553924,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.3096,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553925,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.4563,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553926,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.464,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553927,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.4719,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553928,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.4792,
+        "phase": "concurrent"
+      },
+      {
+        "kind": "search_project_index",
+        "request_id": 553929,
+        "id": "search-route-5539::index-1",
+        "at_ms": 50056.4853,
+        "phase": "concurrent"
+      }
+    ],
+    "samples": [
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553925,
+        "at_ms": 54127.5462,
+        "phase": "concurrent",
+        "wall_ms": 4075.5669000000053,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553927,
+        "at_ms": 56370.3077,
+        "phase": "concurrent",
+        "wall_ms": 6318.325399999994,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553929,
+        "at_ms": 56779.0817,
+        "phase": "concurrent",
+        "wall_ms": 6727.098399999995,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553924,
+        "at_ms": 57294.0629,
+        "phase": "concurrent",
+        "wall_ms": 7242.0841999999975,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553926,
+        "at_ms": 58968.0736,
+        "phase": "concurrent",
+        "wall_ms": 8916.093700000005,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553928,
+        "at_ms": 60109.4259,
+        "phase": "concurrent",
+        "wall_ms": 10057.443500000001,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553922,
+        "at_ms": 60673.0685,
+        "phase": "concurrent",
+        "wall_ms": 10621.1028,
+        "result_count": 1,
+        "fixture_returned": true
+      },
+      {
+        "kind": "project_index_search_results",
+        "request_id": 553923,
+        "at_ms": 62478.561,
+        "phase": "concurrent",
+        "wall_ms": 12426.584000000003,
+        "result_count": 1,
+        "fixture_returned": true
+      }
+    ],
+    "failures": [],
+    "pending_request_ids": [],
+    "controls": [
+      {
+        "kind": "system_settings",
+        "wall_ms": 10.849499999996624,
+        "pending_searches": 8
+      },
+      {
+        "kind": "custom_agent_preset_list",
+        "wall_ms": 10.89999999999418,
+        "pending_searches": 8
+      }
+    ],
+    "interaction": {
+      "wall_ms": 463.9058999999979,
+      "pending_searches": 8
+    },
+    "cpu": {
+      "cpu_seconds": 11.9375,
+      "wall_seconds": 18.732
+    },
+    "snapshots": {
+      "start": {
+        "timestamp_utc": "2026-10-15T19:18:15.3808160Z",
+        "started_utc": "2026-10-15T19:17:09.2276986Z",
+        "cpu_seconds": 46.421875,
+        "process_id": 6352
+      },
+      "end": {
+        "timestamp_utc": "2026-10-15T19:18:34.1122358Z",
+        "started_utc": "2026-10-15T19:17:09.2276986Z",
+        "cpu_seconds": 58.359375,
+        "process_id": 6352
+      }
+    }
+  }
+}

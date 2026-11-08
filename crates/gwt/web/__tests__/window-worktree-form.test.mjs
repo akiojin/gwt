@@ -11,6 +11,31 @@ import {
   windowWorktreeForm,
 } from "../window-worktree-form.js";
 
+test("assigned Agent name replaces the worktree badge while retaining its metadata", () => {
+  const { document } = parseHTML("<span></span>");
+  const badge = document.querySelector("span");
+  renderWindowWorktreeBadge(badge, {
+    preset: "agent", agent_id: "codex", agent_name: "Lumen", lane_kind: "execution",
+  });
+  assert.equal(badge.textContent, "Lumen");
+  assert.equal(badge.dataset.worktreeForm, "branch-backed");
+  assert.equal(badge.dataset.worktreeLabel, "Branch-backed");
+  assert.match(badge.getAttribute("aria-label"), /Lumen/);
+  assert.match(badge.getAttribute("aria-label"), /Branch-backed worktree/);
+});
+
+test("unnamed Agent badges show their work title and late assignment replaces it", () => {
+  const { document } = parseHTML("<span></span>");
+  const badge = document.querySelector("span");
+  const data = { preset: "agent", agent_id: "codex", title: "Fix cache", lane_kind: "execution" };
+  renderWindowWorktreeBadge(badge, data);
+  assert.equal(badge.textContent, "Fix cache");
+  renderWindowWorktreeBadge(badge, { ...data, agent_name: "Lumen" });
+  assert.equal(badge.textContent, "Lumen");
+  renderWindowWorktreeBadge(badge, { ...data, is_pm: true });
+  assert.equal(badge.hidden, true, "the PM retains its separate role identity");
+});
+
 test("legacy wire lane values adapt to semantic worktree forms", () => {
   assert.equal(windowWorktreeForm({ lane_kind: "intake" }), "ephemeral");
   assert.equal(windowWorktreeForm({ laneKind: "execution" }), "branch-backed");
@@ -36,19 +61,19 @@ test("badge view keeps worktree form separate from provider identity", () => {
   assert.deepEqual(ephemeral, {
     form: "ephemeral",
     label: "Ephemeral",
-    shortLabel: "Ephemeral",
+    shortLabel: "codex",
     symbol: "Ø",
-    ariaLabel: "Ephemeral branchless worktree",
-    title: "Ephemeral branchless worktree",
+    ariaLabel: "codex — Ephemeral branchless worktree",
+    title: "codex — Ephemeral branchless worktree",
     providerColor: "cyan",
   });
   assert.deepEqual(branchBacked, {
     form: "branch-backed",
     label: "Branch-backed",
-    shortLabel: "Branch-backed",
+    shortLabel: "codex",
     symbol: "B",
-    ariaLabel: "Branch-backed worktree",
-    title: "Branch-backed worktree",
+    ariaLabel: "codex — Branch-backed worktree",
+    title: "codex — Branch-backed worktree",
     providerColor: "cyan",
   });
 });
@@ -69,10 +94,10 @@ test("unknown worktree form is visible for restored agents but not ordinary pane
   assert.deepEqual(windowWorktreeBadgeView({ preset: "agent" }), {
     form: "unknown",
     label: "Unknown worktree form",
-    shortLabel: "?",
+    shortLabel: "Agent",
     symbol: "?",
-    ariaLabel: "Unknown worktree form",
-    title: "Unknown worktree form",
+    ariaLabel: "Agent — Unknown worktree form",
+    title: "Agent — Unknown worktree form",
     providerColor: "",
   });
 });
@@ -97,10 +122,10 @@ test("DOM helpers attach semantic worktree data and accessible badge labels", ()
   assert.equal(badge.dataset.worktreeForm, "ephemeral");
   assert.equal(badge.dataset.worktreeLabel, "Ephemeral");
   assert.equal(badge.dataset.worktreeSymbol, "Ø");
-  assert.equal(badge.textContent, "Ephemeral");
+  assert.equal(badge.textContent, "codex");
   assert.equal(badge.getAttribute("role"), "img");
-  assert.equal(badge.getAttribute("aria-label"), "Ephemeral branchless worktree");
-  assert.equal(badge.title, "Ephemeral branchless worktree");
+  assert.equal(badge.getAttribute("aria-label"), "codex — Ephemeral branchless worktree");
+  assert.equal(badge.title, "codex — Ephemeral branchless worktree");
 });
 
 test("hidden ordinary-panel badges clear semantic attributes", () => {

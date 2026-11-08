@@ -27,6 +27,41 @@ function doc() {
   return parseHTML(html).document;
 }
 
+test("AC-11: PM framing publishes its target without releasing the layout", () => {
+  const start = appJs.indexOf("      function frameWindow(");
+  const end = appJs.indexOf("      // A window the user asked", start);
+  const calls = [];
+  const data = { id: "pm", preset: "codex", is_pm: true };
+  const frame = new Function("workspaceWindowById", "windowWithSettingsSection", "surfaceForWindow", "windowCatalogModel", "splitSurfaces", `
+    ${appJs.slice(start, end)}; return frameWindow;
+  `)(() => data, value => value, () => "pm", {
+    update: reduce => { const state = reduce({}); if (state.navigation) calls.push(state.navigation); },
+  }, {
+    close: () => assert.fail("must not expose other Canvas windows"),
+    hasLayout: true,
+  });
+  frame("pm");
+  assert.deepEqual(calls, [{ windowId: "pm", notifyFocus: true, serial: 1 }]);
+});
+
+test("AC-11: opening an Issue never returns PM auxiliary Settings as its detail target", () => {
+  const start = appJs.indexOf("      function focusOrSpawnPreset(");
+  const end = appJs.indexOf("      document.addEventListener", start);
+  const document = doc();
+  const windows = [{ id: "pm-settings", preset: "settings", surface_owner: "pm" }], sent = [], focused = [];
+  const open = new Function("normalizeSurfacePreset", "document", "CustomEvent", "activeWorkspace",
+    "isSingletonSurfacePreset", "openExistingSurfaceWindow", "windowCatalogModel", "frontendUnits",
+    `${appJs.slice(start, end)}; return focusOrSpawnPreset;`)(value => value, document,
+    document.defaultView.CustomEvent, () => ({ windows }), () => true, data => focused.push(data.id),
+    { update: reducer => reducer({ catalog: { appState: { active_tab_id: "tab" } } }) },
+    { socketTransport: { send: message => sent.push(message) } });
+  assert.equal(open("issue"), null);
+  assert.deepEqual(sent, [{ kind: "create_window", preset: "issue" }]);
+  windows.push({ id: "issue", preset: "issue" });
+  assert.equal(open("issue"), "issue");
+  assert.deepEqual(focused, ["issue"]);
+});
+
 test("FR-018: PM launcher は rail の Navigate グループ先頭にある", () => {
   const document = doc();
   const entry = document.getElementById("op-pm-entry");
@@ -52,31 +87,13 @@ test("FR-018: PM launcher はアクセシブルな名前を持つ", () => {
     "true",
   );
 
-  const floating = document.getElementById("canvas-pm-launcher");
-  assert.ok(floating, "キャンバス側のランチャーが必要");
-  assert.equal(floating.getAttribute("aria-label"), "Open Project Manager");
+  assert.equal(document.getElementById("canvas-pm-launcher"), null);
 });
 
-test("FR-018: キャンバスの PM ランチャーは既定で非表示", () => {
-  const document = doc();
-  const floating = document.getElementById("canvas-pm-launcher");
-  // PM が見えているときに重複 CTA を出さないため、初期状態は hidden。
-  assert.ok(floating.hasAttribute("hidden"));
-});
-
-test("FR-018: フローティング PM は minimap と同じ角を奪わない", () => {
-  // fleet-minimap は右下・z-index 60 を占有している。PM を同じ角に置くと
-  // 重なるので、左下に固定されていることを構造で固定する。
-  const minimap = /\.fleet-minimap\s*\{[^}]*\}/.exec(componentsCss)?.[0] ?? "";
-  assert.match(minimap, /right:/, "前提: minimap は右下にある");
-
-  const launcher = /\.canvas-pm-launcher\s*\{[^}]*\}/.exec(componentsCss)?.[0] ?? "";
-  assert.match(launcher, /left:/, "PM ランチャーは左端に置く");
-  assert.doesNotMatch(
-    launcher,
-    /\bright:/,
-    "右下は minimap のものなので PM は使わない",
-  );
+test("PM navigation uses the permanent rail without a floating canvas launcher", () => {
+  assert.ok(doc().getElementById("op-pm-entry"));
+  assert.equal(doc().getElementById("canvas-pm-launcher"), null);
+  assert.doesNotMatch(componentsCss, /\.canvas-pm-launcher/);
 });
 
 test("FR-020: PM の role トークンは両テーマに定義され raw color を使わない", () => {
@@ -87,7 +104,7 @@ test("FR-020: PM の role トークンは両テーマに定義され raw color �
   // PM の面は必ずトークン経由で塗る（生 hex/rgb の直書き禁止）。
   const pmRules = componentsCss
     .split("\n")
-    .filter((line) => /canvas-pm-launcher|op-rail__pm-dot|data-pm="true"|op-rail__item--pm/.test(line));
+    .filter((line) => /op-rail__pm-dot|data-pm="true"|op-rail__item--pm/.test(line));
   assert.ok(pmRules.length > 0, "PM の CSS が存在すること");
   const pmBlockStart = componentsCss.indexOf(".op-rail__item--pm");
   const pmBlock = componentsCss.slice(pmBlockStart);
@@ -168,7 +185,7 @@ test("FR-021: rail の PM 状態は running / stopped / absent を持つ", () =>
 test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   const document = doc();
   const start = appJs.indexOf("      const pmLauncherModel = createUiStateStore(");
-  const end = appJs.indexOf("      // True when the window's rectangle", start);
+  const end = appJs.indexOf("      let pendingPmFrame = false;", start);
   assert.ok(start >= 0 && end > start);
   const { update, setPaused } = new Function("document", "createUiStateStore", "isWindowWithinViewport", `
     let pmWindowId;
@@ -189,7 +206,6 @@ test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   update({ windows: [{ id: "pm", is_pm: true, status: "running" }] });
   assert.equal(entry.dataset.pmState, "running");
   assert.equal(entry.dataset.pmPaused, "true");
-  assert.equal(document.getElementById("canvas-pm-launcher").hidden, true);
   setPaused(false);
   assert.equal(entry.dataset.pmState, "running");
   assert.equal(entry.dataset.pmPaused, "false");
@@ -245,14 +261,7 @@ test("FR-019: 死んだ server-driven center 契約は残さない", () => {
   );
 });
 
-test("FR-022: 閉じる確認は PM の停止が自動復帰しないことを明示する", () => {
-  const modal = readFileSync(resolve(here, "../window-close-confirm-modal.js"), "utf8");
-  assert.match(modal, /state\.isPm/, "PM かどうかで文言を分岐する");
-  assert.match(
-    modal,
-    /will not restart on its own/,
-    "クラッシュ時の自動復帰と区別できる文言にする",
-  );
-  // 実際に PM フラグが確認ダイアログへ渡っていること。
-  assert.match(appJs, /isPm:\s*Boolean\(windowData\.is_pm\)/);
+test("PM fixed surface cannot close or restart its resident session (Issue #4777 AC13)", () => {
+  assert.doesNotMatch(appJs, /requestCloseWindow|kind:\s*"close_window"/);
+  assert.match(appJs, /!isAgentWindow \|\| windowData\.is_pm \|\| windowData\.preset === "shell"/);
 });

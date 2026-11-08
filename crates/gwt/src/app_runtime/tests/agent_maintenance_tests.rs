@@ -8,6 +8,89 @@ fn request(action: &str) -> FrontendEvent {
 }
 
 #[test]
+fn supported_agent_catalog_starts_metadata_concurrently_and_preserves_rows() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let bin = write_fixture_runners(temp.path(), &["npm"]);
+    // Codex cannot return metadata until Grok has started. The existing
+    // process deadline bounds a broken serial implementation; no speed assertion.
+    #[cfg(unix)]
+    fs::write(
+        bin.join("npm"),
+        r#"#!/bin/sh
+base=${0%/*}
+case "$2" in
+  @openai/codex)
+    while [ ! -f "$base/grok-started" ]; do /bin/sleep 0.1; done
+    printf '"3.0.0"\n' ;;
+  @xai-official/grok) : > "$base/grok-started"; printf 'fixture registry unavailable\n' >&2; exit 7 ;;
+  *) printf '"1.0.0"\n' ;;
+esac
+"#,
+    )
+    .unwrap();
+    #[cfg(windows)]
+    fs::write(
+        bin.join("npm.cmd"),
+        "@echo off\r\n\
+         if \"%~2\"==\"@openai/codex\" goto codex\r\n\
+         if \"%~2\"==\"@xai-official/grok\" goto grok\r\n\
+         echo \"1.0.0\"\r\nexit /b 0\r\n\
+         :codex\r\n\
+         if not exist \"%~dp0grok-started\" goto codex\r\n\
+         echo \"3.0.0\"\r\nexit /b 0\r\n\
+         :grok\r\ntype nul > \"%~dp0grok-started\"\r\necho fixture registry unavailable 1>&2\r\nexit /b 7\r\n",
+    )
+    .unwrap();
+    let config_path = temp.path().join("config.toml");
+    let mut settings = Settings::default();
+    settings.profiles.profiles[0]
+        .env_vars
+        .insert("PATH".into(), bin.to_string_lossy().into_owned());
+    settings.save(&config_path).unwrap();
+    let options = [("claude", "2.1.0"), ("codex", "2.0.0")]
+        .into_iter()
+        .map(|(id, version)| gwt::AgentOption {
+            id: id.into(),
+            name: id.into(),
+            available: true,
+            installed_version: Some(version.into()),
+            custom_agent: None,
+        })
+        .collect();
+    let cache = LaunchWizardMemoryCache::load_with_agent_options(temp.path(), options);
+    let BackendEvent::SupportedAgentList { agents, .. } =
+        super::super::agent_maintenance::supported_agent_catalog(&cache, &config_path, temp.path())
+    else {
+        panic!("expected supported agent catalog");
+    };
+    assert_eq!(
+        agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        gwt_agent::builtin_agent_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.command)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(agents[0].available_version, None);
+    assert!(!agents[0].update_available);
+    assert!(agents[0]
+        .update_check_error
+        .as_deref()
+        .unwrap()
+        .contains("channel"));
+    assert_eq!(agents[1].available_version.as_deref(), Some("3.0.0"));
+    assert!(agents[1].update_available);
+    assert!(agents[2]
+        .update_check_error
+        .as_deref()
+        .unwrap()
+        .contains("fixture registry unavailable"));
+}
+
+#[test]
 fn maintenance_refuses_starting_agent_panes_without_scheduling_a_worker() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -53,12 +136,11 @@ fn maintenance_reserves_admission_before_the_worker_and_refuses_agent_launches()
         .spawn_agent_window(
             "tab-1",
             gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build(),
-            canvas_bounds(),
             None,
         )
         .unwrap_err();
     assert!(error.contains("maintenance"));
-    let legacy = runtime.start_window("tab-1", "agent", WindowPreset::Codex, canvas_bounds());
+    let legacy = runtime.start_window("tab-1", "agent", WindowPreset::Codex);
     assert!(legacy.iter().any(|event| serde_json::to_value(&event.event)
         .unwrap()
         .to_string()
@@ -135,6 +217,46 @@ fn automatic_update_setting_is_saved_without_starting_maintenance() {
 }
 
 #[test]
+fn automatic_agent_and_app_updates_are_saved_independently() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    runtime.profile_config_path = None;
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let path = runtime.profile_config_path().unwrap();
+    let defaults = Settings::default();
+    assert!(!defaults.agent.auto_update);
+    defaults.save(&path).unwrap();
+
+    // Opposite values expose accidental coupling in either save direction.
+    for (agent_enabled, app_enabled) in [(true, false), (false, true)] {
+        Settings::persist_auto_apply_updates(&path, |_| Ok(app_enabled)).unwrap();
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.auto_apply_updates, Some(app_enabled));
+        assert_eq!(saved.agent.auto_update, !agent_enabled);
+
+        runtime.handle_frontend_event(
+            "settings".into(),
+            FrontendEvent::SetAgentAutoUpdate {
+                enabled: agent_enabled,
+            },
+        );
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.agent.auto_update, agent_enabled);
+        assert_eq!(saved.auto_apply_updates, Some(app_enabled));
+
+        // Change the app setting to match, then differ, without a no-op save.
+        for app_enabled in [agent_enabled, app_enabled] {
+            Settings::persist_auto_apply_updates(&path, |_| Ok(app_enabled)).unwrap();
+            let saved = Settings::load_from_path(&path).unwrap();
+            assert_eq!(saved.auto_apply_updates, Some(app_enabled));
+            assert_eq!(saved.agent.auto_update, agent_enabled);
+        }
+    }
+}
+
+#[test]
 fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -146,7 +268,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
     );
     let mut persisted = tab.workspace.persisted().clone();
     persisted.windows[0].is_pm = true;
-    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "pm");
     insert_test_pane_runtime(&mut runtime, &id);
@@ -157,7 +279,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
             "live {status:?} PM agent"
         );
     }
-    runtime.stop_window_runtime(&id);
+    close_test_owner_runtime(&mut runtime, &id);
     runtime
         .inflight_launches
         .insert("pending".into(), ("next-agent".into(), Instant::now()));
@@ -175,6 +297,40 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
         runtime.agent_maintenance_rejection().is_some(),
         "confirmed wizard preparation owns launch admission"
     );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
+        .pending_launch_wizard_materializations
+        .clear();
+    runtime.set_window_status("tab-1", "pm", WindowProcessStatus::Stopped);
+    assert!(runtime.agent_maintenance_rejection().is_none());
+    let context = runtime.test_context();
+    runtime.issue_monitor_launch_preparations.insert((
+        context.tab_id.clone(),
+        context.generation,
+        5596,
+        None,
+        true,
+    ));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &context.project_root,
+        5597,
+        LinkedIssueKind::Issue,
+        Some("launch:maintenance-queued".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    assert_eq!(runtime.issue_monitor_launch_queue.len(), 1);
+    runtime.issue_monitor_launch_preparations.clear();
+    assert!(runtime.inflight_launches.is_empty());
+    assert!(runtime.runtimes.is_empty());
+    assert!(
+        runtime.agent_maintenance_rejection().is_some(),
+        "a waiting Monitor queue alone must retain launch admission"
+    );
+    runtime.issue_monitor_launch_queue.clear();
+    assert!(runtime.agent_maintenance_rejection().is_none());
 }
 
 #[test]
@@ -278,7 +434,7 @@ fn finish_startup_worker(
 
 #[cfg(unix)]
 #[test]
-fn startup_updates_only_installed_npm_agents_and_refreshes_catalog_after_completion() {
+fn startup_updates_only_installed_supported_agents_and_refreshes_catalog_after_completion() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, tasks) = startup_fixture(temp.path(), Some("1.2.3"), "1.2.4", false);
@@ -310,6 +466,43 @@ fn startup_updates_only_installed_npm_agents_and_refreshes_catalog_after_complet
     assert_eq!(codex["up_to_date"], true);
     assert_eq!(codex["update_available"], false);
     assert_eq!(payload["auto_update"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_updates_antigravity_but_never_unverified_native_routes() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, events, tasks) = startup_fixture(temp.path(), None, "1.2.4", false);
+    let bin = temp.path().join("agent-bin");
+    for (name, script) in [
+        ("curl", "printf '{\"version\":\"1.2.0\"}'"),
+        ("agy", "if [ \"$1\" = update ]; then echo update >> \"$base/native-calls\"; : > \"$base/updated\"; elif [ -f \"$base/updated\" ]; then printf '1.2.0\\n'; else printf '1.0.0\\n'; fi"),
+        ("gh", "if [ \"$2\" = --version ]; then printf '1.0.0\\n'; else echo gh-mutation >> \"$base/native-calls\"; fi"),
+        ("claude", "if [ \"$1\" = --version ]; then printf '1.0.0\\n'; else echo claude-mutation >> \"$base/native-calls\"; fi"),
+        ("hermes", "if [ \"$1\" = --version ]; then printf '1.0.0\\n'; else echo hermes-mutation >> \"$base/native-calls\"; fi"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, format!("#!/bin/sh\nbase=${{0%/*}}\n{script}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    runtime.start_agent_auto_update();
+    let outbound = finish_startup_worker(&mut runtime, &events, &tasks);
+    assert_eq!(
+        fs::read_to_string(bin.join("native-calls")).unwrap().trim(),
+        "update"
+    );
+    let results: Vec<_> = outbound
+        .iter()
+        .map(|event| serde_json::to_value(&event.event).unwrap())
+        .collect();
+    assert!(results.iter().any(|result| result["agent_id"] == "agy"
+        && result["success"] == true
+        && result["after_version"] == "1.2.0"));
+    assert!(!results.iter().any(|result| result["agent_id"] == "claude"
+        || result["agent_id"] == "hermes"
+        || result["agent_id"] == "gh"));
 }
 
 #[cfg(unix)]
@@ -364,7 +557,7 @@ fn startup_disabled_or_pending_launch_does_not_schedule_updates() {
 }
 
 #[test]
-fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
+fn startup_surface_ready_preserves_pm_queue_until_maintenance_finishes() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window_at(
@@ -376,7 +569,9 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
     );
     tab.kind = ProjectKind::NonRepo;
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.deferred_issue_monitor_launches = Some(Vec::new());
     runtime.agent_maintenance.busy = true;
+    assert!(!runtime.issue_monitor_materializer_ready());
     runtime.pending_startup_pm_tabs.push("tab-1".into());
     runtime.pending_startup_auto_resume_sessions.push(
         super::super::PendingStartupAutoResumeSession {
@@ -389,13 +584,19 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
             workspace_resume_context: None,
         },
     );
-    let immediate = runtime.handle_frontend_event(
-        "canvas".into(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+    assert!(runtime.startup_auto_resume_ready_events().is_empty());
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "bootstrap and accepted-view drains must also wait for maintenance"
     );
+    let immediate =
+        runtime.handle_frontend_event("canvas".into(), FrontendEvent::StartupAutoResumeReady {});
     assert!(immediate.is_empty());
+    assert!(
+        !runtime.issue_monitor_materializer_ready(),
+        "canvas arrival cannot admit launches while maintenance defers the restore drain"
+    );
     assert_eq!(runtime.pending_startup_pm_tabs, ["tab-1"]);
     assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
     assert!(
@@ -407,7 +608,7 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
             .is_some(),
         "the paused restore placeholder must survive maintenance"
     );
-    assert!(runtime.agent_maintenance.deferred_startup_bounds.is_some());
+    assert!(runtime.agent_maintenance.deferred_startup_ready);
     runtime.handle_supported_agent_maintenance_complete(
         super::super::agent_maintenance::AgentMaintenanceCompletion {
             results: Vec::new(),
@@ -415,12 +616,13 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
             catalog: None,
         },
     );
+    assert!(runtime.issue_monitor_materializer_ready());
     assert!(runtime.pending_startup_pm_tabs.is_empty());
     assert!(
         runtime.pending_startup_auto_resume_sessions.is_empty(),
         "completion replays the deferred restore drain"
     );
-    assert!(runtime.agent_maintenance.deferred_startup_bounds.is_none());
+    assert!(!runtime.agent_maintenance.deferred_startup_ready);
 }
 
 #[test]

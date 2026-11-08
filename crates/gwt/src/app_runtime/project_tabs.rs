@@ -26,14 +26,13 @@ use std::{
 use super::project_route::ProjectOpenControlFailure;
 use super::startup::prepare_open_project_window_restores;
 #[cfg(test)]
-use super::PreparedProjectSwitch;
+use super::{combined_window_id, PreparedProjectSwitch};
 use super::{
-    combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
-    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, FrontendEvent,
-    OutboundEvent, PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext,
-    ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
-    ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
-    UserEvent, Uuid, WindowCanvasState,
+    load_restored_workspace_state, normalize_recent_project_path, resolve_project_target,
+    same_worktree_path, AppRuntime, BackendEvent, FrontendEvent, OutboundEvent,
+    PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext, ProjectIncarnation,
+    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectNavigationRequest,
+    ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime, UserEvent, Uuid, WindowRegistry,
 };
 
 #[derive(Clone, Copy)]
@@ -74,7 +73,12 @@ fn pick_project_folder_with_deadline(deadline: Instant) -> Result<Option<PathBuf
 pub(crate) fn initial_project_tab_incarnations(
     tabs: &[ProjectTabRuntime],
 ) -> (HashMap<String, ProjectIncarnation>, u64) {
-    let mut next_generation = 1_u64;
+    // Keep cross-boot user grants fenced while leaving ample exact-integer
+    // headroom for per-process reopen generations in the browser protocol.
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    let mut next_generation = (u64::from_le_bytes(bytes[..8].try_into().expect("UUID prefix"))
+        & ((1_u64 << 52) - 1))
+        .max(1);
     let incarnations = tabs
         .iter()
         .map(|tab| {
@@ -495,6 +499,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::CloneProjectError {
                     message: "repository URL is required".to_string(),
+                    existing_project_key: None,
                 },
             )];
         }
@@ -504,23 +509,62 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::CloneProjectError {
                     message: "destination parent folder is required".to_string(),
+                    existing_project_key: None,
                 },
             )];
         }
 
         let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
         let url = trimmed_url.to_string();
         let parent = PathBuf::from(trimmed_parent);
+        let project_key = gwt_core::repo_hash::compute_repo_hash(trimmed_url);
+        let registered_keys = self
+            .project_tab_incarnations
+            .values()
+            .map(|incarnation| incarnation.project_key.clone())
+            .collect::<Vec<_>>();
+        let recent_projects = self
+            .recent_projects
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    self.recent_project_key(&entry.path).cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let worker_client_id = client_id.clone();
         self.blocking_tasks.spawn(move || {
+            // Recent identities may not be hydrated yet. Resolve them here,
+            // before clone creates directories or starts Git, off the tao thread.
+            let existing_project_key = registered_keys
+                .into_iter()
+                .chain(recent_projects.into_iter().map(|(path, key)| {
+                    key.unwrap_or_else(|| gwt_core::paths::resolve_project_scope(&path).hash)
+                }))
+                .find(|key| key == &project_key);
+            if let Some(existing_project_key) = existing_project_key {
+                proxy.send(UserEvent::CloneProjectError {
+                    client_id: worker_client_id,
+                    message: "Repository is already registered.".to_string(),
+                    existing_project_key: Some(existing_project_key.to_string()),
+                });
+                return;
+            }
             proxy.send(UserEvent::CloneProjectProgress {
+                client_id: worker_client_id.clone(),
                 message: "Cloning repository...".to_string(),
             });
             match gwt_git::clone_project_as_nested_bare(&url, &parent) {
                 Ok(outcome) => proxy.send(UserEvent::CloneProjectDone {
+                    client_id: worker_client_id,
                     workspace_home: outcome.workspace_home,
                 }),
                 Err(error) => proxy.send(UserEvent::CloneProjectError {
+                    client_id: worker_client_id,
                     message: error.to_string(),
+                    existing_project_key: None,
                 }),
             }
         });
@@ -547,11 +591,13 @@ impl AppRuntime {
 
     pub(crate) fn handle_clone_project_done(
         &mut self,
+        client_id: &str,
         workspace_home: &Path,
     ) -> Vec<OutboundEvent> {
         self.request_project_open(
             workspace_home.to_path_buf(),
             ProjectNavigationSource::Clone {
+                client_id: client_id.to_string(),
                 workspace_home: workspace_home.to_path_buf(),
             },
         )
@@ -617,7 +663,10 @@ impl AppRuntime {
         message: String,
     ) -> Vec<OutboundEvent> {
         let event = match source {
-            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError { message },
+            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError {
+                message,
+                existing_project_key: None,
+            },
             ProjectNavigationSource::Open { request_id } => BackendEvent::ProjectOpenError {
                 message,
                 request_id: request_id.clone(),
@@ -628,7 +677,12 @@ impl AppRuntime {
                 request_id: None,
             },
         };
-        vec![OutboundEvent::hub(event)]
+        vec![match source {
+            ProjectNavigationSource::Clone { client_id, .. } => {
+                OutboundEvent::reply(client_id, event)
+            }
+            _ => OutboundEvent::hub(event),
+        }]
     }
 
     fn project_navigation_request_is_current(&self, request: &ProjectNavigationRequest) -> bool {
@@ -674,6 +728,15 @@ impl AppRuntime {
                     "superseded by a newer project navigation".to_string(),
                 )),
             );
+            if matches!(
+                &prepared.request.source,
+                ProjectNavigationSource::Clone { .. }
+            ) {
+                return self.project_open_error_events(
+                    &prepared.request.source,
+                    "superseded by a newer project navigation".to_string(),
+                );
+            }
             return Vec::new();
         }
         match prepared.result {
@@ -751,7 +814,7 @@ impl AppRuntime {
                 title: prepared.target.title.clone(),
                 project_root: prepared.target.project_root.clone(),
                 kind: prepared.target.kind,
-                workspace: WindowCanvasState::from_persisted(prepared.workspace),
+                workspace: WindowRegistry::from_persisted(prepared.workspace),
                 migration_pending: prepared.target.needs_migration,
                 main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
             });
@@ -790,36 +853,52 @@ impl AppRuntime {
         let context = self
             .project_context(&tab_id)
             .expect("opened project context");
+        // A backend context publishes its incarnation without granting a view.
+        // This also replaces an earlier GUI's persisted open observation.
+        if let Err(error) = self.persist_actual_project_views(&context) {
+            tracing::warn!(%error, "Project context observation could not be published");
+        }
         #[cfg(test)]
         self.set_active_tab(tab_id.clone());
         self.register_project_log_scope(&tab_id);
         let project_scope = self.project_log_scope_for_tab(&tab_id).cloned();
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter());
-        if let ProjectNavigationSource::Clone { workspace_home } = &source {
+        if let ProjectNavigationSource::Clone { workspace_home, .. } = &source {
             self.remember_recent_clone_workspace_home(workspace_home);
         }
         let _ = self.persist();
 
+        let opened = BackendEvent::ProjectOpened {
+            project_key: prepared.project_key.to_string(),
+            title: prepared.target.title.clone(),
+            request_id: match &source {
+                ProjectNavigationSource::Open { request_id } => request_id.clone(),
+                _ => None,
+            },
+        };
+        let opened = match &source {
+            ProjectNavigationSource::Clone { client_id, .. } => {
+                OutboundEvent::reply(client_id, opened)
+            }
+            _ => OutboundEvent::hub(opened),
+        };
         let mut events = vec![
             self.hub_state_broadcast(),
             self.workspace_state_broadcast(&context),
-            OutboundEvent::hub(BackendEvent::ProjectOpened {
-                project_key: prepared.project_key.to_string(),
-                title: prepared.target.title.clone(),
-                request_id: match &source {
-                    ProjectNavigationSource::Open { request_id } => request_id.clone(),
-                    _ => None,
-                },
-            }),
+            opened,
         ];
         if new_tab {
-            events.extend(
-                self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
-            );
-            events.extend(self.ensure_pm_agent_for_tab(
-                &tab_id,
-                crate::app_runtime::pm::PmEnsureTrigger::Automatic,
-            ));
+            if self.project_execution_admission(&context, &[]).is_ok() {
+                events.extend(
+                    self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
+                );
+                events.extend(self.ensure_pm_agent_for_tab(
+                    &tab_id,
+                    crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+                ));
+            } else if let Some(state) = self.project_state_mut(&context) {
+                state.project_views.deferred_restores = prepared.window_restores;
+            }
             self.spawn_work_events_ingest_for_project_key(
                 prepared.target.project_root.clone(),
                 prepared.project_key,
@@ -853,10 +932,18 @@ impl AppRuntime {
                 ));
             }
         }
-        if let ProjectNavigationSource::Clone { workspace_home } = source {
-            events.push(OutboundEvent::hub(BackendEvent::CloneProjectDone {
-                workspace_home: workspace_home.display().to_string(),
-            }));
+        if let ProjectNavigationSource::Clone {
+            client_id,
+            workspace_home,
+        } = source
+        {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::CloneProjectDone {
+                    project_key: context.project_key.to_string(),
+                    workspace_home: workspace_home.display().to_string(),
+                },
+            ));
         }
         events
     }
@@ -897,6 +984,7 @@ impl AppRuntime {
             .collect::<Vec<_>>();
         for window_id in window_ids {
             self.invalidate_launch_delivery_ack(&window_id);
+            self.initial_launch_workers.remove(&window_id);
             self.pending_launch_completions.remove(&window_id);
         }
         let Some(tab) = self.tab(tab_id).cloned() else {
@@ -1076,56 +1164,171 @@ impl AppRuntime {
         scope: &super::ClientScope,
     ) -> Option<Vec<OutboundEvent>> {
         let (project_key, token) = match event {
-            FrontendEvent::PreviewCloseProject { project_key } => (project_key, None),
-            FrontendEvent::ConfirmCloseProject { token }
+            FrontendEvent::PreviewCloseProject { project_key, .. } => (project_key, None),
+            FrontendEvent::ConfirmCloseProject { token, .. }
             | FrontendEvent::CancelCloseProject { token } => (&token.project_key, Some(token)),
+            FrontendEvent::GetProjectExecutionStatus {
+                project_key,
+                operation_id,
+            } => {
+                let key = project_key.as_deref().or_else(|| match scope {
+                    super::ClientScope::Project(key) => Some(key.as_str()),
+                    _ => None,
+                })?;
+                if matches!(scope, super::ClientScope::Project(own) if own.as_str() != key) {
+                    return Some(self.project_close_error(
+                        client_id,
+                        key,
+                        "ForeignProject",
+                        "Project status is scoped to its connection.",
+                    ));
+                }
+                let context = self
+                    .project_contexts()
+                    .into_iter()
+                    .find(|context| context.project_key.as_str() == key)?;
+                let mut events = self.reconcile_project_choice(&context, operation_id.as_deref());
+                events.push(OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProjectExecutionStatus {
+                        status: self.project_execution_status(&context, operation_id.as_deref()),
+                    },
+                ));
+                return Some(events);
+            }
             _ => return None,
         };
-        let error = || {
-            let event = BackendEvent::CloseProjectError {
-                project_key: project_key.clone(),
-                message: "Close request expired or unauthorized. Try Close Project again.".into(),
-            };
-            Some(vec![OutboundEvent::reply(client_id.to_string(), event)])
+        let error = |runtime: &Self| {
+            Some(runtime.project_close_error(
+                client_id,
+                project_key,
+                "StaleCloseRequest",
+                "Close request expired or unauthorized. Try Close Project again.",
+            ))
         };
         if matches!(scope, super::ClientScope::Project(key) if key.as_str() != project_key) {
-            return error();
+            return error(self);
         }
         let Some(context) = self
             .project_contexts()
             .into_iter()
             .find(|context| context.project_key.as_str() == project_key)
         else {
-            return error();
+            return error(self);
         };
         if let Some(token) = token {
-            let Some(state) = self.project_state_mut(&context) else {
-                return error();
+            let Some(state) = self.project_state(&context) else {
+                return error(self);
             };
             if token.generation != context.generation
                 || state.close_project_nonces.get(client_id) != Some(&token.nonce)
             {
-                return error();
+                return error(self);
             }
-            state.close_project_nonces.remove(client_id);
-            return Some(
-                if matches!(event, FrontendEvent::ConfirmCloseProject { .. }) {
-                    self.close_project_tab_events(&context.tab_id)
-                } else {
-                    Vec::new()
-                },
-            );
+            if matches!(event, FrontendEvent::CancelCloseProject { .. }) {
+                let state = self.project_state_mut(&context).expect("current project");
+                state.close_project_nonces.remove(client_id);
+                state.project_views.previews.remove(client_id);
+                return Some(Vec::new());
+            }
+            let Some(preview) = state.project_views.previews.get(client_id).cloned() else {
+                return error(self);
+            };
+            let FrontendEvent::ConfirmCloseProject {
+                choice,
+                operation_id,
+                expected_policy_revision,
+                expected_view_set_revision,
+                ..
+            } = event
+            else {
+                unreachable!()
+            };
+            let Some(operation_id) = operation_id
+                .as_ref()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            else {
+                return Some(self.project_close_error(
+                    client_id,
+                    project_key,
+                    "ClientUpgradeRequired",
+                    "Reload GWT: Close requires an operation identity and explicit revisions.",
+                ));
+            };
+            if *expected_policy_revision != Some(preview.policy_revision)
+                || *expected_view_set_revision != Some(preview.view_revision)
+                || state.project_views.revision != preview.view_revision
+            {
+                return error(self);
+            }
+            if preview.choice_required && choice.is_none() {
+                return Some(self.project_close_error(
+                    client_id,
+                    project_key,
+                    "ClientUpgradeRequired",
+                    "Reload GWT and choose Continue, Stop, or Cancel.",
+                ));
+            }
+            if !preview.choice_required {
+                let state = self.project_state_mut(&context).expect("current project");
+                state.close_project_nonces.remove(client_id);
+                state.project_views.previews.remove(client_id);
+                return Some(self.detach_actual_project_view(&context, client_id, None, None));
+            }
+            return Some(self.execute_project_choice(
+                &context,
+                client_id,
+                preview,
+                token,
+                choice.expect("explicit choice"),
+                operation_id.clone(),
+            ));
         }
+        let project_wide = matches!(
+            event,
+            FrontendEvent::PreviewCloseProject {
+                project_wide: true,
+                ..
+            }
+        ) || matches!(scope, super::ClientScope::Hub);
         let tab = self.tabs.iter().find(|tab| tab.id == context.tab_id)?;
         let title = tab.title.clone();
         let running_agents =
             crate::runtime_support::collect_running_agents(&tab.workspace.persisted().windows);
+        let policy_revision = gwt_core::project_execution_policy::load(&context.project_root)
+            .map_or(0, |policy| policy.revision);
+        let policy_corruption_digest =
+            gwt::project_execution_policy::policy_corruption_digest(&context.project_root);
+        let state = self.project_state_mut(&context)?;
+        let view_count = state.project_views.view_count();
+        let choice_required = project_wide || view_count <= 1;
+        let view_set_revision = state.project_views.revision();
+        let view_receipts = if project_wide {
+            state.project_views.view_receipts()
+        } else {
+            state
+                .project_views
+                .view_receipts()
+                .into_iter()
+                .filter(|(client, _)| client == client_id)
+                .collect()
+        };
         let nonce = uuid::Uuid::new_v4().to_string();
-        self.project_state_mut(&context)?
+        state
             .close_project_nonces
-            .insert(client_id.to_string(), nonce.clone());
+            .insert(client_id.into(), nonce.clone());
+        state.project_views.previews.insert(
+            client_id.into(),
+            super::project_execution_policy::ClosePreview {
+                policy_revision,
+                view_revision: view_set_revision,
+                choice_required,
+                policy_corruption_digest,
+                view_receipts,
+            },
+        );
         Some(vec![OutboundEvent::reply(
-            client_id.to_string(),
+            client_id,
             BackendEvent::CloseProjectPreview {
                 token: gwt::protocol::CloseProjectToken {
                     project_key: project_key.clone(),
@@ -1134,10 +1337,16 @@ impl AppRuntime {
                 },
                 title,
                 running_agents,
+                choice_required,
+                policy_revision,
+                view_set_revision,
+                view_count,
+                project_wide,
             },
         )])
     }
 
+    #[cfg(test)]
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context(tab_id) else {
             return Vec::new();
@@ -1165,8 +1374,9 @@ impl AppRuntime {
                 Some(closing_project_root.clone()),
                 true,
                 None,
+                None,
             );
-            self.window_lookup.remove(window_id);
+            self.forget_window_scoped_state(window_id);
         }
 
         self.tabs.remove(index);

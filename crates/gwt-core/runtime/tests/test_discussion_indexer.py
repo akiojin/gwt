@@ -158,7 +158,8 @@ class ActionIndexDiscussionsTests(unittest.TestCase):
                     "_make_chroma_collection_repairing",
                     return_value=(_FakeClient(), collection),
                 ), mock.patch.object(runner, "_close_chroma_client"), mock.patch.object(
-                    runner, "_finish_full_build", return_value=None
+                    runner, "_finish_full_build",
+                    side_effect=lambda *args, **kwargs: kwargs["after_publish"]()
                 ):
                     result = runner.action_index_discussions_v2(
                         project_root=str(root),
@@ -200,6 +201,9 @@ class _FakeCollection:
 
     def get(self):
         return {"ids": list(self.ids)}
+
+    def count(self):
+        return len(self.ids)
 
     def delete(self, ids):
         self.ids = [existing for existing in self.ids if existing not in ids]

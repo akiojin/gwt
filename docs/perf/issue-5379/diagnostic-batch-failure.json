@@ -1,0 +1,463 @@
+{
+  "issue": 5379,
+  "fixture": {
+    "binary": "E:\\gwt\\work\\issue-5379\\target\\debug\\gwt.exe",
+    "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38",
+    "gui_started_at": "2026-10-18T23:06:20.1108360Z",
+    "projects": [
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38/workload/project-0",
+        "project_key": "b42b75ea31f326a6",
+        "branch_name": "main"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38/workload/project-1",
+        "project_key": "cc3ccc579c127309",
+        "branch_name": "main"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38/workload/project-2",
+        "project_key": "81f1f4fc0ae84357",
+        "branch_name": "main"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38/workload/project-3",
+        "project_key": "33c8fa3c0d5e86d1",
+        "branch_name": "main"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38/workload/project-4",
+        "project_key": "e192028565eb8f53",
+        "branch_name": "main"
+      }
+    ],
+    "gui_pid": 31056,
+    "binary_origin": "current checkout target/debug",
+    "binary_sha256": "7002E486647907485F2A251D29DAB71A629DC46C10A6520171078135B500702B",
+    "arm": "after",
+    "issue": 5379,
+    "checkout": "E:\\gwt\\work\\issue-5379",
+    "checkout_head": "f16d1243095672d50fdd7e4b4681d0832ce68a6c",
+    "duration_seconds": 10
+  },
+  "theme": "light",
+  "passed": false,
+  "duration_seconds": 10,
+  "full_acceptance_observation": false,
+  "started_at": "2026-10-18T23:10:14.983Z",
+  "ended_at": "2026-10-18T23:10:26.479Z",
+  "actual_elapsed_ms": 11496,
+  "workload": "5 custom Agent PTYs; 8192 ASCII bytes per second per Agent",
+  "producer_receipts": [
+    {
+      "index": 4,
+      "pid": 18932,
+      "started_at": 1792365013602.8035,
+      "session": "487a3803-ce2d-4442-a5ee-0b7a06f7cef5",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-18T23:10:25.150Z",
+      "complete": true
+    },
+    {
+      "index": 0,
+      "pid": 23836,
+      "started_at": 1792364935700.7998,
+      "session": "985c2eec-4627-46c4-8af3-2bf9346ebaaf",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-18T23:10:25.159Z",
+      "complete": true
+    },
+    {
+      "index": 2,
+      "pid": 29256,
+      "started_at": 1792364973498.2024,
+      "session": "b8afd569-11f6-434e-ab7e-5fdeb41b2a27",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-18T23:10:25.152Z",
+      "complete": true
+    },
+    {
+      "index": 3,
+      "pid": 51692,
+      "started_at": 1792364991534.6047,
+      "session": "bb494be7-3279-4576-b8d0-ff9686516901",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-18T23:10:25.154Z",
+      "complete": true
+    },
+    {
+      "index": 1,
+      "pid": 52816,
+      "started_at": 1792364955241.4226,
+      "session": "96803b25-76b1-411f-b55d-eee0daccc1da",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-18T23:10:25.150Z",
+      "complete": true
+    }
+  ],
+  "wire": [
+    {
+      "index": 0,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 1,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 2,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 3,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 4,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    }
+  ],
+  "native_dispatch": {
+    "samples": 304,
+    "stalls": 1,
+    "max_ms": 303,
+    "events": [
+      {
+        "event": "ActiveWorkProjectionPrepared",
+        "count": 3,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "IssueMonitorCapacityChanged",
+        "count": 10,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "IssueMonitorScheduledScanComplete",
+        "count": 5,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "IssueMonitorScheduledScanPrepared",
+        "count": 5,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "IssueMonitorScheduledTick",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 49
+      },
+      {
+        "event": "LogEntry",
+        "count": 3,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "MainEventsCleared",
+        "count": 57,
+        "stalls": 0,
+        "max_ms": 16
+      },
+      {
+        "event": "NewEvents",
+        "count": 57,
+        "stalls": 1,
+        "max_ms": 303
+      },
+      {
+        "event": "RedrawEventsCleared",
+        "count": 57,
+        "stalls": 0,
+        "max_ms": 1
+      },
+      {
+        "event": "RuntimeDaemonEnsureTick",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 7
+      },
+      {
+        "event": "RuntimeOutput",
+        "count": 100,
+        "stalls": 0,
+        "max_ms": 1
+      },
+      {
+        "event": "TerminalConvergenceObserved",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "TerminalConvergenceTick",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 12
+      },
+      {
+        "event": "UpdateDrainObserved",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "WorkMergeStatus",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "WorkTipSubjects",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 0
+      }
+    ],
+    "slow_rows": [
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-1ea0c78bef0c4bde81a35f5b09803e38\\.gwt\\logs\\gwt.log.2026-10-18",
+        "timestamp": "2026-10-19T08:10:24.516049400+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "NewEvents blocked the GUI event loop for 303ms",
+          "event": "NewEvents",
+          "elapsed_ms": 303
+        },
+        "target": "gwt.frontend.timing"
+      }
+    ],
+    "summaries": [
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-18T23:10:20.994471200Z",
+        "stream": "ui",
+        "target": "handler:FrontendReady",
+        "value": 63.8334,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 31056,
+          "count": 1,
+          "total_ms": 63.8334,
+          "p95_ms": 63.8334,
+          "max_ms": 63.8334,
+          "pending_max": 3,
+          "pending_unknown_count": 0,
+          "window_ms": 60002.8569,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-18T23:10:20.994471200Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-18T23:10:20.994471200Z",
+        "stream": "ui",
+        "target": "handler:LaunchWizardLaunchMaterializationRequested",
+        "value": 473.9205,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 31056,
+          "count": 1,
+          "total_ms": 473.9205,
+          "p95_ms": 473.9205,
+          "max_ms": 473.9205,
+          "pending_max": 1,
+          "pending_unknown_count": 0,
+          "window_ms": 60002.8569,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-18T23:10:20.994471200Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-18T23:10:20.994471200Z",
+        "stream": "ui",
+        "target": "handler:RuntimeDaemonEnsureTick",
+        "value": 68.5813,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 31056,
+          "count": 1,
+          "total_ms": 68.5813,
+          "p95_ms": 68.5813,
+          "max_ms": 68.5813,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 60002.8569,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-18T23:10:20.994471200Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-18T23:10:20.994471200Z",
+        "stream": "ui",
+        "target": "handler:TerminalConvergenceTick",
+        "value": 482.1503,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 31056,
+          "count": 2,
+          "total_ms": 482.1503,
+          "p95_ms": 405.2017,
+          "max_ms": 405.2017,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 60002.8569,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-18T23:10:20.994471200Z"
+        }
+      }
+    ],
+    "output_batches": {
+      "count": 50,
+      "stalls": 1,
+      "max_ms": 301
+    }
+  },
+  "browser_errors": [],
+  "dom_snapshot": [
+    {
+      "pane_id": "output-0::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-0::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-1::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-1::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-2::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-2::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-3::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-3::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-4::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-4::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    }
+  ],
+  "limitations": "Deterministic custom PTYs, no provider inference/hooks/builds. Native outer RuntimeOutput dispatch remains the event label; batching flushes at the beginning of every native callback and can be attributed to any event label. All event counts and maxima are retained rather than treating RuntimeOutput alone as the flush budget. Native timing uses integer milliseconds truncated. Slow raw rows are retained; minute summaries cover >50ms events and may straddle interval boundaries. Light is a separate 10-second functional check. Preserved binary source identity must be established by the owner separately from the current checkout HEAD.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "fail"
+}

@@ -33,6 +33,17 @@ pub struct TargetIssueCreateCall {
 }
 
 pub struct TestEnv {
+    pub diagnostic_repository: Option<(String, String)>,
+    pub diagnostic_context: Option<serde_json::Value>,
+    pub diagnostic_runs: HashMap<u64, serde_json::Value>,
+    pub diagnostic_artifacts: HashMap<u64, Vec<u8>>,
+    pub diagnostic_dispatches: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub diagnostic_dispatch_results:
+        std::collections::VecDeque<io::Result<gwt_github::client::http::DiagnosticDispatchAck>>,
+    pub release_policy_context_hook:
+        Option<Box<dyn FnMut() -> io::Result<crate::cli::ReleasePolicyContext> + Send>>,
+    pub release_policy_contexts:
+        std::collections::VecDeque<io::Result<crate::cli::ReleasePolicyContext>>,
     pub client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
@@ -41,6 +52,8 @@ pub struct TestEnv {
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
+    pub feedback_worker_ids: Vec<String>,
+    pub feedback_worker_error: Option<String>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
@@ -48,9 +61,13 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub completion_pr_read_hook: Option<Box<dyn FnMut(usize) + Send>>,
+    pub completion_pr_candidates_call_count: usize,
+    pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
+    pub ci_delivery_snapshots: std::collections::VecDeque<crate::cli::pr::ci_delivery::CiSnapshot>,
     pub pr_comments: Vec<(u64, String)>,
     pub pr_create_call_log: Vec<PrCreateCall>,
     pub pr_edit_call_log: Vec<PrEditCall>,
@@ -74,7 +91,7 @@ pub struct TestEnv {
     pub pr_update_branch_outcomes: HashMap<u64, crate::cli::PrUpdateBranchResult>,
     pub pr_reviews_call_log: Vec<u64>,
     pub pr_review_threads_call_log: Vec<u64>,
-    pub pr_reply_and_resolve_call_log: Vec<(u64, String)>,
+    pub pr_reply_and_resolve_call_log: Vec<(u64, String, Option<String>)>,
     pub pr_checks_call_log: Vec<u64>,
     pub run_logs: HashMap<u64, String>,
     pub run_log_call_log: Vec<u64>,
@@ -84,17 +101,29 @@ pub struct TestEnv {
     pub rerun_call_log: Vec<crate::cli::ActionsRerunTarget>,
     /// Issue #3515: when set, `rerun_actions` refuses with this message.
     pub rerun_rejection: Option<String>,
+    pub dispatch_call_log: Vec<crate::cli::ActionsDispatchCall>,
     pub cancel_call_log: Vec<u64>,
     pub cancel_rejection: Option<String>,
     pub queued_actions: Option<String>,
     pub queued_actions_call_count: usize,
     pub internal_command_call_log: Vec<InternalCommandCall>,
+    pub discussion_create_call_log: Vec<(String, String, String)>,
+    pub required_checks: serde_json::Value,
+    pub required_checks_updates: Vec<(String, serde_json::Value)>,
 }
 
 impl TestEnv {
     pub fn new(cache_root: PathBuf) -> Self {
         let repo_path = cache_root.clone();
         TestEnv {
+            diagnostic_repository: None,
+            diagnostic_context: None,
+            diagnostic_runs: Default::default(),
+            diagnostic_artifacts: Default::default(),
+            diagnostic_dispatches: Default::default(),
+            diagnostic_dispatch_results: Default::default(),
+            release_policy_context_hook: None,
+            release_policy_contexts: Default::default(),
             client: FakeIssueClient::new(),
             cache_root,
             repo_path,
@@ -103,6 +132,8 @@ impl TestEnv {
             stderr: Vec::new(),
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
+            feedback_worker_ids: Vec::new(),
+            feedback_worker_error: None,
             linked_prs: HashMap::new(),
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
@@ -110,9 +141,13 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            completion_pr_read_hook: None,
+            completion_pr_candidates_call_count: 0,
+            pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
+            ci_delivery_snapshots: std::collections::VecDeque::new(),
             pr_comments: Vec::new(),
             pr_create_call_log: Vec::new(),
             pr_edit_call_log: Vec::new(),
@@ -141,11 +176,15 @@ impl TestEnv {
             job_log_call_log: Vec::new(),
             rerun_call_log: Vec::new(),
             rerun_rejection: None,
+            dispatch_call_log: Vec::new(),
             cancel_call_log: Vec::new(),
             cancel_rejection: None,
             queued_actions: None,
             queued_actions_call_count: 0,
             internal_command_call_log: Vec::new(),
+            discussion_create_call_log: Vec::new(),
+            required_checks: serde_json::json!({"strict":false,"checks":[]}),
+            required_checks_updates: Vec::new(),
         }
     }
 
@@ -226,6 +265,33 @@ impl CliEnv for TestEnv {
     fn repo_path(&self) -> &std::path::Path {
         &self.repo_path
     }
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::PublicFeedback,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        super::super::feedback::send_to_upstream(&self.client, record)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        self.feedback_worker_ids.push(id.to_string());
+        if let Some(error) = &self.feedback_worker_error {
+            return Err(io::Error::other(error.clone()));
+        }
+        Ok(())
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        super::super::feedback::send_auto_to_upstream_with_deadline(
+            &self.client,
+            snapshot,
+            &self.repo_path,
+            &gwt_github::client::ResolutionDeadline::new(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(120),
+            ),
+        )
+    }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout
     }
@@ -272,6 +338,23 @@ impl CliEnv for TestEnv {
         self.pr_current_call_count += 1;
         Ok(self.current_pr.clone())
     }
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.completion_pr_candidates_call_count += 1;
+        Ok(self
+            .completion_prs
+            .values()
+            .filter(|snapshot| number.is_none_or(|number| snapshot.inventory.number == number))
+            .map(|snapshot| crate::cli::CompletionPrCandidate {
+                number: snapshot.inventory.number,
+                url: snapshot.inventory.url.clone(),
+                head_ref_name: snapshot.inventory.head_ref_name.clone(),
+                head_sha: snapshot.head_sha.clone(),
+            })
+            .collect())
+    }
     fn create_pr(
         &mut self,
         base: &str,
@@ -292,6 +375,15 @@ impl CliEnv for TestEnv {
         self.created_pr
             .clone()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no created pr seeded"))
+    }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        _base: &str,
+        _head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        self.ci_delivery_snapshots
+            .pop_front()
+            .ok_or_else(|| io::Error::other("canonical CI snapshot not seeded"))
     }
     fn compare_pr_head(
         &mut self,
@@ -361,10 +453,38 @@ impl CliEnv for TestEnv {
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.completion_pr_call_log.push(number);
+        if let Some(hook) = self.completion_pr_read_hook.as_mut() {
+            hook(self.completion_pr_call_log.len());
+        }
         self.completion_prs
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::other(format!("no completion PR snapshot: {number}")))
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.pr_auto_merge_call_log
+            .push((number, reviewed_head_sha.to_string()));
+        let snapshot = self
+            .completion_prs
+            .get_mut(&number)
+            .ok_or_else(|| io::Error::other("no auto-merge PR"))?;
+        if snapshot.head_sha != reviewed_head_sha {
+            return Err(io::Error::other("PR head changed"));
+        }
+        snapshot.inventory.auto_merge_enabled = true;
+        Ok(
+            serde_json::json!({"number":number,"reviewed_head_sha":reviewed_head_sha,"auto_merge_enabled":true,"state":"OPEN"}),
+        )
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.fetch_completion_pr(number)
     }
     fn edit_pr(
         &mut self,
@@ -486,15 +606,30 @@ impl CliEnv for TestEnv {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.pr_reply_and_resolve_call_log
-            .push((number, body.to_string()));
-        let count = self
+        self.pr_reply_and_resolve_call_log.push((
+            number,
+            body.to_string(),
+            thread_id.map(str::to_owned),
+        ));
+        let threads = self
             .pr_review_threads
             .get(&number)
-            .map(|threads| threads.iter().filter(|thread| !thread.is_resolved).count())
-            .unwrap_or(0);
-        Ok(count)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(id) = thread_id {
+            if !threads.iter().any(|thread| thread.id == id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("review thread {id} not found on PR #{number}"),
+                ));
+            }
+        }
+        Ok(threads
+            .iter()
+            .filter(|thread| !thread.is_resolved && thread_id.is_none_or(|id| thread.id == id))
+            .count())
     }
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
         self.pr_checks_call_log.push(number);
@@ -523,6 +658,109 @@ impl CliEnv for TestEnv {
         }
         Ok(format!("rerun requested for {target:?}"))
     }
+
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        if let Some(repository) = &self.diagnostic_repository {
+            return Ok(repository.clone());
+        }
+        Ok(("owner".into(), "repo".into()))
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.diagnostic_context
+            .clone()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.diagnostic_runs
+            .get(&run_id)
+            .cloned()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn diagnostic_artifact(&mut self, _run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.diagnostic_artifacts
+            .get(&artifact_id)
+            .cloned()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        _git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.diagnostic_dispatches.push(inputs.clone());
+        self.diagnostic_dispatch_results
+            .pop_front()
+            .unwrap_or_else(|| Err(super::super::actions::diagnostic::unavailable()))
+    }
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        if let Some(hook) = &mut self.release_policy_context_hook {
+            return hook();
+        }
+        self.release_policy_contexts
+            .pop_front()
+            .unwrap_or_else(|| super::super::actions::release_policy::context(&self.repo_path))
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        _operation: &str,
+        _params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "use production loopback fixture for bounded GitHub settings",
+        ))
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        _operation: &str,
+        _params: &serde_json::Value,
+        _before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "use production loopback fixture for bounded GitHub settings",
+        ))
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.discussion_create_call_log
+            .push((category.into(), title.into(), body.into()));
+        Ok(gwt_github::client::http::CreatedDiscussion {
+            id: "discussion-17".into(),
+            number: 17,
+            url: "https://github.com/owner/repo/discussions/17".into(),
+        })
+    }
+    fn required_status_checks(&mut self, _branch: &str) -> io::Result<serde_json::Value> {
+        Ok(self.required_checks.clone())
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.required_checks_updates
+            .push((branch.into(), settings.clone()));
+        self.required_checks["checks"] = settings["checks"].clone();
+        for check in self.required_checks["checks"]
+            .as_array_mut()
+            .expect("fixture checks")
+        {
+            if check.get("app_id").is_none() {
+                check["app_id"] = serde_json::Value::Null;
+            }
+        }
+        Ok(self.required_checks.clone())
+    }
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        self.dispatch_call_log.push(call);
+        Ok("workflow dispatch requested".into())
+    }
+
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
         self.cancel_call_log.push(run_id);
         if let Some(message) = self.cancel_rejection.clone() {

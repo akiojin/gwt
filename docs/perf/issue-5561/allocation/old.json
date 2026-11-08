@@ -1,0 +1,41 @@
+{
+  "group_count": 1232,
+  "indexed_source_count": 2430574,
+  "mode": "old",
+  "phases": [
+    {
+      "elapsed_ms": 0,
+      "live_bytes": 352156,
+      "peak_bytes": 352156,
+      "phase": "before_scan",
+      "total_allocated_bytes": 537393
+    },
+    {
+      "elapsed_ms": 21403,
+      "live_bytes": 1371713318,
+      "peak_bytes": 1371713318,
+      "phase": "after_scan",
+      "total_allocated_bytes": 1857586059
+    },
+    {
+      "elapsed_ms": 26341,
+      "live_bytes": 1371713318,
+      "peak_bytes": 1376426952,
+      "phase": "after_final",
+      "total_allocated_bytes": 3228569803
+    },
+    {
+      "elapsed_ms": 29213,
+      "live_bytes": 152,
+      "peak_bytes": 1376426952,
+      "phase": "after_drop",
+      "total_allocated_bytes": 3228569803
+    }
+  ],
+  "scanned_source_count": 2430572,
+  "scope": "metadata-only all-group revalidation; no payload intake, projection fold, save, or GUI",
+  "state_source": "read-only grouped intake copy under target",
+  "gui_surface": false,
+  "process_peak_rss_sampled_bytes": 1601781760,
+  "process_id": 17192
+}

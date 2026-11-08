@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import chroma_index_runner as runner
+from tests.git_fixture import git_fixture_env
 
 
 class StatusHealthTests(unittest.TestCase):
@@ -59,16 +60,12 @@ class StatusHealthTests(unittest.TestCase):
         )
 
     def _git(self, root: Path, *args: str) -> None:
-        env = os.environ.copy()
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
-        env["GIT_CONFIG_GLOBAL"] = os.devnull
-        env["GIT_ATTR_NOSYSTEM"] = "1"
         completed = subprocess.run(
             ["git", "-C", str(root), *args],
             check=False,
             capture_output=True,
             text=True,
-            env=env,
+            env=git_fixture_env(),
             timeout=30,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -346,11 +343,12 @@ class StatusHealthTests(unittest.TestCase):
                 )
             self.assertTrue(result["ok"], result)
 
-            status = runner.action_status_v2(
-                repo_hash=self.REPO_HASH,
-                worktree_hash=None,
-                db_root=db_root,
-            )
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                status = runner.action_status_v2(
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=None,
+                    db_root=db_root,
+                )
             self.assertTrue(status["ok"], status)
 
             specs = status["status"]["specs"]
@@ -362,32 +360,25 @@ class StatusHealthTests(unittest.TestCase):
             self.assertFalse(specs["legacy_residue_detected"])
             self.assertIsNotNone(specs["last_repair_at"])
 
-    def test_status_allows_chunked_specs_to_have_more_records_than_manifest_entries(self):
-        with tempfile.TemporaryDirectory() as tmp:
+    def test_status_counts_shared_spec_chunks_and_manifest_records_together(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             db_root = Path(tmp) / "index_root"
+            cache = Path(tmp) / ".gwt/cache/issues" / self.REPO_HASH
+            self._write_cached_spec(cache)
+            (cache / "1939/sections/spec.md").write_text(
+                "\n".join(f"## Section {number}\nRequirements {number}" for number in range(5)),
+                encoding="utf-8",
+            )
+            self.assertTrue(runner.action_index_specs_v2(
+                tmp, self.REPO_HASH, None, db_root=db_root)["ok"])
             db_path = runner.resolve_db_path(
                 self.REPO_HASH,
                 None,
                 "specs",
                 db_root=db_root,
             )
-            db_path.mkdir(parents=True)
-            (db_path / "chroma.sqlite3").write_text("placeholder")
-            runner.write_manifest(
-                db_path,
-                scope="specs",
-                entries=[{"path": "1939", "mtime": 1, "size": 2}],
-            )
-
-            with mock.patch.object(
-                runner, "_scope_document_count", return_value=(True, 5)
-            ):
-                specs = runner._scope_status_v2(
-                    self.REPO_HASH,
-                    None,
-                    "specs",
-                    db_root=db_root,
-                )
+            self.assertEqual(len(runner.read_manifest(db_path, "issues")), 5)
+            specs = runner._scope_status_v2(self.REPO_HASH, None, "specs", db_root=db_root)
 
             self.assertTrue(specs["healthy"], specs)
             self.assertFalse(specs["repair_required"], specs)
@@ -395,27 +386,14 @@ class StatusHealthTests(unittest.TestCase):
             self.assertEqual(specs["document_count"], 5)
 
     def test_status_reports_undersized_specs_index_as_unhealthy(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             db_root = Path(tmp) / "index_root"
-            db_path = runner.resolve_db_path(
-                self.REPO_HASH,
-                None,
-                "specs",
-                db_root=db_root,
-            )
-            db_path.mkdir(parents=True)
-            (db_path / "chroma.sqlite3").write_text("placeholder")
-            runner.write_manifest(
-                db_path,
-                scope="specs",
-                entries=[
-                    {"path": "1939", "mtime": 1, "size": 2},
-                    {"path": "1940", "mtime": 1, "size": 2},
-                ],
-            )
+            self._write_cached_spec(Path(tmp) / ".gwt/cache/issues" / self.REPO_HASH)
+            self.assertTrue(runner.action_index_specs_v2(
+                tmp, self.REPO_HASH, None, db_root=db_root)["ok"])
 
             with mock.patch.object(
-                runner, "_scope_document_count", return_value=(True, 1)
+                runner, "_scope_document_count", return_value=(True, 0)
             ):
                 specs = runner._scope_status_v2(
                     self.REPO_HASH,
@@ -427,7 +405,7 @@ class StatusHealthTests(unittest.TestCase):
             self.assertFalse(specs["healthy"], specs)
             self.assertTrue(specs["repair_required"], specs)
             self.assertEqual(specs["reason"], "count_mismatch")
-            self.assertEqual(specs["document_count"], 1)
+            self.assertEqual(specs["document_count"], 0)
 
 
 if __name__ == "__main__":

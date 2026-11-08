@@ -8,7 +8,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -317,7 +317,7 @@ impl SpawnedChildGuard {
 
     fn terminate(&mut self) {
         if let Some(group) = self.process_group.as_mut() {
-            group.terminate();
+            let _ = group.terminate();
         }
         let Some(mut child) = self.child.take() else {
             return;
@@ -338,7 +338,7 @@ impl SpawnedChildGuard {
         }
         if child.try_wait().ok().flatten().is_none() {
             reap_child_in_background(
-                Arc::new(Mutex::new(child)),
+                Arc::new(PtyChild::new(child)),
                 #[cfg(target_os = "macos")]
                 None,
             );
@@ -380,11 +380,223 @@ struct SpawnDiagnostic {
 #[derive(Default)]
 struct PtyInputState {
     protected: bool,
+    ordinary_input_revision: u64,
+    last_human_input_at: Option<Instant>,
+    protected_transaction_revision: u64,
     queued: VecDeque<Vec<u8>>,
     /// Ordinary (unprotected) keystrokes that have not been submitted or
     /// cleared. Used so PM wake injection can wait instead of splicing a
     /// `[gwt]` prompt into a live TUI composer.
     unsent_user_input: bool,
+}
+
+enum ChildState {
+    Available(Box<dyn portable_pty::Child + Send>),
+    Waiting,
+    Finished(Result<ExitStatus, String>),
+}
+
+/// A blocking waiter owns the OS child outside the state mutex. Process
+/// control and nonblocking status probes remain available while it waits.
+struct PtyChild {
+    state: Mutex<ChildState>,
+    finished: Condvar,
+    pid: Option<u32>,
+    #[cfg(not(unix))]
+    killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+}
+
+impl PtyChild {
+    fn new(child: Box<dyn portable_pty::Child + Send>) -> Self {
+        Self {
+            pid: child.process_id(),
+            #[cfg(not(unix))]
+            killer: Mutex::new(child.clone_killer()),
+            state: Mutex::new(ChildState::Available(child)),
+            finished: Condvar::new(),
+        }
+    }
+
+    fn try_wait(&self) -> Result<Option<ExitStatus>, TerminalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        match &mut *state {
+            ChildState::Available(child) => {
+                let status = child
+                    .try_wait()
+                    .map_err(|error| TerminalError::PtyIoError {
+                        details: error.to_string(),
+                    })?;
+                if let Some(status) = &status {
+                    *state = ChildState::Finished(Ok(status.clone()));
+                    self.finished.notify_all();
+                }
+                Ok(status)
+            }
+            ChildState::Waiting => Ok(None),
+            ChildState::Finished(result) => result
+                .clone()
+                .map(Some)
+                .map_err(|details| TerminalError::PtyIoError { details }),
+        }
+    }
+
+    fn wait(&self) -> Result<ExitStatus, TerminalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        loop {
+            match &*state {
+                ChildState::Finished(result) => {
+                    return result
+                        .clone()
+                        .map_err(|details| TerminalError::PtyIoError { details });
+                }
+                ChildState::Waiting => {
+                    state =
+                        self.finished
+                            .wait(state)
+                            .map_err(|error| TerminalError::PtyIoError {
+                                details: format!("lock poisoned: {error}"),
+                            })?;
+                }
+                ChildState::Available(_) => break,
+            }
+        }
+        let ChildState::Available(mut child) = std::mem::replace(&mut *state, ChildState::Waiting)
+        else {
+            unreachable!("only an available child starts the OS wait");
+        };
+        drop(state);
+
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            // Keep the zombie waitable until the state mutex excludes kill.
+            // Reaping outside it would leave Waiting with a recyclable PID.
+            // Waiting also prevents another try_wait from reaping before the
+            // waitid syscall starts, so it cannot target a replacement child.
+            let ready = wait_for_child_exit(pid);
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = ready.and_then(|()| {
+                child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "child exit notification had no exit status".to_string())
+            });
+            *state = ChildState::Finished(result.clone());
+            self.finished.notify_all();
+            return result.map_err(|details| TerminalError::PtyIoError { details });
+        }
+
+        let result = child.wait().map_err(|error| error.to_string());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = ChildState::Finished(result.clone());
+        self.finished.notify_all();
+        result.map_err(|details| TerminalError::PtyIoError { details })
+    }
+
+    /// Return whether the child was already reaped before signalling it.
+    fn kill(&self) -> Result<bool, TerminalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if let ChildState::Available(child) = &mut *state {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: error.to_string(),
+                })?
+            {
+                *state = ChildState::Finished(Ok(status));
+                self.finished.notify_all();
+                return Ok(true);
+            }
+        }
+        if let ChildState::Finished(result) = &*state {
+            return result
+                .clone()
+                .map(|_| true)
+                .map_err(|details| TerminalError::PtyIoError { details });
+        }
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mut killer = self
+                .killer
+                .lock()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("lock poisoned: {error}"),
+                })?;
+            let _ = killer.kill();
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_child_exit(pid: u32) -> Result<(), String> {
+    loop {
+        // SAFETY: siginfo is writable, pid identifies our unreaped child, and
+        // WNOWAIT leaves reaping to the state-mutex-protected try_wait above.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("wait for child exit: {error}"));
+        }
+    }
+}
+
+/// A cursor report produced by the terminal parser for an observed DSR.
+/// Coordinates are private so this path cannot carry arbitrary input bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPositionReport {
+    row: u16,
+    col: u16,
+}
+
+impl CursorPositionReport {
+    pub(crate) fn from_screen_position(row: u16, col: u16) -> Self {
+        Self {
+            row: row.saturating_add(1),
+            col: col.saturating_add(1),
+        }
+    }
 }
 
 pub struct PtyHandle {
@@ -395,15 +607,25 @@ pub struct PtyHandle {
     /// from carrying a dead pane's descriptors to the `RLIMIT_NOFILE` ceiling
     /// (Issue #4142).
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+    child: Arc<PtyChild>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    /// Serialize ordinary chunks without making input observations wait for I/O.
+    ordinary_input_order: Mutex<()>,
     input_state: Mutex<PtyInputState>,
     generation_active: AtomicBool,
+    // The existing Windows start gate answers ConPTY before its reader can
+    // start. Consume that same native query once when the parser observes it.
+    startup_cursor_report_sent: AtomicBool,
     /// Issue #4909: the child has bracketed-paste mode on (`CSI ? 2004 h`
     /// seen, no `CSI ? 2004 l` since). Published by the pane's output parser,
     /// read by prompt injection off any thread that holds the handle, so a
     /// delivery worker never needs the pane lock to know how to write a body.
     bracketed_paste: AtomicBool,
+    /// Issue #5839: published by the parsed active screen. Protected prompt
+    /// injection must not feed Codex's Transcript/Find input surface.
+    transcript_overlay: AtomicBool,
+    /// Published only after bounded confirmation that the captured tree exited.
+    tree_exit_confirmed: AtomicBool,
     #[cfg(target_os = "macos")]
     reap_requested: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -416,9 +638,17 @@ pub struct PtyHandle {
 
 impl PtyHandle {
     /// Spawn a child process with a PTY.
-    #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
-        Self::spawn_inner(config, SpawnTestFailure::None, None)
+        Self::spawn_with_attempt_observer(config, || {})
+    }
+
+    /// Observe the exact OS child-spawn boundary, after all PTY preparation.
+    #[instrument(name = "spawn", skip_all, fields(cmd = %config.command))]
+    pub fn spawn_with_attempt_observer(
+        config: SpawnConfig,
+        on_attempt: impl FnOnce(),
+    ) -> Result<Self, TerminalError> {
+        Self::spawn_inner(config, SpawnTestFailure::None, None, on_attempt)
     }
 
     /// Spawn a trusted gate helper in the PTY and wait until it proves that it
@@ -430,6 +660,24 @@ impl PtyHandle {
         gate_program: PathBuf,
         gate_args_prefix: Vec<String>,
         nonce: impl Into<String>,
+    ) -> Result<PendingPty, TerminalError> {
+        Self::spawn_pending_with_attempt_observer(
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            || {},
+        )
+    }
+
+    /// Observe the gate's OS spawn attempt without treating preparation errors
+    /// or unconfirmed cleanup as evidence that a child was never created.
+    pub fn spawn_pending_with_attempt_observer(
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+        on_attempt: impl FnOnce(),
     ) -> Result<PendingPty, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
@@ -478,7 +726,7 @@ impl PtyHandle {
             .env
             .insert(START_GATE_TARGET_ENV.to_string(), target);
 
-        let handle = Self::spawn(gate_config)?;
+        let handle = Self::spawn_with_attempt_observer(gate_config, on_attempt)?;
         // Windows ConPTY parks a freshly attached console client inside its
         // startup handshake until the terminal answers the cursor-position
         // query the pseudoconsole emitted on creation. A gated launch only
@@ -487,7 +735,11 @@ impl PtyHandle {
         // Answering here is what a real terminal does anyway; conhost consumes
         // the report instead of forwarding it to the released target.
         #[cfg(windows)]
-        let _ = handle.write_input(CURSOR_POSITION_REPORT);
+        if handle.write_input(CURSOR_POSITION_REPORT).is_ok() {
+            handle
+                .startup_cursor_report_sent
+                .store(true, Ordering::Release);
+        }
         if handle.process_id().is_none() {
             return Err(pending_spawn_error(
                 handle,
@@ -571,6 +823,7 @@ impl PtyHandle {
         config: SpawnConfig,
         failure: SpawnTestFailure,
         observe_pid: Option<&mut dyn FnMut(u32)>,
+        on_attempt: impl FnOnce(),
     ) -> Result<Self, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
@@ -602,6 +855,7 @@ impl PtyHandle {
             cmd.env(key, value);
         }
 
+        on_attempt();
         let child = match pair.slave.spawn_command(cmd) {
             Ok(child) => child,
             Err(error) => {
@@ -662,11 +916,15 @@ impl PtyHandle {
 
         Ok(Self {
             master: Arc::new(Mutex::new(Some(pair.master))),
-            child: Arc::new(Mutex::new(child)),
+            child: Arc::new(PtyChild::new(child)),
             writer: Arc::new(Mutex::new(Some(writer))),
+            ordinary_input_order: Mutex::new(()),
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
+            startup_cursor_report_sent: AtomicBool::new(false),
             bracketed_paste: AtomicBool::new(false),
+            transcript_overlay: AtomicBool::new(false),
+            tree_exit_confirmed: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
@@ -686,6 +944,20 @@ impl PtyHandle {
         self.bracketed_paste.store(enabled, Ordering::Release);
     }
 
+    pub(crate) fn set_transcript_overlay(&self, visible: bool) {
+        self.transcript_overlay.store(visible, Ordering::Release);
+    }
+
+    fn ensure_prompt_input_ready(&self) -> Result<(), TerminalError> {
+        if self.transcript_overlay.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "Codex Transcript overlay is open; close it before sending a prompt"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     // Only the unix reaping tests inject a spawn failure; gating on `test`
     // alone left this dead on Windows, where `-D warnings` then failed a lint
     // CI never runs (its clippy job is Linux-only).
@@ -694,12 +966,78 @@ impl PtyHandle {
         config: SpawnConfig,
         failure: SpawnTestFailure,
         mut observe_pid: impl FnMut(u32),
+        on_attempt: impl FnOnce(),
     ) -> Result<Self, TerminalError> {
-        Self::spawn_inner(config, failure, Some(&mut observe_pid))
+        Self::spawn_inner(config, failure, Some(&mut observe_pid), on_attempt)
     }
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.write_ordinary_input(data, true)
+    }
+
+    /// Preserve ordinary input ordering/composer protection without treating
+    /// an automated write as human activity.
+    pub fn write_machine_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.write_ordinary_input(data, false)
+    }
+
+    pub(crate) fn discard_startup_cursor_preanswer(&self) {
+        self.startup_cursor_report_sent
+            .store(false, Ordering::Release);
+    }
+
+    /// Answer an observed terminal query in this captured runtime generation.
+    /// Protocol replies share the physical writer, but must not wait behind a
+    /// prompt reservation whose ACK may itself require this reply. They do not
+    /// change ordinary input, composer, human quiet time, or transaction revisions.
+    pub fn write_cursor_position_report(
+        &self,
+        report: CursorPositionReport,
+        current: &AtomicBool,
+    ) -> Result<(), TerminalError> {
+        let active =
+            || current.load(Ordering::Acquire) && self.generation_active.load(Ordering::Acquire);
+        if !active() {
+            return Err(TerminalError::PtyIoError {
+                details: "terminal response generation is no longer active".into(),
+            });
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if !active() {
+            return Err(TerminalError::PtyIoError {
+                details: "terminal response generation is no longer active".into(),
+            });
+        }
+        let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
+            details: RELEASED_DESCRIPTORS.into(),
+        })?;
+        // The existing gate preanswered only the initial 1;1 native query.
+        // Consume stale eligibility too, but never suppress a progressed query.
+        if self
+            .startup_cursor_report_sent
+            .swap(false, Ordering::AcqRel)
+            && report.row == 1
+            && report.col == 1
+        {
+            return Ok(());
+        }
+        let bytes = format!("\x1b[{};{}R", report.row, report.col);
+        Self::write_with_locked_writer(&mut **writer, bytes.as_bytes(), 0)
+    }
+
+    fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
+        let _order =
+            self.ordinary_input_order
+                .lock()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("ordinary input order lock poisoned: {error}"),
+                })?;
         let mut state = self
             .input_state
             .lock()
@@ -711,21 +1049,50 @@ impl PtyHandle {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
+        if !data.is_empty() {
+            state.ordinary_input_revision = state.ordinary_input_revision.saturating_add(1);
+        }
+        // Escape-only terminal responses must not postpone supervision. The
+        // existing content classifier also covers paste payloads and edits.
+        if human
+            && (chunk_has_prompt_content(data)
+                || data
+                    .iter()
+                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
+        {
+            state.last_human_input_at = Some(gwt_core::operation_deadline::now());
+        }
         state.note_user_input(data);
         if state.protected {
             state.queued.push_back(data.to_vec());
             return Ok(());
         }
+        // A stalled writer must not pin input_state: snapshots hold Pane while
+        // observing it, and the output reader needs Pane to keep draining the
+        // child's output. Holding both would close an I/O wait cycle.
+        drop(state);
 
         let lock_started = Instant::now();
         let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+        let mut state = self
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
         if !self.generation_active.load(Ordering::Acquire) {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
             });
+        }
+        // A reservation may have started while we waited. Preserve its atomic
+        // body/submit ordering; the ordinary revision was recorded only once.
+        if state.protected {
+            state.queued.push_back(data.to_vec());
+            return Ok(());
         }
         drop(state);
 
@@ -745,11 +1112,42 @@ impl PtyHandle {
             .unwrap_or(false)
     }
 
+    /// Ordinary input observed through any direct PTY input route.
+    pub fn ordinary_input_revision(&self) -> Option<u64> {
+        self.input_state
+            .lock()
+            .ok()
+            .map(|state| state.ordinary_input_revision)
+    }
+
+    /// Read-only input facts for a remote owner projection, under one input lock.
+    /// A clock preceding the last human input is conservatively not quiet.
+    pub fn ordinary_input_observation(&self) -> Option<(u64, bool, Option<Duration>)> {
+        let state = self.input_state.lock().ok()?;
+        Some((
+            state.ordinary_input_revision,
+            state.unsent_user_input,
+            state.last_human_input_at.map(|at| {
+                gwt_core::operation_deadline::now()
+                    .checked_duration_since(at)
+                    .unwrap_or(Duration::ZERO)
+            }),
+        ))
+    }
+
+    /// Atomically observe an empty composer after a full human quiet interval.
+    pub fn quiet_ordinary_input_revision(&self, quiet_for: Duration) -> Option<u64> {
+        let state = self.input_state.lock().ok()?;
+        (!state.unsent_user_input && state.human_input_is_quiet(quiet_for))
+            .then_some(state.ordinary_input_revision)
+    }
+
     /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
     /// key input is queued until the reservation is released.
     pub fn reserve_input_transaction(
         self: &Arc<Self>,
     ) -> Result<PtyInputReservation, TerminalError> {
+        self.ensure_prompt_input_ready()?;
         let mut state = self
             .input_state
             .lock()
@@ -766,10 +1164,20 @@ impl PtyHandle {
                 details: "another protected PTY input transaction is active".to_string(),
             });
         }
+        let previous_transaction_revision = state.protected_transaction_revision;
+        let transaction_revision =
+            previous_transaction_revision
+                .checked_add(1)
+                .ok_or_else(|| TerminalError::PtyIoError {
+                    details: "protected PTY input transaction revision exhausted".to_string(),
+                })?;
+        state.protected_transaction_revision = transaction_revision;
         state.protected = true;
         drop(state);
         Ok(PtyInputReservation {
             handle: Arc::clone(self),
+            previous_transaction_revision,
+            transaction_revision,
         })
     }
 
@@ -880,13 +1288,19 @@ impl PtyHandle {
         let Some(master) = master.as_ref() else {
             return Ok(());
         };
-        let resize_started = Instant::now();
-        let outcome = master.resize(PtySize {
+        let size = PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        });
+        };
+        // ConPTY repaints even for an unchanged grid. Query the actual master
+        // so external size changes are repaired and query errors still resize.
+        if master.get_size().is_ok_and(|current| current == size) {
+            return Ok(());
+        }
+        let resize_started = Instant::now();
+        let outcome = master.resize(size);
         let resize_elapsed_ms =
             u64::try_from(resize_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let total_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -962,19 +1376,19 @@ impl PtyHandle {
             })
     }
 
-    /// Issue #4405 AC-2: lift this tree's CPU cap while it contains the
-    /// host-wide verification lease holder, and restore it afterwards.
+    /// Lift this tree's CPU cap while it contains any canonical verification
+    /// lease holder, and restore it afterwards (Issues #4405 / #5816).
     /// Returns whether the cap changed.
-    pub fn relieve_cap_for_lease_holder(
+    pub fn relieve_cap_for_lease_holders(
         &self,
-        holder_pid: Option<u32>,
+        holder_pids: &[u32],
     ) -> Result<bool, TerminalError> {
         let mut group = match self.process_group.lock() {
             Ok(group) => group,
             Err(poisoned) => poisoned.into_inner(),
         };
         group
-            .relieve_cap_for_lease_holder(holder_pid)
+            .relieve_cap_for_lease_holders(holder_pids)
             .map_err(|details| TerminalError::PtyIoError { details })
     }
 
@@ -986,40 +1400,17 @@ impl PtyHandle {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        group.terminate();
+        let group_result = group
+            .terminate()
+            .map_err(|details| TerminalError::PtyIoError { details });
         drop(group);
 
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        if child
-            .try_wait()
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        #[cfg(unix)]
-        if let Some(pid) = child.process_id() {
-            match nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            ) {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = child.kill();
+        if self.child.kill()? {
+            return group_result;
         }
         #[cfg(target_os = "macos")]
         self.reap_requested.store(true, Ordering::Release);
-        let reaped = child.try_wait().ok().flatten().is_some();
-        drop(child);
+        let reaped = self.child.try_wait().ok().flatten().is_some();
         if !reaped {
             // Reap off the caller thread. Immediate try_wait after SIGKILL
             // often misses the exit, and a zombie still looks alive to
@@ -1030,12 +1421,40 @@ impl PtyHandle {
                 Some(self.unread_output()),
             );
         }
-        Ok(())
+        group_result
+    }
+
+    /// Terminate the captured tree and confirm all its members have exited.
+    ///
+    /// This bounded wait belongs on a background finalizer, never the GUI loop.
+    /// Returns false when the timeout expires and propagates OS observation errors.
+    pub fn terminate_and_wait_for_tree(&self, timeout: Duration) -> Result<bool, TerminalError> {
+        // An already-exited Unix group can reject the initial signal. Only
+        // the complete captured-tree proof below can establish its exit.
+        let kill_result = self.kill();
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let exited = group
+            .terminate_and_wait(timeout)
+            .map_err(|details| TerminalError::PtyIoError { details })?;
+        if exited {
+            self.tree_exit_confirmed.store(true, Ordering::Release);
+        } else {
+            kill_result?;
+        }
+        Ok(exited)
+    }
+
+    /// Whether the captured tree's exit has been confirmed, beyond leader reap.
+    pub fn tree_exit_confirmed(&self) -> bool {
+        self.tree_exit_confirmed.load(Ordering::Acquire)
     }
 
     /// Returns the OS process id of the spawned child, if available.
     pub fn process_id(&self) -> Option<u32> {
-        self.child.lock().ok().and_then(|c| c.process_id())
+        self.child.pid
     }
 
     /// Returns a reader for the PTY output.
@@ -1105,12 +1524,13 @@ impl PtyHandle {
                     details: format!("output_unconsumed: could not drain PTY output: {error}"),
                 })?;
         }
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        child.try_wait().map_err(|e| TerminalError::PtyIoError {
-            details: e.to_string(),
-        })
+        self.child.try_wait()
+    }
+
+    /// Block until the direct child exits, without holding pane, child-state,
+    /// input, or descriptor locks. Concurrent callers share the exit result.
+    pub fn wait(&self) -> Result<ExitStatus, TerminalError> {
+        self.child.wait()
     }
 
     #[cfg(target_os = "macos")]
@@ -1160,7 +1580,7 @@ fn unreaped_child_reason(pid: Option<u32>, output: &UnreadPtyOutput) -> String {
 }
 
 fn reap_child_in_background(
-    child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+    child: Arc<PtyChild>,
     #[cfg(target_os = "macos")] output: Option<UnreadPtyOutput>,
 ) {
     thread::spawn(move || {
@@ -1172,13 +1592,9 @@ fn reap_child_in_background(
                     tracing::debug!(%error, "background PTY reap could not drain unread output");
                 }
             }
-            match child.lock() {
-                Ok(mut guard) => {
-                    if guard.try_wait().ok().flatten().is_some() {
-                        return;
-                    }
-                }
-                Err(_) => return,
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => {}
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1306,6 +1722,14 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
 }
 
 impl PtyInputState {
+    fn human_input_is_quiet(&self, quiet_for: Duration) -> bool {
+        self.last_human_input_at.is_none_or(|at| {
+            gwt_core::operation_deadline::now()
+                .checked_duration_since(at)
+                .is_some_and(|elapsed| elapsed >= quiet_for)
+        })
+    }
+
     fn note_user_input(&mut self, data: &[u8]) {
         self.unsent_user_input = next_unsent_user_input(self.unsent_user_input, data);
     }
@@ -1451,15 +1875,64 @@ fn decode_start_gate_target(encoded: &str) -> Result<(String, Vec<String>), Term
 /// Owned guard for a protected input sequence that may cross a worker delay.
 pub struct PtyInputReservation {
     handle: Arc<PtyHandle>,
+    previous_transaction_revision: u64,
+    transaction_revision: u64,
 }
 
 impl PtyInputReservation {
+    /// The last protected transaction before this reservation was acquired.
+    pub fn previous_transaction_revision(&self) -> u64 {
+        self.previous_transaction_revision
+    }
+
+    /// The protected transaction assigned to this reservation.
+    pub fn transaction_revision(&self) -> u64 {
+        self.transaction_revision
+    }
+
+    /// Run an immediate body commit while ordinary input remains unchanged.
+    /// The callback must not acquire the input state again or wait for authority.
+    pub fn with_unchanged_ordinary_input<T>(
+        &self,
+        expected: u64,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
+        self.with_quiet_ordinary_input(expected, Duration::ZERO, operation)
+    }
+
+    /// Keep revision, composer and quiet-time checks in the same body commit
+    /// critical section. The callback must not acquire input state again.
+    pub fn with_quiet_ordinary_input<T>(
+        &self,
+        expected: u64,
+        quiet_for: Duration,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
+        let state = self
+            .handle
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
+        if state.ordinary_input_revision != expected
+            || state.unsent_user_input
+            || (!quiet_for.is_zero() && !state.human_input_is_quiet(quiet_for))
+        {
+            return Err(TerminalError::PtyIoError {
+                details: "ordinary input changed before protected body commit".into(),
+            });
+        }
+        operation()
+    }
+
     /// Issue #4909: see [`PtyHandle::bracketed_paste_enabled`].
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.handle.bracketed_paste_enabled()
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.handle.ensure_prompt_input_ready()?;
         if !self.handle.generation_active.load(Ordering::Acquire) {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
@@ -1480,6 +1953,7 @@ impl PtyInputReservation {
         let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
             details: RELEASED_DESCRIPTORS.to_string(),
         })?;
+        self.handle.ensure_prompt_input_ready()?;
         PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
     }
 
@@ -1493,6 +1967,7 @@ impl PtyInputReservation {
             &mut dyn FnMut(&mut dyn FnMut()) -> Result<(), TerminalError>,
         ) -> Result<(), TerminalError>,
     ) -> Result<(), TerminalError> {
+        self.handle.ensure_prompt_input_ready()?;
         let mut writer = self
             .handle
             .writer
@@ -1505,6 +1980,7 @@ impl PtyInputReservation {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
+        self.handle.ensure_prompt_input_ready()?;
         let mut commit = |mark_attempted: &mut dyn FnMut()| {
             if !self.handle.generation_active.load(Ordering::Acquire) {
                 return Err(TerminalError::PtyIoError {
@@ -1514,10 +1990,51 @@ impl PtyInputReservation {
             let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
                 details: RELEASED_DESCRIPTORS.to_string(),
             })?;
+            self.handle.ensure_prompt_input_ready()?;
             mark_attempted();
             PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
         };
         authorize_and_commit(&mut commit)
+    }
+
+    /// Use the same reserved physical writer for an ordinary human input.
+    /// Preparation consumes no ordinary facts; record them only at the actual
+    /// write attempt, never when the protected ordinary queue accepts bytes.
+    #[doc(hidden)]
+    pub fn write_ordinary_input_authorized(
+        &self,
+        data: &[u8],
+        authorize_and_commit: impl FnOnce(
+            &mut dyn FnMut(&mut dyn FnMut()) -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
+        self.write_input_authorized(data, |commit| {
+            authorize_and_commit(&mut |mark_attempted| {
+                let state =
+                    self.handle
+                        .input_state
+                        .lock()
+                        .map_err(|error| TerminalError::PtyIoError {
+                            details: format!("input state lock poisoned: {error}"),
+                        })?;
+                let mut state = Some(state);
+                commit(&mut || {
+                    let mut state = state.take().expect("one physical write attempt");
+                    if !data.is_empty() {
+                        state.ordinary_input_revision =
+                            state.ordinary_input_revision.saturating_add(1);
+                    }
+                    if chunk_has_prompt_content(data)
+                        || data.iter().any(|b| matches!(b, b'\r' | b'\n' | 3 | 21))
+                    {
+                        state.last_human_input_at = Some(gwt_core::operation_deadline::now());
+                    }
+                    state.note_user_input(data);
+                    drop(state);
+                    mark_attempted();
+                })
+            })
+        })
     }
 }
 
@@ -1540,7 +2057,16 @@ fn normalize_spawn_config(config: SpawnConfig) -> Result<SpawnConfig, String> {
 
     #[cfg(not(windows))]
     {
-        Ok(normalize_non_windows_spawn_config(config))
+        let config = normalize_non_windows_spawn_config(config);
+        let program = Path::new(&config.command);
+        if program.is_absolute()
+            && !program.try_exists().map_err(|error| {
+                format!("cannot inspect PTY command {}: {error}", program.display())
+            })?
+        {
+            return Err(format!("PTY command does not exist: {}", program.display()));
+        }
+        Ok(config)
     }
 }
 
@@ -1803,6 +2329,117 @@ mod tests {
         command_config(sleep_command(secs))
     }
 
+    #[derive(Debug)]
+    struct ControlledChild {
+        entered: std::sync::mpsc::Sender<()>,
+        exit: std::sync::mpsc::Receiver<std::io::Result<ExitStatus>>,
+    }
+
+    #[derive(Debug)]
+    struct NoopKiller;
+
+    impl portable_pty::ChildKiller for NoopKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self)
+        }
+    }
+
+    impl portable_pty::ChildKiller for ControlledChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NoopKiller)
+        }
+    }
+
+    impl portable_pty::Child for ControlledChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            self.entered.send(()).unwrap();
+            self.exit.recv().unwrap()
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn child_wait_keeps_control_available_and_shares_success_or_failure() {
+        use std::sync::mpsc;
+
+        for fail_wait in [false, true] {
+            let (entered, entered_rx) = mpsc::channel();
+            let (exit, exit_rx) = mpsc::channel();
+            let child = Arc::new(PtyChild::new(Box::new(ControlledChild {
+                entered,
+                exit: exit_rx,
+            })));
+            let (completed, completed_rx) = mpsc::channel();
+            let waiters: Vec<_> = (0..2)
+                .map(|_| {
+                    let child = child.clone();
+                    let completed = completed.clone();
+                    thread::spawn(move || completed.send(child.wait()).unwrap())
+                })
+                .collect();
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            let (control, control_rx) = mpsc::channel();
+            let control_child = child.clone();
+            let controller = thread::spawn(move || {
+                let status = control_child.try_wait().unwrap();
+                let already_exited = control_child.kill().unwrap();
+                control.send((status, already_exited)).unwrap();
+            });
+            // The child explicitly acknowledged OS-wait entry; this probe
+            // must complete before the test permits that wait to finish.
+            let control_result = control_rx.recv_timeout(Duration::from_secs(5));
+            exit.send(if fail_wait {
+                Err(std::io::Error::other("controlled wait failure"))
+            } else {
+                Ok(ExitStatus::with_exit_code(7))
+            })
+            .unwrap();
+            let (status, already_exited) = control_result.expect("wait held the child-state mutex");
+            assert!(status.is_none());
+            assert!(!already_exited);
+            controller.join().unwrap();
+            for _ in 0..2 {
+                let result = completed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                if fail_wait {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("controlled wait failure"));
+                } else {
+                    assert_eq!(result.unwrap().exit_code(), 7);
+                }
+            }
+            for waiter in waiters {
+                waiter.join().unwrap();
+            }
+            assert!(
+                entered_rx.try_recv().is_err(),
+                "only one caller may own the OS wait"
+            );
+        }
+    }
+
     #[cfg(unix)]
     fn wait_for_process_exit(pid: u32) -> bool {
         for _ in 0..100 {
@@ -1875,14 +2512,20 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let observed_pid = Arc::new(AtomicU32::new(0));
         let pid = Arc::clone(&observed_pid);
+        let attempted = std::cell::Cell::new(false);
         let error = match PtyHandle::spawn_with_test_failure(
             sleep_config("60"),
             SpawnTestFailure::TakeWriter,
             move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+            || attempted.set(true),
         ) {
             Ok(_) => panic!("injected writer failure must fail spawn"),
             Err(error) => error,
         };
+        assert!(
+            attempted.get(),
+            "writer failure follows an OS spawn attempt"
+        );
         assert!(error.to_string().contains("take_writer"));
 
         let pid = observed_pid.load(Ordering::SeqCst);
@@ -1898,14 +2541,20 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let observed_pid = Arc::new(AtomicU32::new(0));
         let pid = Arc::clone(&observed_pid);
+        let attempted = std::cell::Cell::new(false);
         let error = match PtyHandle::spawn_with_test_failure(
             sleep_config("60"),
             SpawnTestFailure::ProcessGroupAttach,
             move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+            || attempted.set(true),
         ) {
             Ok(_) => panic!("injected attach failure must fail spawn"),
             Err(error) => error,
         };
+        assert!(
+            attempted.get(),
+            "group attach failure follows an OS spawn attempt"
+        );
         assert!(error.to_string().contains("process group"));
 
         let pid = observed_pid.load(Ordering::SeqCst);
@@ -2086,24 +2735,62 @@ mod tests {
     fn test_resize() {
         let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(sleep_config("1")).expect("spawn failed");
-        handle.resize(120, 48).expect("resize should succeed");
+        let events = capture_input_traces(|| {
+            handle.resize(80, 24).expect("initial size should succeed");
+            handle.resize(120, 48).expect("resize should succeed");
+            handle.resize(120, 48).expect("same size should succeed");
+            // A change through the shared native master must still be repaired.
+            handle
+                .master
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .resize(PtySize {
+                    cols: 90,
+                    rows: 30,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            handle.resize(120, 48).expect("restore actual master size");
+        });
+        let actual = handle
+            .master
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .get_size()
+            .unwrap();
+        assert_eq!((actual.cols, actual.rows), (120, 48));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.target == "gwt::resize::pty")
+                .count(),
+            2,
+            "only changed native sizes should trigger a resize and ConPTY repaint"
+        );
     }
 
     #[test]
     fn test_kill() {
         let _pty_guard = lock_pty_test();
-        let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).expect("spawn failed"));
+        let pid = handle.process_id();
+        let (exited, exited_rx) = std::sync::mpsc::channel();
+        let waiter_handle = handle.clone();
+        let waiter = thread::spawn(move || exited.send(waiter_handle.wait()).unwrap());
         handle.kill().expect("kill should succeed");
 
-        let mut exited = false;
-        for _ in 0..50 {
-            if let Ok(Some(_)) = handle.try_wait() {
-                exited = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(exited, "Process should have exited after kill");
+        exited_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("kill must release the OS waiter")
+            .expect("wait after kill");
+        waiter.join().unwrap();
+        assert!(handle.try_wait().unwrap().is_some());
+        assert_eq!(handle.process_id(), pid, "wait must retain child identity");
     }
 
     #[cfg(target_os = "macos")]
@@ -2429,8 +3116,13 @@ mod tests {
             remove_env: Vec::new(),
             cwd: None,
         };
-        let result = PtyHandle::spawn(config);
+        let attempted = std::cell::Cell::new(false);
+        let result = PtyHandle::spawn_with_attempt_observer(config, || attempted.set(true));
         assert!(result.is_err());
+        assert!(
+            !attempted.get(),
+            "command resolution fails before an OS spawn attempt"
+        );
     }
 
     #[test]
@@ -2470,16 +3162,76 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(command_config(success_command())).expect("spawn failed");
         answer_cursor_position_query(&handle);
-        let mut exited = false;
-        for _ in 0..50 {
-            if let Ok(Some(status)) = handle.try_wait() {
-                assert!(status.success());
-                exited = true;
-                break;
+        let status = handle.wait().expect("wait for successful child");
+        assert!(status.success());
+        assert!(handle.try_wait().unwrap().unwrap().success());
+    }
+
+    #[test]
+    fn waiting_ordinary_input_keeps_observation_and_protected_ordering_live() {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
             }
-            std::thread::sleep(Duration::from_millis(100));
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
-        assert!(exited, "Process should have completed");
+
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).expect("spawn sleeper"));
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = handle.writer.lock().unwrap();
+        let _physical_writer = writer.replace(Box::new(Capture(bytes.clone())));
+        let input = handle.clone();
+        let pending = std::thread::spawn(move || input.write_input(b"human"));
+
+        // Observe ingress, not a sleep: the old path retains input_state while
+        // waiting for writer; the fixed path publishes the ordinary revision.
+        // test-hygiene: allow-wall-clock-deadline Bounds worker ingress; the lock/revision establishes ordering.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let entered = loop {
+            match handle.input_state.try_lock() {
+                Ok(state) if state.ordinary_input_revision > 0 => break true,
+                Err(std::sync::TryLockError::WouldBlock) => break true,
+                Err(error) => panic!("input state: {error}"),
+                _ => {}
+            }
+            // test-hygiene: allow-wall-clock-deadline Bounds ingress when the worker cannot be scheduled; lock/revision establishes ordering.
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+        let observer = handle.clone();
+        let (observed, observation) = std::sync::mpsc::channel();
+        let snapshot = std::thread::spawn(move || {
+            let revision = observer.ordinary_input_observation().unwrap().0;
+            let reservation = observer.reserve_input_transaction().unwrap();
+            observed.send(revision).unwrap();
+            reservation
+        });
+        // test-hygiene: allow-wall-clock-deadline A blocked physical writer must not block snapshot input facts.
+        let result = observation.recv_timeout(Duration::from_secs(5));
+        drop(writer);
+        pending.join().unwrap().unwrap();
+        let reservation = snapshot.join().unwrap();
+        let before_release = bytes.lock().unwrap().clone();
+        drop(reservation);
+
+        assert!(entered, "ordinary input did not enter");
+        assert_eq!(
+            result.ok(),
+            Some(1),
+            "writer wait blocked input observation"
+        );
+        assert!(
+            before_release.is_empty(),
+            "pending input bypassed protection"
+        );
+        assert_eq!(&*bytes.lock().unwrap(), b"human");
     }
 
     #[test]
@@ -2508,6 +3260,188 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_input_revision_distinguishes_a_submitted_user_prompt_from_protected_input() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let before = handle.ordinary_input_revision().unwrap();
+        handle.write_input(b"user prompt\r").unwrap();
+        assert!(!handle.has_unsent_user_input());
+        assert!(handle.ordinary_input_revision().unwrap() > before);
+        let human_time = handle.input_state.lock().unwrap().last_human_input_at;
+        assert!(human_time.is_some());
+        handle.write_machine_input(b"automated prompt\r").unwrap();
+        handle.write_input(b"\x1b[1;1R").unwrap();
+        let revision = handle.ordinary_input_revision();
+        let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
+        reservation.write_input(b"protected body").unwrap();
+        reservation.write_input(b"\r").unwrap();
+        assert_eq!(handle.ordinary_input_revision(), revision);
+        assert_eq!(
+            handle.input_state.lock().unwrap().last_human_input_at,
+            human_time
+        );
+    }
+
+    #[test]
+    fn protected_input_transaction_revision_tracks_each_successful_reservation() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let first = handle.reserve_input_transaction().unwrap();
+        assert_eq!(first.previous_transaction_revision(), 0);
+        assert_eq!(first.transaction_revision(), 1);
+        assert!(handle.reserve_input_transaction().is_err());
+        drop(first);
+
+        let second = handle.reserve_input_transaction().unwrap();
+        assert_eq!(second.previous_transaction_revision(), 1);
+        assert_eq!(second.transaction_revision(), 2);
+    }
+
+    #[test]
+    fn cursor_reports_preserve_reserved_input_and_reject_retired_generations() {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let mut pane =
+            crate::Pane::new_with_spawn_config("cursor-report-proof".into(), sleep_config("60"))
+                .expect("spawn sleeper");
+        let handle = pane.shared_pty();
+        assert!(!handle.startup_cursor_report_sent.load(Ordering::Acquire));
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let _physical_writer = handle
+            .writer
+            .lock()
+            .unwrap()
+            .replace(Box::new(Capture(bytes.clone())));
+        handle.write_input(b"human").unwrap();
+        let reservation = handle.reserve_input_transaction().unwrap();
+        handle.write_input(b"queued").unwrap();
+        let before = {
+            let state = handle.input_state.lock().unwrap();
+            (
+                state.ordinary_input_revision,
+                state.last_human_input_at,
+                state.protected_transaction_revision,
+                state.unsent_user_input,
+                state.queued.clone(),
+            )
+        };
+        let current = AtomicBool::new(true);
+        let report = CursorPositionReport::from_screen_position(2, 6);
+        handle
+            .write_cursor_position_report(report, &current)
+            .unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
+        {
+            let state = handle.input_state.lock().unwrap();
+            assert!(state.protected);
+            assert_eq!(
+                before,
+                (
+                    state.ordinary_input_revision,
+                    state.last_human_input_at,
+                    state.protected_transaction_revision,
+                    state.unsent_user_input,
+                    state.queued.clone(),
+                )
+            );
+        }
+
+        // This is a source-level reconciliation test, not evidence that a
+        // native gate emitted a particular ordering. Only its initial 1;1
+        // query matches the existing successful preanswer on this same PTY.
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        let initial = pane.process_owner_output(b"\x1b[6nchild output");
+        assert_eq!(initial.data, b"\x18child output");
+        assert_eq!(initial.cursor_reports.len(), 1);
+        handle
+            .write_cursor_position_report(initial.cursor_reports[0], &current)
+            .unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
+        handle
+            .write_cursor_position_report(report, &current)
+            .unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R\x1b[3;7R");
+
+        // A progressed query must be written even if stale eligibility was
+        // retained. Returning to 1;1 after public cursor movement is likewise
+        // a new query, not the initial native query already answered.
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        handle
+            .write_cursor_position_report(report, &current)
+            .unwrap();
+        let progressed_written = &*bytes.lock().unwrap() == b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R";
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        let returned = pane.process_owner_output(b"\x1b[4;8H\x1b[H\x1b[6n");
+        assert_eq!(returned.data, b"\x1b[4;8H\x1b[H\x18");
+        assert_eq!(
+            returned.cursor_reports,
+            vec![CursorPositionReport::from_screen_position(0, 0)]
+        );
+        handle
+            .write_cursor_position_report(returned.cursor_reports[0], &current)
+            .unwrap();
+        let expected = b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R\x1b[1;1R";
+        let returned_written = *bytes.lock().unwrap() == expected;
+        assert_eq!(
+            (progressed_written, returned_written),
+            (true, true),
+            "startup eligibility suppressed a progressed or later origin query"
+        );
+
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        current.store(false, Ordering::Release);
+        assert!(handle
+            .write_cursor_position_report(report, &current)
+            .is_err());
+        assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
+        current.store(true, Ordering::Release);
+        handle.revoke_input_generation();
+        assert!(handle
+            .write_cursor_position_report(report, &current)
+            .is_err());
+        assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
+        drop(reservation);
+        assert_eq!(&*bytes.lock().unwrap(), expected);
+        assert!(handle.input_state.lock().unwrap().queued.is_empty());
+    }
+
+    #[test]
+    fn ordinary_input_during_authorization_refuses_the_physical_body_commit() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let revision = handle.ordinary_input_revision().unwrap();
+        let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
+        let mut attempted = false;
+        reservation
+            .write_input_authorized(b"automatic body", |commit| {
+                // Browser input can queue while the physical writer is reserved.
+                handle.write_input(b"human prompt\r")?;
+                reservation
+                    .with_unchanged_ordinary_input(revision, || commit(&mut || attempted = true))
+            })
+            .expect_err("new ordinary input must win before body commit");
+        assert!(!attempted);
+    }
+
+    #[test]
     fn generation_invalidation_fences_reserved_submit_and_drops_queued_input() {
         let _pty_guard = lock_pty_test();
         let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
@@ -2529,9 +3463,48 @@ mod tests {
 
     #[test]
     fn generation_invalidation_waits_for_the_physical_write_commit_point() {
+        struct BlockingWrite {
+            entered: std::sync::mpsc::Sender<Vec<u8>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Write for BlockingWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.entered.send(bytes.to_vec()).unwrap();
+                self.release.recv().unwrap();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         let _pty_guard = lock_pty_test();
         let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
-        let writer = handle.writer.lock().expect("hold physical writer");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _physical_writer = handle
+            .writer
+            .lock()
+            .unwrap()
+            .replace(Box::new(BlockingWrite {
+                entered: entered_tx,
+                release: release_rx,
+            }));
+        let current = Arc::new(AtomicBool::new(true));
+        let reporting_handle = handle.clone();
+        let reporting_current = current.clone();
+        let report = CursorPositionReport::from_screen_position(2, 6);
+        let reporter = std::thread::spawn(move || {
+            reporting_handle.write_cursor_position_report(report, &reporting_current)
+        });
+        assert_eq!(
+            // test-hygiene: allow-wall-clock-deadline Bounds actual typed-write entry; the channel proves both generation checks and writer acquisition happened before logical close.
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            b"\x1b[3;7R"
+        );
+        current.store(false, Ordering::Release);
+        handle.revoke_input_generation();
+        assert!(handle.reserve_input_transaction().is_err());
         let (invalidated_tx, invalidated_rx) = std::sync::mpsc::channel();
         let invalidating_handle = Arc::clone(&handle);
         let invalidator = std::thread::spawn(move || {
@@ -2545,13 +3518,20 @@ mod tests {
                 .is_err(),
             "invalidation must wait behind an already-authorized physical write"
         );
-        drop(writer);
+        release_tx.send(()).unwrap();
+        reporter
+            .join()
+            .unwrap()
+            .expect("an already admitted typed write may finish");
         invalidated_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("invalidation completes after the physical write commit point");
         invalidator.join().expect("invalidation thread");
 
         assert!(handle.write_input(b"late input").is_err());
+        assert!(handle
+            .write_cursor_position_report(report, &current)
+            .is_err());
     }
 
     #[test]

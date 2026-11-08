@@ -163,20 +163,27 @@ fn reclaim_group(process_group: u32) -> bool {
     // The exited leader remains a group member until reap. Its presence must
     // not produce the transcript's "left descendants running" diagnostic.
     // This snapshot controls reporting only; cleanup is always attempted.
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().without_tasks(),
-    );
-    let descendants = system.processes().iter().any(|(pid, process)| {
-        pid.as_u32() != process_group
-            && !matches!(process.status(), ProcessStatus::Dead | ProcessStatus::Zombie)
-            // SAFETY: getpgid only queries a PID; disappearing processes are
-            // ignored. The owned leader still pins the target group id.
-            && unsafe { libc::getpgid(pid.as_u32() as libc::pid_t) }
-                == process_group as libc::pid_t
-    });
+    let descendants = match System::new() {
+        Ok(mut system) => {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().without_tasks(),
+            );
+            system.processes().iter().any(|(pid, process)| {
+                pid.as_u32() != process_group
+                    && !matches!(process.status(), ProcessStatus::Dead | ProcessStatus::Zombie)
+                    // SAFETY: getpgid only queries a PID; disappearing processes are
+                    // ignored. The owned leader still pins the target group id.
+                    && unsafe { libc::getpgid(pid.as_u32() as libc::pid_t) }
+                        == process_group as libc::pid_t
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, process_group, "owned group descendant observation unavailable; cleanup still attempted");
+            false
+        }
+    };
     // SAFETY: the owned leader is unreaped whenever production calls here,
     // so the group id cannot be recycled. Reporting never suppresses cleanup.
     unsafe { libc::killpg(process_group as libc::pid_t, libc::SIGKILL) == 0 && descendants }
@@ -658,14 +665,71 @@ mod tests {
     /// whether they can do anything about it.
     #[test]
     fn an_unreachable_baseline_is_recorded_with_its_cause() {
+        use std::os::unix::process::CommandExt;
+
         assert_eq!(priority_reason(Some(BASELINE_NICE), None), None);
-        let reason = priority_reason(Some(10), None).expect("a degraded child explains itself");
-        assert!(reason.contains("nice 10"), "{reason}");
-        assert!(reason.contains("setpriority"), "{reason}");
-        assert!(
-            reason.contains("runs anyway at what it inherited"),
-            "the record must say the run continued: {reason}"
+        const FIXTURE: &str = "GWT_4473_DEGRADED_DAEMON_FIXTURE";
+        if std::env::var_os(FIXTURE).is_none() {
+            let mut command = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+            let module = module_path!().split_once("::").unwrap().1;
+            command
+                .args([
+                    "--exact",
+                    &format!("{module}::an_unreachable_baseline_is_recorded_with_its_cause"),
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1");
+            // SAFETY: setpriority is async-signal-safe and changes only this
+            // isolated fixture process, never the surrounding test runner.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpriority(libc::PRIO_PROCESS as _, 0, 19) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let output = command.output().expect("run degraded daemon fixture");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = temp_dir("degraded-daemon");
+        let child = spawn(&request(
+            &dir,
+            "/bin/sh",
+            &[
+                "-c",
+                "while [ ! -f release ]; do sleep 0.1; done; printf continued",
+            ],
+        ))
+        .expect("a daemon still spawns when baseline priority cannot be restored");
+        let accepted = child.accepted().clone();
+        std::fs::write(dir.join("release"), "release").unwrap();
+        assert_eq!(child.wait().exit_code, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("stdout.log")).unwrap(),
+            "continued"
         );
+        if accepted.nice.is_some_and(|nice| nice > BASELINE_NICE) {
+            let reason = accepted
+                .nice_reason
+                .expect("a degraded child explains itself");
+            assert!(reason.contains("nice 19"), "{reason}");
+            assert!(reason.contains("setpriority"), "{reason}");
+            assert!(
+                reason.contains("runs anyway at what it inherited"),
+                "{reason}"
+            );
+        } else {
+            assert_eq!(accepted.nice, Some(BASELINE_NICE), "{accepted:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A degraded QoS class is the larger inherited penalty on macOS and

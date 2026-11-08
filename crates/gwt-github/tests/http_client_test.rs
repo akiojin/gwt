@@ -8,8 +8,8 @@
 
 use gwt_github::client::{
     http::{
-        FakeTransport, HttpError, HttpIssueClient, HttpMethod, HttpRequest, HttpResponse,
-        HttpTransport, ReqwestTransport,
+        BinaryHttpResponse, FakeTransport, HttpError, HttpIssueClient, HttpMethod, HttpRequest,
+        HttpResponse, HttpTransport, ReqwestTransport,
     },
     ApiError, CommentId, CommitComparisonStatus, CreateRepositoryIssue, FetchResult, IssueClient,
     IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryActorType,
@@ -123,7 +123,7 @@ fn red_50_fetch_posts_graphql_with_auth() {
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(
         r#"{"data":{"repository":{"issue":{
-            "number":2001,"title":"T","body":"B","state":"OPEN","updatedAt":"2026-04-08T00:00:00Z",
+            "number":2001,"author":{"login":"OriginalCreator"},"title":"T","body":"B","state":"OPEN","updatedAt":"2026-04-08T00:00:00Z",
             "labels":{"nodes":[{"name":"gwt-spec"},{"name":"phase/review"}]},
             "comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
         }}}}"#,
@@ -148,6 +148,10 @@ fn red_50_fetch_posts_graphql_with_auth() {
     let body = req.body.as_deref().unwrap_or("");
     let payload: serde_json::Value = serde_json::from_str(body).unwrap();
     assert!(payload.get("query").is_some());
+    assert!(payload["query"]
+        .as_str()
+        .unwrap()
+        .contains("issueOrPullRequest"));
     assert_eq!(payload["variables"]["owner"], "octo");
     assert_eq!(payload["variables"]["repo"], "gwt");
     assert_eq!(payload["variables"]["number"], 2001);
@@ -155,6 +159,7 @@ fn red_50_fetch_posts_graphql_with_auth() {
     match res {
         FetchResult::Updated(snap) => {
             assert_eq!(snap.number, IssueNumber(2001));
+            assert_eq!(snap.author_login.as_deref(), Some("OriginalCreator"));
             assert_eq!(snap.title, "T");
             assert_eq!(snap.state, IssueState::Open);
             assert_eq!(snap.updated_at, UpdatedAt::new("2026-04-08T00:00:00Z"));
@@ -287,6 +292,40 @@ fn red_52_fetch_returns_not_found() {
     assert!(matches!(err, ApiError::NotFound(IssueNumber(9999))));
 }
 
+#[test]
+fn fetch_distinguishes_a_pull_request_from_an_issue() {
+    for since in [None, Some(UpdatedAt::new("2026-04-08T00:00:00Z"))] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            r#"{"data":{"repository":{"issue":{"__typename":"PullRequest","number":4122}}}}"#,
+        ));
+        let error = client_with(transport)
+            .fetch(IssueNumber(4122), since.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("PR #4122"), "{error}");
+        assert!(error.contains("not an issue"), "{error}");
+        assert!(error.contains("pr.view"), "{error}");
+        assert!(!error.contains("GraphQL"), "{error}");
+    }
+}
+
+#[test]
+fn fetch_maps_graphql_missing_number_to_not_found() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","path":["repository","issue"],"message":"Could not resolve to an Issue or PullRequest"}]}"#,
+    ));
+    let error = client_with(transport)
+        .fetch(IssueNumber(9999), None)
+        .unwrap_err();
+    assert!(
+        matches!(error, ApiError::NotFound(IssueNumber(9999))),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("pr.view"));
+}
+
 // -----------------------------------------------------------------------
 // RED-53: patch_body issues a PATCH /repos/.../issues/:n with body field
 // -----------------------------------------------------------------------
@@ -355,7 +394,7 @@ fn red_55_create_comment_posts_to_issue_comments() {
 fn red_56_create_issue_posts_with_labels() {
     let transport = FakeTransport::new();
     transport.enqueue(created(
-        r#"{"number":99,"title":"T","body":"B","state":"open","updated_at":"t","labels":[{"name":"gwt-spec"},{"name":"phase/draft"}]}"#,
+        r#"{"number":99,"user":{"login":"OriginalCreator"},"title":"T","body":"B","state":"open","updated_at":"t","labels":[{"name":"gwt-spec"},{"name":"phase/draft"}]}"#,
     ));
     let client = client_with(transport);
     let labels = vec!["gwt-spec".to_string(), "phase/draft".to_string()];
@@ -371,6 +410,7 @@ fn red_56_create_issue_posts_with_labels() {
     assert_eq!(payload["labels"][0], "gwt-spec");
     assert_eq!(payload["labels"][1], "phase/draft");
     assert_eq!(snap.number, IssueNumber(99));
+    assert_eq!(snap.author_login.as_deref(), Some("OriginalCreator"));
     assert_eq!(snap.labels, labels);
 }
 
@@ -1883,4 +1923,1121 @@ fn issue_labels_honor_and_settle_rest_budget() {
             1
         );
     }
+}
+
+#[test]
+fn workflow_reads_metadata_and_raw_yaml_at_the_specified_ref() {
+    let transport = FakeTransport::new();
+    let filename = "日本語 Release#?%.yml";
+    let workflow_path = format!(".github/workflows/{filename}");
+    let metadata = serde_json::json!({"path": workflow_path}).to_string();
+    transport.enqueue(ok_body(&metadata));
+    transport.enqueue(ok_body(&metadata));
+    let yaml = "name: Release\non: workflow_dispatch\n";
+    transport.enqueue(ok_body(yaml));
+    transport.enqueue(HttpResponse {
+        status: 204,
+        headers: vec![],
+        body: String::new(),
+    });
+    let client = client_with(transport);
+
+    assert_eq!(client.workflow_path("1234").unwrap(), workflow_path);
+    assert_eq!(client.workflow_path(filename).unwrap(), workflow_path);
+    let git_ref = "feature/release &input=value#fragment";
+    assert_eq!(client.workflow_definition(filename, git_ref).unwrap(), yaml);
+    client
+        .dispatch_workflow(filename, git_ref, &serde_json::Map::new())
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/1234"
+    );
+    let encoded_filename = "%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release%23%3F%25.yml";
+    assert_eq!(
+        requests[1].url,
+        format!("https://api.github.com/repos/octo/gwt/actions/workflows/{encoded_filename}")
+    );
+    assert_eq!(
+        requests[2].url,
+        format!("https://api.github.com/repos/octo/gwt/contents/.github/workflows/{encoded_filename}?ref=feature%2Frelease+%26input%3Dvalue%23fragment")
+    );
+    assert_eq!(
+        requests[3].url,
+        format!(
+            "https://api.github.com/repos/octo/gwt/actions/workflows/{encoded_filename}/dispatches"
+        )
+    );
+    assert_eq!(requests[3].method, HttpMethod::Post);
+    let contents_url = reqwest::Url::parse(&requests[2].url).unwrap();
+    assert_eq!(
+        contents_url.path(),
+        format!("/repos/octo/gwt/contents/.github/workflows/{encoded_filename}")
+    );
+    assert_eq!(
+        contents_url.query_pairs().collect::<Vec<_>>(),
+        vec![("ref".into(), git_ref.into())]
+    );
+    assert!(contents_url.fragment().is_none());
+    for request in requests.iter().take(3) {
+        assert_eq!(request.method, HttpMethod::Get);
+        assert!(request.body.is_none());
+        assert!(request
+            .headers
+            .contains(&("Authorization".into(), "Bearer test-token".into())));
+        assert!(request
+            .headers
+            .contains(&("X-GitHub-Api-Version".into(), "2022-11-28".into())));
+    }
+    assert!(requests[0]
+        .headers
+        .contains(&("Accept".into(), "application/vnd.github+json".into())));
+    assert!(requests[2]
+        .headers
+        .contains(&("Accept".into(), "application/vnd.github.raw+json".into())));
+}
+
+#[test]
+fn workflow_dispatch_posts_inputs_and_accepts_no_content() {
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 204,
+        headers: vec![],
+        body: String::new(),
+    });
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"environment": "staging", "enabled": true})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    client
+        .dispatch_workflow("release.yml", "feature/release", &inputs)
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, HttpMethod::Post);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/release.yml/dispatches"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"ref": "feature/release", "inputs": inputs})
+    );
+    assert!(requests[0]
+        .headers
+        .contains(&("Authorization".into(), "Bearer test-token".into())));
+    assert!(requests[0]
+        .headers
+        .contains(&("Content-Type".into(), "application/json".into())));
+    assert!(requests[0]
+        .headers
+        .contains(&("X-GitHub-Api-Version".into(), "2022-11-28".into())));
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_returns_the_exact_run_with_a_dedicated_version() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"workflow_run_id":42,"run_url":"https://api.github.com/repos/octo/gwt/actions/runs/42","html_url":"https://github.com/octo/gwt/actions/runs/42"}"#,
+    ));
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"request_id": "fixed-request"})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    let ack = client
+        .dispatch_diagnostic_workflow("develop", &inputs)
+        .unwrap();
+
+    assert_eq!(ack.workflow_run_id, 42);
+    assert_eq!(
+        ack.run_url,
+        "https://api.github.com/repos/octo/gwt/actions/runs/42"
+    );
+    assert_eq!(ack.html_url, "https://github.com/octo/gwt/actions/runs/42");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, HttpMethod::Post);
+    assert_eq!(
+        request.url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/windows-diagnostic.yml/dispatches"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"ref": "develop", "inputs": inputs})
+    );
+    assert!(request
+        .headers
+        .contains(&("Authorization".into(), "Bearer test-token".into())));
+    assert!(request
+        .headers
+        .contains(&("Content-Type".into(), "application/json".into())));
+    assert_eq!(
+        request
+            .headers
+            .iter()
+            .filter(|(key, _)| key == "X-GitHub-Api-Version")
+            .collect::<Vec<_>>(),
+        vec![&("X-GitHub-Api-Version".into(), "2026-03-10".into())]
+    );
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_rejects_unbound_or_malformed_acknowledgments_without_retry() {
+    for (status, body) in [
+        (200, "secret-input-value"),
+        (
+            200,
+            r#"{"workflow_run_id":0,"run_url":"https://api.github.com/repos/octo/gwt/actions/runs/0","html_url":"https://github.com/octo/gwt/actions/runs/0"}"#,
+        ),
+        (
+            200,
+            r#"{"workflow_run_id":42,"run_url":"https://secret-input-value.invalid/repos/octo/gwt/actions/runs/42","html_url":"https://github.com/octo/gwt/actions/runs/42"}"#,
+        ),
+        (
+            200,
+            r#"{"workflow_run_id":42,"run_url":"https://api.github.com/repos/octo/gwt/actions/runs/42","html_url":"https://github.com/secret-input-value/gwt/actions/runs/42"}"#,
+        ),
+        (204, "secret-input-value"),
+    ] {
+        let transport = FakeTransport::new();
+        transport.enqueue(HttpResponse {
+            status,
+            headers: vec![],
+            body: body.into(),
+        });
+        let client = client_with(transport);
+        let error = client
+            .dispatch_diagnostic_workflow("develop", &serde_json::Map::new())
+            .unwrap_err();
+        assert!(matches!(error, ApiError::Unexpected(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+        assert_eq!(client.transport().recorded().len(), 1);
+    }
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_refuses_empty_refs_before_submission() {
+    let client = client_with(FakeTransport::new());
+    assert!(client
+        .dispatch_diagnostic_workflow("  ", &serde_json::Map::new())
+        .is_err());
+    assert!(client.transport().recorded().is_empty());
+}
+
+#[test]
+fn diagnostic_workflow_context_hashes_fixed_assets_at_the_exact_default_head() {
+    use sha2::{Digest, Sha256};
+    let transport = FakeTransport::new();
+    let commit = "a".repeat(40);
+    for body in [
+        serde_json::json!({"full_name":"octo/gwt","default_branch":"develop"}).to_string(),
+        serde_json::json!({"object":{"type":"commit","sha":commit}}).to_string(),
+        serde_json::json!({"id":7,"path":".github/workflows/windows-diagnostic.yml","state":"active"}).to_string(),
+        "{\"fixed\":true}\n".into(),
+        "fixed-patch\n".into(),
+        "fixed-workflow\n".into(),
+        "fixed-harness\n".into(),
+    ] {
+        transport.enqueue(ok_body(&body));
+    }
+    let client = client_with(transport);
+    let context = client.diagnostic_workflow_context().unwrap();
+    assert_eq!(
+        context,
+        serde_json::json!({
+            "repository":"octo/gwt", "default_branch":"develop", "workflow_commit":commit,
+            "workflow_id":7, "published":true,
+            "profile_sha256":hex::encode(Sha256::digest(b"{\"fixed\":true}\n")),
+            "patch_sha256":hex::encode(Sha256::digest(b"fixed-patch\n")),
+            "workflow_sha256":hex::encode(Sha256::digest(b"fixed-workflow\n")),
+            "harness_sha256":hex::encode(Sha256::digest(b"fixed-harness\n")),
+        })
+    );
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 7);
+    for request in &requests {
+        assert_eq!(request.method, HttpMethod::Get);
+        assert!(request.body.is_none());
+    }
+    for (request, path) in requests[3..].iter().zip([
+        ".github/diagnostics/windows/4777-restore-f351-v1/profile.json",
+        ".github/diagnostics/windows/4777-restore-f351-v1/diagnostic.patch",
+        ".github/workflows/windows-diagnostic.yml",
+        ".github/diagnostics/windows/4777-restore-f351-v1/run.ps1",
+    ]) {
+        assert_eq!(
+            request.url,
+            format!("https://api.github.com/repos/octo/gwt/contents/{path}?ref={commit}")
+        );
+    }
+}
+
+fn diagnostic_run_metadata() -> serde_json::Value {
+    serde_json::json!({"id":42,"repository":{"full_name":"octo/gwt"},"workflow_id":7,
+        "path":".github/workflows/windows-diagnostic.yml","event":"workflow_dispatch",
+        "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_attempt":1,"status":"completed","conclusion":"success"})
+}
+
+fn diagnostic_artifacts() -> serde_json::Value {
+    serde_json::json!({"total_count":1,"artifacts":[{"id":99,"name":"windows-diagnostic-result","size_in_bytes":4,
+        "expired":false,"workflow_run":{"id":42}}]})
+}
+
+fn enqueue_diagnostic_run(transport: &FakeTransport, path: &str) -> serde_json::Value {
+    let mut run = diagnostic_run_metadata();
+    run["path"] = serde_json::json!(path);
+    transport.enqueue(ok_body(&run.to_string()));
+    enqueue_diagnostic_workflow(transport);
+    transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
+    enqueue_diagnostic_assets(transport);
+    run
+}
+
+fn enqueue_diagnostic_workflow(transport: &FakeTransport) {
+    transport.enqueue(ok_body(
+        r#"{"id":7,"path":".github/workflows/windows-diagnostic.yml"}"#,
+    ));
+}
+
+fn enqueue_diagnostic_assets(transport: &FakeTransport) {
+    for body in [
+        "fixed-profile",
+        "fixed-patch",
+        "fixed-workflow",
+        "fixed-harness",
+    ] {
+        transport.enqueue(ok_body(body));
+    }
+}
+
+#[test]
+fn diagnostic_run_snapshot_hashes_assets_at_the_actual_run_head() {
+    use sha2::{Digest, Sha256};
+    for path in [
+        ".github/workflows/windows-diagnostic.yml",
+        ".github/workflows/windows-diagnostic.yml@refs/heads/develop",
+        ".github/workflows/windows-diagnostic.yml@refs/heads/fix@canary",
+    ] {
+        let transport = FakeTransport::new();
+        let run = enqueue_diagnostic_run(&transport, path);
+        let client = client_with(transport);
+        let snapshot = client.diagnostic_run_snapshot(42).unwrap();
+        assert_eq!(snapshot["run"], run);
+        for (key, body) in [
+            ("profile_sha256", "fixed-profile"),
+            ("patch_sha256", "fixed-patch"),
+            ("workflow_sha256", "fixed-workflow"),
+            ("harness_sha256", "fixed-harness"),
+        ] {
+            assert_eq!(snapshot[key], hex::encode(Sha256::digest(body.as_bytes())));
+        }
+        assert!(client.transport().recorded()[3..]
+            .iter()
+            .all(|request| request
+                .url
+                .ends_with("?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+    }
+}
+
+#[test]
+fn diagnostic_artifact_binds_a_fresh_run_and_drops_credentials_on_the_signed_download() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+    enqueue_diagnostic_workflow(&transport);
+    transport.enqueue(ok_body(&diagnostic_artifacts().to_string()));
+    let signed = "https://productionresultssa19.blob.core.windows.net/actions-results/fixed.zip?sig=secret-input-value";
+    transport.enqueue(HttpResponse {
+        status: 302,
+        headers: vec![("Location".into(), signed.into())],
+        body: String::new(),
+    });
+    transport.enqueue_binary(BinaryHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![0x50, 0x4b, 0xff, 0x00],
+    });
+    let client = client_with(transport);
+    assert_eq!(
+        client.diagnostic_artifact(42, 99).unwrap(),
+        vec![0x50, 0x4b, 0xff, 0x00]
+    );
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests[3].url,
+        "https://api.github.com/repos/octo/gwt/actions/artifacts/99/zip"
+    );
+    assert_eq!(requests[4].url, signed);
+    assert!(requests[3]
+        .headers
+        .iter()
+        .any(|(key, _)| key == "Authorization"));
+    assert!(!requests[4]
+        .headers
+        .iter()
+        .any(|(key, value)| key.eq_ignore_ascii_case("authorization")
+            || value.contains("test-token")));
+    assert!(requests
+        .iter()
+        .all(|request| request.method == HttpMethod::Get));
+}
+
+#[test]
+fn diagnostic_run_snapshot_refuses_foreign_identity_and_incomplete_artifact_lists() {
+    for case in ["repository", "workflow", "workflow_id", "artifacts"] {
+        let transport = FakeTransport::new();
+        let mut run = diagnostic_run_metadata();
+        let mut artifacts = diagnostic_artifacts();
+        if case == "repository" {
+            run["repository"]["full_name"] = serde_json::json!("secret-input-value/foreign");
+        } else if case == "workflow" {
+            run["path"] = serde_json::json!(".github/workflows/foreign.yml@refs/heads/develop");
+        } else if case == "workflow_id" {
+            run["workflow_id"] = serde_json::json!(8);
+            run["path"] = serde_json::json!(
+                ".github/workflows/windows-diagnostic.yml@canary.yml@refs/heads/develop"
+            );
+        } else {
+            artifacts["total_count"] = serde_json::json!(101);
+        }
+        transport.enqueue(ok_body(&run.to_string()));
+        enqueue_diagnostic_workflow(&transport);
+        transport.enqueue(ok_body(&artifacts.to_string()));
+        enqueue_diagnostic_assets(&transport);
+        let client = client_with(transport);
+        let error = client.diagnostic_run_snapshot(42).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+        assert!(client.transport().recorded().len() <= 3);
+    }
+}
+
+#[test]
+fn diagnostic_artifact_refuses_untrusted_downloads_and_invalid_membership() {
+    for case in ["host", "private", "redirect", "size", "foreign", "expired"] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(&diagnostic_run_metadata().to_string()));
+        enqueue_diagnostic_workflow(&transport);
+        let mut artifacts = diagnostic_artifacts();
+        if case == "size" {
+            artifacts["artifacts"][0]["size_in_bytes"] = serde_json::json!(1024 * 1024 + 1);
+        } else if case == "foreign" {
+            artifacts["artifacts"][0]["workflow_run"]["id"] = serde_json::json!(43);
+        } else if case == "expired" {
+            artifacts["artifacts"][0]["expired"] = serde_json::json!(true);
+        }
+        transport.enqueue(ok_body(&artifacts.to_string()));
+        let location = match case {
+            "host" => "https://secret-input-value.invalid/fixed.zip",
+            "private" => "https://127.0.0.1/secret-input-value.zip",
+            _ => "https://productionresultssa19.blob.core.windows.net/actions-results/fixed.zip",
+        };
+        transport.enqueue(HttpResponse {
+            status: 302,
+            headers: vec![("Location".into(), location.into())],
+            body: String::new(),
+        });
+        transport.enqueue(HttpResponse {
+            status: 302,
+            headers: vec![(
+                "Location".into(),
+                "https://secret-input-value.invalid/second".into(),
+            )],
+            body: String::new(),
+        });
+        let client = client_with(transport);
+        let error = client.diagnostic_artifact(42, 99).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+        assert_eq!(
+            client.transport().recorded().len(),
+            match case {
+                "foreign" => 3,
+                "size" | "expired" => 3,
+                "host" | "private" => 4,
+                _ => 5,
+            }
+        );
+    }
+}
+
+#[test]
+fn reqwest_binary_transport_preserves_non_utf8_and_bounds_the_response() {
+    use std::io::{Read, Write};
+    for case in ["bytes", "declared", "stream"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = [0x50, 0x4b, 0xff, 0x00];
+            let length = if case == "declared" {
+                1024 * 1024 + 1
+            } else {
+                body.len()
+            };
+            if case == "stream" {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+                let _ = stream.write_all(&vec![0; 1024 * 1024 + 1]);
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+            if case == "bytes" {
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let response = ReqwestTransport::new().unwrap().execute_binary(
+            HttpRequest {
+                method: HttpMethod::Get,
+                url: format!("http://{address}/fixed"),
+                headers: vec![],
+                body: None,
+            },
+            1024 * 1024,
+        );
+        if case != "bytes" {
+            assert!(response.is_err());
+        } else {
+            assert_eq!(response.unwrap().body, vec![0x50, 0x4b, 0xff, 0x00]);
+        }
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn workflow_errors_do_not_expose_remote_response_bodies_or_inputs() {
+    let transport = FakeTransport::new();
+    for status in [403, 404, 422] {
+        transport.enqueue(HttpResponse {
+            status,
+            headers: vec![],
+            body: r#"{"message":"secret-input-value"}"#.into(),
+        });
+    }
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"token": "secret-input-value"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let errors = [
+        client.workflow_path("1234").unwrap_err(),
+        client
+            .workflow_definition("release.yml", "main")
+            .unwrap_err(),
+        client
+            .dispatch_workflow("release.yml", "main", &inputs)
+            .unwrap_err(),
+    ];
+    assert!(matches!(errors[0], ApiError::PermissionDenied { .. }));
+    for error in errors {
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+    assert_eq!(
+        client.transport().recorded().len(),
+        3,
+        "failures are not retried"
+    );
+}
+
+#[test]
+fn workflow_path_rejects_malformed_metadata_without_exposing_the_body() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body("secret-input-value"));
+    transport.enqueue(ok_body(r#"{"message":"secret-input-value"}"#));
+    let client = client_with(transport);
+    for _ in 0..2 {
+        let error = client.workflow_path("1234").unwrap_err();
+        assert!(matches!(error, ApiError::Unexpected(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+}
+
+#[derive(Default)]
+struct SecretWorkflowFailureTransport(std::sync::atomic::AtomicUsize);
+
+impl HttpTransport for SecretWorkflowFailureTransport {
+    fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(HttpError::Transport("secret-input-value".into()))
+    }
+
+    fn execute_with_deadline(
+        &self,
+        request: HttpRequest,
+        _deadline: &ResolutionDeadline,
+    ) -> Result<HttpResponse, HttpError> {
+        self.execute(request)
+    }
+}
+
+#[test]
+fn workflow_errors_do_not_expose_transport_messages() {
+    let client = HttpIssueClient::with_transport(
+        SecretWorkflowFailureTransport::default(),
+        "test-token".into(),
+        "octo",
+        "gwt",
+    );
+    let errors = [
+        client.workflow_path("1234").unwrap_err(),
+        client
+            .workflow_definition("release.yml", "main")
+            .unwrap_err(),
+        client
+            .dispatch_workflow("release.yml", "main", &serde_json::Map::new())
+            .unwrap_err(),
+    ];
+    for error in errors {
+        assert!(matches!(error, ApiError::Network(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+}
+
+#[test]
+fn diagnostic_workflow_dispatch_sanitizes_transport_failure_without_retry() {
+    let client = HttpIssueClient::with_transport(
+        SecretWorkflowFailureTransport::default(),
+        "test-token".into(),
+        "octo",
+        "gwt",
+    );
+    let error = client
+        .dispatch_diagnostic_workflow("develop", &serde_json::Map::new())
+        .unwrap_err();
+    assert!(matches!(error, ApiError::Network(_)));
+    assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    assert_eq!(
+        client
+            .transport()
+            .0
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[test]
+fn workflow_requests_honor_and_settle_the_shared_rest_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+    let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"path":".github/workflows/release.yml"}"#));
+    transport.enqueue(ok_body("on: workflow_dispatch\n"));
+    transport.enqueue(HttpResponse {
+        status: 429,
+        headers: vec![("Retry-After".into(), "60".into())],
+        body: "secret-input-value".into(),
+    });
+    let client = client_with(transport).with_budget(ledger.clone(), gate);
+    client.workflow_path("1234").unwrap();
+    client.workflow_definition("release.yml", "main").unwrap();
+    assert!(matches!(
+        client.dispatch_workflow("release.yml", "main", &serde_json::Map::new()),
+        Err(ApiError::RateLimited {
+            retry_after: Some(60)
+        })
+    ));
+    assert!(ledger
+        .active_block(
+            gwt_core::github_quota::GitHubQuota::Rest,
+            chrono::Utc::now()
+        )
+        .is_some());
+    assert!(matches!(
+        client.workflow_path("1234"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.workflow_definition("release.yml", "main"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.dispatch_workflow("release.yml", "main", &serde_json::Map::new()),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert_eq!(client.transport().recorded().len(), 3);
+    assert_eq!(
+        ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+        3
+    );
+}
+
+fn discussion_categories_page(
+    nodes: serde_json::Value,
+    next: bool,
+    cursor: Option<&str>,
+) -> HttpResponse {
+    ok_body(
+        &serde_json::json!({"data":{"repository":{
+            "id":"R_gwt", "discussionCategories":{
+                "nodes":nodes, "pageInfo":{"hasNextPage":next,"endCursor":cursor}
+            }
+        }}})
+        .to_string(),
+    )
+}
+
+#[test]
+fn pm_create_discussion_resolves_repository_categories_before_mutating() {
+    for category in ["Announcements", "DIC_announcements"] {
+        let transport = FakeTransport::new();
+        transport.enqueue(discussion_categories_page(
+            serde_json::json!([{"id":"DIC_general","name":"General"}]),
+            true,
+            Some("next"),
+        ));
+        transport.enqueue(discussion_categories_page(
+            serde_json::json!([{"id":"DIC_announcements","name":"Announcements"}]),
+            false,
+            None,
+        ));
+        transport.enqueue(ok_body(
+            r#"{"data":{"createDiscussion":{"discussion":{
+            "id":"D_1","number":42,"url":"https://github.com/octo/gwt/discussions/42"
+        }}}}"#,
+        ));
+        let client = client_with(transport);
+        let discussion = client
+            .create_github_discussion(category, "Title", "Body")
+            .unwrap();
+        assert_eq!(discussion.id, "D_1");
+        assert_eq!(discussion.number, 42);
+        assert_eq!(discussion.url, "https://github.com/octo/gwt/discussions/42");
+        let requests = client.transport().recorded();
+        assert_eq!(requests.len(), 3);
+        assert!(requests
+            .iter()
+            .all(|request| request.method == HttpMethod::Post
+                && request.url == "https://api.github.com/graphql"
+                && request
+                    .headers
+                    .contains(&("Authorization".into(), "Bearer test-token".into()))));
+        let second: serde_json::Value =
+            serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+        assert_eq!(second["variables"]["after"], "next");
+        assert_eq!(second["variables"]["owner"], "octo");
+        assert_eq!(second["variables"]["repo"], "gwt");
+        let mutation: serde_json::Value =
+            serde_json::from_str(requests[2].body.as_deref().unwrap()).unwrap();
+        assert!(mutation["query"]
+            .as_str()
+            .unwrap()
+            .contains("createDiscussion"));
+        assert_eq!(
+            mutation["variables"],
+            serde_json::json!({
+                "repositoryId":"R_gwt", "categoryId":"DIC_announcements", "title":"Title", "body":"Body"
+            })
+        );
+    }
+}
+
+#[test]
+fn pm_create_discussion_refuses_foreign_categories_and_incomplete_pagination() {
+    for (category, next) in [("DIC_foreign", false), ("General", true)] {
+        let transport = FakeTransport::new();
+        transport.enqueue(discussion_categories_page(
+            serde_json::json!([{"id":"DIC_general","name":"General"}]),
+            next,
+            None,
+        ));
+        let client = client_with(transport);
+        assert!(client
+            .create_github_discussion(category, "Title", "Body")
+            .is_err());
+        assert_eq!(
+            client.transport().recorded().len(),
+            1,
+            "refusal must precede mutation"
+        );
+    }
+}
+
+#[test]
+fn pm_create_discussion_rejects_invalid_created_identity() {
+    for discussion in [
+        serde_json::json!({"id":"D_1","number":0,"url":"https://github.com/octo/gwt/discussions/0"}),
+        serde_json::json!({"id":"D_1","number":42,"url":"https://github.com/octo/foreign/discussions/42"}),
+    ] {
+        let transport = FakeTransport::new();
+        transport.enqueue(discussion_categories_page(
+            serde_json::json!([{"id":"DIC_general","name":"General"}]),
+            false,
+            None,
+        ));
+        transport.enqueue(ok_body(
+            &serde_json::json!({"data":{"createDiscussion":{"discussion":discussion}}}).to_string(),
+        ));
+        let client = client_with(transport);
+        assert!(matches!(
+            client.create_github_discussion("General", "Title", "Body"),
+            Err(ApiError::Parse { .. })
+        ));
+        assert_eq!(
+            client.transport().recorded().len(),
+            2,
+            "mutation must not be retried"
+        );
+    }
+}
+
+#[test]
+fn pm_required_status_checks_use_only_the_dedicated_endpoint_and_preserve_app_ids() {
+    let transport = FakeTransport::new();
+    let settings = serde_json::json!({"strict":false,"checks":[{"context":"CI","app_id":1234}]});
+    transport.enqueue(ok_body(&settings.to_string()));
+    transport.enqueue(ok_body(&settings.to_string()));
+    let client = client_with(transport);
+    assert_eq!(client.required_status_checks("develop").unwrap(), settings);
+    assert_eq!(
+        client
+            .update_required_status_checks("develop", &settings)
+            .unwrap(),
+        settings
+    );
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.url, "https://api.github.com/repos/octo/gwt/branches/develop/protection/required_status_checks");
+        assert!(request
+            .headers
+            .contains(&("Authorization".into(), "Bearer test-token".into())));
+    }
+    assert_eq!(requests[0].method, HttpMethod::Get);
+    assert_eq!(requests[0].body, None);
+    assert_eq!(requests[1].method, HttpMethod::Patch);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[1].body.as_deref().unwrap()).unwrap(),
+        settings
+    );
+}
+
+#[test]
+fn pm_required_status_checks_refuse_out_of_scope_branches_and_fields_before_transport() {
+    let client = client_with(FakeTransport::new());
+    for branch in ["feature/topic", "develop/protection", "refs/heads/main"] {
+        assert!(client.required_status_checks(branch).is_err());
+        assert!(client
+            .update_required_status_checks(branch, &serde_json::json!({"strict":true}))
+            .is_err());
+    }
+    for settings in [
+        serde_json::json!({"strict":true,"contexts":["CI"]}),
+        serde_json::json!({"strict":true,"enforce_admins":false}),
+        serde_json::json!({"checks":[{"context":"CI","app_id":"1234"}]}),
+        serde_json::json!({"checks":[{"context":"CI","other":true}]}),
+        serde_json::json!({"strict":"true"}),
+    ] {
+        assert!(client
+            .update_required_status_checks("main", &settings)
+            .is_err());
+    }
+    assert!(client.transport().recorded().is_empty());
+}
+
+#[test]
+fn pm_settings_and_discussion_requests_honor_shared_budget_refusals() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+    let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 429,
+        headers: vec![],
+        body: String::new(),
+    });
+    transport.enqueue(ok_body(
+        r#"{"errors":[{"type":"RATE_LIMITED","message":"limited"}]}"#,
+    ));
+    let client = client_with(transport).with_budget(ledger.clone(), gate);
+    assert!(matches!(
+        client.required_status_checks("main"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.update_required_status_checks("main", &serde_json::json!({"strict":true})),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.pm_settings_snapshot(
+            "repository.settings.set",
+            &serde_json::json!({"description":"New"})
+        ),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.create_github_discussion("General", "Title", "Body"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.create_github_discussion("General", "Title", "Body"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert_eq!(client.transport().recorded().len(), 2);
+    let snapshot = ledger.snapshot(chrono::Utc::now());
+    assert_eq!(snapshot.local["core"].calls_last_hour, 1);
+    assert_eq!(snapshot.local["graphql"].calls_last_hour, 1);
+}
+
+#[test]
+fn pm_bounded_settings_use_fixed_endpoints_and_verify_requested_changes() {
+    use serde_json::json;
+    for (operation, params, before, after, path, patch) in [
+        (
+            "pr.reopen",
+            json!({"number":7}),
+            json!({"number":7,"state":"closed","merged":false,"base":{"repo":{"full_name":"octo/gwt"}}}),
+            json!({"number":7,"state":"open","merged":false,"base":{"repo":{"full_name":"octo/gwt"}}}),
+            "/repos/octo/gwt/pulls/7",
+            json!({"state":"open"}),
+        ),
+        (
+            "release.metadata.set",
+            json!({"tag":"v1/rc","name":"New","body":"","prerelease":true}),
+            json!({"id":17,"url":"https://api.github.com/repos/octo/gwt/releases/17","tag_name":"v1/rc","target_commitish":"main","draft":false,"name":"Old","body":"Old notes","prerelease":false}),
+            json!({"id":17,"url":"https://api.github.com/repos/octo/gwt/releases/17","tag_name":"v1/rc","target_commitish":"main","draft":false,"name":"New","body":"","prerelease":true}),
+            "/repos/octo/gwt/releases/tags/v1%2Frc",
+            json!({"name":"New","body":"","prerelease":true}),
+        ),
+        (
+            "repository.settings.set",
+            json!({"description":"New","allow_auto_merge":true}),
+            json!({"id":42,"full_name":"octo/gwt","description":"Old","allow_auto_merge":false}),
+            json!({"id":42,"full_name":"octo/gwt","description":"New","allow_auto_merge":true}),
+            "/repos/octo/gwt",
+            json!({"description":"New","allow_auto_merge":true}),
+        ),
+    ] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(&before.to_string()));
+        transport.enqueue(ok_body(&after.to_string()));
+        let client = client_with(transport);
+        let snapshot = client.pm_settings_snapshot(operation, &params).unwrap();
+        let result = client
+            .pm_settings_mutate(operation, &params, &snapshot)
+            .unwrap();
+        assert!(result.is_object());
+        let requests = client.transport().recorded();
+        assert_eq!(requests[0].method, HttpMethod::Get);
+        assert_eq!(requests[0].url, format!("https://api.github.com{path}"));
+        assert_eq!(requests[1].method, HttpMethod::Patch);
+        let mutation_path = if operation == "release.metadata.set" {
+            "/repos/octo/gwt/releases/17"
+        } else {
+            path
+        };
+        assert_eq!(
+            requests[1].url,
+            format!("https://api.github.com{mutation_path}")
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(requests[1].body.as_ref().unwrap()).unwrap(),
+            patch
+        );
+        assert!(requests.iter().all(|request| request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer test-token")));
+    }
+}
+
+#[test]
+fn pm_bounded_settings_reject_unscoped_fields_and_wrong_types_before_transport() {
+    use gwt_github::client::http::validate_pm_settings;
+    use serde_json::json;
+    for (operation, params) in [
+        ("raw.patch", json!({"url":"/repos/other/repo"})),
+        ("pr.reopen", json!({"number":0})),
+        ("pr.reopen", json!({"number":7,"repo":"other/repo"})),
+        ("release.metadata.set", json!({"tag":"v1","draft":false})),
+        (
+            "release.metadata.set",
+            json!({"tag":"v1","target_commitish":"main"}),
+        ),
+        ("repository.settings.set", json!({"visibility":"public"})),
+        ("repository.settings.set", json!({"name":"renamed"})),
+        ("repository.settings.set", json!({"allow_auto_merge":"yes"})),
+        (
+            "repository.settings.set",
+            json!({"merge_commit_title":"unknown"}),
+        ),
+        (
+            "repository.settings.set",
+            json!({"topics":["rust"],"description":"mixed"}),
+        ),
+        (
+            "repository.settings.set",
+            json!({"security_and_analysis":{"secret_scanning":{"status":"unknown"}}}),
+        ),
+        (
+            "repository.settings.set",
+            json!({"security_and_analysis":{"unknown":{"status":"enabled"}}}),
+        ),
+    ] {
+        assert!(
+            validate_pm_settings(operation, &params).is_err(),
+            "{operation}: {params}"
+        );
+        let client = client_with(FakeTransport::new());
+        assert!(client.pm_settings_snapshot(operation, &params).is_err());
+        assert!(client.transport().recorded().is_empty());
+    }
+}
+
+#[test]
+fn pm_bounded_settings_refuse_foreign_snapshots_and_unconfirmed_mutations() {
+    use serde_json::json;
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"id":42,"full_name":"other/repo","description":"Old"}"#,
+    ));
+    let client = client_with(transport);
+    let params = json!({"description":"New"});
+    assert!(client
+        .pm_settings_snapshot("repository.settings.set", &params)
+        .is_err());
+    assert!(client
+        .pm_settings_mutate(
+            "repository.settings.set",
+            &params,
+            &json!({"id":42,"full_name":"other/repo","description":"Old"})
+        )
+        .is_err());
+    assert_eq!(client.transport().recorded().len(), 1);
+
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"id":42,"full_name":"octo/gwt","description":"Old"}"#,
+    ));
+    transport.enqueue(ok_body(
+        r#"{"id":42,"full_name":"octo/gwt","description":"Still old"}"#,
+    ));
+    let client = client_with(transport);
+    let before = client
+        .pm_settings_snapshot("repository.settings.set", &params)
+        .unwrap();
+    assert!(client
+        .pm_settings_mutate("repository.settings.set", &params, &before)
+        .is_err());
+
+    let client = client_with(FakeTransport::new());
+    assert!(client.pm_settings_mutate("pr.reopen", &json!({"number":7}), &json!({"number":7,"state":"closed","merged":true,"base":{"repo":{"full_name":"octo/gwt"}}})).is_err());
+    assert!(client.transport().recorded().is_empty());
+}
+
+#[test]
+fn pm_bounded_topics_and_security_use_only_their_typed_fields() {
+    use serde_json::json;
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"names":["rust"]}"#));
+    transport.enqueue(ok_body(r#"{"names":["gwt","rust"]}"#));
+    let client = client_with(transport);
+    let params = json!({"topics":["rust","gwt"]});
+    let before = client
+        .pm_settings_snapshot("repository.settings.set", &params)
+        .unwrap();
+    client
+        .pm_settings_mutate("repository.settings.set", &params, &before)
+        .unwrap();
+    let requests = client.transport().recorded();
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/topics"
+    );
+    assert_eq!(requests[1].method.as_str(), "PUT");
+    assert_eq!(requests[1].url, requests[0].url);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[1].body.as_ref().unwrap()).unwrap(),
+        json!({"names":["rust","gwt"]})
+    );
+
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"id":42,"full_name":"octo/gwt","security_and_analysis":{"secret_scanning":{"status":"disabled"}}}"#));
+    transport.enqueue(ok_body(r#"{"id":42,"full_name":"octo/gwt","security_and_analysis":{"secret_scanning":{"status":"enabled"},"unrelated":{"status":"enabled"}}}"#));
+    let client = client_with(transport);
+    let params = json!({"security_and_analysis":{"secret_scanning":{"status":"enabled"}}});
+    let before = client
+        .pm_settings_snapshot("repository.settings.set", &params)
+        .unwrap();
+    let after = client
+        .pm_settings_mutate("repository.settings.set", &params, &before)
+        .unwrap();
+    assert!(after["security_and_analysis"].get("unrelated").is_none());
+    assert_eq!(client.transport().recorded()[1].method, HttpMethod::Patch);
+}
+
+#[test]
+fn pm_bounded_pr_review_submits_only_explicit_events_and_checks_actual_state() {
+    use gwt_github::client::http::validate_pm_settings;
+    use serde_json::json;
+    for (event, state) in [
+        ("COMMENT", "COMMENTED"),
+        ("APPROVE", "APPROVED"),
+        ("REQUEST_CHANGES", "CHANGES_REQUESTED"),
+    ] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(r#"{"number":7,"state":"open","merged":false,"base":{"repo":{"full_name":"octo/gwt"}}}"#));
+        transport.enqueue(created(&json!({"id":19,"pull_request_url":"https://api.github.com/repos/octo/gwt/pulls/7","state":state,"body":"Review"}).to_string()));
+        let client = client_with(transport);
+        let params = json!({"number":7,"event":event,"body":"Review"});
+        let before = client
+            .pm_settings_snapshot("pr.review.submit", &params)
+            .unwrap();
+        let after = client
+            .pm_settings_mutate("pr.review.submit", &params, &before)
+            .unwrap();
+        assert_eq!(after["state"], state);
+        let requests = client.transport().recorded();
+        assert_eq!(requests[1].method, HttpMethod::Post);
+        assert_eq!(
+            requests[1].url,
+            "https://api.github.com/repos/octo/gwt/pulls/7/reviews"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(requests[1].body.as_ref().unwrap()).unwrap(),
+            json!({"event":event,"body":"Review"})
+        );
+    }
+    for params in [
+        json!({"number":7,"event":"PENDING"}),
+        json!({"number":7,"event":"COMMENT"}),
+        json!({"number":7,"event":"REQUEST_CHANGES","body":" "}),
+        json!({"number":7,"event":"APPROVE","repo":"other/repo"}),
+    ] {
+        assert!(validate_pm_settings("pr.review.submit", &params).is_err());
+    }
+    assert!(
+        validate_pm_settings("pr.review.submit", &json!({"number":7,"event":"APPROVE"})).is_ok()
+    );
+    let before = json!({"repository":"octo/gwt","number":7,"state":"open","merged":false});
+    let params = json!({"number":7,"event":"APPROVE"});
+    let transport = FakeTransport::new();
+    transport.enqueue(created(r#"{"id":19,"pull_request_url":"https://api.github.com/repos/octo/gwt/pulls/7","state":"PENDING","body":""}"#));
+    assert!(client_with(transport)
+        .pm_settings_mutate("pr.review.submit", &params, &before)
+        .is_err());
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 403,
+        headers: vec![],
+        body: r#"{"message":"Can not approve your own pull request"}"#.into(),
+    });
+    assert!(matches!(
+        client_with(transport).pm_settings_mutate("pr.review.submit", &params, &before),
+        Err(ApiError::PermissionDenied { .. })
+    ));
 }

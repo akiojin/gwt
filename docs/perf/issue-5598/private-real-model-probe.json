@@ -1,0 +1,17 @@
+{
+  "python": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-python\\Scripts\\python.exe",
+  "chromadb": "1.5.5",
+  "sentence_transformers": "5.6.0",
+  "portalocker": "2.10.1",
+  "module_paths": {
+    "chromadb": "C:\\Users\\AkioJinsenji\u79e6\u6cc9\u5bfa\u7ae0\u592b\\.gwt\\runtime\\venvs\\chroma-venv-e6d02dab8dff33cf\\Lib\\site-packages\\chromadb\\__init__.py",
+    "sentence_transformers": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-python\\Lib\\site-packages\\sentence_transformers\\__init__.py",
+    "portalocker": "C:\\Users\\AkioJinsenji\u79e6\u6cc9\u5bfa\u7ae0\u592b\\.gwt\\runtime\\venvs\\chroma-venv-e6d02dab8dff33cf\\Lib\\site-packages\\portalocker\\__init__.py"
+  },
+  "import_seconds": 108.19065499999942,
+  "import_pass": true,
+  "model_load_seconds": 3.534005100000286,
+  "dimensions": 768,
+  "real_model_chroma_pass": true,
+  "model_path": "C:\\Users\\AkioJinsenji\u79e6\u6cc9\u5bfa\u7ae0\u592b\\.cache\\huggingface\\hub\\models--intfloat--multilingual-e5-base\\snapshots\\d128750597153bb5987e10b1c3493a34e5a4502a"
+}

@@ -8,6 +8,7 @@ use gwt_github::client::{
 
 fn seed_simple(client: &FakeIssueClient, number: u64, title: &str, body: &str) -> IssueSnapshot {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: body.to_string(),
@@ -202,6 +203,7 @@ fn red_43_list_requires_gwt_spec_label() {
     seed_spec(&c, 1, "a", "phase/draft");
     // Seed a non-spec Issue.
     c.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(2),
         title: "plain".to_string(),
         body: String::new(),
@@ -241,6 +243,7 @@ fn red_45_create_issue_has_no_comments() {
 // Helper: seed a SPEC-labeled issue with an extra phase label.
 fn seed_spec(client: &FakeIssueClient, number: u64, title: &str, phase_label: &str) {
     client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: String::new(),

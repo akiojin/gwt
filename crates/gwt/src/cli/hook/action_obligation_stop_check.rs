@@ -9,7 +9,8 @@
 //! Prose, Board posts, and PR body text never settle anything.
 //!
 //! Standard Stop contracts hold: `stop_hook_active` short-circuits,
-//! missing/malformed/cross-session state fails open (FR-014t/u), and
+//! read errors warn and fail open; missing/cross-session state stays silent
+//! (FR-014t/u), and
 //! intake lanes are excluded (their artifact gate owns them).
 
 use std::path::Path;
@@ -65,14 +66,6 @@ pub(crate) fn handle_user_prompt_submit_with_context(
     if review_dispatch_session {
         return;
     }
-    // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
-    // Every settlement path (all-passing `verify.run`, `pr.*`) requires
-    // production artifacts the PM's contract forbids it from creating, so
-    // arming one leaves it blocked at Stop with no exit but a false
-    // `execution.blocked`. Never arm rather than block-then-excuse.
-    if super::is_resident_pm_worktree(worktree) {
-        return;
-    }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
@@ -92,6 +85,16 @@ pub(crate) fn handle_user_prompt_submit_with_context(
     else {
         return;
     };
+    // Issue #5790 / SPEC-3431 FR-064: the PM can update Issues but cannot
+    // produce implementation, verification or PR artifacts. Reuse the exact
+    // automatic-prompt classifier so notifications never arm even IssueUpdate.
+    if super::is_resident_pm_worktree(worktree)
+        && (crate::pm_conversation::internal_prompt(&prompt)
+            || action_obligation::classify_prompt(&prompt)
+                != Some(action_obligation::ObligationKind::IssueUpdate))
+    {
+        return;
+    }
     // Issue #4454: an orphan window can settle nothing, so it must arm
     // nothing. Not arming is the primary fix; the Stop-side release below
     // covers obligations already on record.
@@ -137,8 +140,26 @@ pub(crate) fn handle_with_input_with_context(
     let Some(session) = current_session else {
         return HookOutput::Silent;
     };
-    let open = action_obligation::open_kinds(&resolved, session.trim());
+    let mut open = match action_obligation::try_open_kinds(&resolved, session.trim()) {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!(%error, "action obligation state is unreadable");
+            return HookOutput::system_message(format!(
+                "Warning: Action obligation state is unreadable ({error}). Stop is not blocked by this infrastructure failure."
+            ));
+        }
+    };
+    // Old PM sessions may already carry execution obligations. Leave their
+    // history intact while enforcing only the kinds the PM can settle.
+    if super::is_resident_pm_worktree(worktree) {
+        open.retain(|kind| *kind == action_obligation::ObligationKind::IssueUpdate);
+    }
     if open.is_empty() {
+        return HookOutput::Silent;
+    }
+    // A declared wait lets the watchdog observe an idle pane. The obligations
+    // remain open and resume blocking Stop as soon as the wait ends.
+    if super::execution_control_stop_check::active_monitor_wait(&resolved, Some(session), None) {
         return HookOutput::Silent;
     }
     // Issue #4454: an obligation armed before this window lost (or never
@@ -222,17 +243,10 @@ mod tests {
         );
     }
 
-    /// SPEC-3431 FR-064: the resident PM never arms a producing obligation.
-    ///
-    /// The settlement paths are an all-passing `verify.run`, `issue.comment` /
-    /// `issue.spec.edit`, or `pr.*`. The PM's contract forbids it from touching
-    /// production code or PRs at all — implementation is always performed by
-    /// agents the Issue Monitor launches — so an implementation obligation is
-    /// **structurally unsettleable** for the PM and its only exit is filing a
-    /// false `execution.blocked` every turn. Observed live: the gate was
-    /// already arming against the running PM session.
+    /// Issue #5790: the PM cannot settle execution obligations, including
+    /// obligations persisted before its arming exemption was installed.
     #[test]
-    fn the_resident_pm_never_arms_a_producing_obligation() {
+    fn the_resident_pm_never_blocks_on_execution_obligations() {
         // GWT_SESSION_ID is process-global; without this these two tests race
         // each other and whichever loses reads the other's session id.
         let _env = gwt_core::test_support::env_lock()
@@ -247,15 +261,110 @@ mod tests {
         let _session =
             gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
 
-        handle_user_prompt_submit(
-            &pm_worktree,
-            &serde_json::json!({ "prompt": "#3457 を修正して" }).to_string(),
-        );
+        for prompt in [
+            "劣化箇所の洗い出しからやってください",
+            "テストを実行して",
+            "PR を作成して",
+        ] {
+            handle_user_prompt_submit(
+                &pm_worktree,
+                &serde_json::json!({ "prompt": prompt }).to_string(),
+            );
+        }
+        assert!(action_obligation::open_kinds(&pm_worktree, "pm-session").is_empty());
+
+        // Reproduce a PM that already has all three kinds from older hooks.
+        for prompt in ["実装して", "テストを実行して", "PR を作成して"] {
+            action_obligation::mark_from_prompt(&pm_worktree, "pm-session", prompt).unwrap();
+        }
+        let previous = action_obligation::load(&pm_worktree).unwrap();
 
         assert_eq!(
             handle_with_input(&pm_worktree, "{}", Some("pm-session")),
             HookOutput::Silent,
             "the PM must not be blocked by an obligation it cannot settle"
+        );
+        assert_eq!(action_obligation::load(&pm_worktree).unwrap(), previous);
+    }
+
+    #[test]
+    fn the_resident_pm_keeps_issue_updates_until_issue_comment_succeeds() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let pm = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(pm.join(".gwt")).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        handle_user_prompt_submit(
+            &pm,
+            &serde_json::json!({ "prompt": "Issue #5790 にコメントを追加して" }).to_string(),
+        );
+        assert_eq!(
+            action_obligation::open_kinds(&pm, "pm-session"),
+            vec![action_obligation::ObligationKind::IssueUpdate]
+        );
+        assert!(matches!(
+            handle_with_input(&pm, "{}", Some("pm-session")),
+            HookOutput::StopBlock { .. }
+        ));
+
+        // The shared success callback used by the actual issue.comment sink.
+        crate::cli::intake_outcome::auto_record_issue_operation(
+            &pm,
+            "issue.comment",
+            crate::cli::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+            5790,
+        );
+        assert!(action_obligation::open_kinds(&pm, "pm-session").is_empty());
+        assert_eq!(
+            handle_with_input(&pm, "{}", Some("pm-session")),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn the_resident_pm_ignores_automatic_prompts_but_keeps_human_issue_requests() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let pm = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(pm.join(".gwt")).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let tick = format!(
+            "[gwt] Scheduled supervision tick: reconcile now — read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close). {} {} {}{}1): Issue #5790 を更新して",
+            crate::pm_registry::PM_STEERING_WAKE_CLAUSE,
+            crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE,
+            crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE,
+            crate::pm_registry::PM_ESCALATION_PROMPT_PREFIX,
+        );
+        let notification = "<task-notification><task-id>task-1</task-id><status>completed</status><summary>Issue #5790 を更新して</summary></task-notification>";
+        assert_eq!(
+            action_obligation::classify_prompt(notification),
+            Some(action_obligation::ObligationKind::IssueUpdate)
+        );
+        for prompt in [tick.as_str(), notification] {
+            handle_user_prompt_submit(&pm, &serde_json::json!({ "prompt": prompt }).to_string());
+            assert!(action_obligation::open_kinds(&pm, "pm-session").is_empty());
+            assert_eq!(
+                handle_with_input(&pm, "{}", Some("pm-session")),
+                HookOutput::Silent
+            );
+        }
+
+        handle_user_prompt_submit(
+            &pm,
+            &serde_json::json!({ "prompt": "[gwt] Issue #5790 を更新して" }).to_string(),
+        );
+        assert_eq!(
+            action_obligation::open_kinds(&pm, "pm-session"),
+            vec![action_obligation::ObligationKind::IssueUpdate]
         );
     }
 
@@ -331,9 +440,19 @@ mod tests {
             "sess-ordinary",
         );
 
-        handle_user_prompt_submit(
-            dir.path(),
-            &serde_json::json!({ "prompt": "バグを修正して" }).to_string(),
+        for prompt in ["バグを修正して", "テストを実行して", "PR を作成して"] {
+            handle_user_prompt_submit(
+                dir.path(),
+                &serde_json::json!({ "prompt": prompt }).to_string(),
+            );
+        }
+        assert_eq!(
+            action_obligation::open_kinds(dir.path(), "sess-ordinary"),
+            vec![
+                action_obligation::ObligationKind::Implementation,
+                action_obligation::ObligationKind::Verification,
+                action_obligation::ObligationKind::Pr,
+            ]
         );
 
         assert!(
@@ -534,6 +653,21 @@ mod tests {
     // stop_hook_active, and intake lanes stay silent.
     #[test]
     fn fail_open_contracts_hold() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_agent::GWT_SESSION_ID_ENV,
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "CODEX_THREAD_ID",
+        ]
+        .map(ScopedEnvVar::unset);
         let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
@@ -564,5 +698,31 @@ mod tests {
             ),
             "obligations gate uniformly after the lane removal"
         );
+
+        let malformed = mk_worktree();
+        let path = action_obligation::state_path(malformed.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(action_obligation::load(malformed.path()).is_err());
+        assert!(action_obligation::open_kinds(malformed.path(), "sess-1").is_empty());
+        let output = handle_with_input(malformed.path(), "{}", Some("sess-1"));
+        let HookOutput::SystemMessage(message) = output else {
+            panic!("unreadable obligations must warn without blocking Stop: {output:?}");
+        };
+        assert!(message.contains("obligation"), "{message}");
+        assert!(message.contains("unreadable"), "{message}");
+        assert!(message.contains("not blocked"), "{message}");
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
+            "{}",
+            malformed.path(),
+            Some("sess-1"),
+        )
+        .expect("public Stop hook");
+        let HookOutput::SystemMessage(public_message) = output else {
+            panic!("public Stop must retain the obligation warning: {output:?}");
+        };
+        assert!(public_message.contains(&message), "{public_message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
     }
 }

@@ -50,6 +50,7 @@ use crate::{
 
 use super::persistence::{
     container_detachments_path, load_container_detachments, merge_container_detachments,
+    WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR,
 };
 
 /// Schema version of [`QuarantineManifest`].
@@ -207,6 +208,76 @@ pub enum StoreConsolidationOutcome {
         /// Work items in the rebuilt canonical projection.
         work_item_count: usize,
     },
+}
+
+/// Existing path-keyed stores for this repository, without loading or hashing
+/// their Work projections. Ordinary Workspace operations use this bounded
+/// presence check so a large or corrupt legacy store cannot hide the split.
+pub fn split_project_store_paths(project_root: &Path) -> Vec<PathBuf> {
+    let Some(identity) = detect_repo_identity(project_root) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    split_candidate_roots(project_root)
+        .into_iter()
+        .filter_map(|root| {
+            let hash = compute_path_hash(&root);
+            let store = gwt_project_dir(&hash);
+            // A past quarantine does not cover a store an old writer recreated.
+            (hash != identity.hash && seen.insert(hash.as_str().to_string()) && store.is_dir())
+                .then_some(store)
+        })
+        .collect()
+}
+
+/// Collect only empty atomic-writer residue whose PID is demonstrably gone.
+/// An unavailable liveness probe retains the file, as do live/recycled PIDs,
+/// nonempty files, symlinks and names outside the coordinator writer contract.
+pub fn cleanup_abandoned_workspace_transaction_temps(
+    process_liveness: impl Fn(u32) -> Option<bool>,
+) -> std::io::Result<usize> {
+    let directory = crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(transaction_temp_writer_pid) else {
+            continue;
+        };
+        // Inspect the contents only after the writer is gone: it may finish
+        // writing between an earlier metadata read and the liveness probe.
+        if process_liveness(pid) != Some(false) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() || metadata.len() != 0 {
+            continue;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
+}
+
+fn transaction_temp_writer_pid(name: &str) -> Option<u32> {
+    let (transaction_id, writer) = name.strip_prefix('.')?.split_once(".json.tmp-")?;
+    uuid::Uuid::parse_str(transaction_id).ok()?;
+    let (pid, nonce) = writer.split_once('-')?;
+    uuid::Uuid::parse_str(nonce).ok()?;
+    pid.parse::<u32>().ok().filter(|pid| *pid != 0)
 }
 
 /// Dry run: report every orphaned store for `project_root` without writing.
@@ -985,3 +1056,7 @@ fn clear_read_only(path: &Path) {
         let _ = fs::set_permissions(path, permissions);
     }
 }
+
+#[cfg(test)]
+#[path = "store_migration_tests.rs"]
+mod tests;

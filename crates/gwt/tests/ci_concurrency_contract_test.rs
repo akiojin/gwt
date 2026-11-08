@@ -98,6 +98,296 @@ fn workflow(name: &str) -> Value {
         .unwrap_or_else(|| panic!("{WORKFLOWS}/{name} must exist"))
 }
 
+#[test]
+fn windows_diagnostic_is_a_fixed_private_output_workflow() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        diagnostic_selftest_failure(
+            br#"{"phase":"probe_wait","native_stage":7,"win32":5,"child_exit":-1}"#
+        ),
+        Some("phase=probe_wait; native_stage=7; win32=5; child_exit=-1".to_string())
+    );
+    assert_eq!(
+        diagnostic_selftest_failure(
+            br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":null}"#
+        ),
+        Some("phase=entry; native_stage=0; win32=0; child_exit=unobserved".to_string())
+    );
+    assert_eq!(
+        diagnostic_selftest_failure(
+            br#"{"phase":"cleanup_fixture_cleanup_false_assert","native_stage":0,"win32":0,"child_exit":null}"#
+        ),
+        Some("phase=cleanup_fixture_cleanup_false_assert; native_stage=0; win32=0; child_exit=unobserved".to_string())
+    );
+    for rejected in [
+        br#"{"phase":"cleanup_fixture_private_assert","native_stage":0,"win32":0,"child_exit":null}"#.as_slice(),
+        br#"{"phase":"cleanup_fixture_setup_private","native_stage":0,"win32":0,"child_exit":null}"#,
+        br#"{"phase":"private-secret-sentinel","native_stage":0,"win32":0,"child_exit":null}"#.as_slice(),
+        br#"{"phase":"C:\\private\\sentinel","native_stage":0,"win32":0,"child_exit":null}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":null,"message":"private-secret-sentinel"}"#,
+        br#"{"phase":"entry","native_stage":10,"win32":0,"child_exit":null}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":4294967296,"child_exit":null}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":2147483648}"#,
+        br#"{"phase":"entry","native_stage":0,"win32":0,"child_exit":1.5}"#,
+        b"private-secret-sentinel\nC:\\private\\sentinel",
+    ] {
+        assert_eq!(diagnostic_selftest_failure(rejected), None);
+    }
+    let doc = workflow("windows-diagnostic.yml");
+    let inputs = triggers(&doc)["workflow_dispatch"]["inputs"]
+        .as_mapping()
+        .expect("fixed diagnostic inputs");
+    let mut names: Vec<_> = inputs.keys().map(|key| key.as_str().unwrap()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "expected_profile_digest",
+            "expected_workflow_commit",
+            "request_id"
+        ]
+    );
+    assert_eq!(doc["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        doc["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false)
+    );
+    let job = &doc["jobs"]["diagnostic"];
+    assert_eq!(job["runs-on"].as_str(), Some("windows-latest"));
+    assert_eq!(job["timeout-minutes"].as_u64(), Some(110));
+    let steps = job["steps"].as_sequence().expect("diagnostic steps");
+    let first_step = steps[0]["run"]
+        .as_str()
+        .expect("byte-preserving checkout setup");
+    assert!(first_step.contains("git config --global core.autocrlf false"));
+    assert!(first_step.contains("git config --global core.eol lf"));
+    let checkouts: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("actions/checkout@"))
+        })
+        .collect();
+    assert_eq!(checkouts.len(), 2);
+    assert_eq!(
+        checkouts[0]["with"]["ref"].as_str(),
+        Some("${{ github.sha }}")
+    );
+    assert_eq!(
+        checkouts[1]["with"]["ref"].as_str(),
+        Some("f351dc97c6a3ef805ecac75987dd43246b268c22")
+    );
+    for checkout in checkouts {
+        assert_eq!(
+            checkout["with"]["persist-credentials"].as_bool(),
+            Some(false)
+        );
+    }
+    let attributes = gwt_core::process::hidden_command("git")
+        .current_dir(repo_root())
+        .args([
+            "-c",
+            "core.autocrlf=true",
+            "check-attr",
+            "text",
+            "eol",
+            "--",
+            ".github/workflows/windows-diagnostic.yml",
+            ".github/diagnostics/windows/4777-restore-f351-v1/profile.json",
+            ".github/diagnostics/windows/4777-restore-f351-v1/diagnostic.patch",
+            ".github/diagnostics/windows/4777-restore-f351-v1/run.ps1",
+        ])
+        .output()
+        .expect("read fixed-asset checkout attributes");
+    assert!(attributes.status.success());
+    let attributes = String::from_utf8(attributes.stdout).unwrap();
+    assert_eq!(
+        attributes
+            .lines()
+            .filter(|line| line.ends_with(": text: set"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        attributes
+            .lines()
+            .filter(|line| line.ends_with(": eol: lf"))
+            .count(),
+        4
+    );
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("actions/upload-artifact@"))
+        })
+        .expect("safe result upload");
+    assert_eq!(
+        upload["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/gwt-diagnostic-result/result.json")
+    );
+    let root = repo_root().join(".github/diagnostics/windows/4777-restore-f351-v1");
+    let profile: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("profile.json")).unwrap()).unwrap();
+    assert_eq!(
+        profile["source_commit"],
+        "f351dc97c6a3ef805ecac75987dd43246b268c22"
+    );
+    assert_eq!(
+        profile["source_tree"],
+        "0feeb960e85a754d0470c07fbb896f9151028602"
+    );
+    assert_eq!(profile["retry"], 0);
+    assert_eq!(profile["providers_concurrent"], true);
+    let patch = fs::read(root.join("diagnostic.patch")).unwrap();
+    assert_eq!(patch.len(), 7535);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&patch)),
+        "8cf3285aa97e628d0d52bd95924bec5ce71461302e3ada5de4daa5e39cd3fc98"
+    );
+    let script = fs::read_to_string(root.join("run.ps1")).unwrap();
+    let publisher =
+        fs::read_to_string(repo_root().join("crates/gwt/src/cli/actions/diagnostic.rs")).unwrap();
+    let publisher: String = publisher.split_whitespace().collect();
+    for required in [
+        "SetFileAttributesW(PCWSTR(from.as_ptr()),FILE_ATTRIBUTE_NORMAL)",
+        "MOVEFILE_WRITE_THROUGH|MOVEFILE_REPLACE_EXISTING",
+    ] {
+        assert!(
+            publisher.contains(required),
+            "missing private Windows publisher contract: {required}"
+        );
+    }
+    let ci = fs::read_to_string(repo_root().join(WORKFLOWS).join(TEST_WORKFLOW)).unwrap();
+    assert!(ci.contains("node scripts/ci-windows-tests.mjs run-runtime gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1"), "the controlled Win32 launcher SelfTest must execute in required Windows CI");
+    for required in [
+        "CREATE_SUSPENDED",
+        "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+        "AssignProcessToJobObject",
+        "TerminateJobObject",
+        "ActiveProcesses",
+        "EnvironmentBlock",
+        "observation_started",
+        "NoStartVerified",
+        "SelfTest",
+        "Get-SelfTestFailure",
+        "Marshal.GetLastWin32Error()",
+        "NativeStage",
+        "Win32Error",
+        "CleanupObserved",
+        "Test-LaunchFailureCleanup",
+        "launch_unobserved",
+    ] {
+        assert!(script.contains(required), "missing {required}");
+    }
+    for forbidden in [
+        "Get-Process",
+        "Stop-Process",
+        "taskkill",
+        "Get-ChildItem Env:",
+        "Write-Host $",
+        "Get-Content $raw",
+        "::error::$",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "unsafe diagnostic surface: {forbidden}"
+        );
+    }
+}
+
+fn diagnostic_selftest_failure(stderr: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(stderr).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 4 {
+        return None;
+    }
+    let phase = object.get("phase")?.as_str()?;
+    let fixture_phase = phase
+        .strip_prefix("cleanup_fixture_")
+        .is_some_and(|fixture| {
+            matches!(
+                fixture,
+                "bootstrap" | "init" | "add" | "commit" | "head" | "tree" | "inputs"
+            ) || fixture.rsplit_once('_').is_some_and(|(scenario, step)| {
+                matches!(
+                    scenario,
+                    "setup"
+                        | "compile"
+                        | "contracts"
+                        | "providers"
+                        | "cleanup_false"
+                        | "cleanup_throw"
+                        | "dispose_throw"
+                        | "restore_failure"
+                        | "launch_unobserved"
+                        | "deadline_cancel"
+                ) && matches!(step, "prepare" | "restore" | "assert" | "receipt")
+            })
+        });
+    if !fixture_phase
+        && !matches!(
+            phase,
+            "entry"
+                | "launcher"
+                | "environment"
+                | "probe_spawn"
+                | "probe_wait"
+                | "probe_projection"
+                | "failure_projection"
+                | "timeout_spawn"
+                | "partial_provider"
+                | "cleanup_fixture"
+                | "no_start"
+                | "final_cleanup"
+        )
+    {
+        return None;
+    }
+    let stage = object.get("native_stage")?.as_u64()?;
+    if stage > 9 {
+        return None;
+    }
+    let win32 = u32::try_from(object.get("win32")?.as_u64()?).ok()?;
+    let exit = object.get("child_exit")?;
+    let exit = if exit.is_null() {
+        "unobserved".to_string()
+    } else {
+        i32::try_from(exit.as_i64()?).ok()?.to_string()
+    };
+    Some(format!(
+        "phase={phase}; native_stage={stage}; win32={win32}; child_exit={exit}"
+    ))
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_diagnostic_selftest_keeps_secret_sentinels_private() {
+    let output = gwt_core::process::hidden_command("pwsh")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+        .arg(repo_root().join(".github/diagnostics/windows/4777-restore-f351-v1/run.ps1"))
+        .arg("-SelfTest")
+        .env(
+            "GWT_DIAGNOSTIC_SECRET_SENTINEL",
+            "private-diagnostic-sentinel",
+        )
+        .output()
+        .expect("Windows PowerShell diagnostic SelfTest");
+    assert!(
+        output.status.success(),
+        "diagnostic SelfTest failed ({})",
+        diagnostic_selftest_failure(&output.stderr).unwrap_or_else(|| "unobserved".to_string())
+    );
+    assert!(
+        std::str::from_utf8(&output.stdout)
+            .is_ok_and(|stdout| stdout.trim() == "Windows diagnostic SelfTest PASS"),
+        "diagnostic SelfTest returned an invalid success marker"
+    );
+    assert!(output.stderr.is_empty(), "diagnostic SelfTest wrote stderr");
+}
+
 /// The `on:` block. YAML 1.1 parsers resolve the bare key `on` to `true`, so
 /// both spellings are accepted.
 fn triggers(doc: &Value) -> &Value {
@@ -220,13 +510,10 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
                         && key.contains("github.event.pull_request.number")
                 );
                 assert!(key.ends_with(id), "job groups must be independent: {id}");
-                if matches!(
-                    id,
-                    "source-sync" | "changes" | "test-windows-verify-timings"
-                ) {
+                if matches!(id, "source-sync" | "changes") {
                     assert!(
                         cancel_in_progress(id, policy),
-                        "short classifiers and superseded paired measurements remain replaceable"
+                        "short classifiers remain replaceable"
                     );
                 } else {
                     assert!(needs(body).iter().any(|need| need == "source-sync"));
@@ -255,7 +542,7 @@ fn gates_develop_pull_requests(doc: &Value) -> bool {
 /// together before merge. Run the same gates on the resulting develop tree.
 #[test]
 fn required_ci_workflows_run_on_develop_pushes() {
-    for name in ["test.yml", "lint.yml", "build.yml"] {
+    for name in ["test.yml", "lint.yml", "build.yml", "coverage-ci.yml"] {
         let doc = workflow(name);
         let branches = triggers(&doc)
             .get("push")
@@ -298,6 +585,7 @@ fn post_merge_runs_do_not_cancel_other_develop_trees_or_their_coverage() {
         "lint.yml",
         "build.yml",
         "coverage.yml",
+        "coverage-ci.yml",
         "post-merge-ci.yml",
     ] {
         let doc = workflow(name);
@@ -325,7 +613,7 @@ fn post_merge_failures_are_reported_to_a_bug_issue() {
     // The default branch is main. A workflow_run listener added to develop
     // cannot report anything until release, so call from the tested tree.
     assert!(triggers(&doc).get("workflow_call").is_some());
-    for name in ["test.yml", "lint.yml", "build.yml"] {
+    for name in ["test.yml", "lint.yml", "build.yml", "coverage-ci.yml"] {
         let caller = workflow(name);
         let report = job(&caller, "report-post-merge-failure");
         let guard = condition(report);

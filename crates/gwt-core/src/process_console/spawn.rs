@@ -111,6 +111,8 @@ pub struct SpawnOptions {
     /// Human-readable command label rendered in summary tracing (e.g.
     /// `"gh pr list"`). The label may differ from the actual argv.
     pub label: String,
+    /// Stable internal caller label for GitHub budget attribution.
+    pub github_caller: Option<String>,
     /// Working directory passed to the child.
     pub current_dir: Option<PathBuf>,
     /// Extra env entries to set / override.
@@ -132,6 +134,7 @@ impl SpawnOptions {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            github_caller: None,
             current_dir: None,
             envs: Vec::new(),
             remove_env: Vec::new(),
@@ -140,6 +143,11 @@ impl SpawnOptions {
             capture_stderr: true,
             forward_output: true,
         }
+    }
+
+    pub fn github_caller(mut self, caller: impl Into<String>) -> Self {
+        self.github_caller = Some(caller.into());
+        self
     }
 
     pub fn current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -193,9 +201,8 @@ impl SpawnOutput {
 /// Synchronous wrapper around [`spawn_logged`].
 ///
 /// Builds a transient current-thread tokio runtime to drive the async
-/// pipeline. Use this from CLI handlers and any sync caller. When the
-/// caller already has a tokio runtime handle, prefer the async variant
-/// directly.
+/// pipeline. Calls from an existing runtime use a scoped thread so they
+/// cannot nest `block_on`. Async callers should prefer [`spawn_logged`].
 pub fn spawn_logged_blocking(
     hub: &ProcessConsoleHub,
     kind: ProcessKind,
@@ -206,10 +213,9 @@ pub fn spawn_logged_blocking(
     if let Some(deadline) = crate::operation_deadline::current() {
         return spawn_logged_blocking_with_deadline(hub, kind, program, args, options, deadline);
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(spawn_logged(hub, kind, program, args, options))
+    let program = program.into();
+    let args: Vec<OsString> = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
+    block_on_spawn(spawn_logged(hub, kind, program, &args, options))
 }
 
 /// Capture a `gh` child whose quota accounting is owned by the caller.
@@ -222,14 +228,14 @@ pub fn capture_gh_blocking(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
 ) -> std::io::Result<SpawnOutput> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(spawn_logged_inner(
-        &ProcessConsoleHub::new(),
+    let program = program.into();
+    let args: Vec<OsString> = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
+    let hub = ProcessConsoleHub::new();
+    block_on_spawn(spawn_logged_inner(
+        &hub,
         ProcessKind::Gh,
         program,
-        args,
+        &args,
         options.forward_output(false),
         crate::operation_deadline::current(),
         false,
@@ -245,12 +251,70 @@ pub fn spawn_logged_blocking_with_deadline(
     options: SpawnOptions,
     deadline: Instant,
 ) -> std::io::Result<SpawnOutput> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(spawn_logged_with_deadline(
-        hub, kind, program, args, options, deadline,
+    let program = program.into();
+    let args: Vec<OsString> = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
+    block_on_spawn(spawn_logged_with_deadline(
+        hub, kind, program, &args, options, deadline,
     ))
+}
+
+fn block_on_spawn(
+    future: impl Future<Output = std::io::Result<SpawnOutput>> + Send,
+) -> std::io::Result<SpawnOutput> {
+    let run = || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(future)
+    };
+    if tokio::runtime::Handle::try_current().is_err() {
+        return run();
+    }
+    // A blocking-pool thread also has a Tokio handle. Use the same safe
+    // boundary there rather than rejecting a valid synchronous caller.
+    let deadline = crate::operation_deadline::current();
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    #[cfg(any(test, feature = "test-support"))]
+    let home = crate::test_support::gwt_home_override();
+    #[cfg(any(test, feature = "test-support"))]
+    let mut ready = TEST_SPAWN_READY.with(|slot| slot.borrow_mut().take());
+    #[cfg(test)]
+    let post_reap_delay = TEST_POST_REAP_DELAY_MS.with(std::cell::Cell::get);
+    let result = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("gwt-process-spawn".into())
+            .spawn_scoped(scope, || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    let _span = span.enter();
+                    let _deadline =
+                        deadline.map(crate::operation_deadline::ScopedOperationDeadline::enter);
+                    #[cfg(any(test, feature = "test-support"))]
+                    let _home = home.as_ref().map(crate::test_support::ScopedGwtHome::set);
+                    #[cfg(any(test, feature = "test-support"))]
+                    TEST_SPAWN_READY.with(|slot| *slot.borrow_mut() = ready.take());
+                    #[cfg(test)]
+                    TEST_POST_REAP_DELAY_MS.with(|slot| slot.set(post_reap_delay));
+                    let result = run();
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        ready = TEST_SPAWN_READY.with(|slot| slot.borrow_mut().take());
+                    }
+                    result
+                })
+            })
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("blocking process spawn thread could not start: {error}"),
+                )
+            })?
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    });
+    #[cfg(any(test, feature = "test-support"))]
+    TEST_SPAWN_READY.with(|slot| *slot.borrow_mut() = ready);
+    result
 }
 
 /// Spawn `program` with `args`, forwarding lines to `hub` and emitting
@@ -291,6 +355,7 @@ async fn spawn_logged_inner(
     deadline: Option<Instant>,
     manage_gh_quota: bool,
 ) -> std::io::Result<SpawnOutput> {
+    let preflight_started = Instant::now();
     #[cfg(any(test, feature = "test-support"))]
     let has_ready_hook =
         deadline.is_some() && TEST_SPAWN_READY.with(|slot| slot.borrow().is_some());
@@ -298,6 +363,13 @@ async fn spawn_logged_inner(
     #[cfg(any(test, feature = "test-support"))]
     let expired = expired && !has_ready_hook;
     if expired {
+        trace_pm_worktree_list_stage(
+            &options,
+            "worktree-list.preflight",
+            preflight_started,
+            deadline,
+            false,
+        );
         return Err(deadline_error(ProcessDeadlineExpired::default()));
     }
     // Issue #3675 AC-2: in test builds (armed via
@@ -346,11 +418,11 @@ async fn spawn_logged_inner(
         // the per-minute (secondary) limit can be approximated across the
         // short-lived gwtd processes that share this account. Issue #3928
         // AC-4: with its source, so the count can be broken down by caller.
-        ledger.record_spawn_from(
-            crate::github_quota::classify_gh_args(args),
-            &crate::github_budget::spawn_source(args),
-            now,
-        );
+        let source = match options.github_caller.as_deref() {
+            Some(caller) => crate::github_budget::spawn_source_for_caller(args, caller),
+            None => crate::github_budget::spawn_source(args),
+        };
+        ledger.record_spawn_from(crate::github_quota::classify_gh_args(args), &source, now);
     }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
@@ -433,7 +505,16 @@ async fn spawn_logged_inner(
         }
     };
 
-    let mut child = match command.spawn() {
+    let spawn_started = Instant::now();
+    let spawned = command.spawn();
+    trace_pm_worktree_list_stage(
+        &options,
+        "worktree-list.spawn",
+        spawn_started,
+        deadline,
+        spawned.is_ok(),
+    );
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             finish_failed_launch(
@@ -477,6 +558,7 @@ async fn spawn_logged_inner(
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
     let collection_deadline = deadline.map(deadline_before_cleanup_reserve);
+    let wait_started = Instant::now();
     let collected = {
         let collect = async {
             let stdout_future = async move {
@@ -521,6 +603,13 @@ async fn spawn_logged_inner(
             None => Some(collect.await),
         }
     };
+    trace_pm_worktree_list_stage(
+        &options,
+        "worktree-list.wait",
+        wait_started,
+        deadline,
+        matches!(&collected, Some(Ok(_))),
+    );
 
     let Some(collected) = collected else {
         let child_was_running = matches!(child.try_wait(), Ok(None));
@@ -531,7 +620,7 @@ async fn spawn_logged_inner(
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
         if options.forward_output {
-            push_command_summary_to_hub(hub, kind, spawn_id, None, duration_ms);
+            push_command_summary_to_hub(hub, kind, spawn_id, &options.label, None, duration_ms);
         }
         trace_process_end(
             kind,
@@ -592,7 +681,7 @@ async fn spawn_logged_inner(
     let exit_code = status.code();
 
     if options.forward_output {
-        push_command_summary_to_hub(hub, kind, spawn_id, exit_code, duration_ms);
+        push_command_summary_to_hub(hub, kind, spawn_id, &options.label, exit_code, duration_ms);
     }
     trace_process_end(
         kind,
@@ -628,6 +717,24 @@ async fn spawn_logged_inner(
         stdout_lines,
         stderr_lines,
     })
+}
+
+fn trace_pm_worktree_list_stage(
+    options: &SpawnOptions,
+    stage: &'static str,
+    started: Instant,
+    deadline: Option<Instant>,
+    success: bool,
+) {
+    if options.label == "git worktree list --porcelain" {
+        let remaining_budget_ms =
+            deadline.map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
+        tracing::info!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success, "PM refresh stage"
+        );
+    }
 }
 
 fn gh_arg_strings(args: &[impl AsRef<std::ffi::OsStr>]) -> Vec<String> {
@@ -829,11 +936,12 @@ fn push_command_summary_to_hub(
     hub: &ProcessConsoleHub,
     kind: ProcessKind,
     spawn_id: u64,
+    label: &str,
     exit_code: Option<i32>,
     duration_ms: u64,
 ) {
     if kind == ProcessKind::Git {
-        crate::process::notify_git_command_finished(duration_ms);
+        crate::process::notify_git_command_finished(label, duration_ms);
     }
     let exit = exit_code.map_or_else(|| "?".to_string(), |code| code.to_string());
     hub.push(ProcessLine::new(
@@ -861,7 +969,7 @@ fn finish_failed_launch(
             ProcessStream::Stderr,
             redact::redact_line(&format!("process launch failed: {error}")),
         ));
-        push_command_summary_to_hub(hub, kind, spawn_id, None, duration_ms);
+        push_command_summary_to_hub(hub, kind, spawn_id, label, None, duration_ms);
         tracing::info!(
             target: SUMMARY_TARGET,
             kind = kind.as_str(),
@@ -1247,22 +1355,131 @@ where
 
 #[cfg(test)]
 mod tests {
+    fn assert_blocking_spawns_succeed() {
+        let hub = ProcessConsoleHub::new();
+        let (program, args) = echo_command();
+        let out = spawn_logged_blocking(
+            &hub,
+            ProcessKind::Git,
+            &program,
+            &args,
+            SpawnOptions::new("runtime boundary echo"),
+        )
+        .expect("sync spawn is safe");
+        assert!(out.success());
+        assert!(out.stdout.contains("hello world"));
+        let out = spawn_logged_blocking_with_deadline(
+            &hub,
+            ProcessKind::Git,
+            &program,
+            &args,
+            SpawnOptions::new("runtime boundary deadline echo"),
+            // test-hygiene: allow-wall-clock-deadline Bound real process completion; captured output, not elapsed time, determines the verdict.
+            Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
+        )
+        .expect("explicit deadline spawn is safe");
+        assert!(out.success());
+    }
+
+    #[test]
+    fn blocking_spawns_are_safe_inside_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async { assert_blocking_spawns_succeed() });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_spawns_are_safe_inside_multithread_runtime() {
+        assert_blocking_spawns_succeed();
+        tokio::task::spawn_blocking(assert_blocking_spawns_succeed)
+            .await
+            .expect("blocking pool callers stay supported");
+    }
+
+    #[tokio::test]
+    async fn blocking_spawns_preserve_ambient_deadlines_inside_runtime() {
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(Instant::now());
+        let options = SpawnOptions::new("expired runtime boundary");
+        let args: &[&str] = &[];
+        let error = spawn_logged_blocking(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Git,
+            "must-not-start",
+            args,
+            options.clone(),
+        )
+        .expect_err("ambient expiry must prevent spawning");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let error = capture_gh_blocking("must-not-start", args, options)
+            .expect_err("quota-owner capture preserves the same deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn blocking_spawns_preserve_scoped_tracing_dispatch() {
+        // Keep interest dynamic when a subscriber-free sibling first registers a callsite.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let trace = CapturedTrace::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(trace.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            // In a fresh test process, a subscriber-free sibling registers the
+            // shared callsites first while this scoped subscriber is alive.
+            std::thread::spawn(assert_blocking_spawns_succeed)
+                .join()
+                .unwrap();
+            assert!(trace.contents().is_empty());
+            runtime.block_on(async { assert_blocking_spawns_succeed() });
+        });
+        assert!(trace.contents().contains("runtime boundary echo"));
+        assert!(trace.contents().contains("runtime boundary deadline echo"));
+    }
+
     #[test]
     fn git_completion_observer_covers_both_summary_paths_only_for_git() {
         thread_local! {
-            static OBSERVED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+            static OBSERVED: std::cell::RefCell<Vec<(String, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        fn observe(duration_ms: u64) {
-            OBSERVED.with(|observed| observed.borrow_mut().push(duration_ms));
+        fn observe(label: &str, duration_ms: u64) {
+            OBSERVED.with(|observed| observed.borrow_mut().push((label.to_string(), duration_ms)));
         }
         crate::process::set_git_command_observer(observe);
         std::thread::spawn(|| {
             let hub = ProcessConsoleHub::new();
-            crate::process::push_command_summary_to_hub(ProcessKind::Git, 1, Some(0), 120);
-            push_command_summary_to_hub(&hub, ProcessKind::Git, 2, Some(0), 340);
-            crate::process::push_command_summary_to_hub(ProcessKind::Docker, 3, Some(0), 500);
-            push_command_summary_to_hub(&hub, ProcessKind::Docker, 4, Some(0), 500);
-            OBSERVED.with(|observed| assert_eq!(*observed.borrow(), vec![120, 340]));
+            crate::process::push_command_summary_to_hub(
+                ProcessKind::Git,
+                1,
+                "git rev-parse --git-common-dir",
+                Some(0),
+                120,
+            );
+            push_command_summary_to_hub(&hub, ProcessKind::Git, 2, "git status", Some(0), 340);
+            crate::process::push_command_summary_to_hub(
+                ProcessKind::Docker,
+                3,
+                "docker ps",
+                Some(0),
+                500,
+            );
+            push_command_summary_to_hub(&hub, ProcessKind::Docker, 4, "docker ps", Some(0), 500);
+            OBSERVED.with(|observed| {
+                assert_eq!(
+                    *observed.borrow(),
+                    vec![
+                        ("git rev-parse --git-common-dir".to_string(), 120),
+                        ("git status".to_string(), 340)
+                    ]
+                )
+            });
         })
         .join()
         .unwrap();
@@ -1298,30 +1515,36 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let ready_count = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&ready_count);
-        with_spawn_ready_for_tests(
-            QUICK_PROCESS_FIXTURE_BUDGET,
-            move || {
-                observed.fetch_add(1, Ordering::SeqCst);
-            },
-            || {
-                let hub = ProcessConsoleHub::new();
-                let spawn = |program: &std::ffi::OsStr| {
-                    spawn_logged_blocking_with_deadline(
-                        &hub,
-                        ProcessKind::Docker,
-                        program,
-                        &["-c", "exit 0"],
-                        SpawnOptions::new("readiness retry").forward_output(false),
-                        Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
-                    )
-                };
-                let error = spawn(directory.path().join("missing").as_os_str()).unwrap_err();
-                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-                assert_eq!(ready_count.load(Ordering::SeqCst), 0);
-                assert!(spawn(std::ffi::OsStr::new("/bin/sh")).unwrap().success());
-                assert_eq!(ready_count.load(Ordering::SeqCst), 1);
-            },
-        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            with_spawn_ready_for_tests(
+                QUICK_PROCESS_FIXTURE_BUDGET,
+                move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                },
+                || {
+                    let hub = ProcessConsoleHub::new();
+                    let spawn = |program: &std::ffi::OsStr| {
+                        spawn_logged_blocking_with_deadline(
+                            &hub,
+                            ProcessKind::Docker,
+                            program,
+                            &["-c", "exit 0"],
+                            SpawnOptions::new("readiness retry").forward_output(false),
+                            Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
+                        )
+                    };
+                    let error = spawn(directory.path().join("missing").as_os_str()).unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                    assert_eq!(ready_count.load(Ordering::SeqCst), 0);
+                    assert!(spawn(std::ffi::OsStr::new("/bin/sh")).unwrap().success());
+                    assert_eq!(ready_count.load(Ordering::SeqCst), 1);
+                },
+            )
+        });
     }
 
     struct PostReapDelayGuard(u64);
@@ -1763,6 +1986,8 @@ mod tests {
     fn silent_success_timeout_and_spawn_failure_emit_no_hub_or_ui_events() {
         use tracing_subscriber::prelude::*;
 
+        // The silent DEBUG callsites are shared with subscriber-free spawn tests too.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let supplied_hub = ProcessConsoleHub::new();
         let candidate_global = ProcessConsoleHub::new();
         let installed_global = super::super::hub::set_global(candidate_global.clone());
@@ -1785,6 +2010,21 @@ mod tests {
             .expect("test runtime");
 
         tracing::subscriber::with_default(subscriber, || {
+            std::thread::spawn(|| {
+                let (program, args) = echo_command();
+                let output = spawn_logged_blocking(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::IndexRunner,
+                    &program,
+                    &args,
+                    SpawnOptions::new("cold silent callsites").forward_output(false),
+                )
+                .unwrap();
+                assert!(output.success());
+            })
+            .join()
+            .unwrap();
+            assert!(trace.contents().is_empty());
             runtime.block_on(async {
                 let (success_program, success_args) = echo_command();
                 spawn_logged(
@@ -1852,7 +2092,16 @@ mod tests {
             "Debug-only silent lifecycle must not reach UiForwarder"
         );
         let trace = trace.contents();
-        assert!(trace.contains("silent process"));
+        for message in [
+            "silent process start",
+            "silent process end",
+            "silent process launch failed",
+        ] {
+            assert!(
+                trace.contains(message),
+                "missing lifecycle event: {message}"
+            );
+        }
         for sensitive in [
             "ghp_abcdef0123456789",
             r"C:\secret",
@@ -2102,7 +2351,9 @@ mod tests {
         let ready_parent = parent_file.clone();
         let ready_descendant = descendant_file.clone();
         let error = with_spawn_ready_for_tests(
-            Duration::from_secs(1),
+            // Reserve the full 1s cleanup grace for the positive reap case;
+            // a 1s fixture budget only leaves 250ms on a loaded Windows host.
+            Duration::from_secs(5),
             move || {
                 let parent = wait_for_pid_file_windows(&ready_parent);
                 let descendant = wait_for_pid_file_windows(&ready_descendant);
@@ -2216,7 +2467,8 @@ mod tests {
                 .capture(false, false)
                 .forward_output(false)
                 .current_dir(directory.path()),
-            Instant::now() + Duration::from_secs(10),
+            // This tests Job release, not PowerShell cold-start speed.
+            Instant::now() + crate::deadline_budget::HANG_GUARD,
         )
         .await
         .expect("root process succeeds before deadline");

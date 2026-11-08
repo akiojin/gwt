@@ -1,0 +1,1794 @@
+{
+  "issue": 5390,
+  "slice": "B",
+  "status": "focused GREEN and same-input native comparison; canonical/CI/base delivery recorded separately",
+  "common_source_head": "ce6606457af3f5270a5044a5b31831a39fb0199f",
+  "source_files_sha256": {
+    "crates/gwt-git/src/pr_status.rs": "db1b609865b4b750c7b46739a0f642e948563f339c31f8972667b7fd26a34c02",
+    "crates/gwt/src/cli/pr/mod.rs": "c72245ac6a3bd8878672a0aeb19fce167764c12d4452c772d1bf3a3cab2ac62f"
+  },
+  "native_sha256": "2f829e08f6ee807f0f8c2a02cc5618cc2c7c1e427e4b37420107f0cc508755d8",
+  "refs_manifest_sha256": "2d455d51d2fbc8dda916cc1c9fad3c9dd99739b2c1a3742ea01e728f253ec810",
+  "harness_sha256": "023b203f682328e1773fccefe16367512b309f832412ecb07b23d5570f0c1a14",
+  "comparison": [
+    {
+      "case": "after-default-warm",
+      "before_seconds": 163.99386879999656,
+      "after_seconds": 29.13577410002472,
+      "before_git_calls": 256,
+      "after_git_calls": 23,
+      "full_branch_row_parity": true,
+      "seconds_reduction_percent": 82.23361988272984
+    },
+    {
+      "case": "after-default-cold",
+      "before_seconds": 127.57474139999249,
+      "after_seconds": 29.35489710001275,
+      "before_git_calls": 256,
+      "after_git_calls": 23,
+      "full_branch_row_parity": true,
+      "seconds_reduction_percent": 76.990039895143
+    },
+    {
+      "case": "after-include-empty-cold",
+      "before_seconds": 133.53536240002722,
+      "after_seconds": 16.722992199996952,
+      "before_git_calls": 256,
+      "after_git_calls": 23,
+      "full_branch_row_parity": true,
+      "seconds_reduction_percent": 87.47673133210927
+    },
+    {
+      "case": "after-include-empty-warm",
+      "before_seconds": 135.0205607000098,
+      "after_seconds": 22.14956109999912,
+      "before_git_calls": 256,
+      "after_git_calls": 23,
+      "full_branch_row_parity": true,
+      "seconds_reduction_percent": 83.59541614612958
+    }
+  ],
+  "native_cases": [
+    {
+      "label": "after-default-warm",
+      "source_head": "ce6606457af3f5270a5044a5b31831a39fb0199f",
+      "native_sha256": "2f829e08f6ee807f0f8c2a02cc5618cc2c7c1e427e4b37420107f0cc508755d8",
+      "refs_sha256": "2d455d51d2fbc8dda916cc1c9fad3c9dd99739b2c1a3742ea01e728f253ec810",
+      "spawn_s": 0.9361974000057671,
+      "stdin": "finite input file with EOF; no writer remains",
+      "first_stdout_s_upper_bound": 29.13577410002472,
+      "poll_resolution_s": 0.1,
+      "exit_s": 29.13577410002472,
+      "exit_code": 0,
+      "censored": false,
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 80,\n  \"bookkeeping_only_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4217\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T03:51:01Z\",\n      \"owner_issue\": 4217\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4229\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T06:35:26Z\",\n      \"owner_issue\": 4229\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4306\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-14T10:14:41Z\",\n      \"owner_issue\": 4306\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3992\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T01:59:42Z\",\n      \"owner_issue\": 3992\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4273\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T02:54:15Z\",\n      \"owner_issue\": 4273\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3825\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:46:35Z\",\n      \"owner_issue\": 3825\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4274\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:52:30Z\",\n      \"owner_issue\": 4274\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-4228\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T07:14:40Z\",\n      \"owner_issue\": 4228\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4371\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T13:50:25Z\",\n      \"owner_issue\": 4371\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4308\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T15:07:03Z\",\n      \"owner_issue\": 4308\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4281\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:06:32Z\",\n      \"owner_issue\": 4281\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4394\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:27:29Z\",\n      \"owner_issue\": 4394\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4352\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:34:58Z\",\n      \"owner_issue\": 4352\n    },\n    {\n      \"ahead\": 16,\n      \"branch\": \"work/issue-4286\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T01:30:43Z\",\n      \"owner_issue\": 4286\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4433\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T11:38:08Z\",\n      \"owner_issue\": 4433\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4205\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:30:03Z\",\n      \"owner_issue\": 4205\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4439\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:54:55Z\",\n      \"owner_issue\": 4439\n    },\n    {\n      \"ahead\": 19,\n      \"branch\": \"work/issue-4257\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T21:07:03Z\",\n      \"owner_issue\": 4257\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3882\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T23:24:44Z\",\n      \"owner_issue\": 3882\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4470\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T06:29:43Z\",\n      \"owner_issue\": 4470\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4386\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T10:37:58Z\",\n      \"owner_issue\": 4386\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3795\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T16:52:50Z\",\n      \"owner_issue\": 3795\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4479\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:09:55Z\",\n      \"owner_issue\": 4479\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4296\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:59:17Z\",\n      \"owner_issue\": 4296\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4283\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T21:51:00Z\",\n      \"owner_issue\": 4283\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4551\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:26:18Z\",\n      \"owner_issue\": 4551\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3698\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:30:40Z\",\n      \"owner_issue\": 3698\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4584\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T04:24:59Z\",\n      \"owner_issue\": 4584\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4543\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T05:27:57Z\",\n      \"owner_issue\": 4543\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4590\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T07:32:32Z\",\n      \"owner_issue\": 4590\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4613\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T17:44:56Z\",\n      \"owner_issue\": 4613\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4597\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T21:10:16Z\",\n      \"owner_issue\": 4597\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4626\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T00:51:33Z\",\n      \"owner_issue\": 4626\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4643\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T03:44:02Z\",\n      \"owner_issue\": 4643\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4647\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T05:55:19Z\",\n      \"owner_issue\": 4647\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4615\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T09:00:25Z\",\n      \"owner_issue\": 4615\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4662\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T12:11:52Z\",\n      \"owner_issue\": 4662\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4689\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-24T14:14:35Z\",\n      \"owner_issue\": 4689\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4704\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T11:48:51Z\",\n      \"owner_issue\": 4704\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4611\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T18:06:31Z\",\n      \"owner_issue\": 4611\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4295\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T03:15:00Z\",\n      \"owner_issue\": 4295\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4556\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T18:30:32Z\",\n      \"owner_issue\": 4556\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4529\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T20:28:33Z\",\n      \"owner_issue\": 4529\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4956\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-04T17:28:43Z\",\n      \"owner_issue\": 4956\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5040-bookkeeping\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-05T20:00:01Z\",\n      \"owner_issue\": null\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5031\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-06T19:27:07Z\",\n      \"owner_issue\": 5031\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4959\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T11:30:51Z\",\n      \"owner_issue\": 4959\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5119\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T21:58:09Z\",\n      \"owner_issue\": 5119\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5158\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T02:59:44Z\",\n      \"owner_issue\": 5158\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5147\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T03:59:57Z\",\n      \"owner_issue\": 5147\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5178\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:30:12Z\",\n      \"owner_issue\": 5178\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5172\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:56:45Z\",\n      \"owner_issue\": 5172\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5174\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:26:50Z\",\n      \"owner_issue\": 5174\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5086\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:39:15Z\",\n      \"owner_issue\": 5086\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4188\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T21:05:31Z\",\n      \"owner_issue\": 4188\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5041\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-09T15:49:14Z\",\n      \"owner_issue\": 5041\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5187\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T08:35:46Z\",\n      \"owner_issue\": 5187\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5097\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T09:23:18Z\",\n      \"owner_issue\": 5097\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5227\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T12:46:52Z\",\n      \"owner_issue\": 5227\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5280\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:47Z\",\n      \"owner_issue\": 5280\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5326\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:51Z\",\n      \"owner_issue\": 5326\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5399\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:08:57Z\",\n      \"owner_issue\": 5399\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4357\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:35:07Z\",\n      \"owner_issue\": 4357\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5423\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T12:02:13Z\",\n      \"owner_issue\": 5423\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5398\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T18:03:21Z\",\n      \"owner_issue\": 5398\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5318\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-15T12:05:34Z\",\n      \"owner_issue\": 5318\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5328\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T00:28:06Z\",\n      \"owner_issue\": 5328\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5645\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:46:33Z\",\n      \"owner_issue\": 5645\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4833\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:50:05Z\",\n      \"owner_issue\": 4833\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3287\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-19T00:19:36Z\",\n      \"owner_issue\": 3287\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4252\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T02:32:43Z\",\n      \"owner_issue\": 4252\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5750\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T03:41:36Z\",\n      \"owner_issue\": 5750\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5648\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T14:21:28Z\",\n      \"owner_issue\": 5648\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5840\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-21T02:12:11Z\",\n      \"owner_issue\": 5840\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4804\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T03:06:36Z\",\n      \"owner_issue\": 4804\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-2970\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T07:32:04Z\",\n      \"owner_issue\": 2970\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4249\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T00:25:27Z\",\n      \"owner_issue\": 4249\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6209\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T09:38:39Z\",\n      \"owner_issue\": 6209\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5330\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T23:38:08Z\",\n      \"owner_issue\": 5330\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6405\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T06:17:41Z\",\n      \"owner_issue\": 6405\n    }\n  ],\n  \"cache_age_secs\": 2,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:38:49.190123Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 5,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5098\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T13:22:51Z\",\n      \"owner_issue\": 5098\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5286\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T15:52:15Z\",\n      \"owner_issue\": 5286\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5400\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T17:58:29Z\",\n      \"owner_issue\": 5400\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6118\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T04:38:23Z\",\n      \"owner_issue\": 6118\n    },\n    {\n      \"ahead\": 12,\n      \"branch\": \"work/issue-4735\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T21:28:05Z\",\n      \"owner_issue\": 4735\n    }\n  ]\n}\n"
+      },
+      "stderr": "",
+      "git_calls": [
+        {
+          "argv": [
+            "git.exe",
+            "remote",
+            "-v"
+          ],
+          "time": "2026-10-27T08:38:51.308981Z",
+          "duration_s": 0.080847,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/develop"
+          ],
+          "time": "2026-10-27T08:38:52.260789Z",
+          "duration_s": 0.114303,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "origin/develop^{commit}"
+          ],
+          "time": "2026-10-27T08:38:52.772983Z",
+          "duration_s": 0.104639,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f^{tree}"
+          ],
+          "time": "2026-10-27T08:38:54.456648Z",
+          "duration_s": 0.160805,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "for-each-ref",
+            "--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)",
+            "--no-merged",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f",
+            "refs/remotes/origin/work/",
+            "refs/remotes/origin/pm/resident"
+          ],
+          "time": "2026-10-27T08:38:55.071354Z",
+          "duration_s": 0.867627,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:38:56.557071Z",
+          "duration_s": 0.514399,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:38:58.884781Z",
+          "duration_s": 0.843445,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:00.894103Z",
+          "duration_s": 0.219394,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:01.533346Z",
+          "duration_s": 0.690047,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:02.951499Z",
+          "duration_s": 0.68584,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:03.706382Z",
+          "duration_s": 0.228857,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:04.275441Z",
+          "duration_s": 0.627378,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:05.672681Z",
+          "duration_s": 0.700412,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:07.732089Z",
+          "duration_s": 0.195587,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:08.670892Z",
+          "duration_s": 0.477538,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:10.105864Z",
+          "duration_s": 1.114263,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:11.293226Z",
+          "duration_s": 0.190076,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:12.144307Z",
+          "duration_s": 0.3529,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:13.547202Z",
+          "duration_s": 0.669379,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:14.338884Z",
+          "duration_s": 0.189269,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:14.998544Z",
+          "duration_s": 0.379297,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:16.843450Z",
+          "duration_s": 0.948039,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:18.190397Z",
+          "duration_s": 0.14296,
+          "exit_code": 0
+        }
+      ],
+      "git_counts": {
+        "remote": 1,
+        "show-ref": 1,
+        "rev-parse": 2,
+        "for-each-ref": 1,
+        "rev-list": 6,
+        "merge-tree": 6,
+        "diff-tree": 6
+      },
+      "gh_argv": [],
+      "history_output_sha256": "d639d8e7433b4f1121a55353ae260cc47397641a5fb6ef3bc1ebe0fb3972fc61",
+      "stages": {
+        "remote": {
+          "calls": 1,
+          "git_process_seconds": 0.080847
+        },
+        "show-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.114303
+        },
+        "rev-parse": {
+          "calls": 2,
+          "git_process_seconds": 0.265444
+        },
+        "for-each-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.867627
+        },
+        "rev-list": {
+          "calls": 6,
+          "git_process_seconds": 3.0415590000000003
+        },
+        "merge-tree": {
+          "calls": 6,
+          "git_process_seconds": 4.961378
+        },
+        "diff-tree": {
+          "calls": 6,
+          "git_process_seconds": 1.166143
+        }
+      },
+      "raw_trace_sha256": "dc2c59986cf221113ed86b573bde2287c1f25417afa2e66e353330f91e5db09f",
+      "unmeasured_stages": [
+        "native main entry/perf setup/PM runtime mapping: no internal spans; this fixture uses checkout cwd, not PM runtime",
+        "DefaultCliEnv construction/cache load and decision: not independently timed",
+        "GitHub network/hydration latency: no network; fake gh returns the saved empty PR payload",
+        "history load/observe/save and render/write exclusive time: no internal spans; bounded by last Git completion and native exit",
+        "OS page-cache state and inherited host scheduling: uncontrolled; cold/warm names refer only to application PR cache"
+      ]
+    },
+    {
+      "label": "after-default-cold",
+      "source_head": "ce6606457af3f5270a5044a5b31831a39fb0199f",
+      "native_sha256": "2f829e08f6ee807f0f8c2a02cc5618cc2c7c1e427e4b37420107f0cc508755d8",
+      "refs_sha256": "2d455d51d2fbc8dda916cc1c9fad3c9dd99739b2c1a3742ea01e728f253ec810",
+      "spawn_s": 0.29029520001495257,
+      "stdin": "finite input file with EOF; no writer remains",
+      "first_stdout_s_upper_bound": 29.35489710001275,
+      "poll_resolution_s": 0.1,
+      "exit_s": 29.35489710001275,
+      "exit_code": 0,
+      "censored": false,
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 80,\n  \"bookkeeping_only_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4217\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T03:51:01Z\",\n      \"owner_issue\": 4217\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4229\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T06:35:26Z\",\n      \"owner_issue\": 4229\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4306\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-14T10:14:41Z\",\n      \"owner_issue\": 4306\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3992\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T01:59:42Z\",\n      \"owner_issue\": 3992\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4273\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T02:54:15Z\",\n      \"owner_issue\": 4273\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3825\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:46:35Z\",\n      \"owner_issue\": 3825\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4274\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:52:30Z\",\n      \"owner_issue\": 4274\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-4228\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T07:14:40Z\",\n      \"owner_issue\": 4228\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4371\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T13:50:25Z\",\n      \"owner_issue\": 4371\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4308\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T15:07:03Z\",\n      \"owner_issue\": 4308\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4281\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:06:32Z\",\n      \"owner_issue\": 4281\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4394\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:27:29Z\",\n      \"owner_issue\": 4394\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4352\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:34:58Z\",\n      \"owner_issue\": 4352\n    },\n    {\n      \"ahead\": 16,\n      \"branch\": \"work/issue-4286\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T01:30:43Z\",\n      \"owner_issue\": 4286\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4433\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T11:38:08Z\",\n      \"owner_issue\": 4433\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4205\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:30:03Z\",\n      \"owner_issue\": 4205\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4439\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:54:55Z\",\n      \"owner_issue\": 4439\n    },\n    {\n      \"ahead\": 19,\n      \"branch\": \"work/issue-4257\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T21:07:03Z\",\n      \"owner_issue\": 4257\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3882\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T23:24:44Z\",\n      \"owner_issue\": 3882\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4470\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T06:29:43Z\",\n      \"owner_issue\": 4470\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4386\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T10:37:58Z\",\n      \"owner_issue\": 4386\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3795\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T16:52:50Z\",\n      \"owner_issue\": 3795\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4479\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:09:55Z\",\n      \"owner_issue\": 4479\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4296\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:59:17Z\",\n      \"owner_issue\": 4296\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4283\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T21:51:00Z\",\n      \"owner_issue\": 4283\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4551\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:26:18Z\",\n      \"owner_issue\": 4551\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3698\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:30:40Z\",\n      \"owner_issue\": 3698\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4584\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T04:24:59Z\",\n      \"owner_issue\": 4584\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4543\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T05:27:57Z\",\n      \"owner_issue\": 4543\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4590\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T07:32:32Z\",\n      \"owner_issue\": 4590\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4613\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T17:44:56Z\",\n      \"owner_issue\": 4613\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4597\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T21:10:16Z\",\n      \"owner_issue\": 4597\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4626\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T00:51:33Z\",\n      \"owner_issue\": 4626\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4643\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T03:44:02Z\",\n      \"owner_issue\": 4643\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4647\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T05:55:19Z\",\n      \"owner_issue\": 4647\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4615\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T09:00:25Z\",\n      \"owner_issue\": 4615\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4662\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T12:11:52Z\",\n      \"owner_issue\": 4662\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4689\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-24T14:14:35Z\",\n      \"owner_issue\": 4689\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4704\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T11:48:51Z\",\n      \"owner_issue\": 4704\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4611\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T18:06:31Z\",\n      \"owner_issue\": 4611\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4295\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T03:15:00Z\",\n      \"owner_issue\": 4295\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4556\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T18:30:32Z\",\n      \"owner_issue\": 4556\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4529\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T20:28:33Z\",\n      \"owner_issue\": 4529\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4956\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-04T17:28:43Z\",\n      \"owner_issue\": 4956\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5040-bookkeeping\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-05T20:00:01Z\",\n      \"owner_issue\": null\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5031\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-06T19:27:07Z\",\n      \"owner_issue\": 5031\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4959\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T11:30:51Z\",\n      \"owner_issue\": 4959\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5119\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T21:58:09Z\",\n      \"owner_issue\": 5119\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5158\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T02:59:44Z\",\n      \"owner_issue\": 5158\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5147\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T03:59:57Z\",\n      \"owner_issue\": 5147\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5178\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:30:12Z\",\n      \"owner_issue\": 5178\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5172\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:56:45Z\",\n      \"owner_issue\": 5172\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5174\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:26:50Z\",\n      \"owner_issue\": 5174\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5086\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:39:15Z\",\n      \"owner_issue\": 5086\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4188\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T21:05:31Z\",\n      \"owner_issue\": 4188\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5041\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-09T15:49:14Z\",\n      \"owner_issue\": 5041\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5187\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T08:35:46Z\",\n      \"owner_issue\": 5187\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5097\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T09:23:18Z\",\n      \"owner_issue\": 5097\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5227\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T12:46:52Z\",\n      \"owner_issue\": 5227\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5280\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:47Z\",\n      \"owner_issue\": 5280\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5326\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:51Z\",\n      \"owner_issue\": 5326\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5399\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:08:57Z\",\n      \"owner_issue\": 5399\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4357\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:35:07Z\",\n      \"owner_issue\": 4357\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5423\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T12:02:13Z\",\n      \"owner_issue\": 5423\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5398\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T18:03:21Z\",\n      \"owner_issue\": 5398\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5318\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-15T12:05:34Z\",\n      \"owner_issue\": 5318\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5328\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T00:28:06Z\",\n      \"owner_issue\": 5328\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5645\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:46:33Z\",\n      \"owner_issue\": 5645\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4833\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:50:05Z\",\n      \"owner_issue\": 4833\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3287\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-19T00:19:36Z\",\n      \"owner_issue\": 3287\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4252\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T02:32:43Z\",\n      \"owner_issue\": 4252\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5750\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T03:41:36Z\",\n      \"owner_issue\": 5750\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5648\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T14:21:28Z\",\n      \"owner_issue\": 5648\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5840\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-21T02:12:11Z\",\n      \"owner_issue\": 5840\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4804\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T03:06:36Z\",\n      \"owner_issue\": 4804\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-2970\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T07:32:04Z\",\n      \"owner_issue\": 2970\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4249\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T00:25:27Z\",\n      \"owner_issue\": 4249\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6209\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T09:38:39Z\",\n      \"owner_issue\": 6209\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5330\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T23:38:08Z\",\n      \"owner_issue\": 5330\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6405\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T06:17:41Z\",\n      \"owner_issue\": 6405\n    }\n  ],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:39:21.854969300Z\",\n  \"github_calls\": 1,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"github\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 5,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5098\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T13:22:51Z\",\n      \"owner_issue\": 5098\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5286\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T15:52:15Z\",\n      \"owner_issue\": 5286\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5400\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T17:58:29Z\",\n      \"owner_issue\": 5400\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6118\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T04:38:23Z\",\n      \"owner_issue\": 6118\n    },\n    {\n      \"ahead\": 12,\n      \"branch\": \"work/issue-4735\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T21:28:05Z\",\n      \"owner_issue\": 4735\n    }\n  ]\n}\n"
+      },
+      "stderr": "",
+      "git_calls": [
+        {
+          "argv": [
+            "git.exe",
+            "remote",
+            "-v"
+          ],
+          "time": "2026-10-27T08:39:21.756135Z",
+          "duration_s": 0.099831,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/develop"
+          ],
+          "time": "2026-10-27T08:39:22.506520Z",
+          "duration_s": 0.109048,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "origin/develop^{commit}"
+          ],
+          "time": "2026-10-27T08:39:22.932159Z",
+          "duration_s": 0.105737,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f^{tree}"
+          ],
+          "time": "2026-10-27T08:39:23.387531Z",
+          "duration_s": 0.108611,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "for-each-ref",
+            "--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)",
+            "--no-merged",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f",
+            "refs/remotes/origin/work/",
+            "refs/remotes/origin/pm/resident"
+          ],
+          "time": "2026-10-27T08:39:24.201429Z",
+          "duration_s": 0.690227,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:25.915779Z",
+          "duration_s": 0.650261,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:26.973363Z",
+          "duration_s": 0.800388,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:29.073904Z",
+          "duration_s": 0.139008,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:30.121463Z",
+          "duration_s": 0.657028,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:31.402811Z",
+          "duration_s": 0.661055,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:34.673286Z",
+          "duration_s": 0.254054,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:35.322888Z",
+          "duration_s": 0.547494,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:38.200465Z",
+          "duration_s": 0.837973,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:41.065861Z",
+          "duration_s": 0.109978,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:42.317186Z",
+          "duration_s": 0.501274,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:42.873490Z",
+          "duration_s": 0.824524,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:44.002827Z",
+          "duration_s": 0.148203,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:44.462565Z",
+          "duration_s": 0.325845,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:45.180146Z",
+          "duration_s": 0.685205,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:45.926805Z",
+          "duration_s": 0.116921,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:46.351083Z",
+          "duration_s": 0.265284,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:47.937279Z",
+          "duration_s": 0.580242,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:48.933265Z",
+          "duration_s": 0.123145,
+          "exit_code": 0
+        }
+      ],
+      "git_counts": {
+        "remote": 1,
+        "show-ref": 1,
+        "rev-parse": 2,
+        "for-each-ref": 1,
+        "rev-list": 6,
+        "merge-tree": 6,
+        "diff-tree": 6
+      },
+      "gh_argv": [
+        "[\"api\", \"rate_limit\"]",
+        "[\"pr\", \"list\", \"--state\", \"open\", \"--limit\", \"100\", \"--json\", \"number,title,url,state,isDraft,headRefName,headRefOid,isCrossRepository,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,closingIssuesReferences\"]"
+      ],
+      "history_output_sha256": "d639d8e7433b4f1121a55353ae260cc47397641a5fb6ef3bc1ebe0fb3972fc61",
+      "stages": {
+        "remote": {
+          "calls": 1,
+          "git_process_seconds": 0.099831
+        },
+        "show-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.109048
+        },
+        "rev-parse": {
+          "calls": 2,
+          "git_process_seconds": 0.21434799999999998
+        },
+        "for-each-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.690227
+        },
+        "rev-list": {
+          "calls": 6,
+          "git_process_seconds": 2.947186
+        },
+        "merge-tree": {
+          "calls": 6,
+          "git_process_seconds": 4.389387
+        },
+        "diff-tree": {
+          "calls": 6,
+          "git_process_seconds": 0.8913090000000001
+        }
+      },
+      "raw_trace_sha256": "28974e4ea9b8005f0dad4d7ed8cf64ccbce532e0457f732ff4a49663e60ceb0a",
+      "unmeasured_stages": [
+        "native main entry/perf setup/PM runtime mapping: no internal spans; this fixture uses checkout cwd, not PM runtime",
+        "DefaultCliEnv construction/cache load and decision: not independently timed",
+        "GitHub network/hydration latency: no network; fake gh returns the saved empty PR payload",
+        "history load/observe/save and render/write exclusive time: no internal spans; bounded by last Git completion and native exit",
+        "OS page-cache state and inherited host scheduling: uncontrolled; cold/warm names refer only to application PR cache"
+      ]
+    },
+    {
+      "label": "after-include-empty-cold",
+      "source_head": "ce6606457af3f5270a5044a5b31831a39fb0199f",
+      "native_sha256": "2f829e08f6ee807f0f8c2a02cc5618cc2c7c1e427e4b37420107f0cc508755d8",
+      "refs_sha256": "2d455d51d2fbc8dda916cc1c9fad3c9dd99739b2c1a3742ea01e728f253ec810",
+      "spawn_s": 1.123457599984249,
+      "stdin": "finite input file with EOF; no writer remains",
+      "first_stdout_s_upper_bound": 16.722992199996952,
+      "poll_resolution_s": 0.1,
+      "exit_s": 16.722992199996952,
+      "exit_code": 0,
+      "censored": false,
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 80,\n  \"bookkeeping_only_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4217\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T03:51:01Z\",\n      \"owner_issue\": 4217\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4229\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T06:35:26Z\",\n      \"owner_issue\": 4229\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4306\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-14T10:14:41Z\",\n      \"owner_issue\": 4306\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3992\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T01:59:42Z\",\n      \"owner_issue\": 3992\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4273\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T02:54:15Z\",\n      \"owner_issue\": 4273\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3825\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:46:35Z\",\n      \"owner_issue\": 3825\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4274\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:52:30Z\",\n      \"owner_issue\": 4274\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-4228\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T07:14:40Z\",\n      \"owner_issue\": 4228\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4371\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T13:50:25Z\",\n      \"owner_issue\": 4371\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4308\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T15:07:03Z\",\n      \"owner_issue\": 4308\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4281\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:06:32Z\",\n      \"owner_issue\": 4281\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4394\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:27:29Z\",\n      \"owner_issue\": 4394\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4352\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:34:58Z\",\n      \"owner_issue\": 4352\n    },\n    {\n      \"ahead\": 16,\n      \"branch\": \"work/issue-4286\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T01:30:43Z\",\n      \"owner_issue\": 4286\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4433\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T11:38:08Z\",\n      \"owner_issue\": 4433\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4205\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:30:03Z\",\n      \"owner_issue\": 4205\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4439\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:54:55Z\",\n      \"owner_issue\": 4439\n    },\n    {\n      \"ahead\": 19,\n      \"branch\": \"work/issue-4257\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T21:07:03Z\",\n      \"owner_issue\": 4257\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3882\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T23:24:44Z\",\n      \"owner_issue\": 3882\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4470\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T06:29:43Z\",\n      \"owner_issue\": 4470\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4386\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T10:37:58Z\",\n      \"owner_issue\": 4386\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3795\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T16:52:50Z\",\n      \"owner_issue\": 3795\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4479\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:09:55Z\",\n      \"owner_issue\": 4479\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4296\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:59:17Z\",\n      \"owner_issue\": 4296\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4283\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T21:51:00Z\",\n      \"owner_issue\": 4283\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4551\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:26:18Z\",\n      \"owner_issue\": 4551\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3698\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:30:40Z\",\n      \"owner_issue\": 3698\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4584\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T04:24:59Z\",\n      \"owner_issue\": 4584\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4543\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T05:27:57Z\",\n      \"owner_issue\": 4543\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4590\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T07:32:32Z\",\n      \"owner_issue\": 4590\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4613\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T17:44:56Z\",\n      \"owner_issue\": 4613\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4597\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T21:10:16Z\",\n      \"owner_issue\": 4597\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4626\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T00:51:33Z\",\n      \"owner_issue\": 4626\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4643\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T03:44:02Z\",\n      \"owner_issue\": 4643\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4647\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T05:55:19Z\",\n      \"owner_issue\": 4647\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4615\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T09:00:25Z\",\n      \"owner_issue\": 4615\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4662\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T12:11:52Z\",\n      \"owner_issue\": 4662\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4689\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-24T14:14:35Z\",\n      \"owner_issue\": 4689\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4704\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T11:48:51Z\",\n      \"owner_issue\": 4704\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4611\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T18:06:31Z\",\n      \"owner_issue\": 4611\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4295\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T03:15:00Z\",\n      \"owner_issue\": 4295\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4556\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T18:30:32Z\",\n      \"owner_issue\": 4556\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4529\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T20:28:33Z\",\n      \"owner_issue\": 4529\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4956\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-04T17:28:43Z\",\n      \"owner_issue\": 4956\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5040-bookkeeping\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-05T20:00:01Z\",\n      \"owner_issue\": null\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5031\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-06T19:27:07Z\",\n      \"owner_issue\": 5031\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4959\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T11:30:51Z\",\n      \"owner_issue\": 4959\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5119\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T21:58:09Z\",\n      \"owner_issue\": 5119\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5158\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T02:59:44Z\",\n      \"owner_issue\": 5158\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5147\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T03:59:57Z\",\n      \"owner_issue\": 5147\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5178\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:30:12Z\",\n      \"owner_issue\": 5178\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5172\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:56:45Z\",\n      \"owner_issue\": 5172\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5174\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:26:50Z\",\n      \"owner_issue\": 5174\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5086\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:39:15Z\",\n      \"owner_issue\": 5086\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4188\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T21:05:31Z\",\n      \"owner_issue\": 4188\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5041\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-09T15:49:14Z\",\n      \"owner_issue\": 5041\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5187\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T08:35:46Z\",\n      \"owner_issue\": 5187\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5097\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T09:23:18Z\",\n      \"owner_issue\": 5097\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5227\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T12:46:52Z\",\n      \"owner_issue\": 5227\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5280\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:47Z\",\n      \"owner_issue\": 5280\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5326\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:51Z\",\n      \"owner_issue\": 5326\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5399\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:08:57Z\",\n      \"owner_issue\": 5399\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4357\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:35:07Z\",\n      \"owner_issue\": 4357\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5423\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T12:02:13Z\",\n      \"owner_issue\": 5423\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5398\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T18:03:21Z\",\n      \"owner_issue\": 5398\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5318\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-15T12:05:34Z\",\n      \"owner_issue\": 5318\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5328\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T00:28:06Z\",\n      \"owner_issue\": 5328\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5645\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:46:33Z\",\n      \"owner_issue\": 5645\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4833\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:50:05Z\",\n      \"owner_issue\": 4833\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3287\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-19T00:19:36Z\",\n      \"owner_issue\": 3287\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4252\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T02:32:43Z\",\n      \"owner_issue\": 4252\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5750\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T03:41:36Z\",\n      \"owner_issue\": 5750\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5648\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T14:21:28Z\",\n      \"owner_issue\": 5648\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5840\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-21T02:12:11Z\",\n      \"owner_issue\": 5840\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4804\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T03:06:36Z\",\n      \"owner_issue\": 4804\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-2970\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T07:32:04Z\",\n      \"owner_issue\": 2970\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4249\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T00:25:27Z\",\n      \"owner_issue\": 4249\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6209\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T09:38:39Z\",\n      \"owner_issue\": 6209\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5330\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T23:38:08Z\",\n      \"owner_issue\": 5330\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6405\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T06:17:41Z\",\n      \"owner_issue\": 6405\n    }\n  ],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:39:52.302192200Z\",\n  \"github_calls\": 1,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"github\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 5,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5098\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T13:22:51Z\",\n      \"owner_issue\": 5098\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5286\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T15:52:15Z\",\n      \"owner_issue\": 5286\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5400\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T17:58:29Z\",\n      \"owner_issue\": 5400\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6118\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T04:38:23Z\",\n      \"owner_issue\": 6118\n    },\n    {\n      \"ahead\": 12,\n      \"branch\": \"work/issue-4735\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T21:28:05Z\",\n      \"owner_issue\": 4735\n    }\n  ]\n}\n"
+      },
+      "stderr": "",
+      "git_calls": [
+        {
+          "argv": [
+            "git.exe",
+            "remote",
+            "-v"
+          ],
+          "time": "2026-10-27T08:39:52.214568Z",
+          "duration_s": 0.08558,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/develop"
+          ],
+          "time": "2026-10-27T08:39:52.488387Z",
+          "duration_s": 0.098405,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "origin/develop^{commit}"
+          ],
+          "time": "2026-10-27T08:39:52.886065Z",
+          "duration_s": 0.100432,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f^{tree}"
+          ],
+          "time": "2026-10-27T08:39:53.045270Z",
+          "duration_s": 0.092462,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "for-each-ref",
+            "--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)",
+            "--no-merged",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f",
+            "refs/remotes/origin/work/",
+            "refs/remotes/origin/pm/resident"
+          ],
+          "time": "2026-10-27T08:39:53.471352Z",
+          "duration_s": 0.672434,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:54.660252Z",
+          "duration_s": 0.493615,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:55.934759Z",
+          "duration_s": 0.667261,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:56.674522Z",
+          "duration_s": 0.170096,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:56.905020Z",
+          "duration_s": 0.464671,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:39:57.435663Z",
+          "duration_s": 0.792802,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:39:58.481715Z",
+          "duration_s": 0.148943,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:39:59.205581Z",
+          "duration_s": 0.489041,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:00.570924Z",
+          "duration_s": 0.805275,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:01.492627Z",
+          "duration_s": 0.162554,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:01.733070Z",
+          "duration_s": 0.51044,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:02.313648Z",
+          "duration_s": 0.900018,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:03.831573Z",
+          "duration_s": 0.15299,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:04.048074Z",
+          "duration_s": 0.333539,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:04.610977Z",
+          "duration_s": 0.685374,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:05.372225Z",
+          "duration_s": 0.119021,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:05.796206Z",
+          "duration_s": 0.28132,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:06.228356Z",
+          "duration_s": 0.574067,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:07.525853Z",
+          "duration_s": 0.132848,
+          "exit_code": 0
+        }
+      ],
+      "git_counts": {
+        "remote": 1,
+        "show-ref": 1,
+        "rev-parse": 2,
+        "for-each-ref": 1,
+        "rev-list": 6,
+        "merge-tree": 6,
+        "diff-tree": 6
+      },
+      "gh_argv": [
+        "[\"api\", \"rate_limit\"]",
+        "[\"pr\", \"list\", \"--state\", \"open\", \"--limit\", \"100\", \"--json\", \"number,title,url,state,isDraft,headRefName,headRefOid,isCrossRepository,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,closingIssuesReferences\"]"
+      ],
+      "history_output_sha256": "d639d8e7433b4f1121a55353ae260cc47397641a5fb6ef3bc1ebe0fb3972fc61",
+      "stages": {
+        "remote": {
+          "calls": 1,
+          "git_process_seconds": 0.08558
+        },
+        "show-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.098405
+        },
+        "rev-parse": {
+          "calls": 2,
+          "git_process_seconds": 0.192894
+        },
+        "for-each-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.672434
+        },
+        "rev-list": {
+          "calls": 6,
+          "git_process_seconds": 2.572626
+        },
+        "merge-tree": {
+          "calls": 6,
+          "git_process_seconds": 4.424797
+        },
+        "diff-tree": {
+          "calls": 6,
+          "git_process_seconds": 0.8864519999999999
+        }
+      },
+      "raw_trace_sha256": "02aee4cecc14a60b321f043b8e0c0672f097eff74d6c56b73a2271b9f937617d",
+      "unmeasured_stages": [
+        "native main entry/perf setup/PM runtime mapping: no internal spans; this fixture uses checkout cwd, not PM runtime",
+        "DefaultCliEnv construction/cache load and decision: not independently timed",
+        "GitHub network/hydration latency: no network; fake gh returns the saved empty PR payload",
+        "history load/observe/save and render/write exclusive time: no internal spans; bounded by last Git completion and native exit",
+        "OS page-cache state and inherited host scheduling: uncontrolled; cold/warm names refer only to application PR cache"
+      ]
+    },
+    {
+      "label": "after-include-empty-warm",
+      "source_head": "ce6606457af3f5270a5044a5b31831a39fb0199f",
+      "native_sha256": "2f829e08f6ee807f0f8c2a02cc5618cc2c7c1e427e4b37420107f0cc508755d8",
+      "refs_sha256": "2d455d51d2fbc8dda916cc1c9fad3c9dd99739b2c1a3742ea01e728f253ec810",
+      "spawn_s": 0.008608500007539988,
+      "stdin": "finite input file with EOF; no writer remains",
+      "first_stdout_s_upper_bound": 22.14956109999912,
+      "poll_resolution_s": 0.1,
+      "exit_s": 22.14956109999912,
+      "exit_code": 0,
+      "censored": false,
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 80,\n  \"bookkeeping_only_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4217\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T03:51:01Z\",\n      \"owner_issue\": 4217\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4229\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-11T06:35:26Z\",\n      \"owner_issue\": 4229\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4306\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-14T10:14:41Z\",\n      \"owner_issue\": 4306\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3992\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T01:59:42Z\",\n      \"owner_issue\": 3992\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4273\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T02:54:15Z\",\n      \"owner_issue\": 4273\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3825\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:46:35Z\",\n      \"owner_issue\": 3825\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4274\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T03:52:30Z\",\n      \"owner_issue\": 4274\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-4228\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T07:14:40Z\",\n      \"owner_issue\": 4228\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4371\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T13:50:25Z\",\n      \"owner_issue\": 4371\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4308\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T15:07:03Z\",\n      \"owner_issue\": 4308\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4281\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:06:32Z\",\n      \"owner_issue\": 4281\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4394\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:27:29Z\",\n      \"owner_issue\": 4394\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4352\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-15T16:34:58Z\",\n      \"owner_issue\": 4352\n    },\n    {\n      \"ahead\": 16,\n      \"branch\": \"work/issue-4286\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T01:30:43Z\",\n      \"owner_issue\": 4286\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4433\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T11:38:08Z\",\n      \"owner_issue\": 4433\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4205\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:30:03Z\",\n      \"owner_issue\": 4205\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4439\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-16T13:54:55Z\",\n      \"owner_issue\": 4439\n    },\n    {\n      \"ahead\": 19,\n      \"branch\": \"work/issue-4257\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T21:07:03Z\",\n      \"owner_issue\": 4257\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3882\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-18T23:24:44Z\",\n      \"owner_issue\": 3882\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4470\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T06:29:43Z\",\n      \"owner_issue\": 4470\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4386\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T10:37:58Z\",\n      \"owner_issue\": 4386\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3795\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T16:52:50Z\",\n      \"owner_issue\": 3795\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4479\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:09:55Z\",\n      \"owner_issue\": 4479\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4296\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T20:59:17Z\",\n      \"owner_issue\": 4296\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4283\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-21T21:51:00Z\",\n      \"owner_issue\": 4283\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4551\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:26:18Z\",\n      \"owner_issue\": 4551\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3698\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T03:30:40Z\",\n      \"owner_issue\": 3698\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4584\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T04:24:59Z\",\n      \"owner_issue\": 4584\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4543\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T05:27:57Z\",\n      \"owner_issue\": 4543\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4590\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T07:32:32Z\",\n      \"owner_issue\": 4590\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4613\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T17:44:56Z\",\n      \"owner_issue\": 4613\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4597\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-22T21:10:16Z\",\n      \"owner_issue\": 4597\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4626\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T00:51:33Z\",\n      \"owner_issue\": 4626\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4643\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T03:44:02Z\",\n      \"owner_issue\": 4643\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4647\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T05:55:19Z\",\n      \"owner_issue\": 4647\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4615\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T09:00:25Z\",\n      \"owner_issue\": 4615\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4662\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-23T12:11:52Z\",\n      \"owner_issue\": 4662\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4689\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-24T14:14:35Z\",\n      \"owner_issue\": 4689\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4704\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T11:48:51Z\",\n      \"owner_issue\": 4704\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4611\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-27T18:06:31Z\",\n      \"owner_issue\": 4611\n    },\n    {\n      \"ahead\": 3,\n      \"branch\": \"work/issue-4295\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T03:15:00Z\",\n      \"owner_issue\": 4295\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4556\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T18:30:32Z\",\n      \"owner_issue\": 4556\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4529\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-09-28T20:28:33Z\",\n      \"owner_issue\": 4529\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4956\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-04T17:28:43Z\",\n      \"owner_issue\": 4956\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5040-bookkeeping\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-05T20:00:01Z\",\n      \"owner_issue\": null\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5031\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-06T19:27:07Z\",\n      \"owner_issue\": 5031\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4959\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T11:30:51Z\",\n      \"owner_issue\": 4959\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5119\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-07T21:58:09Z\",\n      \"owner_issue\": 5119\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5158\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T02:59:44Z\",\n      \"owner_issue\": 5158\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5147\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T03:59:57Z\",\n      \"owner_issue\": 5147\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5178\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:30:12Z\",\n      \"owner_issue\": 5178\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5172\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T05:56:45Z\",\n      \"owner_issue\": 5172\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5174\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:26:50Z\",\n      \"owner_issue\": 5174\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5086\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T06:39:15Z\",\n      \"owner_issue\": 5086\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4188\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-08T21:05:31Z\",\n      \"owner_issue\": 4188\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5041\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-09T15:49:14Z\",\n      \"owner_issue\": 5041\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5187\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T08:35:46Z\",\n      \"owner_issue\": 5187\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5097\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T09:23:18Z\",\n      \"owner_issue\": 5097\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5227\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-10T12:46:52Z\",\n      \"owner_issue\": 5227\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5280\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:47Z\",\n      \"owner_issue\": 5280\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5326\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-13T06:45:51Z\",\n      \"owner_issue\": 5326\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5399\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:08:57Z\",\n      \"owner_issue\": 5399\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4357\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T10:35:07Z\",\n      \"owner_issue\": 4357\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5423\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T12:02:13Z\",\n      \"owner_issue\": 5423\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5398\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T18:03:21Z\",\n      \"owner_issue\": 5398\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5318\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-15T12:05:34Z\",\n      \"owner_issue\": 5318\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5328\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T00:28:06Z\",\n      \"owner_issue\": 5328\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5645\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:46:33Z\",\n      \"owner_issue\": 5645\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4833\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-16T16:50:05Z\",\n      \"owner_issue\": 4833\n    },\n    {\n      \"ahead\": 4,\n      \"branch\": \"work/issue-3287\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-19T00:19:36Z\",\n      \"owner_issue\": 3287\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4252\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T02:32:43Z\",\n      \"owner_issue\": 4252\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5750\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T03:41:36Z\",\n      \"owner_issue\": 5750\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5648\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-20T14:21:28Z\",\n      \"owner_issue\": 5648\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5840\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-21T02:12:11Z\",\n      \"owner_issue\": 5840\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4804\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T03:06:36Z\",\n      \"owner_issue\": 4804\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-2970\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-22T07:32:04Z\",\n      \"owner_issue\": 2970\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-4249\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T00:25:27Z\",\n      \"owner_issue\": 4249\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6209\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T09:38:39Z\",\n      \"owner_issue\": 6209\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5330\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-25T23:38:08Z\",\n      \"owner_issue\": 5330\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6405\",\n      \"has_non_gwt_changes\": false,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T06:17:41Z\",\n      \"owner_issue\": 6405\n    }\n  ],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:40:07.861878Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 5,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5098\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T13:22:51Z\",\n      \"owner_issue\": 5098\n    },\n    {\n      \"ahead\": 2,\n      \"branch\": \"work/issue-5286\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-11T15:52:15Z\",\n      \"owner_issue\": 5286\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5400\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-14T17:58:29Z\",\n      \"owner_issue\": 5400\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6118\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-23T04:38:23Z\",\n      \"owner_issue\": 6118\n    },\n    {\n      \"ahead\": 12,\n      \"branch\": \"work/issue-4735\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-26T21:28:05Z\",\n      \"owner_issue\": 4735\n    }\n  ]\n}\n"
+      },
+      "stderr": "",
+      "git_calls": [
+        {
+          "argv": [
+            "git.exe",
+            "remote",
+            "-v"
+          ],
+          "time": "2026-10-27T08:40:08.055042Z",
+          "duration_s": 0.082317,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/develop"
+          ],
+          "time": "2026-10-27T08:40:08.455622Z",
+          "duration_s": 0.091398,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "origin/develop^{commit}"
+          ],
+          "time": "2026-10-27T08:40:08.606530Z",
+          "duration_s": 0.097543,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-parse",
+            "--verify",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f^{tree}"
+          ],
+          "time": "2026-10-27T08:40:09.118131Z",
+          "duration_s": 0.094108,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "for-each-ref",
+            "--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)",
+            "--no-merged",
+            "ce6606457af3f5270a5044a5b31831a39fb0199f",
+            "refs/remotes/origin/work/",
+            "refs/remotes/origin/pm/resident"
+          ],
+          "time": "2026-10-27T08:40:09.273156Z",
+          "duration_s": 0.666379,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:10.185140Z",
+          "duration_s": 0.491924,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:11.644592Z",
+          "duration_s": 0.813059,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:12.523568Z",
+          "duration_s": 0.162115,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:12.910032Z",
+          "duration_s": 0.490178,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:13.516280Z",
+          "duration_s": 0.716881,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:14.552919Z",
+          "duration_s": 0.147356,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:16.599866Z",
+          "duration_s": 0.504336,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:18.351073Z",
+          "duration_s": 0.740219,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:19.478145Z",
+          "duration_s": 0.129143,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:21.805743Z",
+          "duration_s": 0.66819,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:22.636729Z",
+          "duration_s": 1.016987,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:25.033098Z",
+          "duration_s": 0.189589,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:25.290429Z",
+          "duration_s": 0.345668,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:25.769151Z",
+          "duration_s": 0.746053,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:26.927586Z",
+          "duration_s": 0.135508,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "rev-list",
+            "--parents",
+            "--stdin"
+          ],
+          "time": "2026-10-27T08:40:27.426810Z",
+          "duration_s": 0.28827,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z"
+          ],
+          "time": "2026-10-27T08:40:28.996722Z",
+          "duration_s": 0.640303,
+          "exit_code": 0
+        },
+        {
+          "argv": [
+            "git.exe",
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**"
+          ],
+          "time": "2026-10-27T08:40:29.910947Z",
+          "duration_s": 0.115279,
+          "exit_code": 0
+        }
+      ],
+      "git_counts": {
+        "remote": 1,
+        "show-ref": 1,
+        "rev-parse": 2,
+        "for-each-ref": 1,
+        "rev-list": 6,
+        "merge-tree": 6,
+        "diff-tree": 6
+      },
+      "gh_argv": [],
+      "history_output_sha256": "d639d8e7433b4f1121a55353ae260cc47397641a5fb6ef3bc1ebe0fb3972fc61",
+      "stages": {
+        "remote": {
+          "calls": 1,
+          "git_process_seconds": 0.082317
+        },
+        "show-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.091398
+        },
+        "rev-parse": {
+          "calls": 2,
+          "git_process_seconds": 0.19165100000000002
+        },
+        "for-each-ref": {
+          "calls": 1,
+          "git_process_seconds": 0.666379
+        },
+        "rev-list": {
+          "calls": 6,
+          "git_process_seconds": 2.7885660000000003
+        },
+        "merge-tree": {
+          "calls": 6,
+          "git_process_seconds": 4.673502
+        },
+        "diff-tree": {
+          "calls": 6,
+          "git_process_seconds": 0.87899
+        }
+      },
+      "raw_trace_sha256": "dd374811dd8fa280cceb2582aa36f9b0db520f75118300667bc95e244b47c9d6",
+      "unmeasured_stages": [
+        "native main entry/perf setup/PM runtime mapping: no internal spans; this fixture uses checkout cwd, not PM runtime",
+        "DefaultCliEnv construction/cache load and decision: not independently timed",
+        "GitHub network/hydration latency: no network; fake gh returns the saved empty PR payload",
+        "history load/observe/save and render/write exclusive time: no internal spans; bounded by last Git completion and native exit",
+        "OS page-cache state and inherited host scheduling: uncontrolled; cold/warm names refer only to application PR cache"
+      ]
+    }
+  ],
+  "actual_entry_green": {
+    "command": "cargo test -p gwt --lib cli::pr::tests::pr_list_ -- --nocapture",
+    "log_sha256": "4b5c95ac8e7a5dae46fe8e4495e9ca2f1118a564dd7939009f25383cf6f719ad",
+    "actual_tracked_observations": [
+      {
+        "exit_code": 1,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 0,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n",
+        "git_calls": 4,
+        "logged_git_ms": 1173,
+        "params": {},
+        "response": {
+          "error": "network error: Git error: injected local inventory for-each-ref failure",
+          "exit_code": 1,
+          "ok": false,
+          "operation": "pr.list"
+        },
+        "stage": "for-each-ref",
+        "total_ms": 1203.423
+      },
+      {
+        "exit_code": 1,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 0,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n[\"rev-list\", \"--parents\", \"--stdin\"]\n",
+        "git_calls": 5,
+        "logged_git_ms": 4790,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "error": "network error: Git error: injected local inventory rev-list failure",
+          "exit_code": 1,
+          "ok": false,
+          "operation": "pr.list"
+        },
+        "stage": "rev-list",
+        "total_ms": 4821.2498000000005
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 0,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n[\"rev-list\", \"--parents\", \"--stdin\"]\n[\"merge-tree\", \"--write-tree\", \"--stdin\", \"--name-only\", \"--no-messages\", \"-z\"]\n[\"diff-tree\", \"--stdin\", \"-r\", \"--raw\", \"-z\", \"--no-renames\", \"--\", \":(top,glob)**\", \":(top,exclude,glob).gwt/**\"]\n",
+        "git_calls": 7,
+        "logged_git_ms": 2492,
+        "params": {},
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 6,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:40:53.020645600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 1,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5390\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 5390\n    }\n  ]\n}\n"
+        },
+        "stage": "",
+        "total_ms": 2511.7631
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 0,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n[\"rev-list\", \"--parents\", \"--stdin\"]\n[\"merge-tree\", \"--write-tree\", \"--stdin\", \"--name-only\", \"--no-messages\", \"-z\"]\n",
+        "git_calls": 6,
+        "logged_git_ms": 1424,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 8,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:40:53.020645600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 1,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5390\",\n      \"has_non_gwt_changes\": null,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 5390\n    }\n  ]\n}\n"
+        },
+        "stage": "merge-tree",
+        "total_ms": 1446.058
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 0,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n[\"rev-list\", \"--parents\", \"--stdin\"]\n[\"merge-tree\", \"--write-tree\", \"--stdin\", \"--name-only\", \"--no-messages\", \"-z\"]\n[\"merge-tree\", \"--write-tree\", \"--name-only\", \"--no-messages\", \"-z\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"d195eb494538f935704e061a70ccc0e0086cc949\"]\n[\"diff\", \"--quiet\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"b6982d6579593be9aeba760306725a6f43e84a51\", \"--\", \":(top,glob)**\", \":(top,exclude,glob).gwt/**\"]\n",
+        "git_calls": 8,
+        "logged_git_ms": 3926,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 9,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:40:53.020645600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 1,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5390\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 5390\n    }\n  ]\n}\n"
+        },
+        "stage": "no-stdin",
+        "total_ms": 3947.1313999999998
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 0,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n",
+        "git_calls": 4,
+        "logged_git_ms": 2076,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 13,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T08:40:53.020645600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+        },
+        "stage": "",
+        "total_ms": 2094.4706
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 2,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n",
+        "git_calls": 4,
+        "logged_git_ms": 718,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 1,\n  \"fetched_at\": \"2026-10-27T08:41:09.062572900Z\",\n  \"github_calls\": 1,\n  \"hydrated\": 0,\n  \"pull_requests\": [\n    {\n      \"age_hours\": 4152,\n      \"auto_merge_enabled\": false,\n      \"base_ref_name\": \"\",\n      \"blocker\": null,\n      \"check_counts\": {\n        \"failure\": 0,\n        \"in_progress\": 0,\n        \"skipped\": 0,\n        \"success\": 1,\n        \"total\": 1\n      },\n      \"ci_status\": \"SUCCESS\",\n      \"closing_issues\": [],\n      \"created_at\": \"2026-05-07T08:00:00Z\",\n      \"default_action\": \"propose merge\",\n      \"default_action_executable\": true,\n      \"default_action_operation\": null,\n      \"dwell_hours\": 4152,\n      \"escalate_after_cycles\": 3,\n      \"escalation_due\": true,\n      \"fallback\": null,\n      \"head_ref_name\": \"\",\n      \"is_draft\": false,\n      \"kind\": \"pull_request\",\n      \"lifecycle\": \"MERGE-CANDIDATE\",\n      \"lifecycle_source\": \"observed\",\n      \"merge_state_status\": \"CLEAN\",\n      \"mergeable\": \"MERGEABLE\",\n      \"number\": 12,\n      \"owner_issue\": null,\n      \"owner_issue_closed\": false,\n      \"owner_issue_source\": null,\n      \"review_status\": \"APPROVED\",\n      \"stale\": true,\n      \"stale_after_hours\": 72,\n      \"title\": \"Current PR\",\n      \"unchanged_cycles\": 0,\n      \"updated_at\": \"2026-05-07T08:00:00Z\",\n      \"url\": \"https://github.com/akiojin/gwt/pull/12\"\n    }\n  ],\n  \"skipped_unchanged\": 0,\n  \"source\": \"github\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+        },
+        "stage": "",
+        "total_ms": 930.1816
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 2,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n",
+        "git_calls": 4,
+        "logged_git_ms": 701,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 1,\n  \"fetched_at\": \"2026-10-27T08:41:09.062572900Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [\n    {\n      \"age_hours\": 4152,\n      \"auto_merge_enabled\": false,\n      \"base_ref_name\": \"\",\n      \"blocker\": null,\n      \"check_counts\": {\n        \"failure\": 0,\n        \"in_progress\": 0,\n        \"skipped\": 0,\n        \"success\": 1,\n        \"total\": 1\n      },\n      \"ci_status\": \"SUCCESS\",\n      \"closing_issues\": [],\n      \"created_at\": \"2026-05-07T08:00:00Z\",\n      \"default_action\": \"propose merge\",\n      \"default_action_executable\": true,\n      \"default_action_operation\": null,\n      \"dwell_hours\": 4152,\n      \"escalate_after_cycles\": 3,\n      \"escalation_due\": true,\n      \"fallback\": null,\n      \"head_ref_name\": \"\",\n      \"is_draft\": false,\n      \"kind\": \"pull_request\",\n      \"lifecycle\": \"MERGE-CANDIDATE\",\n      \"lifecycle_source\": \"observed\",\n      \"merge_state_status\": \"CLEAN\",\n      \"mergeable\": \"MERGEABLE\",\n      \"number\": 12,\n      \"owner_issue\": null,\n      \"owner_issue_closed\": false,\n      \"owner_issue_source\": null,\n      \"review_status\": \"APPROVED\",\n      \"stale\": true,\n      \"stale_after_hours\": 72,\n      \"title\": \"Current PR\",\n      \"unchanged_cycles\": 1,\n      \"updated_at\": \"2026-05-07T08:00:00Z\",\n      \"url\": \"https://github.com/akiojin/gwt/pull/12\"\n    }\n  ],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+        },
+        "stage": "",
+        "total_ms": 715.1453
+      },
+      {
+        "exit_code": 0,
+        "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+        "gh_calls_cumulative": 2,
+        "git_argv": "[\"show-ref\", \"--verify\", \"--quiet\", \"refs/remotes/origin/develop\"]\n[\"rev-parse\", \"--verify\", \"origin/develop^{commit}\"]\n[\"rev-parse\", \"--verify\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126^{tree}\"]\n[\"for-each-ref\", \"--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)\", \"--no-merged\", \"5d00c01646d1f2f24cdd202ad3f56e7f4f411126\", \"refs/remotes/origin/work/\", \"refs/remotes/origin/pm/resident\"]\n[\"rev-list\", \"--parents\", \"--stdin\"]\n[\"merge-tree\", \"--write-tree\", \"--stdin\", \"--name-only\", \"--no-messages\", \"-z\"]\n[\"diff-tree\", \"--stdin\", \"-r\", \"--raw\", \"-z\", \"--no-renames\", \"--\", \":(top,glob)**\", \":(top,exclude,glob).gwt/**\"]\n",
+        "git_calls": 7,
+        "logged_git_ms": 4080,
+        "params": {
+          "include": []
+        },
+        "response": {
+          "exit_code": 0,
+          "kind": "pull_request",
+          "ok": true,
+          "operation": "pr.list",
+          "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 6,\n  \"count\": 1,\n  \"fetched_at\": \"2026-10-27T08:41:09.062572900Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [\n    {\n      \"age_hours\": 4152,\n      \"auto_merge_enabled\": false,\n      \"base_ref_name\": \"\",\n      \"blocker\": null,\n      \"check_counts\": {\n        \"failure\": 0,\n        \"in_progress\": 0,\n        \"skipped\": 0,\n        \"success\": 1,\n        \"total\": 1\n      },\n      \"ci_status\": \"SUCCESS\",\n      \"closing_issues\": [],\n      \"created_at\": \"2026-05-07T08:00:00Z\",\n      \"default_action\": \"propose merge\",\n      \"default_action_executable\": true,\n      \"default_action_operation\": null,\n      \"dwell_hours\": 4152,\n      \"escalate_after_cycles\": 3,\n      \"escalation_due\": true,\n      \"fallback\": null,\n      \"head_ref_name\": \"\",\n      \"is_draft\": false,\n      \"kind\": \"pull_request\",\n      \"lifecycle\": \"MERGE-CANDIDATE\",\n      \"lifecycle_source\": \"observed\",\n      \"merge_state_status\": \"CLEAN\",\n      \"mergeable\": \"MERGEABLE\",\n      \"number\": 12,\n      \"owner_issue\": null,\n      \"owner_issue_closed\": false,\n      \"owner_issue_source\": null,\n      \"review_status\": \"APPROVED\",\n      \"stale\": true,\n      \"stale_after_hours\": 72,\n      \"title\": \"Current PR\",\n      \"unchanged_cycles\": 2,\n      \"updated_at\": \"2026-05-07T08:00:00Z\",\n      \"url\": \"https://github.com/akiojin/gwt/pull/12\"\n    }\n  ],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 8,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-1\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 1\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-2\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 2\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-3\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 3\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-4\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 4\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 5\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-6\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 6\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-7\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 7\n    },\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-8\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 8\n    }\n  ]\n}\n"
+        },
+        "stage": "",
+        "total_ms": 4112.2036
+      }
+    ],
+    "test_executable_sha256": "48ff7c822cb4928f7cde702a9f87985e32616ac2df4dddadbe3dfc8e5cb731bc",
+    "result": "8 passed; 0 failed",
+    "fanout_acceptance": "8 candidates require no more processes than the single candidate observation plus one; previous RED single5/eight26 still violates this same boundary. The relative guard permits fixed overhead from capturing the base tree from its frozen commit.",
+    "retained_test_executable": "target/pr-list-b-native/green-gwt-tests.exe"
+  },
+  "framing_regression": {
+    "red_log": "    Blocking waiting for file lock on build directory\n   Compiling gwt-git v9.145.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt-git)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 38s\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt_git-0b656073acf34a9a.exe)\n\nrunning 1 test\ntest pr_status::tests::inventory_batch_parsers_require_complete_records ... FAILED\n\nfailures:\n\n---- pr_status::tests::inventory_batch_parsers_require_complete_records stdout ----\n\nthread 'pr_status::tests::inventory_batch_parsers_require_complete_records' (5352) panicked at crates\\gwt-git\\src\\pr_status.rs:6839:9:\nassertion failed: parse_inventory_merge_batch(&clean.as_bytes()[..clean.len() - 1], 1).is_none()\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    pr_status::tests::inventory_batch_parsers_require_complete_records\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 411 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p gwt-git --lib`\n",
+    "red_log_sha256": "f46f4a0c1dfe7aa6ccb7c387043c48905b461c5ea5beb149f88d552a905e81f0",
+    "failure": "missing final merge-record NUL was accepted before the review repair",
+    "green_result": "inventory_batch_parsers_require_complete_records passes within Git138; rejects missing/extra merge framing, missing conflict paths, truncated/invalid diff metadata and trailing garbage"
+  },
+  "git_tests": {
+    "command": "cargo test -p gwt-git --lib pr_status::tests",
+    "log_sha256": "92732c3523afb6fff9aed9cc96ae1a9fdcd0fab69384f04235c40b60c50ce08b",
+    "result": "138 passed; 0 failed"
+  },
+  "independent_source_review": {
+    "reviewer": "pr_list_path_review (assigned pane name サエ; separate collaboration context)",
+    "blocking_findings_remaining": 0,
+    "closed_findings": [
+      "no added Git minimum: graph batching replaces proposed ahead-behind atom; Git2.38 source compatibility reuses singleton",
+      "base tree resolves from frozen commit OID",
+      "merge framing strictly consumes record terminator and final empty field",
+      "diff raw metadata validates fields/modes/OIDs/status"
+    ],
+    "artifact_review": "blocking0: independent reparse/row equality/hash/log verification of final diagnosis/GREEN/Markdown"
+  },
+  "limits": "The four valid native executions show the dominant local-stocktake fanout on the saved equivalent input and truthful complete replies. They do not prove the original censored process had only this cause, deployment, production PM20s availability, or parent fleet/CPU/RSS acceptance. After-case16.7–29.4s native observations do not establish reliable20s PM polling; uncaptured wrapper gaps, runtime mapping and real GitHub/network remain outside the measured exclusive stage timings."
+}

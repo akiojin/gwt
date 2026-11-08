@@ -238,3 +238,71 @@ test("running and error stages expose selectable DOM text without overlay copy s
     "error modal must rely on native selection instead of an overlay copy shim",
   );
 });
+
+test("migration progress batches frames while modal lifecycle and actions stay synchronous", async t => {
+  const { document, modalEl, dialogEl, createNode } = mount();
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const source = readFileSync(resolve(here, '../project-shell-surface.js'), 'utf8')
+    .replace(/from "\/(.*?)"/g, (_, name) => `from "${new URL(`../${name}`, import.meta.url).href}"`);
+  const { createProjectShellSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const sent = [];
+  let renders = 0;
+  const controller = createProjectShellSurface({
+    send: message => {
+      if (message.kind === 'start_migration') {
+        assert.equal(dialogEl.querySelector('button'), null, 'Migrate disappears before send');
+        assert.equal(dialogEl.getAttribute('aria-busy'), 'true');
+      }
+      sent.push(message);
+    },
+    createNode: (...args) => { if (args[0] === 'h2') renders += 1; return createNode(...args); },
+    windowCatalogModel: { subscribeFrame: () => () => {} },
+    migrationModal: modalEl, migrationDialog: dialogEl,
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
+  t.after(() => controller.dispose());
+  const detected = { kind: 'migration_detected', tab_id: 'tab-1', project_root: '/repo' };
+  const progress = percent => ({ kind: 'migration_progress', tab_id: 'tab-1', phase: 'bareify', percent });
+  controller.applyMigrationReceiveEvent(detected);
+  assert.ok(modalEl.classList.contains('open'));
+  dialogEl.querySelector('button').click();
+  assert.deepEqual(sent, [{ kind: 'start_migration', tab_id: 'tab-1' }]);
+  assert.equal(dialogEl.querySelector('button'), null);
+  assert.equal(dialogEl.getAttribute('aria-busy'), 'true');
+  const initialRenders = renders;
+  flush();
+  assert.equal(renders, initialRenders, 'pending frame must not repeat synchronous stage rendering');
+  const before = dialogEl.innerHTML;
+  for (let percent = 1; percent <= 50; percent += 1) controller.applyMigrationReceiveEvent(progress(percent));
+  controller.applyMigrationReceiveEvent({ ...progress(99), tab_id: 'unrelated' });
+  assert.equal(dialogEl.innerHTML, before, 'running progress waits for the frame');
+  assert.equal(frames.size, 1);
+  flush();
+  assert.equal(renders, initialRenders + 1);
+  assert.equal(dialogEl.querySelector('progress').getAttribute('value'), '50');
+  assert.match(dialogEl.textContent, /Building bare repository/);
+  controller.applyMigrationReceiveEvent(progress(60));
+  controller.applyMigrationReceiveEvent({ kind: 'migration_error', tab_id: 'tab-1', message: 'Failure' });
+  assert.match(dialogEl.textContent, /Failure/);
+  const errorRenders = renders;
+  flush();
+  assert.equal(renders, errorRenders);
+  dialogEl.querySelector('button').click();
+  assert.equal(modalEl.classList.contains('open'), false);
+  controller.applyMigrationReceiveEvent(detected);
+  dialogEl.querySelector('button').click();
+  controller.applyMigrationReceiveEvent(progress(70));
+  controller.applyMigrationReceiveEvent({ kind: 'migration_done', tab_id: 'tab-1' });
+  assert.equal(modalEl.classList.contains('open'), false);
+  flush();
+  assert.equal(modalEl.classList.contains('open'), false);
+  controller.applyMigrationReceiveEvent(detected);
+  dialogEl.querySelector('button').click();
+  controller.applyMigrationReceiveEvent(progress(80));
+  controller.dispose();
+  assert.equal(frames.size, 0, 'dispose cancels pending presentation');
+});

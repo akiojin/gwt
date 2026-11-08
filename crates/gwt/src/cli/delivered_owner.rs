@@ -660,6 +660,213 @@ pub fn record_no_action(
     Ok(NoActionOutcome::Recorded(Box::new(audit)))
 }
 
+/// A terminal execution can retain obligations armed after it settled. This
+/// receipt records their non-delivery settlement without changing the ECR,
+/// generation ledger, Session, or historical verification evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredSettlementAudit {
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+    pub session_id: String,
+    pub reason: String,
+    pub predecessor_status: ExecutionControlStatus,
+    pub predecessor_bytes_sha256: String,
+    pub source_base: String,
+    pub head: String,
+    pub upstream_ref: String,
+    pub remote_tip: String,
+    pub owner_updated_at: String,
+    pub recorded_at: DateTime<Utc>,
+    pub content_hash: String,
+}
+
+const DELIVERED_SETTLEMENT_AUDIT_FILE: &str = "execution-delivered-settlement.json";
+
+fn delivered_settlement_hash(audit: &DeliveredSettlementAudit) -> String {
+    let mut probe = audit.clone();
+    probe.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&probe).unwrap_or_default())
+}
+
+pub enum DeliveredSettlementOutcome {
+    Settled(Box<DeliveredSettlementAudit>),
+    Refused(String),
+}
+
+fn git_read(worktree: &Path, args: &[&str]) -> io::Result<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(worktree)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("git {} failed", args.join(" "))));
+    }
+    String::from_utf8(output.stdout)
+        .map(|text| text.trim().to_string())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Read the configured upstream directly. Local tracking refs cannot prove a
+/// push, and no fetch or Git mutation is needed when the remote contains HEAD.
+fn pushed_head(worktree: &Path) -> io::Result<(String, String, String)> {
+    let head = git_read(worktree, &["rev-parse", "HEAD"])?;
+    let branch = git_read(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let remote = git_read(
+        worktree,
+        &["config", "--get", &format!("branch.{branch}.remote")],
+    )?;
+    let merge_ref = git_read(
+        worktree,
+        &["config", "--get", &format!("branch.{branch}.merge")],
+    )?;
+    if remote.is_empty() || remote == "." || !merge_ref.starts_with("refs/heads/") {
+        return Err(io::Error::other("no configured remote upstream"));
+    }
+    let response = git_read(
+        worktree,
+        &["ls-remote", "--exit-code", "--refs", &remote, &merge_ref],
+    )?;
+    let remote_tip = response
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(_, reference)| *reference == merge_ref)
+        .map(|(tip, _)| tip.to_string())
+        .ok_or_else(|| io::Error::other("configured upstream returned no exact tip"))?;
+    if head != remote_tip {
+        git_read(
+            worktree,
+            &["merge-base", "--is-ancestor", &head, &remote_tip],
+        )
+        .map_err(|_| io::Error::other("HEAD is not proven pushed to the configured upstream"))?;
+    }
+    Ok((
+        head,
+        format!("{remote}/{}", merge_ref.trim_start_matches("refs/heads/")),
+        remote_tip,
+    ))
+}
+
+/// Issue #4214 AC-6: settle only the holder's open obligations on an already
+/// delivered terminal owner. Fresh CLOSED and upstream readback are mandatory;
+/// no verification matrix or delivery/completion claim is produced.
+pub fn record_delivered_settlement<E: crate::cli::CliEnv>(
+    env: &mut E,
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+) -> io::Result<DeliveredSettlementOutcome> {
+    use gwt_github::{client::IssueClient, FetchResult, IssueNumber, IssueState};
+
+    let refused = |reason: String| Ok(DeliveredSettlementOutcome::Refused(reason));
+    if reason.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "execution.settle_delivered requires a non-empty params.reason",
+        ));
+    }
+    if crate::cli::trusted_store::trusted_dir_for_worktree(worktree).is_none() {
+        return refused("canonical trusted store is unavailable".to_string());
+    }
+    let Some(record) = crate::cli::execution_state::load(worktree)? else {
+        return refused("no execution control record exists".to_string());
+    };
+    if !crate::cli::execution_state::integrity_ok(&record) {
+        return refused("execution control record failed integrity validation".to_string());
+    }
+    if record.primary_session_id != session_id {
+        return refused("execution control record belongs to another session".to_string());
+    }
+    if record.status == ExecutionControlStatus::Active {
+        return refused("only terminal executions use delivered-owner settlement; use execution.no_action for an active delivered owner".to_string());
+    }
+    let Some(predecessor_bytes) = crate::cli::execution_state::record_contents(worktree)? else {
+        return refused("execution control record bytes are unavailable".to_string());
+    };
+    // An unconditional canonical client read is essential here: a historical
+    // CLOSED cache entry is not authority to discard today's producing work.
+    let snapshot = match env.client().fetch(IssueNumber(record.owner_number), None) {
+        Ok(FetchResult::Updated(snapshot))
+            if snapshot.number.0 == record.owner_number && snapshot.state == IssueState::Closed =>
+        {
+            snapshot
+        }
+        Ok(_) => return refused("owner is not freshly proven CLOSED".to_string()),
+        Err(error) => return refused(format!("owner CLOSED state is unprovable: {error}")),
+    };
+    let source_base = match probe_source_surface(worktree) {
+        SourceSurface::Zero { base } => base,
+        surface => return refused(surface.describe()),
+    };
+    let (head, upstream_ref, remote_tip) = match pushed_head(worktree) {
+        Ok(proof) => proof,
+        Err(error) => return refused(format!("upstream delivery is unprovable: {error}")),
+    };
+    let mut audit = DeliveredSettlementAudit {
+        owner_kind: record.owner_kind,
+        owner_number: record.owner_number,
+        session_id: session_id.to_string(),
+        reason: reason.trim().to_string(),
+        predecessor_status: record.status,
+        predecessor_bytes_sha256: sha256_hex(predecessor_bytes.as_bytes()),
+        source_base,
+        head,
+        upstream_ref,
+        remote_tip,
+        owner_updated_at: snapshot.updated_at.0,
+        recorded_at: Utc::now(),
+        content_hash: String::new(),
+    };
+    audit.content_hash = delivered_settlement_hash(&audit);
+
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        // Detect authority/source changes while the fresh external proofs were
+        // read. Never rewrite the predecessor, even when it is Blocked.
+        if crate::cli::execution_state::record_contents(worktree)?.as_deref()
+            != Some(predecessor_bytes.as_str())
+            || probe_source_surface(worktree)
+                != (SourceSurface::Zero {
+                    base: audit.source_base.clone(),
+                })
+            || git_read(worktree, &["rev-parse", "HEAD"])? != audit.head
+        {
+            return refused(
+                "execution or source changed during delivered-owner inspection".to_string(),
+            );
+        }
+        let state = crate::cli::action_obligation::prepare_delivered_settlement(
+            worktree,
+            session_id,
+            &format!("execution.settle_delivered ({})", audit.reason),
+        )?;
+        if let Some(stored) =
+            crate::cli::trusted_store::read(worktree, DELIVERED_SETTLEMENT_AUDIT_FILE)?
+        {
+            let stored: DeliveredSettlementAudit = serde_json::from_str(&stored)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if stored.content_hash != delivered_settlement_hash(&stored) {
+                return refused(
+                    "delivered-owner settlement audit failed integrity validation".to_string(),
+                );
+            }
+            if stored.predecessor_bytes_sha256 == audit.predecessor_bytes_sha256
+                && stored.session_id == session_id
+            {
+                audit = stored;
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(&audit)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        // Audit first makes an interrupted obligation save retryable. The only
+        // mutable records here are this receipt and the holder's obligations.
+        crate::cli::trusted_store::write(worktree, DELIVERED_SETTLEMENT_AUDIT_FILE, &bytes)?;
+        if let Some(state) = state {
+            crate::cli::action_obligation::save(worktree, &state)?;
+        }
+        Ok(DeliveredSettlementOutcome::Settled(Box::new(audit)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +1069,252 @@ mod tests {
                 .unwrap()
                 .unwrap()
         }
+    }
+
+    fn pushed_fixture() -> NoActionFixture {
+        let fx = fixture();
+        let remote = fx.home.path().join("origin.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "--bare", "-q"]);
+        git(
+            fx.path(),
+            &["remote", "set-url", "origin", remote.to_str().unwrap()],
+        );
+        git(fx.path(), &["push", "-q", "-u", "origin", "HEAD"]);
+        fx
+    }
+
+    fn block(fx: &NoActionFixture) {
+        crate::cli::execution_state::ensure_generation_ledger(
+            fx.path(),
+            crate::cli::execution_state::ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Issue,
+                number: 3290,
+            },
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        settle(
+            fx.path(),
+            "sess-1",
+            ExecutionSettlement::Blocked {
+                reason: "historical runner failure".to_string(),
+                missing_verification: Some("historical verification".to_string()),
+            },
+        )
+        .unwrap();
+        crate::cli::action_obligation::mark_from_prompt(
+            fx.path(),
+            "sess-1",
+            "PRを作成してください",
+        )
+        .unwrap();
+    }
+
+    fn settlement_env(fx: &NoActionFixture, state: gwt_github::IssueState) -> crate::cli::TestEnv {
+        let env = crate::cli::TestEnv::new(fx.path().to_path_buf());
+        env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
+            number: gwt_github::IssueNumber(3290),
+            title: "Delivered owner".to_string(),
+            body: String::new(),
+            labels: vec![],
+            state,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-13T01:00:00Z"),
+            comments: vec![],
+        });
+        env
+    }
+
+    fn settle_command(env: &mut crate::cli::TestEnv) -> i32 {
+        // TestEnv consumes stdin, as a real canonical invocation does.
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "execution.settle_delivered",
+            "params": { "reason": "owner is already delivered" }
+        })
+        .to_string();
+        crate::cli::json_envelope::dispatch(env, "gwtd")
+    }
+
+    #[test]
+    fn settle_delivered_closes_pr_obligation_and_preserves_terminal_history() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fx = pushed_fixture();
+        fx.launch("sess-1");
+        block(&fx);
+        let before = fx.record_bytes();
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3290,
+        };
+        let ledger = crate::cli::execution_state::load_generation_ledger(fx.path(), owner)
+            .unwrap()
+            .unwrap();
+        let ledger_path = crate::cli::trusted_store::trusted_dir_for_worktree(fx.path())
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("execution-owners/owner-3290/generation-ledger.json");
+        let ledger_bytes = std::fs::read(&ledger_path).unwrap();
+        let session_path = fx.home.path().join("sessions/sess-1.toml");
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(&session_path, "historical session bytes").unwrap();
+        crate::cli::trusted_store::write(
+            fx.path(),
+            "verification-run.json",
+            b"historical failed verification",
+        )
+        .unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-1");
+        let mut env = settlement_env(&fx, gwt_github::IssueState::Closed);
+
+        assert_eq!(
+            settle_command(&mut env),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stdout)
+        );
+        assert!(crate::cli::action_obligation::open_kinds(fx.path(), "sess-1").is_empty());
+        assert_eq!(
+            fx.record_bytes(),
+            before,
+            "Blocked history remains byte-identical"
+        );
+        assert_eq!(
+            crate::cli::execution_state::load_generation_ledger(fx.path(), owner)
+                .unwrap()
+                .unwrap(),
+            ledger
+        );
+        assert_eq!(std::fs::read(&ledger_path).unwrap(), ledger_bytes);
+        assert_eq!(
+            std::fs::read_to_string(&session_path).unwrap(),
+            "historical session bytes"
+        );
+        assert_eq!(
+            crate::cli::trusted_store::read(fx.path(), "verification-run.json")
+                .unwrap()
+                .unwrap(),
+            "historical failed verification"
+        );
+        assert!(env.pr_create_call_log.is_empty());
+        assert_eq!(env.client.call_log(), vec!["fetch:#3290"]);
+        let audit =
+            crate::cli::trusted_store::read(fx.path(), "execution-delivered-settlement.json")
+                .unwrap()
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&audit).unwrap();
+        assert_eq!(
+            value["predecessor_bytes_sha256"],
+            sha256_hex(before.as_bytes())
+        );
+        assert_eq!(value["predecessor_status"], "blocked");
+
+        env.stdout.clear();
+        assert_eq!(
+            settle_command(&mut env),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stdout)
+        );
+        assert_eq!(
+            crate::cli::trusted_store::read(fx.path(), "execution-delivered-settlement.json")
+                .unwrap()
+                .unwrap(),
+            audit,
+            "repeat does not rewrite the audit"
+        );
+        assert_eq!(fx.record_bytes(), before);
+    }
+
+    #[test]
+    fn settle_delivered_refuses_open_or_unknown_owner_without_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fx = pushed_fixture();
+        fx.launch("sess-1");
+        block(&fx);
+        let before = fx.record_bytes();
+        let obligations = crate::cli::action_obligation::load(fx.path()).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-1");
+        let mut env = settlement_env(&fx, gwt_github::IssueState::Open);
+        // A historical CLOSED cache entry cannot override today's server state.
+        gwt_github::Cache::new(env.cache_root.clone())
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
+                number: gwt_github::IssueNumber(3290),
+                title: "Cached closed".to_string(),
+                body: String::new(),
+                labels: vec![],
+                state: gwt_github::IssueState::Closed,
+                updated_at: gwt_github::UpdatedAt::new("2026-01-01T00:00:00Z"),
+                comments: vec![],
+            })
+            .unwrap();
+        assert_ne!(settle_command(&mut env), 0);
+        assert_eq!(env.client.call_log(), vec!["fetch:#3290"]);
+        let mut unknown = crate::cli::TestEnv::new(fx.path().to_path_buf());
+        assert_ne!(settle_command(&mut unknown), 0);
+        assert_eq!(fx.record_bytes(), before);
+        assert_eq!(
+            crate::cli::action_obligation::load(fx.path()).unwrap(),
+            obligations
+        );
+        assert!(
+            crate::cli::trusted_store::read(fx.path(), "execution-delivered-settlement.json")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn settle_delivered_refuses_source_foreign_holder_and_unpushed_head() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fx = pushed_fixture();
+        fx.launch("sess-1");
+        block(&fx);
+        let before = fx.record_bytes();
+        let obligations = crate::cli::action_obligation::load(fx.path()).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-1");
+        let mut env = settlement_env(&fx, gwt_github::IssueState::Closed);
+        write_file(fx.path(), "source.rs", "undelivered source");
+        assert_ne!(settle_command(&mut env), 0);
+        std::fs::remove_file(fx.path().join("source.rs")).unwrap();
+        {
+            let _foreign =
+                gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-2");
+            assert_ne!(settle_command(&mut env), 0);
+        }
+        write_file(fx.path(), ".gwt/work/local.txt", "unpushed bookkeeping");
+        git(fx.path(), &["add", ".gwt/work/local.txt"]);
+        git(
+            fx.path(),
+            &["commit", "-q", "-m", "chore(work): local bookkeeping"],
+        );
+        assert!(matches!(
+            probe_source_surface(fx.path()),
+            SourceSurface::Zero { .. }
+        ));
+        assert_ne!(settle_command(&mut env), 0);
+        assert_eq!(fx.record_bytes(), before);
+        assert_eq!(
+            crate::cli::action_obligation::load(fx.path()).unwrap(),
+            obligations
+        );
+        assert!(
+            crate::cli::trusted_store::read(fx.path(), "execution-delivered-settlement.json")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // AC-2 / AS-218: a zero-diff No Action succeeds, is idempotent, and

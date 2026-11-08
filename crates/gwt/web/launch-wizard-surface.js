@@ -15,10 +15,10 @@
 // deps:
 // - createNode(tag, className, textContent): shared DOM helper owned by
 //   app.js (also used by Board / settings surfaces).
-// - closeModal(): closes the Add Window preset modal before the wizard
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
-//   the frontendUnits registry and visibleBounds() stay there).
+//   the frontendUnits registry stays there).
+import { createUiStateStore } from "/ui-state-store.js";
 import { createInteractionGuard } from "/interaction-guard.js";
 import { createFocusTrap } from "/focus-trap.js";
 import {
@@ -32,7 +32,7 @@ import {
 // conversation with input enabled; producing authority is recovered by the
 // backend continuation coordinator, and Work-level Continue work owns
 // successor generations.
-export function launchWizardStartMethodIntent(methodKind) {
+function launchWizardStartMethodIntent(methodKind) {
   switch (methodKind) {
     case "continue_last_session":
     case "open_session_picker":
@@ -46,7 +46,6 @@ export function launchWizardStartMethodIntent(methodKind) {
 
 export function createLaunchWizardSurface({
   createNode,
-  closeModal,
   sendWizardAction,
   requestWorkAdvisory,
 }) {
@@ -68,6 +67,7 @@ export function createLaunchWizardSurface({
       const displayBranchName = (name) =>
         typeof name === "string" ? name.replace(/^origin\//, "") : name;
 
+      const visibilityModel = createUiStateStore({ open: false });
       let launchWizard = null;
       let launchWizardOpenError = null;
       let launchWizardOpening = null;
@@ -123,10 +123,16 @@ export function createLaunchWizardSurface({
               message: deferred.message || "Unable to open Launch Wizard",
             };
           }
+          publishLaunchWizardVisibility();
           renderLaunchWizard();
         },
       });
       let branchCleanupWindowId = null;
+
+      function publishLaunchWizardVisibility() {
+        const open = Boolean(launchWizard || launchWizardOpenError || launchWizardOpening);
+        visibilityModel?.update(state => state.open === open ? state : { open });
+      }
 
       function setLaunchWizardPendingDisabled(root, disabled) {
         if (!disabled) return;
@@ -286,6 +292,7 @@ export function createLaunchWizardSurface({
           const block = createNode("section", "launch-agent-set");
           block.classList.toggle("is-open", isOpen);
           block.dataset.agentId = set.agent_id || "";
+          block.dataset.agentMemberId = set.agent_member_id || "";
           block.setAttribute("aria-label", name);
           const header = createNode("div", "launch-agent-set__header");
           const heading = createNode("div", "launch-agent-set__heading");
@@ -367,7 +374,7 @@ export function createLaunchWizardSurface({
         const note = createNode(
           "div",
           "launch-note launch-agent-sets__order",
-          `Sets launch in this order; the first one starts the next launch. After saving: ${pool.resulting_summary}`,
+          `The first member in the list fixes the launch tool. Only selected members using that tool are tried in order. If none is available, new launches wait; tools never switch automatically. After saving: ${pool.resulting_summary}`,
         );
         note.setAttribute("role", "note");
         parent.appendChild(note);
@@ -595,26 +602,6 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      function appendCheckboxField(
-        parent,
-        label,
-        copy,
-        checked,
-        onChange,
-        wide = false,
-      ) {
-        const field = createLaunchField(label, wide);
-        const checkboxLabel = createNode("label", "launch-inline-check");
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = checked;
-        input.addEventListener("change", () => onChange(input.checked));
-        checkboxLabel.appendChild(input);
-        checkboxLabel.appendChild(createNode("span", "", copy));
-        field.appendChild(checkboxLabel);
-        parent.appendChild(field);
-        return field;
-      }
 
       // SPEC-2014 2026-05-29 amendment — operation-appropriate controls.
       // These delegate to the standalone launch-controls.js builders so the
@@ -929,6 +916,7 @@ export function createLaunchWizardSurface({
         // backend state. Discard (do not replay) the deferred event
         // so we don't undo the user-initiated close.
         wizardInteractionGuard.discard();
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -943,6 +931,7 @@ export function createLaunchWizardSurface({
         launchWizardPendingAction = action || null;
         launchWizardPendingActionDisconnected = false;
         launchWizardPendingActionQueued = false;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -1001,6 +990,7 @@ export function createLaunchWizardSurface({
           meta,
           message,
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -1170,7 +1160,6 @@ export function createLaunchWizardSurface({
         }
 
         syncWizardDraftState();
-        closeModal();
         // Issue #3192 — this derivation runs BEFORE the opening/openError
         // early returns below, so it is reached for generic branch / agent
         // pending states where `launchWizard` is null
@@ -1793,17 +1782,22 @@ export function createLaunchWizardSurface({
               }),
           );
           if (launchWizard.show_agent_settings) {
-            appendChoiceOrSelectField(
-              grid,
-              "Agent",
-              launchWizard.agent_options || [],
-              launchWizard.selected_agent_id,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_agent",
-                  agent_id: value,
-                }),
-            );
+            if (launchWizard.issue_monitor_pool) {
+              const members = [...(launchWizard.agent_member_options || [])];
+              const selected = launchWizard.selected_agent_member_id || "";
+              if (!members.some(member => member.value === selected)) members.push({ value: selected,
+                label: selected ? `${selected} · Unavailable member` : "Select a registered member…" });
+              const memberField = appendSelectField(grid, "Agent", members, selected,
+                value => sendWizardAction({ kind: "set_agent_member", agent_member_id: value }));
+              const explanation = members.find(member => member.value === selected)?.description;
+              if (explanation) memberField.appendChild(createNode("div", "launch-field-help", explanation));
+              const tool = createLaunchField("Tool");
+              tool.appendChild(createNode("div", "launch-note", launchWizard.selected_agent_id || "Unavailable tool"));
+              grid.appendChild(tool);
+            } else {
+              appendChoiceOrSelectField(grid, "Agent", launchWizard.agent_options || [], launchWizard.selected_agent_id,
+                value => sendWizardAction({ kind: "set_agent", agent_id: value }));
+            }
             if (launchWizard.selected_agent_id === "grok") {
               appendTextField(
                 grid,
@@ -2162,6 +2156,7 @@ export function createLaunchWizardSurface({
           launchWizardOpenError = null;
         }
         launchWizard = event.wizard;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
         const nextHolderFingerprint = currentHolderDecision()?.fingerprint || null;
         if (
@@ -2193,6 +2188,7 @@ export function createLaunchWizardSurface({
           title: event.title || "Launch Agent",
           message: event.message || "Unable to open Launch Wizard",
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -2315,6 +2311,7 @@ export function createLaunchWizardSurface({
       }
 
       return {
+        visibilityModel,
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,

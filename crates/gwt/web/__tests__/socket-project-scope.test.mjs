@@ -2,10 +2,25 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { parseHTML } from "linkedom";
 import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
 import { createPmWindowModel } from "../pm-chat.js";
+import { createUiStateStore } from "../ui-state-store.js";
+import { createAgentSwitchModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const boardSource = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
+  .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+const { createBoardLogsSurface } = await import(`data:text/javascript;base64,${Buffer.from(boardSource).toString("base64")}`);
+const profileSource = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8")
+  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(profileSource).toString("base64")}`);
+const indexSource = readFileSync(new URL("../project-index-search-surface.js", import.meta.url), "utf8")
+  .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+const { createProjectIndexSearchSurface } = await import(`data:text/javascript;base64,${Buffer.from(indexSource).toString("base64")}`);
+const knowledgeSource = readFileSync(new URL("../knowledge-kanban-surface.js", import.meta.url), "utf8")
+  .replace(/from "([/.][^"]+)"/g, (_, path) => `from "${new URL(path.replace(/^\//, ""), new URL("../", import.meta.url)).href}"`);
+const { createKnowledgeKanbanSurface } = await import(`data:text/javascript;base64,${Buffer.from(knowledgeSource).toString("base64")}`);
 function functionSource(name) {
   const start = source.indexOf(`      function ${name}(`);
   assert.notEqual(start, -1);
@@ -25,38 +40,82 @@ function fixture({ routeProjectKey = null } = {}) {
   }
   const context = vm.createContext({
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
-    pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
+    pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0, socketInputHandoff: null,
+    startupAutoResumeReadySent: false, startupFrames: [], startupTimers: [],
+    requestAnimationFrame(callback) { context.startupFrames.push(callback); return context.startupFrames.length; },
+    cancelAnimationFrame() {},
+    setTimeout(callback) { context.startupTimers.push(callback); return context.startupTimers.length; },
+    reconnectCallbacks: [], connectionStates: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
-    closeResetCount: 0, notificationResetCount: 0,
-    agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
-    closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
-    projectPageMetadata: { resetConnection() {} },
+    closeResetCount: 0, attentionReportCount: 0,
+    agentCompletionNotifier: { reset() {} },
+    closeProjectController: { connectionLost() { context.closeResetCount += 1; }, reconnect() {} },
+    projectViewReadiness: { connectionLost() {} }, projectExecutionPolicy: { connectionLost() {}, applyStatus() {} },
+    projectPageMetadata: { resetConnection() {}, reportAttention() { context.attentionReportCount += 1; } },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
+    activeWorkspace: () => ({ windows: [{ id: "pane-a" }] }),
+    resyncCalls: [],
+    resyncBoardLogs: (ids) => context.resyncCalls.push(["board-logs", ...ids]),
+    resyncBranches: (ids) => context.resyncCalls.push(["branches", ...ids]),
+    resyncKnowledge: (ids) => context.resyncCalls.push(["knowledge", ...ids]),
+    resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
+    resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
+    resyncSettings: () => {
+      context.resyncCalls.push(["settings"]);
+      context.send({ kind: "get_system_settings" });
+      context.resyncHookDoctor();
+    },
+    hookDoctorResyncs: 0, resyncHookDoctor: () => { context.hookDoctorResyncs++; },
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
-    opened, renderRouteNotFound() { context.notFoundRendered = true; },
+    createUiStateStore,
+    opened, renderRouteNotFound() {
+      assert.equal(context.routeProjectMissing, true);
+      assert.ok(sockets.every(socket => socket.readyState === 3));
+      assert.equal(context.socketInputHandoff, null);
+      assert.equal(context.overlayDisposed, true);
+      context.notFoundRendered = (context.notFoundRendered || 0) + 1;
+    },
     renderAppState(state) { context.appState = context.mergeProjectCatalog(state); context.connectSocket(); },
     window: {
       location: { href: "http://localhost:1234/?token=discard#fragment" },
-      setTimeout: () => 1,
+      setTimeout: (callback) => { context.reconnectCallbacks.push(callback); return context.reconnectCallbacks.length; },
       open: (...args) => { opened.push(args); return null; },
     },
     document: {},
-    droppedInputs: 0, connectionOverlay: { reportInputDropped() { context.droppedInputs += 1; } },
-    clearTimeout() {}, clearPickerPending() {}, setConnectionState() {}, syncRunningBranchCleanups() {},
-    createSocketReceiveDispatcher: ({ receive }) => ({ handle(event) { receive(JSON.parse(event.data)); } }),
+    droppedInputs: 0, connectionOverlay: {
+      reportInputDropped() { context.droppedInputs += 1; },
+      dispose() { context.overlayDisposed = true; },
+    },
+    clearTimeout() {}, clearPickerPending() {},
+    setConnectionState(connected) { context.connectionStates.push(connected); }, syncRunningBranchCleanups() {},
+    dispatcherOptions: [],
+    disposedDispatchers: 0,
+    createSocketReceiveDispatcher: (options) => {
+      context.dispatcherOptions.push(options);
+      return {
+        handle(event) { options.receive(JSON.parse(event.data)); },
+        dispose() { context.disposedDispatchers++; },
+      };
+    },
     received: [], receive(event) { context.received.push(event); },
     uiTraceWiring: { isTracing: () => false }, traceUi() {},
   });
-  for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult"]) {
+  for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult", "sendStartupAutoResumeReady"]) {
     vm.runInContext(functionSource(name), context);
   }
   for (const name of ["mergeProjectCatalog", "receiveHubState", "showProjectRouteNotFound"]) {
     if (source.includes(`function ${name}(`)) vm.runInContext(functionSource(name), context);
   }
+  vm.runInContext(source.slice(source.indexOf('      const projectRouteNotFoundModel ='),
+    source.indexOf('      function showProjectRouteNotFound(')), context);
   // Allow the pre-change implementation to reach behavioral assertions.
   if (source.includes("function activeProjectKey(")) vm.runInContext(functionSource("activeProjectKey"), context);
+  if (source.includes("function requestSocketSnapshots(")) vm.runInContext(functionSource("requestSocketSnapshots"), context);
+  if (source.includes("function resyncSocketSurfaces(")) vm.runInContext(functionSource("resyncSocketSurfaces"), context);
+  if (source.includes("function closeSocketInputHandoff(")) vm.runInContext(functionSource("closeSocketInputHandoff"), context);
+  if (source.includes("function sendOnSocket(")) vm.runInContext(functionSource("sendOnSocket"), context);
   const select = (key) => { context.appState = { active_tab_id: key, tabs: [{ id: key, project_key: key }] }; context.connectSocket(); };
   return { context, sockets, select, opened };
 }
@@ -83,17 +142,17 @@ test("offline input is discarded while queued control messages retain project sc
   select("0123456789abcdef");
   context.send({ kind: "terminal_input", id: "pane-a", data: "a" });
   context.send({ kind: "pane_send_input", session_id: "pane-a", text: "a" });
-  context.send({ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } });
+  context.send({ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 });
   select("fedcba9876543210");
   context.send({ kind: "terminal_input", id: "pane-b", data: "b" });
-  context.send({ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } });
+  context.send({ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 });
   assert.equal(context.droppedInputs, 3, "every discarded input is surfaced immediately");
   assert.equal(sockets.length, 3);
   sockets[2].open();
-  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } }]);
+  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 }, { kind: "get_system_settings" }]);
   select("0123456789abcdef");
   sockets[3].open();
-  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } }]);
+  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 }, { kind: "get_system_settings" }]);
 });
 
 test("Hub socket refuses pane input before project scope is known", () => {
@@ -122,7 +181,7 @@ test("retained Hub processes catalog and navigation without duplicating global e
   assert.deepEqual(context.received.map((event) => event.kind), ["hub_state", "update_state"]);
   context.send({ kind: "reopen_recent_project", path: "/project-b" });
   assert.equal(sockets[0].sent.at(-1).path, "/project-b");
-  assert.equal(sockets[1].sent.length, 1);
+  assert.equal(sockets[1].sent.length, 2);
   select(projectB.project_key);
   assert.equal(sockets[0].readyState, 1);
   assert.equal(sockets[1].readyState, 3);
@@ -152,23 +211,426 @@ test("route-bound Project tab connects its scope from the URL before any catalog
   assert.equal(new URL(sockets[0].url).search, "");
   assert.equal(new URL(sockets[1].url).searchParams.get("repo_hash"), projectB.project_key);
   sockets[1].open();
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }], "full sync is requested on the scoped socket");
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "full sync is requested on the scoped socket");
   context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
   assert.equal(context.activeProjectTab().id, projectB.id, "the catalog entry for the route becomes active");
   assert.equal(sockets.length, 2, "catalog updates never rebind the scope");
 });
 
-test("route-bound Project tab reconnects to the same Project only", () => {
+test("route-bound Project tab reconnects to the same Project only", t => {
+  const { document } = parseHTML('<html><body><div data-id="index"><div id="index-body"></div></div></body></html>');
+  const previous = { document: globalThis.document, CSS: globalThis.CSS };
+  globalThis.document = document;
+  globalThis.CSS = { escape: value => value };
+  const selectPrototype = document.defaultView.HTMLSelectElement.prototype;
+  const previousValue = Object.getOwnPropertyDescriptor(selectPrototype, "value");
+  Object.defineProperty(selectPrototype, "value", { configurable: true,
+    get() { return this.getAttribute("value") || ""; }, set(value) { this.setAttribute("value", value); } });
+  t.after(() => { Object.assign(globalThis, previous); Object.defineProperty(selectPrototype, "value", previousValue); });
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.activeWorkspace = () => ({ windows: [{ id: "board" }, { id: "logs" }, { id: "profile" }, { id: "index" }] });
+  const surface = createBoardLogsSurface({
+    send: event => context.send(event), windowMap: new Map(),
+    activeWorkspace: context.activeWorkspace, activeProjectTab: () => null,
+    projectWindowContextById: () => null, getActiveWorkProjection: () => null,
+  });
+  context.resyncBoardLogs = ids => {
+    context.resyncCalls.push(["board-logs", ...ids]);
+    surface.resyncBoardLogs(ids);
+  };
+  const profile = createProfileWindowSurface({
+    send: event => context.send(event), windowMap: new Map([["profile", {}]]),
+  });
+  context.resyncProfile = ids => {
+    context.resyncCalls.push(["profile", ...ids]);
+    profile.resyncProfile(ids);
+  };
+  const frames = new Set();
+  const index = createProjectIndexSearchSurface({
+    send: event => context.send(event), activeProjectTab: () => ({ project_root: "/repo" }),
+    makeEl: (tag, options = {}) => {
+      const node = document.createElement(tag);
+      node.className = options.className || "";
+      if (options.text) node.textContent = options.text;
+      for (const [key, value] of Object.entries(options.attrs || {})) node.setAttribute(key, value);
+      Object.assign(node.dataset, options.dataset);
+      return node;
+    },
+    clearChildren: node => node.replaceChildren(), requestFullIndexStatusRefresh() {},
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
+  context.resyncProjectIndexSearch = ids => {
+    context.resyncCalls.push(["index", ...ids]);
+    index.resyncProjectIndexSearch(ids);
+  };
+  t.after(() => index.disposeIndexSearchWindow("index"));
+  context.connectSocket();
+  sockets[1].open();
+  index.mountProjectIndexSurface(document.getElementById("index-body"), { id: "index" });
+  const searchState = index.indexSearchStateMap.get("index");
+  searchState.matchMode = "all_terms";
+  searchState.selectedScopes = new Set(["memory"]);
+  const query = document.querySelector(".index-search-input");
+  query.value = "retained query";
+  query.dispatchEvent(new document.defaultView.Event("input"));
+  document.querySelector(".index-search-box").dispatchEvent(new document.defaultView.Event("submit"));
+  const oldSearch = sockets[1].sent.findLast(message => message.kind === "search_project_index");
+  assert.equal(oldSearch.match_mode, "all_terms");
+  assert.deepEqual(oldSearch.scopes, ["memory"]);
+  assert.equal(context.hookDoctorResyncs, 1, "ordinary project connect recovers Hook Doctor requests");
+  const board = surface.ensureBoardState("board");
+  board.composerBody = "Unsent draft";
+  board.pendingSubmit = { body: "Submitted draft", parentId: null, existingEntryIds: new Set() };
+  const logs = surface.ensureLogState("logs");
+  logs.scope = "global";
+  logs.query = "retained filter";
+  const foreign = surface.ensureBoardState("foreign-project");
+  foreign.loading = true;
+  surface.requestBoard("board");
+  surface.requestLogs("logs");
+  const draft = profile.ensureProfileState("profile");
+  draft.draft = { name: "Unsent Profile draft" };
+  draft.saveInFlight = true;
+  draft.saveTimer = 17;
+  profile.requestProfile("profile");
+  profile.requestProfile("foreign-profile");
+  sockets[1].close();
+  assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
+  context.reconnectCallbacks.at(-1)();
+  assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
+  assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
+  sockets.at(-1).open();
+  assert.equal(context.hookDoctorResyncs, 2, "ordinary close/reopen recovers pending Hook Doctor reads");
+  const replacementSearches = sockets.at(-1).sent.filter(message => message.kind === "search_project_index");
+  assert.equal(replacementSearches.length, 1, "ordinary reconnect reissues the interrupted Index search exactly once");
+  const replacementSearch = replacementSearches[0];
+  assert.ok(replacementSearch.request_id > oldSearch.request_id);
+  assert.deepEqual({ ...replacementSearch, request_id: oldSearch.request_id }, oldSearch);
+  index.handleProjectIndexSearchResults({ id: "index", request_id: oldSearch.request_id, results: [{ title: "Stale" }] });
+  assert.equal(index.indexSearchStateMap.get("index").inFlightRequestId, replacementSearch.request_id);
+  index.handleProjectIndexSearchResults({ id: "index", request_id: replacementSearch.request_id, results: [{ title: "Recovered" }] });
+  for (const callback of [...frames]) { frames.delete(callback); callback(); }
+  assert.equal(document.querySelector(".index-search-input"), query);
+  assert.equal(query.value, "retained query");
+  assert.match(document.querySelector(".index-result-list").textContent, /Recovered/);
+  assert.equal(document.querySelector(".index-search-layout").getAttribute("aria-busy"), "false");
+  assert.deepEqual(sockets.at(-1).sent.filter(message => message.kind !== "search_project_index"), [
+    { kind: "frontend_ready" }, { kind: "get_system_settings" },
+    { kind: "load_board", id: "board", all: false },
+    { kind: "load_logs", id: "logs", scope: "global" },
+    { kind: "load_profile", id: "profile" },
+  ], "ordinary reconnect recovers interrupted reads without replaying the pending post");
+  assert.deepEqual(context.resyncCalls, [
+    ["settings"],
+    ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
+    ["settings"],
+    ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
+  ],
+    "ordinary reconnect must recover Settings reads as well as window snapshots");
+  assert.equal(draft.draft.name, "Unsent Profile draft");
+  assert.equal(draft.saveInFlight, true);
+  assert.equal(draft.saveTimer, 17);
+  const count = sockets.at(-1).sent.length;
+  profile.requestProfile("profile");
+  profile.requestProfile("foreign-profile");
+  assert.equal(sockets.at(-1).sent.length, count, "pending own read is deduplicated and foreign read stays fenced");
+  profile.applyProfileReceiveEvent({ kind: "profile_snapshot", id: "profile", snapshot: {} });
+  profile.requestProfile("profile");
+  assert.equal(sockets.at(-1).sent.length, count + 1, "snapshot clears the lost Profile loading state");
+  assert.deepEqual(sockets.at(-1).sent.at(-1), { kind: "load_profile", id: "profile" });
+  assert.equal(board.resetToLatest, true);
+  assert.equal(board.composerBody, "Unsent draft");
+  assert.equal(board.pendingSubmit.body, "Submitted draft");
+  assert.equal(board.pendingSubmit.recovering, true);
+  assert.equal(logs.query, "retained filter");
+  assert.equal(foreign.loading, true, "another project's interrupted read stays fenced");
+  surface.applyBoardLogsReceiveEvent({ kind: "board_entries", id: "board", entries: [], has_more_before: false });
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs", entries: [], scope: "global" });
+  assert.equal(board.loading, false);
+  assert.equal(logs.loading, false);
+  assert.equal(context.attentionReportCount, 2);
+});
+
+test("ordinary socket reconnect recovers only Knowledge reads sent before disconnect", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const windows = [{ id: "knowledge", preset: "issue" }, { id: "offline", preset: "issue" }, { id: "closing", preset: "issue" }];
+  context.activeWorkspace = () => ({ windows });
+  const knowledge = createKnowledgeKanbanSurface({
+    send: event => context.send(event), windowMap: new Map(),
+    workspaceWindowById: id => windows.find(window => window.id === id),
+    getWorkspaceWindows: () => windows, scheduleFrame: run => { run(); return () => {}; },
+  });
+  t.after(() => { for (const id of ["knowledge", "offline", "closing", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
+  Object.assign(context, {
+    handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
+    knowledgeBridgeStateMap: knowledge.knowledgeBridgeStateMap,
+    resyncKnowledge: knowledge.resyncKnowledge,
+    clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
+    handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
+  });
+  context.connectionOverlay.setConnected = () => {};
+  context.document.getElementById = () => null;
+  vm.runInContext(functionSource("setConnectionState"), context);
+  context.connectSocket();
+  sockets[1].open();
+  knowledge.requestKnowledgeBridge("knowledge", "issue");
+  const oldRead = sockets[1].sent.find(message => message.kind === "load_knowledge_bridge");
+  const foreign = knowledge.ensureKnowledgeBridgeState("foreign", "issue");
+  foreign.loading = true;
+  foreign.loadQueued = true;
+  sockets[1].readyState = 2; // CLOSING, before the close callback reports offline
+  knowledge.requestKnowledgeBridge("closing", "issue");
+  const closingRead = context.pendingMessages.find(entry => entry.message.id === "closing").message;
+  sockets[1].close();
+  knowledge.requestKnowledgeBridge("offline", "issue");
+  const queuedRead = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  t.mock.timers.tick(5000);
+  t.mock.timers.tick(56000);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, true,
+    "an offline unsent read retains its owner beyond the response timeout");
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("closing").loading, true,
+    "a CLOSING unsent read also retains its owner until replay");
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  knowledge.requestKnowledgeBridge("closing", "issue", true);
+  assert.equal(context.pendingMessages.length, 2, "Refresh is coalesced into each existing unsent owner");
+  context.reconnectCallbacks.at(-1)(); // reports offline for a second time
+  sockets.at(-1).open();
+  const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
+  assert.equal(reads.filter(message => message.id === "knowledge").length, 1,
+    "normal close/timer/open replaces the interrupted read");
+  assert.ok(reads.find(message => message.id === "knowledge").request_id > oldRead.request_id);
+  assert.deepEqual(reads.filter(message => message.id === "offline"), [queuedRead],
+    "offline first read is flushed once, without a replacement");
+  assert.deepEqual(reads.filter(message => message.id === "closing"), [closingRead],
+    "a CLOSING socket queues the initial read before its close callback, without a replacement");
+  assert.equal(reads.some(message => message.id === "foreign"), false);
+  assert.equal(foreign.loading, true);
+  assert.equal(foreign.loadQueued, true, "another project's queue has not been flushed");
+  for (const read of reads.filter(message => message.id !== "closing")) knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id,
+    request_id: read.request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  const refresh = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline" && message.refresh);
+  assert.equal(refresh.length, 1, "coalesced Refresh starts once after the queued read completes");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: refresh[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("knowledge").loading, false);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, false);
+  sockets.at(-1).close();
+  context.reconnectCallbacks.at(-1)();
+  sockets.at(-1).open();
+  const recovered = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "closing");
+  assert.equal(recovered.length, 1, "the flushed queued read now needs one replacement if its reply is lost");
+  assert.ok(recovered[0].request_id > closingRead.request_id);
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "closing",
+    request_id: recovered[0].request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("closing").loading, false);
+  knowledge.requestKnowledgeBridge("knowledge", "issue");
+  context.connectSocket(true);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "knowledge").length, 1,
+    "forced recovery leaves replacement ownership with the existing full resync");
+  for (const read of sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge")) {
+    knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id, request_id: read.request_id,
+      knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  }
+  sockets.at(-1).close();
+  knowledge.requestKnowledgeBridge("offline", "issue");
+  const forcedQueued = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  const offline = knowledge.knowledgeBridgeStateMap.get("offline");
+  offline.selectedNumber = 50160001;
+  offline.selectionGeneration += 1;
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  const phase = { kind: "update_knowledge_bridge_phase", id: "offline", request_id: 999,
+    issue_number: 50160001, target_phase: "implementation" };
+  context.send(phase);
+  context.send({ kind: "load_knowledge_bridge", id: "foreign", request_id: 998, knowledge_kind: "issue", refresh: false });
+  context.connectSocket(true);
+  sockets.at(-1).open();
+  const forcedReads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline");
+  assert.equal(forcedReads.length, 1, "forced recovery replaces an unsent read instead of replaying it as well");
+  assert.ok(forcedReads[0].request_id > forcedQueued.request_id);
+  assert.equal(forcedReads[0].selected_number, 50160001, "the replacement uses the latest selection");
+  assert.equal(forcedReads[0].refresh, true, "the unsent owner's coalesced Refresh intent survives replacement");
+  const phaseIndex = sockets.at(-1).sent.findIndex(message => message.kind === phase.kind && message.request_id === phase.request_id);
+  assert.notEqual(phaseIndex, -1, "the queued write is retained");
+  assert.ok(phaseIndex < sockets.at(-1).sent.indexOf(forcedReads[0]),
+    "full recovery still reads after queued writes");
+  assert.equal(sockets.at(-1).sent.filter(message => message.id === "foreign").length, 1,
+    "a read outside the current workspace is not silently discarded");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: forcedQueued.request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(offline.loading, true, "the superseded request cannot settle the replacement");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: forcedReads[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(offline.loading, false);
+});
+
+test("receive recovery requests pane and open surface snapshots only on the owning socket", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
   sockets[1].open();
-  sockets[1].close();
-  assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
-  context.connectSocket();
-  assert.equal(context.notificationResetCount, 2, "reconnect discards observed Running duration");
-  assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
+  context.resyncCalls.length = 0;
+  const old = context.dispatcherOptions.at(-1);
+  let recoveryLoads = 0;
+  context.recoveryCenterController = { reconnect() { recoveryLoads++; } };
+  assert.equal(typeof old.onResync, "function", "overflow must have a snapshot recovery callback");
+  old.onResync("overflow");
+  assert.equal(sockets.length, 3, "overflow also fences the native receive backlog");
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
+  assert.equal(sockets[1].readyState, 3, "the input handoff ends when recovery opens");
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  assert.deepEqual(context.resyncCalls, [
+    ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
+    ["profile", "pane-a"],
+    ["index", "pane-a"], ["settings"],
+  ]);
+  assert.equal(recoveryLoads, 1, "a lost Recovery Center read is reissued");
+  sockets.at(-1).close();
+  context.connectSocket();
+  sockets.at(-1).open();
+  old.onResync("visible");
+  assert.equal(sockets.at(-1).sent.length, 2, "a stale dispatcher cannot resync a replacement socket");
+});
+
+test("a terminal receive failure replaces the owning connection and fences its old dispatcher", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const old = context.dispatcherOptions.at(-1);
+  old.onResync("receive-error");
+  assert.equal(sockets.length, 3, "the native backlog cannot follow the failed terminal packet");
+  sockets[2].open();
+  assert.equal(sockets[1].readyState, 3);
+  assert.deepEqual(sockets[2].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  const count = context.received.length;
+  old.receive({ kind: "terminal_output", data_base64: "stale" });
+  old.onResync("receive-error");
+  assert.equal(context.received.length, count);
+  assert.equal(sockets.length, 3);
+});
+
+test("native foreground recovery does not require an observed hidden event", () => {
+  const document = { hidden: false };
+  let resumes = 0;
+  let refreshes = 0;
+  const reconnects = [];
+  const reports = [];
+  const refresh = () => { refreshes++; };
+  const handlerSource = source.split('document.addEventListener("visibilitychange", ')[1].split("\n      });")[0] + "\n}";
+  const context = {
+    document,
+    projectViewReadiness: { visible() {} },
+    socketReceiveDispatcher: { resume() { resumes++; } },
+    socketProjectKey: projectA.project_key,
+    connectSocket: force => reconnects.push(force),
+    requestVisiblePmReports: force => reports.push(force),
+    rearmVisibleTerminalViewportRefreshes: refresh,
+    resumeKnowledgeEventRefresh: refresh, refreshVisibleKnowledgeWindows: refresh,
+  };
+  const handler = vm.runInNewContext(`(${handlerSource})`, context);
+  handler({ isTrusted: true });
+  assert.equal(resumes, 1, "native restore can arrive without a preceding hidden event");
+  handler({ isTrusted: false });
+  assert.equal(resumes, 1, "pane visibility notifications must not reset socket recovery");
+  assert.equal(refreshes, 6, "both visible notifications retain the existing display refreshes");
+  context.socketReceiveDispatcher = null;
+  handler({ isTrusted: true });
+  assert.deepEqual(reconnects, [true], "native restore also fences a replacement that has not opened yet");
+  handler({ isTrusted: false });
+  assert.deepEqual(reconnects, [true], "synthetic visibility cannot replace the pending connection");
+  document.hidden = true;
+  handler({ isTrusted: true });
+  assert.equal(resumes, 1, "backgrounding never requests snapshots");
+  assert.equal(refreshes, 12);
+  assert.deepEqual(reports, [true, true, true, true], "visible restores force Reports; hidden notification does not");
+  assert.deepEqual(reconnects, [true], "backgrounding never replaces the pending connection");
+});
+
+test("window reveal forces only its visible Reports snapshot and preserves terminal activation", () => {
+  const requests = [], sent = [], activated = [];
+  const pm = { id: "pm", is_pm: true };
+  const context = vm.createContext({
+    document: { hidden: false }, socket: { readyState: 1 }, WebSocket: { OPEN: 1 },
+    socketProjectKey: "project", activeProjectKey: () => "project",
+    activeWorkspace: () => ({ windows: [pm, { id: "other", is_pm: true }] }),
+    pmChatViews: new Map([["pm", { logHost: { hidden: true } }], ["other", { logHost: { hidden: true } }]]),
+    visibleWindowData: () => true,
+    requestPmReports: (id, force) => { requests.push([id, force]); return { kind: "load_pm_reports", id }; },
+    send: request => sent.push(request.id),
+    runTerminalRevealActivation: () => { activated.push("terminal"); return {}; },
+    traceUi() {}, UI_TRACE_EVENT: {},
+  });
+  vm.runInContext(functionSource("requestVisiblePmReports") + "\n" + functionSource("activateTerminalOnReveal"), context);
+  context.activateTerminalOnReveal("pm");
+  assert.deepEqual(requests, [["pm", true]]);
+  assert.deepEqual(sent, ["pm"]);
+  assert.deepEqual(activated, ["terminal"]);
+  context.pmChatViews.get("pm").logHost.hidden = false;
+  context.activateTerminalOnReveal("pm");
+  assert.deepEqual(sent, ["pm"], "Execution log keeps its existing hydration path");
+});
+
+test("foreground recovery replaces the native backlog without replaying mutations", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  const oldSocket = sockets[1];
+  oldSocket.open();
+  context.resyncCalls.length = 0;
+  const oldDispatcher = context.dispatcherOptions.at(-1);
+  context.send({ kind: "post_board_entry", id: "pane-a", body: "draft" });
+  const sentBeforeResume = oldSocket.sent.length;
+  oldDispatcher.onResync("visible");
+  assert.equal(sockets.length, 3, "fresh snapshots need a transport without native buffered frames");
+  assert.equal(oldSocket.readyState, 1, "keep the live input path until replacement OPEN");
+  assert.equal(oldSocket.sent.length, sentBeforeResume, "do not append snapshots behind the native backlog");
+  assert.equal(context.disposedDispatchers, 1);
+  assert.equal(context.closeResetCount, 1, "the lost connection invalidates close preview authority");
+  assert.equal(sockets[0].readyState, 0, "the retained catalog connection is untouched");
+  const failedReplacement = sockets.at(-1);
+  assert.equal(new URL(failedReplacement.url).searchParams.get("repo_hash"), projectA.project_key);
+  const input = { kind: "terminal_input", id: "pane-a", data: "x" };
+  const paneInput = { kind: "pane_send_input", session_id: "pane-a", text: "y" };
+  assert.equal(context.send(input), "sent");
+  assert.equal(context.send(paneInput), "sent");
+  assert.deepEqual(oldSocket.sent.slice(-2), [input, paneInput], "input is delivered live, never queued for another prompt");
+  assert.equal(context.pendingMessages.length, 0);
+  oldSocket.handlers.message({ data: JSON.stringify({ kind: "terminal_output", id: "pane-a" }) });
+  oldSocket.handlers.close();
+  assert.deepEqual(context.received, [], "native messages from the old socket stay fenced");
+  assert.equal(context.reconnectTimer, null, "an old close cannot delay the replacement");
+  failedReplacement.close();
+  context.reconnectCallbacks.at(-1)();
+  const replacement = sockets.at(-1);
+  assert.notEqual(replacement, failedReplacement, "retry replaces a connection that failed before OPEN");
+  assert.equal(context.send(input), "sent", "a failed replacement keeps the same live input channel during retry");
+  replacement.open();
+  assert.equal(oldSocket.readyState, 3, "release the old transport after the replacement opens");
+  assert.equal(context.droppedInputs, 0);
+  assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "one full sync and no mutation replay");
+  assert.deepEqual(context.resyncCalls, [
+    ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
+    ["profile", "pane-a"], ["index", "pane-a"], ["settings"],
+  ]);
+  oldDispatcher.onResync("visible");
+  assert.equal(sockets.length, 4, "a stale dispatcher cannot replace the new socket");
+});
+
+test("recovery input handoff closes on a project switch and never crosses scopes", () => {
+  const { context, sockets, select } = fixture();
+  select(projectA.project_key);
+  const old = sockets.at(-1);
+  old.open();
+  context.dispatcherOptions.at(-1).onResync("visible");
+  const pending = sockets.at(-1);
+  select("fedcba9876543210");
+  assert.equal(old.readyState, 3);
+  assert.equal(pending.readyState, 3);
+  const before = old.sent.length;
+  assert.equal(context.send({ kind: "terminal_input", id: "pane-b", data: "x" }), "unavailable");
+  assert.equal(old.sent.length, before, "the former project must never receive the new project's input");
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 
@@ -185,18 +647,91 @@ test("Reports history survives disconnect while the Project reconnects", () => {
   context.connectSocket();
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 test("project not found stops every reconnect for the route", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
-  context.showProjectRouteNotFound();
-  assert.equal(context.notFoundRendered, true);
+  sockets[1].open();
+  context.dispatcherOptions.at(-1).onResync("visible");
+  assert.equal(sockets[1].readyState, 1, "exercise not-found cleanup during the live input handoff");
+  const reconnectCount = context.reconnectCallbacks.length;
+  const connectionStates = [...context.connectionStates];
+  assert.equal(context.notFoundRendered, undefined, "the initial false state must not close the route");
+  vm.runInContext('projectRouteNotFoundModel.update(() => true)', context);
+  assert.equal(context.notFoundRendered, 1);
   assert.ok(sockets.every((socket) => socket.readyState === 3));
+  assert.equal(context.reconnectCallbacks.length, reconnectCount, "terminal close must not reserve reconnects");
+  assert.deepEqual(context.connectionStates, connectionStates, "terminal close must not start an outage overlay");
+  assert.equal(context.reconnectTimer, null);
+  assert.equal(context.hubReconnectTimer, null);
+  vm.runInContext('projectRouteNotFoundModel.update(() => true)', context);
+  assert.equal(context.notFoundRendered, 1, "the same missing state must not rebuild the view");
   const count = sockets.length;
   context.connectSocket();
   assert.equal(sockets.length, count);
+});
+
+test("a queued startup notification ignores a route that became missing", () => {
+  for (const missing of [false, true]) {
+    const queued = [], sent = [];
+    const context = vm.createContext({
+      startupAutoResumeReadySent: false, routeProjectMissing: false, socketReceiveDispatcherGeneration: 1,
+      setTimeout() {}, clearTimeout() {}, cancelAnimationFrame() {},
+      requestAnimationFrame(callback) { queued.push(callback); },
+      send(message) { sent.push(message); },
+    });
+    vm.runInContext(functionSource('sendStartupAutoResumeReady'), context);
+    context.sendStartupAutoResumeReady();
+    context.routeProjectMissing = missing;
+    queued[0]();
+    assert.equal(sent.length, missing ? 0 : 1);
+    if (!missing) assert.equal(sent[0].kind, 'startup_auto_resume_ready');
+  }
+});
+
+test("canvas readiness is sent once on each connection after backend restarts", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket(); sockets[0].open(); sockets[1].open();
+  for (let restart = 0; restart <= 3; restart++) {
+    const connection = sockets.at(-1);
+    const framesBefore = context.startupFrames.length;
+    context.sendStartupAutoResumeReady();
+    context.sendStartupAutoResumeReady();
+    assert.equal(context.startupFrames.length, framesBefore + 1, "each connection needs a fresh readiness callback");
+    context.startupFrames.at(-1)();
+    assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1,
+      `connection ${restart} must release its backend's startup gate exactly once`);
+    if (restart < 3) {
+      connection.close(); context.connectSocket(); sockets.at(-1).open();
+    }
+  }
+});
+
+test("canvas readiness survives suspended frames and discards old connection callbacks", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket(); sockets[0].open(); sockets[1].open();
+  context.sendStartupAutoResumeReady();
+  assert.equal(context.startupTimers.length, 1, "a background tab needs a timer fallback");
+  const oldFrame = context.startupFrames.at(-1), oldTimer = context.startupTimers.at(-1);
+  sockets[1].close(); context.connectSocket(); sockets.at(-1).open();
+  context.sendStartupAutoResumeReady();
+  const connection = sockets.at(-1);
+  oldTimer(); oldFrame();
+  assert.deepEqual(connection.sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "old callbacks cannot release a new backend");
+  context.startupTimers.at(-1)(); // No animation frame runs in the background.
+  context.startupFrames.at(-1)(); // Foregrounding later must not send twice.
+  assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1);
+});
+
+test("a missing route ignores late receive work", () => {
+  const context = vm.createContext({
+    routeProjectMissing: true,
+    closeProjectController: { receive() { assert.fail('a missing route must ignore received work'); } },
+  });
+  vm.runInContext(functionSource('receive'), context);
+  context.receive({ kind: 'workspace_state', workspace: {} });
 });
 
 
@@ -211,6 +746,9 @@ test("aggregate control events bypass held rendering frames and stale sockets st
   old.handlers.message({ data: JSON.stringify(aggregate) });
   assert.equal(context.received.at(-1)?.kind, "project_agent_aggregate");
   assert.equal(held.length, 0, "aggregate must never wait for animation frames");
+  old.handlers.message({ data: JSON.stringify({ kind: "project_notification", notification: { transition_id: "one" } }) });
+  assert.equal(context.received.at(-1)?.kind, "project_notification");
+  assert.equal(held.length, 0, "desktop intent must not wait for animation frames in a hidden tab");
   old.handlers.message({ data: JSON.stringify({ kind: "workspace_state" }) });
   assert.equal(held.length, 1, "normal render scheduling must remain unchanged");
   old.close();
@@ -228,7 +766,69 @@ test("offline acknowledgement is ephemeral and never replays against a fresh con
   sockets[1].open();
   sockets[1].close();
   assert.equal(context.send({ kind: "project_aggregate_ack", revision: 99, visible: true, focused: true }), "unavailable");
+  assert.equal(context.send({ kind: "project_client_attention", visible: true, focused: true, notification_permission: "granted" }), "unavailable");
+  assert.equal(context.pendingMessages.length, 0, "stale attention must never replay after reconnect");
   context.connectSocket();
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+});
+
+
+test("switch mutations never queue or replay, and a closed-socket race retains an unknown operation", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const switching = createAgentSwitchModel(projectA.project_key);
+  Object.assign(context, switching);
+  vm.runInContext(functionSource("requestAgentSwitch"), context);
+  context.connectSocket(); sockets[1].open(); sockets[1].close();
+  const action = { kind: "request", operation_id: "operation-one", member_id: "member", expected_roster_revision: 3, target_issue_number: 42 };
+  context.requestAgentSwitch(action);
+  assert.equal(context.pendingMessages.length, 0, "an offline switch must not execute on the next Host");
+  assert.deepEqual(switching.model.read().pending, action);
+  assert.equal(switching.model.read().disconnected, true);
+  assert.equal(context.send({ kind: "agent_switch", action: { kind: "cancel", operation_id: action.operation_id } }), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket(); sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  sockets.at(-1).send = () => { throw new Error("connection closed during send"); };
+  assert.doesNotThrow(() => assert.equal(context.send({ kind: "agent_switch", action }), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0);
+});
+
+
+test("Hook Doctor repair uses only the current live socket and never queues a replay", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const repair = { kind: "get_hook_doctor", request_id: 1, repair: true };
+  assert.equal(context.send(repair), "sent");
+  assert.deepEqual(sockets[1].sent.at(-1), repair, "a live explicit repair is allowed");
+  sockets[1].close();
+  assert.equal(context.send(repair), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket();
+  sockets.at(-1).open();
+  assert.ok(sockets.at(-1).sent.every(message => message.kind !== "get_hook_doctor" || message.repair !== true));
+  context.socketProjectKey = projectB.project_key;
+  assert.equal(context.send(repair), "unavailable", "repair cannot use another project's socket");
+  context.socketProjectKey = projectA.project_key;
+  sockets.at(-1).send = () => { throw new Error("connection closed during repair send"); };
+  assert.doesNotThrow(() => assert.equal(context.send(repair), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0, "a failed send is never retried after reconnect");
+});
+
+test("first project connection reads saved Works settings without a Settings host", () => {
+  const { sockets, select } = fixture();
+  select("0123456789abcdef"); sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "get_system_settings").length, 1);
+});
+
+
+test("close choices and view receipts belong to their exact live connection and never queue", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key }); context.connectSocket();
+  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready']) {
+    assert.equal(context.send({ kind }), 'unavailable');
+  }
+  assert.deepEqual(context.pendingMessages, []);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready/.test(event.kind)), false);
 });

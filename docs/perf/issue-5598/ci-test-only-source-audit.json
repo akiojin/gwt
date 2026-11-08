@@ -1,0 +1,31 @@
+{
+  "reference_commit": "d834b8325c4df105d092dca3c1f88ccea868b9ea",
+  "reason": "CI-only follow-up: relocate the provided-input regression below the existing CLI line budget and recover poisoned test env locks. All edits are inside existing cfg(test) modules. Original measurement artifacts and hashes remain unchanged.",
+  "boundary": "Normalized source before the final cfg(test) module is identical; this is a runtime-equivalence audit, not a new latency measurement.",
+  "files": [
+    {
+      "path": "crates/gwt/src/cli.rs",
+      "reference_git_source_sha256": "12dc81d7b8f638acc550eb8c8813a74d870194c0671bae3766a51ba3df7a2358",
+      "measured_windows_source_sha256": "603c0ee7db10d00950eee0470736d5492fa7b1e521cefb69de0003684407d138",
+      "current_source_sha256": "f96ecfdd0a7bb9c8e335c8504c3ab7106361daf192c93417401005f9f226766c",
+      "normalized_production_prefix_sha256": "f47f7b2e5899e00a2eb3351346a6b8b0c1bd1f9c2773c6881e3a1a78f92c9994",
+      "production_prefix_unchanged": true
+    },
+    {
+      "path": "crates/gwt/src/bin/gwtd.rs",
+      "reference_git_source_sha256": "68d0c09e8191fd49c5e944f880242c0a5587cb7486eb4870f8ff25d91f0eee91",
+      "measured_windows_source_sha256": "c3bf7f14b1470062b231e2c4af64e088159e7c6179b91f36e49411e7c579e638",
+      "current_source_sha256": "747eeb3ca2b169a6528607d87c16d17ba2187737cc41c44ffb6d740ae3de5c33",
+      "normalized_production_prefix_sha256": "efafe0630d5fa7c196e8d82b032e8d09702c3a035812124a045e18fe256ad0c1",
+      "production_prefix_unchanged": true
+    },
+    {
+      "path": "crates/gwt/src/cli/json_envelope.rs",
+      "reference_git_source_sha256": "5eeca733af40c7cd8030907e8f3b596375fbec1d12ff3e72217cc20467a21fff",
+      "measured_windows_source_sha256": null,
+      "current_source_sha256": "0819c15e8d602cfe68701992aca650d1015f9579e477b7b978119d1378fc1c67",
+      "normalized_production_prefix_sha256": "2503595813fb73cd1e51f132c5c10e2ab2b4c2b7103b2d7cef1abece53bf1378",
+      "production_prefix_unchanged": true
+    }
+  ]
+}

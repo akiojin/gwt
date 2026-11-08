@@ -1,0 +1,67 @@
+{
+  "command": [
+    "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\venvs\\chroma-venv-eac269738a090205\\Scripts\\python.exe",
+    "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\runners\\chroma_index_runner-04eaf92932fa8080.py",
+    "--action",
+    "index-issues",
+    "--repo-hash",
+    "99a8660247f5bc49",
+    "--project-root",
+    "E:\\gwt\\work\\issue-5598",
+    "--mode",
+    "incremental",
+    "--respect-ttl",
+    "--qos",
+    "interactive"
+  ],
+  "boundary": "Native canonical incremental respect-TTL refresh; no hand-edited health metadata or source",
+  "before_meta": {
+    "schema_version": 1,
+    "mode": "incremental",
+    "last_full_refresh": "2026-10-16T03:25:26.544786+00:00",
+    "ttl_minutes": 15,
+    "document_count": 1622,
+    "source_cache_fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3",
+    "source_document_count": 1622,
+    "source_cache_refresh_at": "2026-10-16T02:52:31.476200300+00:00"
+  },
+  "result": {
+    "wall_ms": 23413.789799999904,
+    "exit_code": 1,
+    "stdout": "{\"ok\": false, \"scope\": \"issues\", \"error_code\": \"PUBLISH_FAILED\", \"error\": \"issues rebuild failed: PUBLISH_FAILED (1622/1622)\", \"repair\": {\"schema_version\": 1, \"fingerprint\": \"252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3\", \"failures\": 1, \"last_error\": \"PUBLISH_FAILED\", \"actual_document_count\": 1622, \"expected_document_count\": 1622, \"mode\": \"incremental\"}, \"mode\": \"incremental\"}",
+    "stderr": "{\"phase\": \"indexing\", \"scope\": \"issues\", \"mode\": \"incremental\", \"done\": 0, \"total\": 0}\n",
+    "timed_out": false,
+    "output": {
+      "ok": false,
+      "scope": "issues",
+      "error_code": "PUBLISH_FAILED",
+      "error": "issues rebuild failed: PUBLISH_FAILED (1622/1622)",
+      "repair": {
+        "schema_version": 1,
+        "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3",
+        "failures": 1,
+        "last_error": "PUBLISH_FAILED",
+        "actual_document_count": 1622,
+        "expected_document_count": 1622,
+        "mode": "incremental"
+      },
+      "mode": "incremental"
+    }
+  },
+  "after_meta": {
+    "schema_version": 1,
+    "mode": "incremental",
+    "last_full_refresh": "2026-10-16T03:25:26.544786+00:00",
+    "ttl_minutes": 15,
+    "document_count": 1622,
+    "source_cache_fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3",
+    "source_document_count": 1622,
+    "source_cache_refresh_at": "2026-10-16T02:52:31.476200300+00:00"
+  },
+  "source_fingerprint_unchanged": true,
+  "runtime_runner": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\runners\\chroma_index_runner-04eaf92932fa8080.py",
+    "bytes": 394145,
+    "sha256": "04eaf92932fa8080a40e1696ec647a612b3dd07d990439e8d5a28af76b47aaec"
+  }
+}

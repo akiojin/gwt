@@ -187,6 +187,7 @@ pub(crate) struct RecoveryDeliveryAuthority {
     authority: RecoveryAuthority,
     author: String,
     agent_id: String,
+    agent_name: Option<String>,
     origin_branch: Option<String>,
     worktree_form: BoardWorktreeForm,
 }
@@ -197,6 +198,7 @@ impl RecoveryDeliveryAuthority {
         session_id: impl Into<String>,
         author: impl Into<String>,
         agent_id: impl Into<String>,
+        agent_name: Option<String>,
         origin_branch: Option<String>,
         worktree_form: BoardWorktreeForm,
     ) -> Result<Self, RecoveryError> {
@@ -204,6 +206,7 @@ impl RecoveryDeliveryAuthority {
             authority: RecoveryAuthority::new(project_id, session_id)?,
             author: author.into(),
             agent_id: agent_id.into(),
+            agent_name,
             origin_branch,
             worktree_form,
         })
@@ -287,6 +290,7 @@ pub(crate) fn resolve_delivery_authority(
         session.id,
         session.display_name,
         session.agent_id.command(),
+        session.agent_name,
         origin_branch,
         worktree_form,
     )
@@ -406,7 +410,7 @@ where
             )
         }
     };
-    let intent = match RecoveryIntent::new(
+    let mut intent = match RecoveryIntent::new(
         recovery_id.clone(),
         provider_kind,
         authority.worktree_form,
@@ -428,6 +432,25 @@ where
         Ok(store) => store,
         Err(_) => return RecoveryDeliveryReport::refused(provider_kind, "store_unavailable", true),
     };
+    // A replay retains its immutable authorship snapshot across name backfill.
+    // All other caller payload fields still participate in conflict detection.
+    if let Some(previous) = match store.get(&recovery_id) {
+        Ok(previous) => previous,
+        Err(_) => return RecoveryDeliveryReport::refused(provider_kind, "store_unavailable", true),
+    } {
+        intent.entry.origin_agent_name = previous.intent.entry.origin_agent_name;
+        intent.payload_digest =
+            match gwt_core::coordination::board_entry_payload_digest(&intent.entry) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return RecoveryDeliveryReport::refused(
+                        provider_kind,
+                        "unsafe_or_invalid_payload",
+                        false,
+                    )
+                }
+            };
+    }
     match store.prepare(&prepare_operation, intent) {
         Ok(_) => {}
         Err(RecoveryError::OperationConflict | RecoveryError::AlreadyExists) => {
@@ -850,6 +873,7 @@ fn canonical_entry(
         authority.authority.session_id.clone(),
         redact(&authority.agent_id),
     )
+    .with_agent_name(authority.agent_name.as_deref().map(redact))
     .with_worktree_form(authority.worktree_form)
     .with_recovery_id(recovery_id);
     let mut entry = draft.finalize().map_err(|_| ())?;

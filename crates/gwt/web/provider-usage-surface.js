@@ -35,6 +35,7 @@ export function createProviderUsageSurface({
         weekly: "Weekly",
         opus_weekly: "Opus weekly",
         sonnet_weekly: "Sonnet weekly",
+        fable_weekly: "Fable weekly",
         code_review_weekly: "Code review weekly",
       };
 
@@ -99,12 +100,6 @@ export function createProviderUsageSurface({
         }
       }
 
-      function usageFmtResetAt(iso) {
-        if (!iso) return "";
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return "";
-        return d.toLocaleString();
-      }
 
       function usageFmtTokens(n) {
         if (n == null) return "—";
@@ -139,78 +134,12 @@ export function createProviderUsageSurface({
         return wrap;
       }
 
-      function renderUsageAccountRow(account) {
-        const row = document.createElement("div");
-        row.className = "op-usage-account";
-        row.dataset.provider = account.provider;
-        const head = document.createElement("div");
-        head.className = "op-usage-account__head";
-        const name = document.createElement("span");
-        name.className = "op-usage-account__name";
-        name.textContent = USAGE_PROVIDER_NAME[account.provider] || account.provider;
-        head.appendChild(name);
-        if (account.plan) {
-          const plan = document.createElement("span");
-          plan.className = "op-usage-account__plan";
-          plan.textContent = account.plan;
-          head.appendChild(plan);
-        }
-        const reason = usageStateReason(account.state);
-        if (reason) {
-          const isDisabled = (account.state && account.state.kind) === "disabled";
-          const r = document.createElement(isDisabled ? "button" : "span");
-          r.className = "op-usage-account__reason";
-          r.textContent = reason;
-          if (isDisabled) {
-            r.type = "button";
-            r.classList.add("op-usage-account__reason--action");
-            r.addEventListener("click", (e) => {
-              e.stopPropagation();
-              if (typeof window.__gwtHideUsageHover === "function") {
-                window.__gwtHideUsageHover();
-              }
-              document.dispatchEvent(
-                new CustomEvent("settings:open", { detail: { target: "usage" } }),
-              );
-            });
-          }
-          head.appendChild(r);
-        }
-        row.appendChild(head);
-        for (const w of account.windows || []) {
-          const line = document.createElement("div");
-          line.className = "op-usage-window";
-          const label = document.createElement("span");
-          label.className = "op-usage-window__label";
-          applyUsageWindowLabel(label, w);
-          const pct = document.createElement("span");
-          pct.className = "op-usage-window__pct";
-          pct.textContent = `${Math.round(w.used_percent)}%`;
-          line.appendChild(label);
-          line.appendChild(buildUsageBar(w.used_percent, account.limit_reached));
-          line.appendChild(pct);
-          if (w.resets_at) {
-            const reset = document.createElement("span");
-            reset.className = "op-usage-window__reset";
-            reset.textContent = `↻ ${usageFmtResetAt(w.resets_at)}`;
-            line.appendChild(reset);
-          }
-          row.appendChild(line);
-        }
-        return row;
-      }
 
       function consumptionTotal(b) {
         if (!b) return 0;
         return (b.input || 0) + (b.output || 0) + (b.cached || 0);
       }
 
-      function fmtConsumptionBreakdown(b) {
-        if (!b) return "—";
-        return `in ${usageFmtTokens(b.input || 0)} · out ${usageFmtTokens(
-          b.output || 0,
-        )} · cached ${usageFmtTokens(b.cached || 0)}`;
-      }
 
       function renderConsumptionChart(days) {
         const chart = document.createElement("div");
@@ -269,6 +198,31 @@ export function createProviderUsageSurface({
         row.appendChild(bar);
         row.appendChild(pct);
         row.appendChild(reset);
+        return row;
+      }
+
+      function buildUsageCreditsRow(extra) {
+        const row = document.createElement("div");
+        row.className = "op-usage-win";
+        row.dataset.usageCredits = "true";
+        const label = document.createElement("span");
+        label.className = "op-usage-win__lbl";
+        label.textContent = "Usage credits";
+        const hasUtilization = Number.isFinite(extra.utilization);
+        const bar = hasUtilization
+          ? buildUsageBar(extra.utilization)
+          : document.createElement("span");
+        bar.classList.add("op-usage-win__bar");
+        const percent = document.createElement("span");
+        percent.className = "op-usage-win__pct";
+        percent.textContent = hasUtilization ? `${Math.round(extra.utilization)}%` : "—";
+        const amount = document.createElement("span");
+        amount.className = "op-usage-win__reset";
+        const values = [extra.used_credits, extra.monthly_limit]
+          .map(value => Number.isFinite(value) ? String(value) : "—")
+          .join(" / ");
+        amount.textContent = extra.currency ? `${values} ${extra.currency}` : values;
+        row.append(label, bar, percent, amount);
         return row;
       }
 
@@ -511,6 +465,10 @@ export function createProviderUsageSurface({
           }
         }
 
+        if (account.provider === "claude_code" && account.extra_usage?.is_enabled === true) {
+          card.appendChild(buildUsageCreditsRow(account.extra_usage));
+        }
+
         const pc = usageConsumptionFor(account.provider);
         if (pc) {
           const cwrap = document.createElement("div");
@@ -696,7 +654,7 @@ export function createProviderUsageSurface({
         panel.appendChild(section);
         let initialRender = true;
         let unsubscribe;
-        unsubscribe = usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        unsubscribe = usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
           if (!initialRender && !checkbox.isConnected) {
             unsubscribe?.();
             usagePanelSubscriptions.delete(panel);
@@ -711,7 +669,7 @@ export function createProviderUsageSurface({
 
       // These views live for the factory's lifetime, like its window hover
       // hooks. The receive API updates data without choosing which view renders.
-      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         try {
           window.__operatorShell?.applyProviderUsage?.(snapshot);
@@ -719,7 +677,7 @@ export function createProviderUsageSurface({
           console.warn("usage pill update failed", e);
         }
       });
-      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         try {
           refreshUsageHoverIfOpen();
@@ -727,7 +685,7 @@ export function createProviderUsageSurface({
           /* no-op */
         }
       });
-      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         // Empty sessions must clear stale token/context values in Workspace.
         try {

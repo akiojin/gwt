@@ -73,11 +73,14 @@ pub(crate) enum HookAgentSessionId {
 #[serde(from = "RawHookEventWire")]
 pub(crate) struct RawHookEvent {
     tool_name: Option<String>,
+    tool_use_id: Option<String>,
     tool_input: Option<serde_json::Value>,
     session_id: Option<String>,
     transcript_path: Option<String>,
     prompt: Option<String>,
     cwd: Option<String>,
+    active_skill: Option<String>,
+    active_plugin: Option<String>,
 }
 
 /// Wire shape that accepts each field under its snake_case and camelCase
@@ -90,6 +93,9 @@ struct RawHookEventWire {
     tool_name: Option<String>,
     #[serde(rename = "toolName")]
     tool_name_camel: Option<String>,
+    tool_use_id: Option<String>,
+    #[serde(rename = "toolUseId")]
+    tool_use_id_camel: Option<String>,
     tool_input: Option<serde_json::Value>,
     #[serde(rename = "toolInput")]
     tool_input_camel: Option<serde_json::Value>,
@@ -101,19 +107,39 @@ struct RawHookEventWire {
     transcript_path_camel: Option<String>,
     prompt: Option<String>,
     cwd: Option<String>,
+    // Advisory metadata is optional even when a provider cannot describe it.
+    active_skill: Option<serde_json::Value>,
+    #[serde(rename = "activeSkill")]
+    active_skill_camel: Option<serde_json::Value>,
+    active_plugin: Option<serde_json::Value>,
+    #[serde(rename = "activePlugin")]
+    active_plugin_camel: Option<serde_json::Value>,
 }
 
 impl From<RawHookEventWire> for RawHookEvent {
     fn from(wire: RawHookEventWire) -> Self {
         Self {
             tool_name: wire.tool_name.or(wire.tool_name_camel),
+            tool_use_id: wire.tool_use_id.or(wire.tool_use_id_camel),
             tool_input: wire.tool_input.or(wire.tool_input_camel),
             session_id: wire.session_id.or(wire.session_id_camel),
             transcript_path: wire.transcript_path.or(wire.transcript_path_camel),
             prompt: wire.prompt,
             cwd: wire.cwd,
+            active_skill: advisory_string(wire.active_skill.or(wire.active_skill_camel)),
+            active_plugin: advisory_string(wire.active_plugin.or(wire.active_plugin_camel)),
         }
     }
+}
+
+fn advisory_string(value: Option<serde_json::Value>) -> Option<String> {
+    value.and_then(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 impl RawHookEvent {
@@ -132,6 +158,13 @@ impl RawHookEvent {
         self.tool_name.as_deref()
     }
 
+    pub(crate) fn tool_use_id(&self) -> Option<&str> {
+        self.tool_use_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
     pub(crate) fn prompt(&self) -> Option<&str> {
         self.prompt.as_deref()
     }
@@ -148,6 +181,8 @@ impl From<RawHookEvent> for HookEvent {
             tool_input: raw.tool_input,
             transcript_path: raw.transcript_path,
             cwd: raw.cwd,
+            active_skill: raw.active_skill,
+            active_plugin: raw.active_plugin,
         }
     }
 }
@@ -234,11 +269,14 @@ mod tests {
     fn raw_event(session_id: &str) -> RawHookEvent {
         RawHookEvent {
             tool_name: None,
+            tool_use_id: None,
             tool_input: None,
             session_id: Some(session_id.to_string()),
             transcript_path: None,
             prompt: None,
             cwd: None,
+            active_skill: None,
+            active_plugin: None,
         }
     }
 
@@ -342,6 +380,7 @@ mod tests {
             r#"{
                 "sessionId":"grok-session",
                 "toolName":"ask_user_question",
+                "toolUseId":"grok-tool-call",
                 "toolInput":{"question":"Continue?"},
                 "transcriptPath":"/tmp/grok-transcript.jsonl",
                 "cwd":"/tmp/worktree"
@@ -355,6 +394,7 @@ mod tests {
             Some("grok-session")
         );
         assert_eq!(raw.tool_name(), Some("ask_user_question"));
+        assert_eq!(raw.tool_use_id(), Some("grok-tool-call"));
         assert_eq!(raw.cwd(), Some("/tmp/worktree"));
         let canonical = HookEvent::from(raw);
         assert_eq!(
