@@ -56,6 +56,36 @@ test.describe.serial("Release Notes window (live backend)", () => {
   test("clicking #app-version opens the Release Notes window with the label target focused", async ({
     page,
   }, info) => {
+    const reads: Array<{ id: string; focus_version: string }> = [];
+    let connections = 0;
+    let droppedReplyId: string | null = null;
+    await page.routeWebSocket(/\/ws\?.*repo_hash=/, socket => {
+      connections++;
+      const server = socket.connectToServer();
+      socket.onMessage(message => {
+        const request = typeof message === "string" ? JSON.parse(message) : null;
+        if (request?.kind === "open_release_notes") reads.push(request);
+        server.send(message);
+      });
+      server.onMessage(message => {
+        const reply = typeof message === "string" ? JSON.parse(message) : null;
+        if (reply?.kind === "release_notes_payload" && droppedReplyId === null) {
+          droppedReplyId = reply.id;
+          return;
+        }
+        socket.send(message);
+      });
+    });
+    const closeProjectSocket = () => page.evaluate(() => {
+      const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!socket) throw new Error("owning project socket is missing");
+      socket.close();
+    });
+    // Install interception before this document creates its owning socket.
+    await page.reload();
+    await injectReleaseNotesWorkspace(page, CURRENT_VERSION);
+    await expect.poll(() => connections).toBe(1);
     const label = page.locator("#app-version");
     await expect(label).toBeVisible();
     const labelText = (await label.textContent())?.trim() ?? "";
@@ -67,6 +97,13 @@ test.describe.serial("Release Notes window (live backend)", () => {
     expect(expectedVersion).toMatch(/^\d+\.\d+\.\d+$/);
 
     await label.click();
+    await expect.poll(() => droppedReplyId).not.toBeNull();
+    expect(reads).toHaveLength(1);
+    await expect(page.locator("#release-notes-window")).toHaveCount(0);
+    await closeProjectSocket();
+    await expect.poll(() => reads.length, { timeout: 20_000 }).toBe(2);
+    expect(reads[1].id).not.toBe(reads[0].id);
+    expect(reads[1].focus_version).toBe(expectedVersion);
 
     const window = page.locator("#release-notes-window");
     await expect(window).toBeVisible({
@@ -88,6 +125,10 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(
       window.locator(".release-notes-content h2"),
     ).toHaveText(`v${expectedVersion}`);
+    expect(reads).toHaveLength(2);
+    await info.attach("Release Notes lost-reply recovery", {
+      body: JSON.stringify({ reads, droppedReplyId, connections }), contentType: "application/json",
+    });
     await page.screenshot({ path: info.outputPath("release-notes.png") });
   });
 

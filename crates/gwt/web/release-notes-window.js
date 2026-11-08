@@ -16,11 +16,12 @@ import { createUiStateStore } from "./ui-state-store.js";
 
 const CHANGELOG_URL =
   "https://github.com/akiojin/gwt/blob/main/CHANGELOG.md";
+let releaseNotesRequestSequence = 0;
 
 export function createReleaseNotesWindow({
   document,
   send = () => {},
-  generateId = () => `release-notes-${Date.now()}`,
+  generateId = () => `release-notes-${Date.now()}-${++releaseNotesRequestSequence}`,
   // SPEC #2780 v2 Amendment (FR-014, Codex review on PR #2917): the update
   // CTA modal must be in `downloading` state before `apply_update_to_version`
   // fires, otherwise UpdateProgress / UpdateReady events arriving from the
@@ -49,6 +50,8 @@ export function createReleaseNotesWindow({
     keydownHandler: null,
     pendingFocusVersion: null,
     lastRequestId: null,
+    requestPending: false,
+    requestQueued: false,
     confirmModal: null,
     mode: "release_notes",
     titleEl: null,
@@ -487,22 +490,37 @@ export function createReleaseNotesWindow({
     requestReleaseNotes(focusVersion);
   }
 
-  function requestReleaseNotes(focusVersion = null) {
+  function requestReleaseNotes(focusVersion = null, retry = false) {
     state.pendingFocusVersion = focusVersion;
-    state.focusReturn = document.activeElement;
+    if (!retry) state.focusReturn = document.activeElement;
     const id = generateId();
     state.lastRequestId = id;
-    send({
+    state.requestPending = true;
+    state.requestQueued = send({
       kind: "open_release_notes",
       id,
       focus_version: focusVersion || null,
-    });
+    }) === "queued";
+  }
+
+  function reconnect(replayedRequestId = null) {
+    if (!state.requestPending) return;
+    if (state.requestQueued) {
+      // Only the actual replay can promote a queued read to a sent owner.
+      if (replayedRequestId === state.lastRequestId) state.requestQueued = false;
+      return;
+    }
+    requestReleaseNotes(state.pendingFocusVersion, true);
   }
 
   function handlePayload(payload) {
     if (!payload || !Array.isArray(payload.entries)) {
       return;
     }
+    if (payload.id && state.lastRequestId
+      && (!state.requestPending || payload.id !== state.lastRequestId)) return;
+    state.requestPending = false;
+    state.requestQueued = false;
     // SPEC #2780 v2 Amendment (FR-013): payload now carries the running
     // version so the Update action button can pick the right label.
     const currentVersion =
@@ -528,7 +546,11 @@ export function createReleaseNotesWindow({
     state.pendingFocusVersion = null;
   }
 
-  function handleError(message) {
+  function handleError(message, id = null) {
+    if (id && state.lastRequestId
+      && (!state.requestPending || id !== state.lastRequestId)) return;
+    state.requestPending = false;
+    state.requestQueued = false;
     model.update(current => ({
       ...current,
       entries: [],
@@ -539,6 +561,8 @@ export function createReleaseNotesWindow({
   }
 
   function close() {
+    state.requestPending = false;
+    state.requestQueued = false;
     model.update(current => ({ ...current, visible: false }));
     dismissDowngradeConfirm();
     if (state.keydownHandler) {
@@ -575,6 +599,7 @@ export function createReleaseNotesWindow({
   return {
     open,
     openAbout,
+    reconnect,
     handlePayload,
     handleError,
     close,

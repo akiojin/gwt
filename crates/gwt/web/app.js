@@ -1280,6 +1280,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (socket?.readyState !== WebSocket.OPEN) return;
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
+        releaseNotesWindow.reconnect();
         resyncSocketSurfaces();
         if (socketProjectKey) requestVisiblePmReports(true);
       }
@@ -1331,6 +1332,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
         recoveryCenterController?.reconnect();
+        let replayedReleaseNotesId = null;
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1344,6 +1346,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               && (activeWorkspace()?.windows || []).some(entry => entry.id === pending.message.id)) continue;
           }
           socket.send(JSON.stringify(pending.message));
+          if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
         }
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -1357,6 +1360,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           resyncProfile(ids);
           resyncProjectIndexSearch(ids);
         }
+        releaseNotesWindow.reconnect(replayedReleaseNotesId);
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -5079,7 +5083,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyReleaseNotesPayload(event);
             break;
           case "release_notes_error":
-            applyReleaseNotesError(event.message);
+            applyReleaseNotesError(event.message, event.id);
             break;
           case "active_work_projection":
           case "active_work_projection_patch":

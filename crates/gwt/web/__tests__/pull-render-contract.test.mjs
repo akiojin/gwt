@@ -851,7 +851,7 @@ test("Release notes receivers resolve only shared model updates", () => {
   assert.deepEqual(receivers(app), []);
   for (const name of ['handlePayload', 'handleError']) {
     assert.deepEqual(scanModule(surface, surfaceFile, { rootName: name }), []);
-    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message) {',
+    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message, id = null) {',
         `function ${name}(${name === 'handlePayload' ? 'payload' : 'message'}) { renderSidebar(model.read());`);
     assert.notEqual(bypass, surface);
     assert.ok(scanModule(bypass, surfaceFile, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
