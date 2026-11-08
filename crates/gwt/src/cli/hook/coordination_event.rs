@@ -172,6 +172,16 @@ fn board_entry_for_event_with_paths(
     cache_root: &Path,
     linkage_store_path: Option<&Path>,
 ) -> Result<Option<BoardEntry>, HookError> {
+    if crate::pm_registry::pane_is_pm(
+        session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(&session.worktree_path),
+        Some(&session.worktree_path),
+        Some(&session.id),
+    ) {
+        return Ok(None);
+    }
     let context = resolve_issue_context_with_paths(session, cache_root, linkage_store_path);
     let owner_label = match context.as_ref() {
         Some(context) => issue_context_label(context),
@@ -290,7 +300,9 @@ fn linked_issue_number_for_branch(
     linkage_store_path: Option<&Path>,
 ) -> Option<u64> {
     let branch = session.branch.trim();
-    if branch.is_empty() {
+    if branch.is_empty()
+        || session.launch_origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+    {
         return None;
     }
     let path = linkage_store_path?;
@@ -348,6 +360,33 @@ mod tests {
             updated_at: UpdatedAt::new("2026-04-14T00:00:00Z".to_string()),
             comments: Vec::<CommentSnapshot>::new(),
         }
+    }
+
+    #[test]
+    fn pm_lifecycle_never_posts_implementation_status_with_stale_issue_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(dir.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let linkage = dir.path().join("issue-links.json");
+        std::fs::write(&linkage, r#"{"branches":{"work":5286}}"#).unwrap();
+        let mut session = Session::new(&worktree, "work", AgentId::ClaudeCode);
+        session.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+
+        for linked in [Some(5286), None] {
+            session.linked_issue_number = linked;
+            for event in ["SessionStart", "Stop"] {
+                sync_coordination_for_session_with_paths(
+                    &session,
+                    event,
+                    &cache_root,
+                    Some(&linkage),
+                )
+                .unwrap();
+            }
+        }
+        assert!(load_snapshot(&worktree).unwrap().board.entries.is_empty());
     }
 
     #[test]
@@ -435,7 +474,7 @@ mod tests {
         )
         .unwrap();
 
-        let session = Session::new(dir.path(), "feature/issue-link", AgentId::Codex);
+        let mut session = Session::new(dir.path(), "feature/issue-link", AgentId::Codex);
 
         sync_coordination_for_session_with_paths(
             &session,
@@ -451,6 +490,26 @@ mod tests {
         assert_eq!(entry.state.as_deref(), Some("ready"));
         assert!(entry.body.contains("Issue #1776"));
         assert!(entry.body.contains("Launch Agent issue linkage"));
+
+        session.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        assert!(
+            board_entry_for_event_with_paths(
+                &session,
+                "Stop",
+                &cache_root,
+                Some(&linkage_store_path),
+            )
+            .unwrap()
+            .is_none(),
+            "automatic restore must not recover a historical branch owner"
+        );
+        session.linked_issue_number = Some(1776);
+        assert!(
+            board_entry_for_event_with_paths(&session, "Stop", &cache_root, None)
+                .unwrap()
+                .is_some(),
+            "a restored implementation with a resolved owner still reports"
+        );
     }
 
     #[test]
