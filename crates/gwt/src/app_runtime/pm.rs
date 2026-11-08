@@ -427,6 +427,21 @@ impl AppRuntime {
             return Vec::new();
         }
         self.sync_pm_session_cache(&project_root, prefs.registration.as_ref());
+        // Cold restore may be accepted before the GUI first reads the PM prefs.
+        // Preserve any newer request's existing projection authority.
+        if !self
+            .project_state_for_root(&project_root)
+            .is_some_and(|state| {
+                state
+                    .pending_pm_launches
+                    .values()
+                    .any(|root| root == &project_root)
+            })
+        {
+            if let Some(registration) = prefs.registration.as_ref() {
+                self.mark_pm_resume_launches(tab_id, &HashSet::new(), &registration.session_id);
+            }
+        }
         if trigger == PmEnsureTrigger::Automatic && !prefs.settings.auto_start {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -2120,6 +2135,10 @@ impl AppRuntime {
             .unwrap_or_default();
         if let Some(state) = self.project_state_for_root_mut(project_root) {
             for combined in new_ids {
+                // Only the latest accepted PM request may update this root's cache.
+                state
+                    .pending_pm_launches
+                    .retain(|_, root| root != project_root);
                 state
                     .pending_pm_launches
                     .insert(combined, project_root.to_path_buf());
@@ -2156,6 +2175,9 @@ impl AppRuntime {
             .collect();
         if let Some(state) = self.project_state_mut(&context) {
             for window in accepted {
+                state
+                    .pending_pm_launches
+                    .retain(|_, root| root != &context.project_root);
                 state
                     .pending_pm_launches
                     .insert(window, context.project_root.clone());
@@ -2683,14 +2705,44 @@ mod delivery_tests {
     fn issue_6691_host_failure_retries_once_and_recovers_without_duplicate_wakes() {
         use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
         use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        use gwt_core::test_support::ScopedEnvVar;
         use std::sync::atomic::AtomicUsize;
 
         let _env_lock = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Recovery asserts the real ACK, not delivery or readiness latency.
+        let _budgets = [
+            "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+            "GWT_TEST_BUDGET_HOOK_LIVE_ATTEMPT_MS",
+            "GWT_TEST_BUDGET_HOOK_LIVE_READINESS_MS",
+        ]
+        .map(|key| {
+            ScopedEnvVar::set(
+                key,
+                gwt_core::deadline_budget::HANG_GUARD
+                    .as_millis()
+                    .to_string(),
+            )
+        });
         for failures in [1, 2] {
             let temp = tempfile::tempdir().unwrap();
-            let _home = ScopedGwtHome::set(temp.path());
+            let home = gwt_core::paths::normalize_windows_child_process_path(
+                &temp.path().canonicalize().unwrap(),
+            );
+            let _home = ScopedGwtHome::set(&home);
+            let _native_home = ScopedEnvVar::set("HOME", &home);
+            let _native_userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+            let _runner = ScopedEnvVar::set(
+                "GWT_TEST_PM_HOOK_RUNNER",
+                gwt_core::paths::normalize_windows_child_process_path(
+                    &std::env::current_exe().unwrap(),
+                ),
+            );
+            let _result = ScopedEnvVar::set(
+                "GWT_TEST_PM_HOOK_RESULT",
+                temp.path().join("pm-hook-result.json"),
+            );
             let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
             let _pane = attach_live_pm_pane(&mut runtime, &window_id);
             let (proxy, recorded) = AppEventProxy::stub();
@@ -2852,8 +2904,8 @@ mod delivery_tests {
             target.owner_identity = original_identity;
             runtime.flush_pending_pm_wake(&window_id);
             assert_eq!(tasks.lock().unwrap().len(), 1);
-            // The pane fixture drains input without a provider. Its shared
-            // helper supplies the exact issued body to the real hook ACK path.
+            // The existing native provider acknowledges the exact issued body;
+            // recovery must complete without waiting for deadline expiry.
             crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
             let receipt = pm_registry::pm_delivery_receipt_for_operation(
                 &pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),

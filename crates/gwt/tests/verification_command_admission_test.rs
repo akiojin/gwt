@@ -771,6 +771,7 @@ fn canonical_four_matrix_throughput_probe() {
         "serial_elapsed_ms": serial_ms,
         "parallel_elapsed_ms": parallel_ms,
         "parallel_to_serial_ratio": parallel_ms as f64 / serial_ms as f64,
+        // test-hygiene: allow-wall-clock-deadline Real Cargo throughput measurement requires elapsed time, not event ordering.
         "one_third_target_met": parallel_ms.saturating_mul(3) <= serial_ms,
         "disk_measurement": disk,
     });

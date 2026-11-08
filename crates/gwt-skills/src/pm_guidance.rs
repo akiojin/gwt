@@ -1865,6 +1865,9 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 - In `akiojin/gwt`, inspect retained external-feedback exclusions and fixed
   `gwt-feedback-triage` / `gwt-feedback-evidence` updates through existing
   canonical Issue reads/search (`search`, `issue.view`, `issue.comments`).
+  Every cycle, search pending `gwt-feedback` / `gwt-feedback-triage` reports;
+  a non-empty PM-owned backlog requires you to triage at least the head report or escalate
+  before judging no change, even when the Monitor snapshot is unchanged.
   For author verification, use the fixed `github.com/akiojin/gwt` read-only
   REST GET fallback in External feedback intake; canonical content reads alone
   do not establish marker or adoption authorship. Apply that policy outside the
@@ -2075,6 +2078,11 @@ quota:
   `gh pr list`.
 - Each row already carries a `lifecycle` class and a `default_action`.
   Classify nothing yourself; act on those fields.
+- An open pipeline PR that is `CI-RED` or `AUTO-MERGE-STALLED` requires
+  action even when `issue.monitor.status` is unchanged. Compare its
+  `owner_issue` with the Monitor launch row and `pane.list` / `execution.status`;
+  a producing agent that ended before merge is an ownerless blocked PR:
+  relaunch the owner or escalate. Neither is a no-change cycle.
 - Classes and default actions:
   - `READY_TO_PROMOTE`: mark the Draft Ready (see below)
   - `MERGE-CANDIDATE`: mark Ready if draft, otherwise propose merge
@@ -2570,7 +2578,8 @@ and urgency.
   authorize another `pane.read`.
 - Build a stalled-item inventory every cycle covering `needs_human`,
   decision waits, ownerless pull requests, open PRs that are `CI-RED`,
-  `CONFLICTED`, or `escalation_due`, and quiet agents. Advance at
+  `CONFLICTED`, `AUTO-MERGE-STALLED`, or `escalation_due`, pending PM-owned feedback triage,
+  and quiet agents. Advance at
   least one item from that inventory in every cycle through a launch,
   requeue, priority correction, escalation resolution, PR triage or
   update-branch, or concrete user handoff. Inventory membership alone does not
@@ -3706,7 +3715,7 @@ mod tests {
             "first detected or materially changed",
             "the question, your recommendation and rationale, and a copy-paste answer example",
             "Build a stalled-item inventory every cycle",
-            "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, or `escalation_due`, and quiet agents",
+            "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, `AUTO-MERGE-STALLED`, or `escalation_due`, pending PM-owned feedback triage, and quiet agents",
             "Advance at least one item from that inventory in every cycle",
             "Inventory membership alone does not require another Report",
             "The same material state on the next tick creates zero cards",
@@ -4009,6 +4018,35 @@ mod tests {
         ] {
             assert!(body.contains(class), "missing class {class}");
         }
+    }
+
+    /// Issue #6859: Monitor deltas cannot stand in for PR and PM-owned intake work.
+    #[test]
+    fn contract_reconciles_blocked_prs_and_feedback_before_no_change() {
+        let loop_contract = section("## Resident loop (unattended)");
+        let pr_contract = section("## Open PR inventory");
+        let reporting = section("## Reporting cadence");
+        for phrase in [
+            "Every cycle, search pending `gwt-feedback` / `gwt-feedback-triage` reports",
+            "triage at least the head report or escalate",
+        ] {
+            assert!(
+                loop_contract.contains(phrase),
+                "resident loop is missing {phrase}"
+            );
+        }
+        for phrase in [
+            "even when `issue.monitor.status` is unchanged",
+            "`owner_issue` with the Monitor launch row and `pane.list` / `execution.status`",
+            "a producing agent that ended before merge is an ownerless blocked PR",
+            "relaunch the owner or escalate",
+        ] {
+            assert!(
+                pr_contract.contains(phrase),
+                "PR inventory is missing {phrase}"
+            );
+        }
+        assert!(reporting.contains("pending PM-owned feedback triage"));
     }
 
     #[test]

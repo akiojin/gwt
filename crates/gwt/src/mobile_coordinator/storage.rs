@@ -37,12 +37,36 @@ pub enum StoreError {
     CredentialTooLarge,
     #[error("mobile registry commit outcome is uncertain; drop the store and explicitly reopen to inspect current authority")]
     CommitUncertain,
-    #[error("mobile store is unusable after an uncertain commit; drop it and explicitly reopen")]
+    #[error("mobile store is unusable after a failed checkpoint or uncertain commit; drop it and explicitly reopen")]
     Unusable,
     #[error(transparent)]
     Credential(#[from] CredentialError),
     #[error("mobile private storage I/O failed: {0}")]
     Io(#[from] io::Error),
+}
+
+/// Reject repository markers even when their symlink targets are unavailable.
+/// Callers supply a canonical directory whose ancestors are trusted.
+pub(crate) fn has_repository_marker(directory: &Path) -> Result<bool, StoreError> {
+    fn entry_present(path: &Path) -> Result<bool, StoreError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    for ancestor in directory.ancestors() {
+        if entry_present(&ancestor.join(".git"))? {
+            return Ok(true);
+        }
+        let head = entry_present(&ancestor.join("HEAD"))?;
+        let refs = entry_present(&ancestor.join("refs"))?;
+        if head && refs {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Public metadata only; the bearer is returned exclusively through its file.
@@ -56,6 +80,13 @@ struct LockedDirectory {
     path: PathBuf,
     directory: File,
     lock: File,
+}
+
+impl Drop for LockedDirectory {
+    fn drop(&mut self) {
+        // A fork/dup may retain the open-file description after our File closes.
+        let _ = fs2::FileExt::unlock(&self.lock);
+    }
 }
 
 impl LockedDirectory {
@@ -117,13 +148,14 @@ impl LockedDirectory {
     }
 }
 
-/// Owns the single in-memory clock watermark/latch and the offline writer lock.
-/// Failed observations remain latched here. Durability of failed observations
-/// across restarts is a later runtime/operator contract, not supplied by reopen.
+/// Owns the clock watermark/latch and the single writer lock. Registration
+/// actors checkpoint trusted observations before processing requests; raw
+/// registry borrows alone do not establish durability across restarts.
 pub struct CoordinatorStore {
     guard: LockedDirectory,
     registry: CoordinatorRegistry,
     usable: bool,
+    persisted_wall: Option<u64>,
 }
 
 impl CoordinatorStore {
@@ -144,6 +176,7 @@ impl CoordinatorStore {
             guard,
             registry,
             usable: true,
+            persisted_wall: Some(now),
         })
     }
 
@@ -155,6 +188,8 @@ impl CoordinatorStore {
             guard,
             registry,
             usable: true,
+            // Opening advances RAM time; the first checkpoint must save it.
+            persisted_wall: None,
         })
     }
 
@@ -169,6 +204,26 @@ impl CoordinatorStore {
     pub fn registry(&mut self) -> Result<&mut CoordinatorRegistry, StoreError> {
         self.check()?;
         Ok(&mut self.registry)
+    }
+
+    /// Persist trusted time before request validation, including rejected
+    /// requests. Open's first observation is saved even in the same second;
+    /// subsequent same-second calls still check the guard and clock latch.
+    /// Any failure requires explicit reopen, never reuse of this authority.
+    pub(super) fn checkpoint(&mut self, now: u64) -> Result<(), StoreError> {
+        let result = (|| {
+            self.check()?;
+            self.registry.observe(now)?;
+            if self.persisted_wall != Some(now) {
+                let snapshot = encode(&self.registry.stored)?;
+                self.commit_registry(&snapshot, now, File::sync_all)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.usable = false;
+        }
+        result
     }
 
     pub fn issue(
@@ -287,6 +342,7 @@ impl CoordinatorStore {
         })()
         .map_err(|_| StoreError::CommitUncertain)?;
         self.registry = registry;
+        self.persisted_wall = Some(self.registry.stored.last_observed);
         self.usable = true;
         Ok(())
     }
@@ -474,6 +530,28 @@ mod tests {
     }
 
     #[test]
+    fn repository_markers_require_both_bare_entries_and_propagate_metadata_errors() {
+        let dir = private_dir();
+        let child = dir.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        assert!(!has_repository_marker(&child).unwrap());
+        let head = dir.path().join("HEAD");
+        let refs = dir.path().join("refs");
+        symlink("missing-head", &head).unwrap();
+        assert!(!has_repository_marker(&child).unwrap());
+        symlink("missing-refs", &refs).unwrap();
+        assert!(has_repository_marker(&child).unwrap());
+        std::fs::remove_file(head).unwrap();
+        assert!(!has_repository_marker(&child).unwrap());
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").unwrap();
+        assert!(matches!(
+            has_repository_marker(&file),
+            Err(StoreError::Io(_))
+        ));
+    }
+
+    #[test]
     fn oversized_credential_is_refused_before_secret_or_registry_publication() {
         let dir = private_dir();
         let mut store = CoordinatorStore::initialize(dir.path(), 100).unwrap();
@@ -618,8 +696,15 @@ mod tests {
             CoordinatorStore::open(dir.path(), 100),
             Err(StoreError::Busy)
         ));
+        // Model a fork's shared open-file description without a timing race.
+        let inherited_lock = store.guard.lock.try_clone().unwrap();
         drop(store);
         let reopened = CoordinatorStore::open(dir.path(), 100).unwrap();
+        drop(inherited_lock);
+        assert!(matches!(
+            CoordinatorStore::open(dir.path(), 100),
+            Err(StoreError::Busy)
+        ));
         drop(reopened);
         assert_eq!(lock_inode, std::fs::metadata(&lock).unwrap().ino());
         assert!(CoordinatorStore::initialize(dir.path(), 100).is_err());
@@ -640,10 +725,12 @@ mod tests {
         std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
         let alias = dir.path().join("alias");
         std::fs::hard_link(&registry, &alias).unwrap();
-        assert!(matches!(
-            CoordinatorStore::open(dir.path(), 100),
-            Err(StoreError::UnsafeStorage)
-        ));
+        let hard_link_result = CoordinatorStore::open(dir.path(), 100);
+        assert!(
+            matches!(&hard_link_result, Err(StoreError::UnsafeStorage)),
+            "expected a private hard-link refusal, got {:?}",
+            hard_link_result.as_ref().err()
+        );
         std::fs::remove_file(&alias).unwrap();
         std::fs::rename(&registry, &alias).unwrap();
         symlink(&alias, &registry).unwrap();

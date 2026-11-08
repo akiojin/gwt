@@ -5,6 +5,9 @@ use std::{
     sync::OnceLock,
 };
 
+#[cfg(windows)]
+use std::{collections::HashMap, ffi::OsString, os::windows::fs::MetadataExt};
+
 use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
     Match,
@@ -13,6 +16,11 @@ use serde::Deserialize;
 
 const INDEX_PATH_POLICY_SOURCE: &str = include_str!("../../runtime/index_path_policy.json");
 static INDEX_PATH_POLICY: OnceLock<IndexPathPolicy> = OnceLock::new();
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static PATH_CANONICALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexPathPolicy {
@@ -100,14 +108,28 @@ impl IndexPathPolicy {
     }
 
     /// Filter one inventory without reopening its root for every candidate.
-    /// Resolve file targets afresh; no normalized paths survive this operation.
+    /// Resolve reparse targets afresh; metadata is shared only within this operation.
     pub fn filter_builtin_denied_paths(
         &self,
         root: &Path,
         mut paths: Vec<PathBuf>,
     ) -> Vec<PathBuf> {
         let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        #[cfg(windows)]
+        let ordinary_root = fs::symlink_metadata(root)
+            .is_ok_and(|metadata| metadata.is_dir() && metadata.file_attributes() & 0x400 == 0);
+        #[cfg(windows)]
+        let mut ordinary_directories = HashMap::new();
         paths.retain(|path| {
+            #[cfg(windows)]
+            if ordinary_root
+                && path.strip_prefix(root).is_ok_and(|relative| {
+                    self.is_builtin_denied_relative_path(relative, path)
+                        && ordinary_batch_path(root, relative, &mut ordinary_directories)
+                })
+            {
+                return false;
+            }
             let rel = relative_path_with_canonical_root(root, &canonical_root, path);
             !self.is_builtin_denied_relative_path(&rel, path)
         });
@@ -145,6 +167,41 @@ impl IndexPathPolicy {
         self.allow_paths
             .contains(&normalize_rel_path(&relative_path(root, path)))
     }
+}
+
+#[cfg(windows)]
+fn ordinary_batch_path(
+    root: &Path,
+    relative: &Path,
+    directories: &mut HashMap<PathBuf, HashSet<OsString>>,
+) -> bool {
+    let mut parent = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let names = directories.entry(parent.clone()).or_insert_with(|| {
+            let mut names = HashSet::new();
+            if let Ok(entries) = fs::read_dir(&parent) {
+                for entry in entries.flatten() {
+                    // DirEntry metadata retains reparse attributes on Windows without
+                    // reopening each file. Exact names also preserve canonical casing.
+                    if entry.metadata().is_ok_and(|metadata| {
+                        (metadata.is_file() || metadata.is_dir())
+                            && metadata.file_attributes() & 0x400 == 0
+                    }) {
+                        names.insert(entry.file_name());
+                    }
+                }
+            }
+            names
+        });
+        if !names.contains(name) {
+            return false;
+        }
+        parent.push(name);
+    }
+    true
 }
 
 fn add_gitignore_files(
@@ -233,6 +290,8 @@ fn relative_path(root: &Path, path: &Path) -> PathBuf {
 }
 
 fn relative_path_with_canonical_root(root: &Path, canonical_root: &Path, path: &Path) -> PathBuf {
+    #[cfg(all(test, windows))]
+    PATH_CANONICALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let canonical_path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical_path
         .strip_prefix(canonical_root)
@@ -248,4 +307,26 @@ fn normalize_rel_path(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_path_batch_skips_canonicalizing_ordinary_denied_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join(".gwt/work/events");
+        fs::create_dir_all(&parent).unwrap();
+        let paths = [parent.join("first.jsonl"), parent.join("second.jsonl")].to_vec();
+        for path in &paths {
+            fs::write(path, "event").unwrap();
+        }
+        let before = PATH_CANONICALIZE_CALLS.with(|calls| calls.get());
+        assert!(default_index_path_policy()
+            .filter_builtin_denied_paths(dir.path(), paths)
+            .is_empty());
+        let calls = PATH_CANONICALIZE_CALLS.with(|calls| calls.get() - before);
+        assert_eq!(calls, 0, "ordinary denied files must not be canonicalized");
+    }
 }

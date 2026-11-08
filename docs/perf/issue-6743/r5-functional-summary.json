@@ -1,0 +1,97 @@
+{
+  "issue": 6743,
+  "generation": "R5",
+  "kind": "Direct headed functional evidence, not canonical verification or CPU acceptance",
+  "command": "pwsh -NoProfile -File scripts/diagnostics/issue-5658-browser-check.ps1 -Label after -PaneCount 5 -SampleMilliseconds 15000 -FunctionalOnly -SessionsFixture target/issue-6743-sessions-fixture",
+  "test_exit_code": 0,
+  "passed": 2,
+  "headed": true,
+  "headed_source_contract": "idle-cpu-live.spec.ts test.use({headless:false})",
+  "launch": {
+    "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/launch.json",
+    "sha256": "74fc2d44a881e0178812adce2087a3be18a473b45f111f1ef38d8aa3fe1a13e2"
+  },
+  "gui_sha256": "a9b4e76cce5458bae268fdd687f7168b3812cf5f6c62b1bd56566303042f40d1",
+  "daemon_sha256": "904378f2e96d39998fb86b45e6e03c6eef2ccb9bed3a4953b2a35612cdc98c7c",
+  "themes": {
+    "dark": {
+      "passed": 1,
+      "session_count": 5,
+      "ipc_receipts": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-agent-ipc-receipts.json",
+        "sha256": "4c82684d94b8f165e4c119ee7be945ced300398e455f957ccb3822e131356d93"
+      },
+      "errors": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-errors.json",
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "console_or_page_error_count": 0,
+      "work_readiness": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-work-projection-readiness.json",
+        "sha256": "d18ae09a9914eae2916f87a35e589e8e27ebfcaab31588d1b98af00ea1431706"
+      },
+      "frontier_required": false,
+      "full_five_session_hook_audit_observed": true,
+      "hook_health_is_not_asserted_healthy": "needs_attention means audited, not healthy",
+      "screenshot": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-dark/after-dark-5-idle-agents.png",
+        "sha256": "f435aac8b600361b4f783cfaca4d3944d1812e17bdb2a0d365ff381386415c02"
+      },
+      "screenshot_inspected": true,
+      "receipt_event_counts": [
+        12,
+        12,
+        12,
+        10,
+        10
+      ]
+    },
+    "light": {
+      "passed": 1,
+      "session_count": 5,
+      "ipc_receipts": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-agent-ipc-receipts.json",
+        "sha256": "d1e0a5b9cb082de89ea4dfe78dd7e9078895fb20c7578dc691cfd3ef9e59c0f4"
+      },
+      "errors": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-errors.json",
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "console_or_page_error_count": 0,
+      "work_readiness": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-work-projection-readiness.json",
+        "sha256": "df26c1e7f01923e8efd6c0b44a12bc934d1fecac233547ab0a78aabb3c22c59f"
+      },
+      "frontier_required": false,
+      "full_five_session_hook_audit_observed": true,
+      "hook_health_is_not_asserted_healthy": "needs_attention means audited, not healthy",
+      "screenshot": {
+        "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/idle-cpu-live-Issue-5658-i-7f2f9-authenticated-Ready-polling-chromium-light/after-light-5-idle-agents.png",
+        "sha256": "078a785ce3c30f6e8caf4153ed882c6100a0d6892e4f9e5898db36749463113b"
+      },
+      "screenshot_inspected": true,
+      "receipt_event_counts": [
+        26,
+        26,
+        26,
+        26,
+        24
+      ]
+    }
+  },
+  "cpu_acceptance": false,
+  "canonical_acceptance": false,
+  "user_verification_result": "n/a (autonomous)",
+  "fresh_sessions_per_theme": true,
+  "owned_cleanup": {
+    "artifact": {
+      "path": "crates/gwt/playwright/test-results/issue-5658-after-f23d055733ec42f495dc83af338356a2/owned-pid-cleanup.json",
+      "sha256": "541d65e95dbab3c3f0450ee46d43be9aacbfa34ecbc6ea6ce2bbdc5ec1267529"
+    },
+    "daemon_pid": 17928,
+    "gui_exited": true,
+    "gui_pid": 17832,
+    "daemon_exited": true,
+    "cleaned_at": "2026-11-04T21:07:20.3083607Z"
+  }
+}

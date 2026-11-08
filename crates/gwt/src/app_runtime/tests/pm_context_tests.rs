@@ -188,6 +188,21 @@ fn pm_request_task_browser_reopen_resolves_user_and_reconciles_receipts() {
     );
     assert_eq!(store.read().unwrap().unwrap().revision, 4);
 
+    let mut complete = serde_json::json!({"kind":"complete_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
+        "request":{"operation_id":"user-complete", "expected_revision":4,
+            "reason":"Verified the original outcome", "task_id":"synthetic-task",
+            "condition_revision":1,"review_generation":1,"evidence":["synthetic:verified-outcome"]}});
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone())["code"],
+        "stale_review"
+    );
+    complete["request"]["review_generation"] = serde_json::json!(2);
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone())["code"],
+        "reassessment_required"
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), committed);
+
     store
         .apply(
             &gwt_core::pm_request_tasks::Actor {
@@ -223,6 +238,230 @@ fn pm_request_task_browser_reopen_resolves_user_and_reconciles_receipts() {
     assert_eq!(current["receipt"]["revision"], 4);
     assert_eq!(current["receipt"]["actor"]["id"], "browser:browser-a");
     assert_eq!(current["receipt"]["tasks"][0]["review_required"], true);
+
+    complete["request"]["expected_revision"] = serde_json::json!(5);
+    let mut empty_evidence = complete.clone();
+    empty_evidence["request"]["evidence"] = serde_json::json!([]);
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", empty_evidence)["code"],
+        "invalid_request"
+    );
+    let completed = invoke(&mut runtime, "browser-a", complete.clone());
+    assert_eq!(completed["state"], "ready");
+    assert_eq!(completed["revision"], 6);
+    assert_eq!(completed["task"]["status"], "completed");
+    assert_eq!(
+        completed["task"]["completion"]["evidence"],
+        complete["request"]["evidence"]
+    );
+    assert_eq!(
+        completed["receipt"]["actor"],
+        serde_json::json!({"kind":"user","id":"browser:browser-a"})
+    );
+    assert_eq!(
+        completed["receipt"]["reason"],
+        complete["request"]["reason"]
+    );
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone()),
+        completed
+    );
+    let mut noop = complete.clone();
+    noop["request"]["operation_id"] = serde_json::json!("user-complete-noop");
+    noop["request"]["expected_revision"] = serde_json::json!(6);
+    let noop_result = invoke(&mut runtime, "browser-a", noop);
+    assert_eq!(noop_result["state"], "ready");
+    assert_eq!(noop_result["revision"], 7);
+    assert_eq!(noop_result["receipt"]["tasks"], serde_json::json!([]));
+    let mut reopened = serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":6,
+        "request":{"operation_id":"user-reopen-again", "expected_revision":7, "reason":"Recheck original outcome", "task_id":"synthetic-task"}});
+    let pending = invoke(&mut runtime, "browser-a", reopened.clone());
+    let saved = fs::read(&state_path).unwrap();
+    let replay = invoke(&mut runtime, "browser-a", complete.clone());
+    assert_eq!(replay["revision"], 8);
+    assert_eq!(replay["task"], pending["task"]);
+    assert_eq!(replay["receipt"], completed["receipt"]);
+    assert_eq!(
+        invoke(&mut runtime, "browser-b", complete.clone())["code"],
+        "operation_conflict"
+    );
+    complete["request"]["reason"] = serde_json::json!("Changed payload");
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone())["code"],
+        "operation_conflict"
+    );
+    complete["request"]["operation_id"] = serde_json::json!("stale-complete");
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete)["code"],
+        "conflict"
+    );
+    reopened["kind"] = serde_json::json!("load_pm_request_task");
+    reopened.as_object_mut().unwrap().remove("request");
+    reopened["task_id"] = serde_json::json!("synthetic-task");
+    reopened["receipt_operation_id"] = serde_json::json!("user-complete");
+    assert_eq!(invoke(&mut runtime, "browser-b", reopened), replay);
+    assert_eq!(fs::read(&state_path).unwrap(), saved);
+}
+
+#[test]
+fn pm_request_task_browser_cancel_preserves_audit_and_reconciles_receipts() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let store = completed_pm_request_task_fixture(&repo);
+    let before = store.read().unwrap().unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let invoke = |runtime: &mut AppRuntime, client: &str, wire| {
+        pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, client, wire)
+    };
+    let cancel = serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":1,
+        "request":{"operation_id":"user-cancel", "expected_revision":3, "reason":"Withdraw the request", "task_id":"synthetic-task"}});
+    let applied = invoke(&mut runtime, "browser-a", cancel.clone());
+    assert_eq!(applied["state"], "ready");
+    assert_eq!(applied["revision"], 4);
+    assert_eq!(applied["task"]["status"], "cancelled");
+    assert!(applied["task"]["completion"].is_null());
+    assert_eq!(applied["task"]["review_generation"], 2);
+    assert_eq!(applied["receipt"]["action"], "cancel");
+    assert_eq!(
+        applied["receipt"]["actor"],
+        serde_json::json!({"kind":"user","id":"browser:browser-a"})
+    );
+    assert_eq!(applied["receipt"]["reason"], cancel["request"]["reason"]);
+    assert_eq!(invoke(&mut runtime, "browser-a", cancel.clone()), applied);
+    let mut stale = cancel.clone();
+    stale["request"]["operation_id"] = serde_json::json!("stale-cancel");
+    assert_eq!(invoke(&mut runtime, "browser-a", stale)["code"], "conflict");
+    assert_eq!(
+        invoke(&mut runtime, "browser-b", cancel)["code"],
+        "operation_conflict"
+    );
+    let recovered = invoke(
+        &mut runtime,
+        "browser-b",
+        serde_json::json!({
+        "kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":2,
+        "task_id":"synthetic-task", "receipt_operation_id":"user-cancel"}),
+    );
+    assert_eq!(recovered, applied);
+    let after = store.read().unwrap().unwrap();
+    assert_eq!(after.revision, 4);
+    assert_eq!(after.sources, before.sources);
+    assert_eq!(&after.receipts[..3], &before.receipts);
+    assert_eq!(after.receipts.len(), 4);
+}
+
+#[test]
+fn pm_request_task_browser_update_keeps_current_state_separate_from_its_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let store = completed_pm_request_task_fixture(&repo);
+    let before = store.read().unwrap().unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let invoke = |runtime: &mut AppRuntime, client: &str, wire| {
+        pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, client, wire)
+    };
+    let unchanged = serde_json::json!({"kind":"update_pm_request_task", "id":"tab-1::agent-1", "request_id":1,
+        "request":{"operation_id":"user-noop", "expected_revision":3, "reason":"Confirm these conditions",
+            "task":before.tasks["synthetic-task"].draft}});
+    let applied = invoke(&mut runtime, "browser-a", unchanged.clone());
+    assert_eq!(applied["state"], "ready");
+    assert_eq!(applied["revision"], 4);
+    assert_eq!(applied["task"]["status"], "completed");
+    assert_eq!(applied["receipt"]["tasks"], serde_json::json!([]));
+    assert_eq!(
+        applied["receipt"]["actor"],
+        serde_json::json!({"kind":"user","id":"browser:browser-a"})
+    );
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", unchanged.clone()),
+        applied
+    );
+    assert_eq!(store.read().unwrap().unwrap().revision, 4);
+
+    let mut correction = unchanged.clone();
+    correction["request"]["operation_id"] = serde_json::json!("user-correction");
+    correction["request"]["expected_revision"] = serde_json::json!(4);
+    correction["request"]["reason"] = serde_json::json!("Restore the original outcome");
+    correction["request"]["task"]["purpose"] =
+        serde_json::json!("Verify the full original outcome");
+    let corrected = invoke(&mut runtime, "browser-a", correction.clone());
+    assert_eq!(corrected["state"], "ready");
+    assert_eq!(corrected["revision"], 5);
+    assert_eq!(corrected["task"]["status"], "pending");
+    assert_eq!(corrected["task"]["condition_revision"], 2);
+    assert_eq!(corrected["task"]["review_generation"], 2);
+    assert_eq!(corrected["task"]["review_required"], true);
+    assert!(corrected["task"]["completion"].is_null());
+    assert_eq!(corrected["receipt"]["action"], "update");
+    assert_eq!(
+        corrected["receipt"]["reason"],
+        correction["request"]["reason"]
+    );
+    let saved = store.read().unwrap().unwrap();
+    assert_eq!(saved.sources, before.sources);
+    assert_eq!(&saved.receipts[..3], &before.receipts);
+    assert_eq!(saved.receipts.len(), 5);
+
+    let replay = invoke(&mut runtime, "browser-a", unchanged.clone());
+    assert_eq!(replay["revision"], 5);
+    assert_eq!(replay["task"], corrected["task"]);
+    assert_eq!(replay["receipt"], applied["receipt"]);
+    assert_eq!(replay["receipt"]["revision"], 4);
+    correction["request"]["reason"] = serde_json::json!("Different content for the same operation");
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", correction.clone())["code"],
+        "operation_conflict"
+    );
+    correction["request"]["operation_id"] = serde_json::json!("stale-update");
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", correction)["code"],
+        "conflict"
+    );
+    assert_eq!(
+        invoke(&mut runtime, "browser-b", unchanged)["code"],
+        "operation_conflict"
+    );
+    let recovered = invoke(
+        &mut runtime,
+        "browser-b",
+        serde_json::json!({
+        "kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":2,
+        "task_id":"synthetic-task", "receipt_operation_id":"user-noop"}),
+    );
+    assert_eq!(recovered, replay);
+    assert_eq!(store.read().unwrap().unwrap(), saved);
 }
 
 #[test]
@@ -293,6 +532,15 @@ fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access()
             read.clone(),
             serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":2,
             "request":{"operation_id":"foreign-reopen", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task"}}),
+            serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":3,
+            "request":{"operation_id":"foreign-cancel", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task"}}),
+            serde_json::json!({"kind":"complete_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
+            "request":{"operation_id":"foreign-complete", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task",
+                "condition_revision":1,"review_generation":1,"evidence":["synthetic:outcome"]}}),
+            serde_json::json!({"kind":"update_pm_request_task", "id":"tab-1::agent-1", "request_id":4,
+            "request":{"operation_id":"foreign-update", "expected_revision":3, "reason":"Synthetic foreign request",
+                "task":{"id":"synthetic-task","title":"Changed","purpose":"Changed","completion_conditions":["Outcome"],
+                    "issue_numbers":[],"goal_ids":[],"assignee":null}}}),
         ] {
             wire["id"] = serde_json::json!(id);
             let rejected = invoke(&mut runtime, "browser-a", wire);
@@ -318,6 +566,15 @@ fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access()
         serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":3, "task_id":"synthetic-task"}),
         serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":4,
             "request":{"operation_id":"closed-project-reopen", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task"}}),
+        serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
+            "request":{"operation_id":"closed-project-cancel", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task"}}),
+        serde_json::json!({"kind":"complete_pm_request_task", "id":"tab-1::agent-1", "request_id":7,
+            "request":{"operation_id":"closed-project-complete", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task",
+                "condition_revision":1,"review_generation":1,"evidence":["synthetic:outcome"]}}),
+        serde_json::json!({"kind":"update_pm_request_task", "id":"tab-1::agent-1", "request_id":6,
+            "request":{"operation_id":"closed-project-update", "expected_revision":3, "reason":"Synthetic closed project request",
+                "task":{"id":"synthetic-task","title":"Changed","purpose":"Changed","completion_conditions":["Outcome"],
+                    "issue_numbers":[],"goal_ids":[],"assignee":null}}}),
     ] {
         let request_id = wire["request_id"].clone();
         let id = wire["id"].clone();

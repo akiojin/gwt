@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -440,8 +440,42 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
     return result.stdout.trim();
   }
-  async function stop() {
-    const ownedPid = child?.pid;
+  function processBirth(pid: number) {
+    const result = windows
+      ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+      { encoding: "utf8", windowsHide: true })
+      : spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+    if (result.error) throw result.error;
+    return result.status === 0 ? result.stdout.trim() : "";
+  }
+  async function captureGuiOwner() {
+    const directory = join(state, "projects", hash, "runtime/daemon");
+    for (const name of await readdir(directory)) {
+      if (!name.endsWith(".json")) continue;
+      const endpointFile = join(directory, name), bytes = await readFile(endpointFile, "utf8");
+      const endpoint = JSON.parse(bytes);
+      if (endpoint.scope?.repo_hash !== hash || !endpoint.project_transport_url
+        || await realpath(endpoint.scope.project_root) !== await realpath(project)) continue;
+      if (!Number.isInteger(endpoint.pid) || endpoint.pid <= 0) throw new Error("Invalid fixture owner PID");
+      const birth = processBirth(endpoint.pid);
+      const response = await fetch(`${endpoint.project_transport_url}/private/project/command`, {
+        method: "POST", headers: { Authorization: `Bearer ${endpoint.auth_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ project_key: hash, command: { type: "health" } }), signal: AbortSignal.timeout(15_000),
+      });
+      const health = await response.json();
+      if (!response.ok || !birth || processBirth(endpoint.pid) !== birth
+        || health.pid !== endpoint.pid || health.project_key !== hash
+        || health.startup_intent !== "gui_managed" || !(health.gui_presence_count >= 1)
+        || !(health.host_started_at > 0) || typeof health.host_instance_id !== "string" || !health.host_instance_id || health.draining
+        || await readFile(endpointFile, "utf8") !== bytes) throw new Error("Fixture GUI owner identity changed before restart");
+      return { pid: endpoint.pid as number, birth, host_started_at: health.host_started_at,
+        host_instance_id: health.host_instance_id, project_key: hash,
+        startup_intent: health.startup_intent, gui_presence_count: health.gui_presence_count };
+    }
+    throw new Error("Fixture has no authenticated GUI-managed owner to drain");
+  }
+  async function stopGui() {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
@@ -452,6 +486,23 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         const forcedDeadline = Date.now() + 8_000;
         while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
       }
+    }
+    if (child?.pid && processCommand(child.pid)) {
+      throw new Error(`Fixture gwt process ${child.pid} remained after shutdown`);
+    }
+  }
+  async function stop(coldOwnerDrain = false) {
+    const owner = coldOwnerDrain ? await captureGuiOwner() : undefined;
+    const ownedPid = child?.pid;
+    await stopGui();
+    let drainError: Error | undefined;
+    if (owner) {
+      // Cold restore starts after the real GUI lifetime drain. Killing providers
+      // during reconnect grace would instead leave intentional error diagnostics.
+      const deadline = Date.now() + 45_000;
+      while (processBirth(owner.pid) === owner.birth && Date.now() < deadline) await delay(100);
+      const exited = processBirth(owner.pid) !== owner.birth;
+      if (!exited) drainError = new Error(`Fixture owner ${owner.pid} did not drain after GUI shutdown`);
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
@@ -489,6 +540,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;
+    if (owner) await testInfo.attach("fixture-cold-owner-drain", {
+      body: JSON.stringify({ ...owner, exited: !drainError }), contentType: "application/json",
+    });
+    if (drainError) throw drainError;
   }
   async function start() {
     const urlFile = join(home, `url-${++incarnation}.txt`);
@@ -531,6 +586,6 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
-    async restart() { await stop(); return start(); } };
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
+    async restart(options: { coldOwnerDrain?: boolean } = {}) { await stop(options.coldOwnerDrain); return start(); } };
 }

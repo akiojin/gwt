@@ -1,6 +1,180 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.154.0] - 2026-11-07
+
+### Bug Fixes
+
+- **perf:** Avoid idle process scans and redundant path lookups
+- **perf:** Reuse conversation decisions and skip empty disabled scans
+- **perf:** Project status の重複読み取りを省く
+- **test:** PM wake の結果検証を既定期限から独立させる
+- **logging:** Tolerate concurrent history cleanup
+- **web:** Knowledge未送信readの期限開始を再送時に揃える
+- **test:** PM wake の復旧fixtureを実ACKへ移行する
+- **launch:** Prevent monitor preparation loops on unconnected panes
+- **monitor:** Honor explicit member launch profiles
+
+### Documentation
+
+- **perf:** Record issue 6743 delivery recovery
+
+### Features
+
+- **mobile:** Add bounded one-shot invitation registry
+- **mobile:** Gate invitations on authenticated host registrations
+- **pm:** ブラウザから依頼タスクを訂正できるようにする
+- **mobile:** Enforce registration leases at authorization fences
+
+### Miscellaneous Tasks
+
+- **work:** 依頼タスク取消の配送監査を記録する
+- **work:** 配送監査 PR の関連付けを保存する
+- **work:** Preserve canonical verification blocker evidence
+- **work:** Record issue 6743 delivery continuation
+- **work:** Record issue 6743 verified delivery scope
+- **work:** Record issue 6743 delivery verification scope
+- **work:** Record issue 6743 final verification plan
+- **work:** Knowledge queued readのPR関連付けを記録
+- **work:** PR #6825 の着地記録を同期する
+- **work:** Record issue 5876 reliability verification
+- **work:** Record issue 5876 reliability snapshot delivery
+
+### Testing
+
+- **perf:** Preserve source hook audits during recovered measurement
+- **perf:** Honor requested cpu acceptance window in both themes
+
+## [9.153.0] - 2026-11-07
+
+### Bug Fixes
+
+- **web:** Settings の通常再接続で読込を回復する
+- **runtime:** 起動の生存期間とPM登録の表示同期を補正する
+- **runtime:** Retain gui residency and pm identity on restore
+- **mobile:** 到達不能なリポジトリmarkerを拒否する
+- **web:** 再接続の一覧応答から編集中の環境変数を保護する
+- **monitor:** 停止済み runtime の再利用 PID を履歴として扱う
+- **verify:** Windows 復旧 worker の source authority を検証する
+- **web:** 通常再接続で Knowledge の中断読込を回復する
+- **web:** Retain queued Knowledge reads through socket closing
+- **runtime:** Worktree をまたぐ監督接続を復旧する
+- **ci:** Preserve home guard compatibility with older pr heads
+- **mobile:** Guard終了時に共有FDのlockを解放する
+- **issue-monitor:** Restore manual admission and auto controls
+- **issue-monitor:** Preserve terminal authority exhaustion
+
+### Features
+
+- **mobile:** 固定私有設定からHost資格を選択する
+- **pm:** ブラウザから依頼タスクを取り消す
+- **mobile:** PC Host資格の取込と点検を追加する
+
+### Miscellaneous Tasks
+
+- **work:** ロック競合テスト移行の配信検証を記録
+- **work:** Settings 再接続 PR の関連記録を保存する
+- **work:** Issue #5876 の配送記録を精算する
+- **work:** Issue #6476の配送継続記録を保存する
+- **work:** Issue #4740の配送継続記録を保存する
+- **work:** Settings の編集保護に関する引継ぎを記録する
+- **work:** 編集保護の PR 関連記録を保存する
+- **work:** 依頼タスク取消の PR 関連付けを保存する
+- **work:** Issue #5876 の配送記録を照合する
+- **work:** 起動障害修正の PR 関連付けを保存する
+- **work:** Record PR 6829 delivery association
+- **work:** Knowledge 再接続 PR の関連記録を保存する
+- **work:** Record the Knowledge queued-read recovery PR
+- **work:** Record issue 6809 delivery audit
+- **work:** Settle issue 6809 work event
+- **work:** Record issue 6809 pull request
+- **work:** Record issue 6732 verification blocker
+- **work:** Record issue 6732 active recovery wait
+- **work:** Preserve issue 6732 recovery handoff
+- **work:** Record issue 6732 delivery scope
+- **work:** Record issue 6732 delivery verification
+- **work:** Record issue 6732 recovered delivery slice
+- **work:** Record issue 6732 verified delivery scope
+- **work:** Issue #6732 の最終配送範囲を記録
+- **work:** Record issue 6732 delivery continuation
+
+### Performance
+
+- **paths:** Avoid stale project identity scans and guard test homes
+
+### Testing
+
+- **core:** ロック競合通知を論理期限で検証する
+- **windows:** Shell snapshot の観測サイズを実行時に合わせる
+- **core:** ロック期限検証の無関係な速度上限を除く
+- **fleet:** Multicall cat の起動名を指定する
+- **fleet:** 孤立プロセス fixture を Rust で構築する
+- **verify:** Recover poisoned native test environment locks
+- **web:** Align reconnect contract assertions with recovery mode
+- **paths:** Audit browser hooks from the managed caller
+- **issue-monitor:** Select issues before checking auto recovery
+- **issue-monitor:** Target the active issues surface
+- **runtime:** 対照終了後の Monitor 更新を待つ
+- **runtime:** Await quota fixture launch acknowledgement
+- **fleet:** Select cat applet in renamed orphan fixture
+- **fleet:** Use shell builtins for orphan fixture echo
+- **runtime:** Publish owner fixture endpoints atomically
+
+## [9.152.0] - 2026-11-06
+
+### Bug Fixes
+
+- **web:** 通常再接続でProfile読込を回復する
+- **web:** 未確認rename中のProfile編集を保持する
+- **usage:** Restrict Claude account totals to shared windows
+- **usage:** Route resumed acceptance to the live project
+- **usage:** Harden browser check setup and cleanup
+- **usage:** Scope browser check to model limit regression
+- **update:** Discard failed staged updates and prevent replay
+- **ci:** Migrate release macOS runners to macos-15
+- **execution:** 完了履歴の通信失敗を警告として扱う
+- **web:** Recover index searches after reconnect
+- **terminal:** 再接続と出力修復でスクロール履歴を保持
+- **terminal:** Keep snapshot repair advancing during output
+- **terminal:** Keep reconnect snapshots ahead of live output
+- **terminal:** Broadcast snapshots that overtake live output
+- **terminal:** Retry failed history snapshots while output is idle
+
+### Documentation
+
+- **perf:** Reconcile delivered child acceptance for issue 5390
+
+### Features
+
+- **pm:** Capture selected native requests for tracking
+- **pm:** Expose browser task reassessment
+
+### Miscellaneous Tasks
+
+- **work:** Profile回復PRの関連付けを保存する
+- **work:** Native wake修復の配送検証を記録
+- **work:** Rename保護PRの関連付けを保存する
+- **work:** Record usage fix delivery verification
+- **work:** Resume update failure delivery
+- **work:** Deliver verified update failure recovery
+- **work:** Resume failed update delivery
+- **work:** Record index reconnect PR association
+- **work:** Native選択受付PRの関連付けを保存する
+- **work:** Record scrollback repair delivery continuation
+- **work:** Record scrollback delivery verification scope
+- **work:** Preserve scrollback environment handoff
+- **work:** Preserve scrollback retry verification handoff
+- **work:** Record scrollback delivery scope
+- **work:** 端末履歴修復の配信範囲を確定
+
+### Testing
+
+- **pm:** Reject unconfirmed native wake before file wait
+- **pm:** Wake回帰fixtureのHOMEを隔離する
+- **windows:** Observe snapshots in survivor output probe
+- **pm:** Reject unconfirmed native wake before file wait
+- **terminal:** Align async snapshot fixtures with scrollback restore
+
 ## [9.151.0] - 2026-11-06
 
 ### Bug Fixes

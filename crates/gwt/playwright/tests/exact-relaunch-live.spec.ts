@@ -10,7 +10,7 @@ import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
+import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
@@ -542,7 +542,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         git("clone", "--bare", "--quiet", project, join(home, "origin.git"));
         git("remote", "add", "origin", join(home, "origin.git")); git("fetch", "--quiet", "origin");
         for (let i = 1; i <= 4; i += 1) git("branch", `worker-${i}`);
-        let provider = await readFile(join(bin, "codex"), "utf8");
+        const codexScript = join(bin, process.platform === "win32" ? "codex.cjs" : "codex");
+        const claudeScript = join(bin, process.platform === "win32" ? "claude.cjs" : "claude");
+        let provider = await readFile(codexScript, "utf8");
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
@@ -578,9 +580,8 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
   message:{id:require('node:crypto').randomUUID(),model:'claude-sonnet-4-5',usage:{
     input_tokens:80,output_tokens:12,cache_read_input_tokens:40,cache_creation_input_tokens:5}}}) + '\\n');
 ` + claude.slice(transcriptEnd);
-        await writeFile(join(bin, "claude"), claude);
-        await chmod(join(bin, "claude"), 0o755);
-        execFileSync(process.execPath, ["--check", join(bin, "claude")]);
+        await writeFixtureNodeCommand(bin, "claude", claude);
+        execFileSync(process.execPath, ["--check", claudeScript]);
         // All five real children need measured transcript data before a fleet total is known.
         provider = provider.replace("// Like the real provider,", `
 for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON.stringify({
@@ -589,8 +590,8 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     last_token_usage:{input_tokens:100,cached_input_tokens:20,output_tokens:10},model_context_window:1000}}
 }) + '\\n');
 // Like the real provider,`);
-        await writeFile(join(bin, "codex"), provider);
-        execFileSync(process.execPath, ["--check", join(bin, "codex")]);
+        await writeFixtureNodeCommand(bin, "codex", provider);
+        execFileSync(process.execPath, ["--check", codexScript]);
       },
     });
     const errors = capture(page);
@@ -648,8 +649,15 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     };
     try {
       await page.setViewportSize({ width: 1600, height: 1500 });
-      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await page.addInitScript(theme => {
+        if (location.protocol === "http:" || location.protocol === "https:") {
+          localStorage.setItem("gwt:ui:theme", theme);
+        }
+      }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true, suppressProjectSurfaces: true });
+      await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
+        ?.filter((entry: any) => entry.payload.kind === "project_execution_status")
+        .at(-1)?.payload.status.view_state)).toBe("open");
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
       for (let i = 1; i <= 4; i += 1) {
@@ -707,7 +715,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
-      const restarted = await fixture.restart(); workspace = null; usage = null; activity = null;
+      // Prevent the old document from reconnecting before the fresh navigation.
+      await page.goto("about:blank");
+      const restarted = await fixture.restart({ coldOwnerDrain: true }); workspace = null; usage = null; activity = null;
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });

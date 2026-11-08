@@ -845,6 +845,7 @@ export function createKnowledgeKanbanSurface({
   openSurfaceNotice = () => false,
 }) {
       const knowledgeBridgeStateMap = new Map();
+      let knowledgeTransportOnline = false;
       const terminalPreviewText = new Map();
       const issueControlExplanations = new Map();
       const issueExplanationBindings = new WeakMap();
@@ -1409,6 +1410,11 @@ export function createKnowledgeKanbanSurface({
           }
           limit.title = limit.disabled ? "Automatic or roster-managed limit. Configure in Issues settings." : "Machine-wide agent limit; existing agents continue.";
         }
+        const autoLimit = bar.querySelector('[data-action="monitor-limit-auto"]');
+        if (autoLimit) {
+          autoLimit.disabled = status.max_active_agents_override == null;
+          autoLimit.title = autoLimit.disabled ? "Automatic machine-wide agent limit is active." : "Use the automatic machine-wide agent limit; existing agents continue.";
+        }
         // Issue #4366 AC-6b: the saved settings and the held fallback stay two
         // separate lines, now of the ⚙ tooltip.
         const settings = bar.querySelector('[data-action="monitor-settings"]');
@@ -1663,6 +1669,9 @@ export function createKnowledgeKanbanSurface({
           }
           input.value = String(status.agent_roster_capacity ?? status.max_active_agents_override ?? status.max_active_agents ?? 1);
         });
+        bar.querySelector('[data-action="monitor-limit-auto"]')?.addEventListener("click", () => {
+          send({kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
+        });
         bar
           .querySelector('[data-action="monitor-toggle"]')
           ?.addEventListener("click", () => {
@@ -1872,6 +1881,8 @@ export function createKnowledgeKanbanSurface({
             queuedSearchQuery: "",
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
+            loadInterrupted: false,
+            loadQueued: false,
             loadSlow: false,
             error: "",
             emptyMessage: "",
@@ -2126,6 +2137,8 @@ export function createKnowledgeKanbanSurface({
 
       function finishKnowledgeLoad(state, windowId, knowledgeKind) {
         clearKnowledgeLoadRecoveryTimer(state);
+        state.loadInterrupted = false;
+        state.loadQueued = false;
         state.loading = false;
         state.refreshing = false;
         state.loadSlow = false;
@@ -2154,6 +2167,7 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
+        state.loadInterrupted = false;
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -2169,21 +2183,24 @@ export function createKnowledgeKanbanSurface({
         state.queuedLoadRefresh = false;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
-        send({
+        state.loadQueued = send({
           kind: "load_knowledge_bridge",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
-        });
-        scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
+        }) === "queued";
+        // An unsent read has no backend response deadline until ordinary replay.
+        if (!state.loadQueued) scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
       function resyncKnowledge(windowIds) {
         for (const windowId of windowIds) {
           const state = knowledgeBridgeStateMap.get(windowId);
           if (!state) continue;
+          // Only an unsent owner's Refresh intent transfers to the full read.
+          const refresh = state.loadQueued && (state.refreshing || state.queuedLoadRefresh);
           clearKnowledgeLoadRecoveryTimer(state);
           invalidateKnowledgeSearchOwner(state, state.kind, state.query);
           state.inFlightSearchIntent = null;
@@ -2199,7 +2216,7 @@ export function createKnowledgeKanbanSurface({
           state.pendingPhaseUpdates.clear();
           state.dndSnapshot = null;
           // The full read includes selected detail; keep query and selection.
-          requestKnowledgeBridge(windowId, state.kind, false);
+          requestKnowledgeBridge(windowId, state.kind, refresh);
         }
       }
 
@@ -2497,8 +2514,30 @@ export function createKnowledgeKanbanSurface({
 
       // SPEC #3170 AS-17.2: disconnect invalidates every retry owner;
       // reconnect restarts a degraded still-open window/query at 5 seconds.
-      function handleKnowledgeTransportChange(online) {
+      function handleKnowledgeTransportChange(online, recoverSnapshots = false) {
+        const disconnected = knowledgeTransportOnline && !online;
+        knowledgeTransportOnline = online;
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (disconnected && state.loading && !state.loadQueued) {
+            // Only a read sent before this disconnect needs a replacement.
+            // Repeated offline notifications must not duplicate queued reads.
+            state.loadInterrupted = true;
+            clearKnowledgeLoadRecoveryTimer(state);
+          }
+          // Forced recovery already replaces every read through resyncKnowledge.
+          if (online && !recoverSnapshots && state.loadInterrupted && workspaceWindowById(windowId)) {
+            state.loadInterrupted = false;
+            if (state.loading) {
+              state.ownedLoadRequestIds.clear();
+              state.loading = false;
+              requestKnowledgeBridge(windowId, state.kind, state.refreshing || state.queuedLoadRefresh);
+            }
+          }
+          if (online && !recoverSnapshots && state.loadQueued && workspaceWindowById(windowId)) {
+            // Ordinary open flushes this owner; forced open replaces it in resync.
+            state.loadQueued = false;
+            scheduleKnowledgeLoadRecovery(windowId, state.kind, state.loadRequestId);
+          }
           if (!online && state.revisionPending) {
             state.revisionPending = false;
             state.autoRefreshDirty = true;
@@ -5373,6 +5412,7 @@ export function createKnowledgeKanbanSurface({
                       <span class="knowledge-monitor-switch__state">Off</span>
                     </button>
                     <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                     <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>

@@ -2037,6 +2037,7 @@ fn sample_runtime_with_events(
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
+        issue_monitor_launch_attempts: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         // Issue #3878: own the fallback commit budget instead of inheriting
@@ -10974,6 +10975,12 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     use gwt::pm_registry::{self, PmDeliveryReceiptStatus as Status};
     use std::cell::Cell;
 
+    assert_eq!(
+        gwt::project_runtime::pm_delivery::PM_WAKE_DELIVERY_BUDGET.default_value(),
+        Duration::from_secs(2),
+        "outcome-test pins must preserve the production delivery budget"
+    );
+
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let path = temp.path().join("receipts.jsonl");
@@ -11117,6 +11124,26 @@ fn issue_6722_periodic_wake_delivers_with_monitor_off_and_no_queue() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Readiness and the child Stop hook are prerequisites, not latency checks.
+    let _hook_budgets = [
+        "GWT_TEST_BUDGET_HOOK_LIVE_ATTEMPT_MS",
+        "GWT_TEST_BUDGET_HOOK_LIVE_READINESS_MS",
+    ]
+    .map(|key| {
+        ScopedEnvVar::set(
+            key,
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        )
+    });
+    // This fixture asserts the native ACK, not the owner's two-second latency.
+    let _delivery_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let home =
         gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
@@ -11152,6 +11179,26 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Readiness and the child Stop hook are prerequisites, not latency checks.
+    let _hook_budgets = [
+        "GWT_TEST_BUDGET_HOOK_LIVE_ATTEMPT_MS",
+        "GWT_TEST_BUDGET_HOOK_LIVE_READINESS_MS",
+    ]
+    .map(|key| {
+        ScopedEnvVar::set(
+            key,
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        )
+    });
+    // This fixture asserts the native ACK, not the owner's two-second latency.
+    let _delivery_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let home =
         gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
@@ -11226,7 +11273,11 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
     assert_native_pm_received_periodic_wake(&repo, &result, &pm);
 }
 
-fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_default: bool) {
+fn assert_pm_ensure_spawns_from_default_branch(
+    default_branch: &str,
+    cached_default: bool,
+    supersede_before_completion: bool,
+) {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
     // FR-001/FR-002: no registration + auto_start default ON => silent spawn
     // with a pending PM marker so launch completion can register the session.
@@ -11306,7 +11357,62 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         "actual PM launch: {:?}",
         completion.result.as_ref().err()
     );
-    runtime.handle_remote_owner_launch_complete(completion);
+    if supersede_before_completion {
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.registration = None;
+            let mut profile = prefs.settings.launch_profile_or_default();
+            profile.agent_id = "codex".into();
+            prefs.settings.launch_profile = Some(profile);
+        })
+        .unwrap();
+        runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Restart);
+        tasks.lock().unwrap().pop().unwrap()();
+        drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+        let successor = runtime.tab("tab-1").unwrap().workspace.persisted().windows[1].clone();
+        let successor_id = combined_window_id("tab-1", &successor.id);
+        assert!(runtime
+            .pending_launch_completions
+            .contains_key(&successor_id));
+        // Only the old callback is an actual native completion. The successor
+        // request is queued; seed its later projection without a second child.
+        let projected = pm_registration_fixture("successor-pm", &repo);
+        runtime.sync_pm_session_cache(&repo, Some(&projected));
+        runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .set_session_id(&successor.id, Some(projected.session_id.clone()));
+        let late_events = runtime.handle_remote_owner_launch_complete(completion);
+        let cached = runtime.pm_session_for_root(&repo).cloned();
+        let wire = runtime.workspace_view_for_tab(runtime.tab("tab-1").unwrap());
+        close_test_owner_runtime(&mut runtime, &window_id);
+        assert_eq!(
+            cached.as_deref(),
+            Some(projected.session_id.as_str()),
+            "an older native completion cannot replace the latest requested PM projection"
+        );
+        assert_eq!(
+            wire.windows
+                .iter()
+                .filter(|window| window.is_pm)
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            [successor_id.as_str()]
+        );
+        assert!(late_events.iter().all(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.workspace.windows)
+                .all(|window| !window.is_pm || window.id == successor_id),
+            _ => true,
+        }));
+        return;
+    }
+    let completion_events = runtime.handle_remote_owner_launch_complete(completion);
     assert!(
         runtime
             .tab("tab-1")
@@ -11388,6 +11494,25 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
     )
     .unwrap();
     assert!(physical.pty.tree_exit_confirmed());
+    let workspace = completion_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("the completed PM launch publishes its workspace");
+    let pm_windows: Vec<_> = workspace
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.workspace.windows)
+        .filter(|window| window.is_pm)
+        .map(|window| window.id.as_str())
+        .collect();
+    assert_eq!(
+        pm_windows,
+        [window_id.as_str()],
+        "the first completed workspace marks the durably registered PM"
+    );
 }
 
 /// Issue #4375: run the completion of the PM worktree preparation the runtime

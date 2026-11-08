@@ -1,19 +1,28 @@
 //! Host registration lease bookkeeping (Issue #6476).
 //!
 //! This foundation opens no transport and grants no device authorization. A
-//! trusted caller must authenticate coordinator replies, own this value under
-//! the Host authorization fence, and check it at the final read/input effect.
+//! trusted caller must authenticate coordinator replies. MobileAuthorization's
+//! registered mode owns this value under its Host authorization fence and checks
+//! final read/input effects, including the native permit acceptance deadline.
 //! Network failure/EOF must invalidate it and disable the Host with a new epoch.
-//! Renewal scheduling (every ten seconds) and that runtime wiring are separate.
+//! Renewal polling keeps a ten-second request-start cadence; the runtime must
+//! drive it before the first reply too. Actual timers and transport are separate.
 //! The credential module provides strict reads and explicit immutable private
 //! imports only; neither operation registers or enables this Host.
+//! Configuration selects an explicit imported identity from fixed private
+//! storage; loading it likewise grants no registration or device authority.
 
+pub mod admin;
 pub mod credential;
+
+mod config;
+pub use config::{HostConfigError, MobileHostConfig};
 
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MAX_LEASE_SECS: u64 = 30;
+const RENEWAL_INTERVAL_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LeaseError {
@@ -68,6 +77,7 @@ pub struct RegistrationLease {
     credential_expires_at: u64,
     last_instant: Instant,
     last_wall: u64,
+    next_renewal_at: Instant,
     pending: Option<PendingRenewal>,
     active_until: Option<Instant>,
     disabled: bool,
@@ -92,6 +102,7 @@ impl RegistrationLease {
             credential_expires_at,
             last_instant: now,
             last_wall: wall,
+            next_renewal_at: now,
             pending: None,
             active_until: None,
             disabled: false,
@@ -105,6 +116,7 @@ impl RegistrationLease {
         wall: u64,
     ) -> Result<RegistrationRenewal, LeaseError> {
         self.observe(now, wall)?;
+        self.next_renewal_at = now + Duration::from_secs(RENEWAL_INTERVAL_SECS);
         let nonce = Uuid::new_v4();
         let request = RegistrationRenewal {
             generation: self.generation,
@@ -120,6 +132,21 @@ impl RegistrationLease {
                 + Duration::from_secs(MAX_LEASE_SECS.min(self.credential_expires_at - wall)),
         });
         Ok(request)
+    }
+
+    /// Poll even before the first reply. Observe expiry on every call, but
+    /// never replace an unanswered request or extend its original deadline.
+    /// Late polls emit one request; replies do not reset the ten-second cadence.
+    pub fn poll_renewal(
+        &mut self,
+        now: Instant,
+        wall: u64,
+    ) -> Result<Option<RegistrationRenewal>, LeaseError> {
+        self.observe(now, wall)?;
+        if self.pending.is_some() || now < self.next_renewal_at {
+            return Ok(None);
+        }
+        self.begin_renewal(now, wall).map(Some)
     }
 
     /// Accept only an authenticated response for the current generation/nonce.
@@ -155,10 +182,21 @@ impl RegistrationLease {
 
     /// Check at the synchronous effect while holding the Host authority fence.
     pub fn check(&mut self, now: Instant, wall: u64) -> Result<(), LeaseError> {
+        self.checked_deadline(now, wall).map(|_| ())
+    }
+
+    /// The absolute request-start deadline, for the final native permit cap.
+    pub(crate) fn checked_deadline(
+        &mut self,
+        now: Instant,
+        wall: u64,
+    ) -> Result<Instant, LeaseError> {
         self.observe(now, wall)?;
+        self.active_until.ok_or(LeaseError::NotRegistered)
+    }
+
+    pub(crate) fn active_deadline(&self) -> Option<Instant> {
         self.active_until
-            .ok_or(LeaseError::NotRegistered)
-            .map(|_| ())
     }
 
     pub fn invalidate(&mut self) {
@@ -211,6 +249,82 @@ mod tests {
         lease
             .accept_renewal(request.generation(), request.nonce(), 30, now, wall)
             .unwrap();
+    }
+
+    #[test]
+    fn renewal_poll_keeps_pending_deadline_and_request_start_cadence() {
+        let now = Instant::now();
+        let mut host = lease(now, 200);
+        let first = host.begin_renewal(now, 100).unwrap();
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(10), 110),
+            Ok(None)
+        );
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(20), 120),
+            Ok(None)
+        );
+        host.accept_renewal(
+            first.generation(),
+            first.nonce(),
+            30,
+            now + Duration::from_secs(20),
+            120,
+        )
+        .unwrap();
+        let next = host
+            .poll_renewal(now + Duration::from_secs(20), 120)
+            .unwrap()
+            .unwrap();
+        assert_ne!(next.nonce(), first.nonce());
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(20), 120),
+            Ok(None)
+        );
+        host.accept_renewal(
+            next.generation(),
+            next.nonce(),
+            30,
+            now + Duration::from_secs(20),
+            120,
+        )
+        .unwrap();
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(29), 129),
+            Ok(None)
+        );
+        assert!(host
+            .poll_renewal(now + Duration::from_secs(30), 130)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn renewal_poll_observes_idle_expiry_and_clock_failure_before_due() {
+        let now = Instant::now();
+        let mut host = lease(now, 200);
+        host.begin_renewal(now, 100).unwrap();
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(20), 120),
+            Ok(None)
+        );
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(30), 130),
+            Err(LeaseError::LeaseExpired)
+        );
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(31), 131),
+            Err(LeaseError::Disabled)
+        );
+        let mut host = lease(now, 105);
+        grant(&mut host, now, 100);
+        assert_eq!(
+            host.poll_renewal(now + Duration::from_secs(5), 105),
+            Err(LeaseError::CredentialExpired)
+        );
+        let mut host = lease(now, 200);
+        grant(&mut host, now, 100);
+        assert_eq!(host.poll_renewal(now, 99), Err(LeaseError::ClockRollback));
     }
 
     #[test]

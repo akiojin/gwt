@@ -11,6 +11,38 @@ fn workflow(name: &str) -> Value {
 }
 
 #[test]
+fn exact_head_home_guards_skip_unavailable_pre_feature_helpers() {
+    for (file, jobs) in [
+        (
+            "test.yml",
+            &["test-windows-rust", "test-windows-rust-lib"][..],
+        ),
+        ("coverage.yml", &["coverage-shard"][..]),
+    ] {
+        let document = workflow(file);
+        for job in jobs {
+            let steps = document["jobs"][job]["steps"].as_sequence().unwrap();
+            let snapshot = steps
+                .iter()
+                .find(|step| step["id"] == "home-guard")
+                .unwrap();
+            assert_eq!(
+                snapshot["if"], "${{ hashFiles('scripts/ci_home_guard.py') != '' }}",
+                "{file}/{job}: a pre-feature PR head does not contain the helper"
+            );
+            let check = steps
+                .iter()
+                .find(|step| step["name"] == "Check tests left real HOME project stores unchanged")
+                .unwrap();
+            assert_eq!(
+                check["if"],
+                "${{ !cancelled() && steps.home-guard.outcome == 'success' }}"
+            );
+        }
+    }
+}
+
+#[test]
 fn pr_coverage_and_lint_run_independently_under_stable_check_names() {
     let coverage = workflow("coverage.yml");
     assert!(

@@ -690,6 +690,11 @@ pub struct WindowRuntime {
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
+    pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
+    pub(crate) pending_input_commands: std::collections::VecDeque<(
+        gwt::project_runtime::events::OwnerCommand,
+        RemoteRuntimeCommandKind,
+    )>,
     pub(crate) output_seq: u64,
     pub(crate) status_revision: u64,
     pub(crate) raw_status: gwt::WindowProcessStatus,
@@ -728,6 +733,8 @@ impl WindowRuntime {
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input_observation: None,
             last_human_input_at: None,
+            input_in_flight: None,
+            pending_input_commands: Default::default(),
             output_seq: 0,
             status_revision: 0,
             raw_status: gwt::WindowProcessStatus::Running,
@@ -778,6 +785,10 @@ impl WindowRuntime {
         }
         Some(observation.revision)
     }
+
+    fn input_delivery_pending(&self) -> bool {
+        self.input_in_flight.is_some() || !self.pending_input_commands.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -796,6 +807,7 @@ pub(crate) struct RemoteRuntimeCommandCompletion {
     pub(crate) incarnation: u64,
     pub(crate) kind: RemoteRuntimeCommandKind,
     pub(crate) approval_resolution_started: bool,
+    pub(crate) input_command_id: Option<uuid::Uuid>,
     pub(crate) result: Result<Option<gwt::project_runtime::events::OwnerInputObservation>, String>,
 }
 
@@ -986,6 +998,8 @@ pub(crate) struct RemoteRuntimeSnapshot {
     pub(crate) exit_code: Option<u32>,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) pm_registration: Option<Box<gwt::pm_registry::PmRegistration>>,
     #[serde(default)]
     pub(crate) agent_id: Option<String>,
     #[serde(default)]
@@ -1702,8 +1716,8 @@ pub(crate) struct ProjectRuntimeState {
 
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
-    /// entry is consumed by `handle_launch_complete`, which writes the PM
-    /// registration once the session id exists.
+    /// entry is consumed by native launch completion to project the owner's
+    /// durable PM registration into the GUI's read-only cache.
     pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
     /// Repositories whose explicit PM-capable pane close has been accepted but
     /// whose durable deregistration is still running. Automatic ensure must
@@ -2073,6 +2087,7 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_launch_preparations: HashSet<wizard::IssueMonitorLaunchPreparationKey>,
+    pub(crate) issue_monitor_launch_attempts: HashMap<wizard::IssueMonitorLaunchPreparationKey, u8>,
     pub(crate) issue_monitor_launch_queue: Vec<wizard::PendingIssueMonitorLaunch>,
     pub(crate) issue_monitor_materializer_id: String,
     /// Issue #3878: budget for one local fallback commit of the Issue Monitor
@@ -5153,6 +5168,7 @@ impl AppRuntime {
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
+            issue_monitor_launch_attempts: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
@@ -11325,6 +11341,9 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
+            | FrontendEvent::UpdatePmRequestTask { id, .. }
+            | FrontendEvent::CompletePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11703,6 +11722,9 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
+            | FrontendEvent::UpdatePmRequestTask { id, .. }
+            | FrontendEvent::CompletePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12072,6 +12094,39 @@ impl AppRuntime {
                 &id,
                 request_id,
                 pm_chat::PmRequestTaskOperation::Reopen(request),
+            ),
+            FrontendEvent::CancelPmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Cancel(request),
+            ),
+            FrontendEvent::UpdatePmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Update(request),
+            ),
+            FrontendEvent::CompletePmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Complete(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
@@ -14326,6 +14381,9 @@ impl AppRuntime {
         let changed = state.project_owner_health.as_ref() != Some(&health)
             || state.project_owner_connection_id != connection_id
             || state.project_owner_identity != identity;
+        let input_connection_changed = state.project_owner_connection_id != connection_id
+            || state.project_owner_identity != identity
+            || health.state != gwt::protocol::ProjectOwnerHealthState::Healthy;
         if changed {
             state.project_owner_execution_status = None;
         }
@@ -14358,6 +14416,20 @@ impl AppRuntime {
             ),
             self.hub_state_broadcast(),
         ];
+        if input_connection_changed {
+            let ids = self
+                .runtimes
+                .keys()
+                .filter(|id| self.project_key_for_window(id) == Some(&context.project_key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for id in ids {
+                events.extend(self.discard_pending_remote_input(
+                    &id,
+                    "Queued input was discarded because the project connection changed. Retype it.",
+                ));
+            }
+        }
         if health.state == gwt::protocol::ProjectOwnerHealthState::Healthy {
             events.extend(self.queue_owner_inventory(context, Some(connection_id), None, None));
         }
@@ -14587,7 +14659,7 @@ impl AppRuntime {
             runtime.screen_seq = snapshot.screen_seq;
         }
         runtime.has_unsent_user_input.store(
-            snapshot.has_unsent_user_input,
+            snapshot.has_unsent_user_input || runtime.input_delivery_pending(),
             std::sync::atomic::Ordering::Release,
         );
         runtime.observe_input(snapshot.input_observation);
@@ -15542,13 +15614,15 @@ impl AppRuntime {
             let mut restore_refusal = None;
             let mut launch_sent = false;
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
+                let mut _gui_presence = None;
                 let attempt = async {
                 if command.is_none() && !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
                 let connected = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await;
-                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.clone());
-                let client = connected?;
+                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.as_ref().map(|(client, _)| client.clone()).map_err(Clone::clone));
+                let (client, presence) = connected?;
+                _gui_presence = Some(presence);
                 if !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
@@ -15683,8 +15757,13 @@ impl AppRuntime {
                         return Err(snapshot_error);
                     }
                 };
-                let snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
+                let mut snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
                 if snapshot.id != owner_pane_id || snapshot.incarnation != incarnation || snapshot.session_id.as_deref() != receipt["session_id"].as_str() { return Err("owner launch snapshot identity changed".into()); }
+                snapshot.pm_registration = gwt::pm_registry::load_pm_prefs(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                ).ok().and_then(|prefs| prefs.registration).filter(|registration| {
+                    snapshot.session_id.as_deref() == Some(registration.session_id.as_str())
+                }).map(Box::new);
                 let session = read_owner_session(&snapshot, &sessions_dir);
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session))
                 }.await;
@@ -15932,6 +16011,32 @@ impl AppRuntime {
                             Some("owner connection is unavailable".into()),
                         );
                     };
+                    let Some(identity) = client.identity() else {
+                        return Vec::new();
+                    };
+                    if self
+                        .project_state(&context)
+                        .and_then(|state| state.project_owner_identity.as_ref())
+                        .is_some_and(|accepted| accepted != identity)
+                    {
+                        return Vec::new();
+                    }
+                    let pm_root = self
+                        .project_state_mut(&context)
+                        .and_then(|state| state.pending_pm_launches.remove(&window_id));
+                    let pm_cache_changed = match (pm_root, snapshot.pm_registration.as_ref()) {
+                        (Some(root), Some(registration))
+                            if root == context.project_root
+                                && snapshot.session_id.as_deref()
+                                    == Some(registration.session_id.as_str()) =>
+                        {
+                            let changed =
+                                self.pm_session_for_root(&root) != Some(&registration.session_id);
+                            self.sync_pm_session_cache(&root, Some(registration));
+                            changed
+                        }
+                        _ => false,
+                    };
                     if self.runtimes.get(&window_id).is_some_and(|runtime| {
                         runtime.owner_pane_id == snapshot.id
                             && runtime.incarnation == snapshot.incarnation
@@ -15939,7 +16044,12 @@ impl AppRuntime {
                     }) {
                         // Inventory may have installed this same owner before the HTTP launch reply.
                         // A fresh post-install snapshot repairs it without replaying older status/data.
-                        return self.request_owner_snapshot(&window_id, None);
+                        let mut events = Vec::new();
+                        if pm_cache_changed {
+                            events.push(self.workspace_state_broadcast(&context));
+                        }
+                        events.extend(self.request_owner_snapshot(&window_id, None));
+                        return events;
                     }
                     self.record_restore_window_outcome(&window_id, Ok(()));
                     self.restore_launch_windows.remove(&window_id);
@@ -16389,19 +16499,50 @@ impl AppRuntime {
             .get(window_id)
             .map(|runtime| runtime.status_revision)
             .unwrap_or_default();
+        let connection_id = self
+            .project_state(context)
+            .map(|state| state.project_owner_connection_id);
+        let discard_input = self.runtimes.get(window_id).is_some_and(|runtime| {
+            runtime.input_delivery_pending()
+                && (runtime.owner_pane_id != snapshot.id
+                    || runtime.incarnation != snapshot.incarnation
+                    || runtime.owner_identity != identity
+                    || runtime
+                        .input_in_flight
+                        .is_some_and(|(connection, _)| Some(connection) != connection_id))
+        });
+        let discarded_input = if discard_input {
+            self.discard_pending_remote_input(
+                window_id,
+                "Queued input was discarded because the pane owner changed. Retype it.",
+            )
+        } else {
+            Vec::new()
+        };
         let composer_hint = self
             .runtimes
-            .get(window_id)
+            .get_mut(window_id)
             .filter(|runtime| {
                 runtime.owner_pane_id == snapshot.id
                     && runtime.incarnation == snapshot.incarnation
                     && runtime.owner_identity == identity
             })
             .map(|runtime| {
+                let preserve_input = runtime
+                    .input_in_flight
+                    .is_none_or(|(connection, _)| Some(connection) == connection_id);
                 (
                     runtime.has_unsent_user_input.clone(),
                     runtime.input_observation,
                     runtime.last_human_input_at,
+                    preserve_input
+                        .then(|| runtime.input_in_flight.take())
+                        .flatten(),
+                    if preserve_input {
+                        std::mem::take(&mut runtime.pending_input_commands)
+                    } else {
+                        Default::default()
+                    },
                 )
             });
         let mut runtime = WindowRuntime::remote(
@@ -16411,10 +16552,14 @@ impl AppRuntime {
             client,
             identity,
         );
-        if let Some((hint, observation, last_human_input_at)) = composer_hint {
+        if let Some((hint, observation, last_human_input_at, input_in_flight, pending)) =
+            composer_hint
+        {
             runtime.has_unsent_user_input = hint;
             runtime.input_observation = observation;
             runtime.last_human_input_at = last_human_input_at;
+            runtime.input_in_flight = input_in_flight;
+            runtime.pending_input_commands = pending;
         }
         runtime.status_revision = status_revision;
         runtime.child_pid = snapshot.child_pid;
@@ -16422,7 +16567,7 @@ impl AppRuntime {
         runtime.screen_ansi = snapshot.screen_ansi;
         runtime.screen_seq = snapshot.screen_seq;
         runtime.has_unsent_user_input.store(
-            snapshot.has_unsent_user_input,
+            snapshot.has_unsent_user_input || runtime.input_delivery_pending(),
             std::sync::atomic::Ordering::Release,
         );
         runtime.output_seq = snapshot.screen_seq;
@@ -16449,6 +16594,7 @@ impl AppRuntime {
                 .with_terminal_stream_seq(Some(snapshot.screen_seq)),
         ];
         events.extend(status_events);
+        events.extend(discarded_input);
         events.extend(self.request_owner_snapshot(window_id, None));
         if activity_changed {
             self.invalidate_workspace_projection_patch(&context.tab_id);
@@ -16492,7 +16638,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|executor| {
                     executor.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,

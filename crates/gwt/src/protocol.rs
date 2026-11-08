@@ -426,14 +426,36 @@ impl AgentResourceSettings {
     }
 }
 
-/// A browser can request reassessment, but cannot supply actor or provenance.
+/// A browser can reopen or cancel tracking, but cannot supply actor or provenance.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PmRequestTaskReopenRequest {
+pub struct PmRequestTaskUserRequest {
     pub operation_id: String,
     pub expected_revision: u64,
     pub reason: String,
     pub task_id: String,
+}
+
+/// Correct a saved draft without accepting actor or source provenance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PmRequestTaskUpdateRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub task: gwt_core::pm_request_tasks::TaskDraft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PmRequestTaskCompleteRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub task_id: String,
+    pub condition_revision: u64,
+    pub review_generation: u64,
+    pub evidence: Vec<String>,
 }
 
 /// Selected tracking data only; originals remain outside this browser adapter.
@@ -706,7 +728,22 @@ pub enum FrontendEvent {
     ReopenPmRequestTask {
         id: String,
         request_id: u64,
-        request: PmRequestTaskReopenRequest,
+        request: PmRequestTaskUserRequest,
+    },
+    CancelPmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskUserRequest,
+    },
+    UpdatePmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskUpdateRequest,
+    },
+    CompletePmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskCompleteRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -4213,6 +4250,37 @@ mod tests {
         let mut forged = reopen;
         forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
         assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let cancel = serde_json::json!({"kind":"cancel_pm_request_task", "id":"pm",
+            "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                "reason":"Withdraw this request","task_id":"task"}});
+        let _: FrontendEvent = serde_json::from_value(cancel.clone()).expect("user cancel");
+        let mut forged = cancel;
+        forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let update = serde_json::json!({"kind":"update_pm_request_task", "id":"pm",
+            "request_id":4,"request":{"operation_id":"update","expected_revision":3,
+                "reason":"Correct the original outcome","task":{"id":"task","title":"Corrected task",
+                    "purpose":"The original purpose","completion_conditions":["Verified outcome"],
+                    "issue_numbers":[],"goal_ids":[],"assignee":null}}});
+        let _: FrontendEvent = serde_json::from_value(update.clone()).expect("user update");
+        for field in ["actor", "source", "project_key", "task_id"] {
+            let mut forged = update.clone();
+            forged["request"][field] = serde_json::json!("claimed");
+            assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        }
+        let mut forged = update;
+        forged["request"]["task"]["source_id"] = serde_json::json!("claimed");
+        assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let complete = serde_json::json!({"kind":"complete_pm_request_task", "id":"pm",
+            "request_id":5,"request":{"operation_id":"complete","expected_revision":3,
+                "reason":"Verified the original outcome","task_id":"task",
+                "condition_revision":1,"review_generation":1,"evidence":["fixture:outcome"]}});
+        let _: FrontendEvent = serde_json::from_value(complete.clone()).expect("user complete");
+        for field in ["actor", "source", "project_key", "authority"] {
+            let mut forged = complete.clone();
+            forged["request"][field] = serde_json::json!("claimed");
+            assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        }
     }
 
     #[test]

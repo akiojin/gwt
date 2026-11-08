@@ -276,16 +276,20 @@ pub fn actual_open(repo: &Path) -> Result<bool, String> {
     let Some(observed) = observation(repo)? else {
         return Ok(false);
     };
-    if observation_is_revoked(&observed) {
-        return Ok(false);
+    Ok(observation_is_open(&policy, &observed))
+}
+
+fn observation_is_open(policy: &store::Policy, observed: &RuntimeObservation) -> bool {
+    if observation_is_revoked(observed) {
+        return false;
     }
-    Ok(observed.views.values().any(|receipt| {
+    observed.views.values().any(|receipt| {
         policy.choice != Some(Choice::Stop)
             || (policy
                 .last_operation()
                 .is_some_and(|operation| operation.effect_state == EffectState::Confirmed)
                 && receipt.admitted_policy_revision == policy.revision)
-    }))
+    })
 }
 
 pub fn session_lineage(repo: &Path, session: &gwt_agent::Session) -> Vec<String> {
@@ -653,6 +657,9 @@ pub fn local_status(
     }
     let policy = store::load(repo);
     let policy_error = policy.as_ref().err().map(ToString::to_string);
+    let corruption_digest = policy_error
+        .as_ref()
+        .and_then(|_| policy_corruption_digest(repo));
     let policy = policy.ok();
     let operation = policy
         .as_ref()
@@ -661,7 +668,11 @@ pub fn local_status(
             None => policy.last_operation(),
         })
         .cloned();
-    let open = actual_open(repo).unwrap_or(false);
+    // One status projection reuses its freshly read policy and observation.
+    let open = policy
+        .as_ref()
+        .zip(observed.as_ref())
+        .is_some_and(|(policy, observed)| observation_is_open(policy, observed));
     let choice = policy.as_ref().and_then(|value| value.choice);
     let latest_operation = policy.as_ref().and_then(|policy| policy.last_operation());
     let (state, reason) = if let Some(error) = policy_error {
@@ -701,7 +712,10 @@ pub fn local_status(
         ("selection_pending", "actual_view_required".into())
     };
     crate::protocol::ProjectExecutionStatusView {
-        project_key: store::project_key(repo),
+        project_key: policy.as_ref().map_or_else(
+            || store::project_key(repo),
+            |policy| policy.project_key.clone(),
+        ),
         generation: observed.as_ref().map_or(0, |value| value.generation),
         revision: policy.as_ref().map_or(0, |value| value.revision),
         choice,
@@ -724,7 +738,7 @@ pub fn local_status(
         recovery_operation: (state == "unknown" || state == "selection_pending")
             .then(|| "project.execution.choose".into()),
         view_set_revision: observed.as_ref().map_or(0, |value| value.view_set_revision),
-        policy_corruption_digest: policy_corruption_digest(repo),
+        policy_corruption_digest: corruption_digest,
     }
 }
 

@@ -7,12 +7,17 @@ param(
     [ValidateSet('debug', 'release')][string]$BuildProfile = 'debug',
     [string]$BuildTargetDirectory = 'target',
     [ValidateRange(0.001, 1000)][double]$MaxCpuCores = 0.2,
+    [ValidateRange(1, 12)][int]$PaneCount = 12,
+    [ValidateRange(0, 1000)][double]$MaxDaemonCpuCores = 0,
+    [ValidateRange(0, 120)][int]$NativeProfileSeconds = 0,
     [string]$SessionsFixture,
+    [string]$SourceAuditDirectory,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
 )
 
 $ErrorActionPreference = 'Stop'
 if ($FunctionalOnly -and $AssertCpuBudget) { throw '-FunctionalOnly cannot assert the idle CPU budget.' }
+if ($FunctionalOnly -and $MaxDaemonCpuCores -gt 0) { throw '-FunctionalOnly cannot assert the daemon idle CPU budget.' }
 if ($FunctionalOnly -and $BuildProfile -ne 'debug') { throw 'Canonical GUI verification requires the checkout debug binaries.' }
 $measurementScope = if ($FunctionalOnly) { 'functional (includes startup)' } else { 'steady idle' }
 $checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -67,11 +72,11 @@ function Set-CheckEnvironment($variables) {
         [Environment]::SetEnvironmentVariable($key, $variables[$key])
     }
 }
-function Invoke-CheckoutEnvelope($operation, $parameters, [switch]$SourceContext) {
+function Invoke-CheckoutEnvelope($operation, $parameters, [switch]$SourceContext, [string]$WorkingDirectory = $checkout) {
     $attempts = if ($operation -eq 'issue.monitor.status') { 6 } else { 1 }
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         $startInfo = [Diagnostics.ProcessStartInfo]::new($gwtdBinary)
-        $startInfo.WorkingDirectory = $checkout
+        $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         if ($SourceContext) {
@@ -107,6 +112,28 @@ function Invoke-CheckoutEnvelope($operation, $parameters, [switch]$SourceContext
         }
         throw "$operation failed (exit $nativeExitCode): $diagnostic"
     }
+}
+function Invoke-SourceHookAudit($parameters) {
+    if (!$SourceAuditDirectory) {
+        return Invoke-CheckoutEnvelope 'hook.doctor' $parameters -SourceContext
+    }
+    # The recovered verification worker has no native ancestry in the managed
+    # caller. Only hook auditing crosses this rendezvous; measured children stay
+    # under the worker's observed Job. No source environment is serialized.
+    $requestId = [Guid]::NewGuid().ToString('N')
+    $requestPath = Join-Path $SourceAuditDirectory "$requestId.request.json"
+    $responsePath = Join-Path $SourceAuditDirectory "$requestId.response.json"
+    $request = @{schema_version=1;operation='hook.doctor';params=$parameters} | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::WriteAllText("$requestPath.tmp", $request, [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move("$requestPath.tmp", $requestPath)
+    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+    while (!(Test-Path -LiteralPath $responsePath)) {
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Managed source hook audit timed out.' }
+        Start-Sleep -Milliseconds 100
+    }
+    $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json
+    if ($response.ok -isnot [bool] -or !$response.ok) { throw "Managed source hook audit failed: $($response.output)" }
+    return $response
 }
 function Assert-HookHealth($doctor) {
     $preflight = $doctor.preflight
@@ -191,7 +218,7 @@ try {
     $fixtureProject = Join-Path $checkHome 'project'
     # Launch pushes/fetches branches normally, entirely inside this private
     # origin. Its wildcard mapping cannot import the source checkout's fleet.
-    # Launch Wizard owns all twelve fixture branches/worktrees.
+    # Launch Wizard owns all fixture branches/worktrees.
     Write-Host 'Preparing private single-branch origin and shared checkout fixture.'
     $null = Invoke-FixtureGit @('clone', '--bare', '--shared', '--single-branch', '--no-tags', '--branch', $sourceBranch, '--', $checkout, $fixtureOrigin)
     $null = Invoke-FixtureGit @('clone', '--shared', '--single-branch', '--no-tags', '--branch', $sourceBranch, '--', $fixtureOrigin, $fixtureProject)
@@ -319,9 +346,10 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
     process.stdout.write(Array.from({ length: 600 }, (_, index) => '\x1b[36mGWT_IDLE_HISTORY_' + String(index).padStart(4, '0')
       + ' ' + '.'.repeat(80) + '\x1b[0m\r\n').join('') + 'GWT_IDLE_5658_SEEDED_' + command.index + '\r\n');
     void readPane();
-  } else if (command.kind === 'start' && ownWindow && !started && Number.isFinite(command.at) && Number.isInteger(command.index)) {
+  } else if (command.kind === 'start' && ownWindow && !started && Number.isFinite(command.at) && Number.isInteger(command.index)
+      && Number.isInteger(command.pane_count) && command.pane_count > 0) {
     started = true;
-    const first = command.at + command.index * period / 12;
+    const first = command.at + command.index * period / command.pane_count;
     setTimeout(() => {
       record({ kind: 'started', at: new Date().toISOString(), first_at: new Date(first).toISOString(), period_ms: period });
       void readPane();
@@ -346,10 +374,10 @@ agentType = "command"
 command = "$nodeToml"
 defaultArgs = ["$providerToml", "$receiptsToml"]
 "@, [Text.UTF8Encoding]::new($false))
-    $hookBinary = ((Invoke-CheckoutEnvelope 'hook.doctor' @{} -SourceContext).output | ConvertFrom-Json).managed_hook_bin
+    $hookBinary = ((Invoke-SourceHookAudit @{}).output | ConvertFrom-Json).managed_hook_bin
     if (!$hookBinary -or $hookBinary -match '[/\\]target[/\\].*[/\\]gwtd(\.exe)?$') { throw 'Stable hook fallback missing' }
     $hookParams = @{purpose='managed_browser';repair=$true;expected_hook_bin=$hookBinary}
-    $doctor = (Invoke-CheckoutEnvelope 'hook.doctor' $hookParams -SourceContext).output | ConvertFrom-Json
+    $doctor = (Invoke-SourceHookAudit $hookParams).output | ConvertFrom-Json
     $hookEvidence.before = $doctor.preflight
     Assert-HookHealth $doctor
     # Launch children without the calling agent's capability, Session, execution,
@@ -362,10 +390,10 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
         GWT_HOOK_BIN=$hookBinary;GIT_TERMINAL_PROMPT='0';GH_PROMPT_DISABLED='1';
         RUST_LOG='info,gwt.terminal.delivery=debug'}
     '{"schema_version":1,"operation":"daemon.start","params":{}}' | Set-Content "$checkHome/daemon-start.json" -Encoding utf8NoBOM
-    $daemon = Start-Process -FilePath $gwtdBinary -WorkingDirectory $checkout -WindowStyle Hidden -PassThru -RedirectStandardInput "$checkHome/daemon-start.json" -RedirectStandardOutput "$checkHome/daemon-stdout.log" -RedirectStandardError "$checkHome/daemon-stderr.log"
+    $daemon = Start-Process -FilePath $gwtdBinary -WorkingDirectory $fixtureProject -WindowStyle Hidden -PassThru -RedirectStandardInput "$checkHome/daemon-start.json" -RedirectStandardOutput "$checkHome/daemon-stdout.log" -RedirectStandardError "$checkHome/daemon-stderr.log"
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
     do {
-        $daemonStatus = (Invoke-CheckoutEnvelope 'daemon.status' @{}).output
+        $daemonStatus = (Invoke-CheckoutEnvelope 'daemon.status' @{} -WorkingDirectory $fixtureProject).output
         if ($daemonStatus -match '^running pid=(\d+).*probe=ok') { break }
         if ($daemon.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Isolated daemon did not become ready' }
         Start-Sleep -Milliseconds 200
@@ -411,30 +439,40 @@ defaultArgs = ["$providerToml", "$receiptsToml"]
     Write-Host 'Checkout Hub ready: seeded project catalog entry is present.'
     $healthParams = @{purpose='managed_browser';expected_hook_bin=$hookBinary}
     # Only the doctor child receives the original managed source context.
-    $doctor = (Invoke-CheckoutEnvelope 'hook.doctor' $healthParams -SourceContext).output | ConvertFrom-Json
+    $doctor = (Invoke-SourceHookAudit $healthParams).output | ConvertFrom-Json
     $hookEvidence.after = $doctor.preflight
     Assert-HookHealth $doctor
     $hashes = @{}
     foreach ($path in @($gwtRelative, $gwtdRelative, 'crates/gwt/src/main.rs',
+        'crates/gwt/src/usage_poller.rs', 'crates/gwt/src/monitor_duplicate_runtime.rs', 'crates/gwt/src/cli/daemon/server.rs',
+        'crates/gwt/src/process.rs', 'crates/gwt-core/src/index/path_policy.rs',
+        'crates/gwt/src/project_execution_policy.rs',
+        'crates/gwt/src/cli/tray/lifetime.rs',
         'crates/gwt/src/session_inventory.rs', 'crates/gwt/src/index_worker.rs', 'crates/gwt/src/runtime_health_poller.rs', 'crates/gwt/src/agent_capacity.rs',
         'crates/gwt-terminal/src/pane.rs', 'crates/gwt-terminal/src/test_util.rs',
         'crates/gwt/src/project_runtime/events.rs', 'crates/gwt/src/project_runtime/owner.rs',
         'crates/gwt/src/project_runtime/transport.rs', 'crates/gwt/src/app_runtime/mod.rs',
-        'scripts/diagnostics/issue-5658-browser-check.ps1', 'scripts/diagnostics/issue-5658-cpu.ps1',
+        'scripts/diagnostics/issue-5658-browser-check.ps1', 'scripts/diagnostics/issue-5658-cpu.ps1', 'scripts/diagnostics/issue-6743-sampling.ps1',
         'crates/gwt/playwright/tests/idle-cpu-live.spec.ts')) { $hashes[$path] = (Get-FileHash -LiteralPath (Join-Path $checkout $path) -Algorithm SHA256).Hash.ToLowerInvariant() }
     $launchEvidence = @{git_head=$sourceHead;git_status=@(& git -C $checkout status --short);project=$fixtureProject;repo_hash=$repoHash;
         measurement_scope=$measurementScope;build_profile=$BuildProfile;fixture_clone_sha=$fixtureHead;fixture_origin=$fixtureOrigin;fixture_push_url=$fixturePushUrl;
         fixture_origin_branch_refs=$originRefs.Count;fixture_project_origin_branch_refs=$trackingRefs.Count;
-        provider_sha256=$providerHash;ready_requests_per_minute=66;agent_count=12;
-        gui_pid=$process.Id;gui_started_at=$process.StartTime.ToUniversalTime().ToString('o');daemon_pid=$daemon.Id;project_key=$projectKey;
+        provider_sha256=$providerHash;ready_requests_per_minute=($PaneCount * 5.5);agent_count=$PaneCount;
+        gui_pid=$process.Id;gui_started_at=$process.StartTime.ToUniversalTime().ToString('o');daemon_pid=$daemon.Id;daemon_project=$fixtureProject;project_key=$projectKey;
         sha256=$hashes;sessions_fixture=$fixture;pm_auto_start=$false;issue_monitor_enabled=$false;background_index='normal';
+        source_manifest_scope='working tree at evidence capture; immutable comparison binaries identified separately by their SHA256';
         delivery_diagnostic_filter='info,gwt.terminal.delivery=debug';
         user_verification_result='n/a (autonomous)'}
     $launchEvidence.managed_browser_preflight = $hookEvidence
     Set-CheckEnvironment @{GWT_PLAYWRIGHT_BASE_URL=$projectUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
         GWT_PLAYWRIGHT_PID=[string]$process.Id;GWT_PLAYWRIGHT_PROJECT_ROOT=$checkout;
+        GWT_IDLE_PANE_COUNT=[string]$PaneCount;GWT_IDLE_DAEMON_PID=[string]$daemon.Id;
+        GWT_IDLE_DAEMON_STARTED_AT=$daemon.StartTime.ToUniversalTime().ToString('o');
+        GWT_IDLE_MAX_DAEMON_CORES=$MaxDaemonCpuCores.ToString([Globalization.CultureInfo]::InvariantCulture);
+        GWT_IDLE_PROFILE_SECONDS=[string]$NativeProfileSeconds;GWT_IDLE_GWT_BINARY=$gwtBinary;
         GWT_PLAYWRIGHT_GUI_STARTED_AT=$process.StartTime.ToUniversalTime().ToString('o');
         GWT_IDLE_FIXTURE_SHA=$fixtureHead;GWT_IDLE_FIXTURE_BRANCH=$sourceBranch;GWT_IDLE_PROVIDER_SHA=$providerHash;
+        GWT_IDLE_FIXTURE_PROJECT=$fixtureProject;
         GWT_IDLE_PROJECT_STATE=$projectState;
         GWT_IDLE_CPU_LABEL=$Label;GWT_IDLE_SAMPLE_MS=[string]$SampleMilliseconds;
         GWT_IDLE_BUILD_PROFILE=$BuildProfile;
