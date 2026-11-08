@@ -1,5 +1,184 @@
 use super::ClientScope;
 
+#[test]
+fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
+    use super::{RemoteRuntimeCommandCompletion, RemoteRuntimeCommandKind};
+    use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    let original_status = runtime.runtimes[&id].status;
+    let completion = |kind| RemoteRuntimeCommandCompletion {
+        context: context.clone(),
+        connection_id: 1,
+        identity: identity.clone(),
+        id: id.clone(),
+        incarnation: probe.incarnation,
+        kind,
+        approval_resolution_started: false,
+        input_command_id: None,
+        result: Err("project command timed out".into()),
+    };
+    let mut wire = Vec::new();
+    for (kind, operation) in [
+        (
+            RemoteRuntimeCommandKind::Input { reply_client: None },
+            "input",
+        ),
+        (RemoteRuntimeCommandKind::Resize, "resize"),
+        (RemoteRuntimeCommandKind::Stop, "stop"),
+    ] {
+        let events = runtime.handle_remote_runtime_command_complete(completion(kind));
+        assert_eq!(events.len(), 1, "one operation error, no lifecycle frames");
+        assert!(
+            matches!(&events[0].target, DispatchTarget::Project(key) if key == &context.project_key)
+        );
+        let value = serde_json::to_value(&events[0].event).unwrap();
+        assert_eq!(value["kind"], "window_command_error");
+        assert_eq!(value["operation"], operation);
+        assert_eq!(value["message"], "project command timed out");
+        assert_eq!(
+            events[0].event.delivery_policy().delivery,
+            gwt::protocol::BackendEventDeliveryClass::Error
+        );
+        assert_eq!(runtime.runtimes[&id].status, original_status);
+        assert!(!runtime.runtimes[&id].exit_confirmed);
+        wire.push(value);
+    }
+    let ack = runtime.handle_remote_runtime_command_complete(completion(
+        RemoteRuntimeCommandKind::Input {
+            reply_client: Some("origin".into()),
+        },
+    ));
+    assert!(matches!(&ack[0].target, DispatchTarget::Client(client) if client == "origin"));
+    assert!(matches!(
+        &ack[0].event,
+        BackendEvent::PaneSendResult {
+            ok: false,
+            error: Some(_),
+            ..
+        }
+    ));
+    let mut stale = completion(RemoteRuntimeCommandKind::Resize);
+    stale.incarnation += 1;
+    assert!(runtime
+        .handle_remote_runtime_command_complete(stale)
+        .is_empty());
+
+    // Both pre-send fences remain closed; no worker may send to the old pane.
+    let pane_id = runtime.runtimes[&id].owner_pane_id.clone();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = None;
+    for empty_pane in [false, true] {
+        if empty_pane {
+            runtime
+                .project_state_mut(&context)
+                .unwrap()
+                .project_owner_identity = Some(identity.clone());
+            runtime.runtimes.get_mut(&id).unwrap().owner_pane_id.clear();
+        }
+        let events = runtime.queue_remote_runtime_command(
+            &id,
+            OwnerCommand::Resize {
+                id: pane_id.clone(),
+                incarnation: probe.incarnation,
+                cols: 90,
+                rows: 30,
+            },
+            RemoteRuntimeCommandKind::Resize,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&events[0].event).unwrap()["kind"],
+            "window_command_error"
+        );
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            unreachable!()
+        };
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "refusal must happen before sending"
+        );
+    }
+
+    // Use normal health -> inventory -> attach, never repair the stale fields by hand.
+    runtime.handle_project_owner_health(
+        &context,
+        2,
+        Some(identity.clone()),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
+        },
+    );
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        unreachable!()
+    };
+    drain_queued_blocking_tasks(&Arc::clone(tasks));
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        unreachable!()
+    };
+    let completed = std::mem::take(&mut *recorded.lock().unwrap());
+    for event in completed {
+        if let Some(UserEvent::RemoteOwnerInventoryComplete(completion)) =
+            runtime.accept_project_completion(event)
+        {
+            runtime.handle_remote_owner_inventory_complete(*completion);
+        }
+    }
+    assert_eq!(runtime.runtimes[&id].owner_pane_id, pane_id);
+    assert_eq!(runtime.runtimes[&id].owner_identity, identity);
+    assert!(runtime
+        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n")
+        .is_empty());
+    let ack = drain_browser_owner_input(&mut runtime);
+    assert!(ack
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: true, .. })));
+    assert!(probe.pty.try_wait().unwrap().is_none());
+
+    // A real owner/PTY error is authoritative even without confirmed process exit.
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("actual PTY read failure".into()),
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    while let Ok(event) = source.try_recv() {
+        if matches!(event, OwnerEvent::Status { .. }) {
+            wire.extend(
+                runtime
+                    .handle_project_owner_event(&context, 2, &identity, event)
+                    .into_iter()
+                    .map(|event| serde_json::to_value(event.event).unwrap()),
+            );
+        }
+    }
+    assert_eq!(runtime.runtimes[&id].status, WindowProcessStatus::Error);
+    assert!(runtime.runtimes[&id]
+        .detail
+        .as_deref()
+        .unwrap()
+        .starts_with("actual PTY read failure"));
+    assert!(!runtime.runtimes[&id].exit_confirmed);
+    println!("ISSUE3340_EVENTS={}", serde_json::to_string(&wire).unwrap());
+}
+
 fn aggregate_test_runtime(root: &Path) -> AppRuntime {
     let tabs = ["a", "b"]
         .into_iter()

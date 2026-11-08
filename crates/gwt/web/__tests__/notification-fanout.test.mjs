@@ -28,6 +28,23 @@ const completionSource = readFileSync(
   "utf8",
 );
 
+test("window command failures notify without publishing a lifecycle transition", () => {
+  const initialization = appSource.match(/const windowCommandErrorModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(initialization, "operation errors need their own UI model");
+  const records = [], alerts = [];
+  const receive = new Function("createUiStateStore", "notificationCenter", "alertsToasts", `
+    ${initialization}
+    return event => { ${caseBlock(appSource, "window_command_error").replace('case "window_command_error":', '')} };
+  `)(createUiStateStore, { recordError: event => records.push(event) }, { push: event => alerts.push(event) });
+  receive({ kind: "window_command_error", id: "agent-1", operation: "resize", message: "Refresh the project connection and try again." });
+  assert.equal(records.length, 1);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].title, "Resize failed");
+  assert.equal(alerts[0].message, records[0].message);
+  assert.doesNotMatch(initialization, /applyStatus|terminalStatusModel|Agent error|hit an error/);
+  assert.equal(DEFAULT_COALESCE_KINDS.has("window_command_error"), false);
+});
+
 // Extract the balanced `{ ... }` body of a `function name(` declaration.
 function functionBody(source, name) {
   const start = source.indexOf(`function ${name}(`);
