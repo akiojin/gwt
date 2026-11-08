@@ -4796,6 +4796,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
       });
 
+      const windowCommandErrorModel = createUiStateStore(null);
+      windowCommandErrorModel.subscribe(event => event, event => {
+        if (!event) return;
+        const title = { input: "Input failed", resize: "Resize failed", stop: "Stop failed" }[event.operation] || "Window command failed";
+        const key = `window-command:${event.id}:${event.operation}`;
+        notificationCenter.recordError({ key, title, message: event.message });
+        alertsToasts.push({ id: key, level: "error", title, message: event.message, timeoutMs: 8000 });
+      });
+
       const launchProgressModel = createUiStateStore(null);
       launchProgressModel.subscribe(progress => progress, progress => {
         if (!progress) return;
@@ -5167,6 +5176,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               kind: event.kind, id: event.id, status: event.status, detail: event.detail,
               retryable: event.retryable,
             }));
+            break;
+          case "window_command_error":
+            windowCommandErrorModel.update(() => ({ ...event }));
             break;
           case "attachment_progress":
             handleAttachmentProgress(event);
