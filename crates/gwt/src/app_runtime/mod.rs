@@ -16528,14 +16528,14 @@ impl AppRuntime {
                     runtime.has_unsent_user_input.clone(),
                     runtime.input_observation,
                     runtime.last_human_input_at,
-                    preserve_input
-                        .then(|| {
-                            (
-                                runtime.input_in_flight.take(),
-                                runtime.input_in_flight_reply.take(),
-                            )
-                        })
-                        .unwrap_or_default(),
+                    if preserve_input {
+                        (
+                            runtime.input_in_flight.take(),
+                            runtime.input_in_flight_reply.take(),
+                        )
+                    } else {
+                        (None, None)
+                    },
                     if preserve_input {
                         std::mem::take(&mut runtime.pending_input_commands)
                     } else {
