@@ -4408,6 +4408,28 @@ impl WorkItemsIntakeSnapshot {
             .transpose()
     }
 
+    pub(crate) fn close_projection_needs_rebuild(
+        &self,
+        projection: &WorkItemsProjection,
+        close_content: Option<&str>,
+    ) -> Result<bool> {
+        let Some(close_content) = close_content else {
+            return Ok(false);
+        };
+        let previous = self.files[0].1.as_deref();
+        let proofs = self.files.last().and_then(|(_, bytes)| bytes.as_deref());
+        // A valid snapshot may intentionally omit a close rejected by the fold.
+        // Only a missing or unusable snapshot calls for complete-source repair.
+        if matching_close_projection_snapshot(previous, proofs)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Ok(false);
+        }
+        has_compacted_machine_local_closes(projection, close_content)
+    }
+
     pub(crate) fn apply_detachments(&self, projection: &mut WorkItemsProjection) -> Result<()> {
         remove_detached_containers(projection, &self.detachments()?);
         Ok(())
@@ -8685,6 +8707,78 @@ fn machine_local_close_event_matches_projected_lifecycle(
 // Each snapshot authenticates exact accepted close identities for one byte-exact
 // projection. A watermark or a raw event shard never establishes acceptance.
 type ProjectedCloseEvents = BTreeMap<String, BTreeMap<String, String>>;
+
+/// Inspect whether compacted local closes need a complete-source proof rebuild.
+/// This never recovers transactions, creates locks, or changes persisted bytes.
+pub fn workspace_close_projection_needs_rebuild(
+    works_path: &Path,
+    close_path: &Path,
+) -> Result<bool> {
+    ensure_supported_workspace_layout(works_path)?;
+    validate_workspace_local_close_path(works_path)?;
+    validate_workspace_local_close_path(close_path)?;
+    let proofs_path = workspace_close_projection_proofs_path(works_path);
+    validate_workspace_local_close_path(&proofs_path)?;
+    let previous = read_intake_snapshot_file(works_path)?;
+    let proofs = read_intake_snapshot_file(&proofs_path)?;
+    if matching_close_projection_snapshot(previous.as_deref(), proofs.as_deref())
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Ok(false);
+    }
+    let (Some(previous), Some(closes)) = (previous, read_intake_snapshot_file(close_path)?) else {
+        return Ok(false);
+    };
+    let close_content = std::str::from_utf8(&closes).map_err(|error| {
+        GwtError::Other(format!("work events local lifecycle is not UTF-8: {error}"))
+    })?;
+    let projection = decode_workspace_work_items(
+        works_path,
+        &previous,
+        &load_container_detachments(works_path)?,
+    )?;
+    has_compacted_machine_local_closes(&projection, close_content)
+}
+
+fn has_compacted_machine_local_closes(
+    projection: &WorkItemsProjection,
+    close_content: &str,
+) -> Result<bool> {
+    let inline_ids = projection
+        .work_items
+        .iter()
+        .map(|item| {
+            (
+                item.id.as_str(),
+                item.events
+                    .iter()
+                    .map(|event| event.id.as_str())
+                    .collect::<HashSet<_>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut needs_rebuild = false;
+    for line in close_content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let event: WorkEvent = serde_json::from_str(line)
+            .map_err(|error| GwtError::Other(format!("machine-local close event json: {error}")))?;
+        if matches!(
+            event.kind,
+            WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+        ) && inline_ids
+            .get(event.work_item_id.as_str())
+            .is_some_and(|ids| !ids.contains(event.id.as_str()))
+        {
+            needs_rebuild = true;
+        }
+    }
+    Ok(needs_rebuild)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
