@@ -270,6 +270,7 @@ fn current_switch_runtime(
         &expected.session_id,
     ))?;
     Ok(runtime.status == gwt_agent::AgentStatus::Idle
+        && runtime.is_current_normal_stop()
         && expected.matches_runtime(&expected.session_id, expected.host_pid, &runtime))
 }
 
@@ -481,6 +482,8 @@ fn drive_switch(
             }
         };
         if intent.stage == Requested {
+            let submitted = std::cell::Cell::new(false);
+            let post_submit_grace = std::cell::Cell::new(None);
             let delivered =
                 gwt::cli::execution_state::with_current_active_session_execution_identity_lease(
                     sessions,
@@ -528,6 +531,7 @@ fn drive_switch(
                                     return Err("Source writer changed after checkpoint body delivery".into());
                                 }
                                 return reservation.write_input_authorized(bytes, |commit| commit(&mut || {}))
+                                    .map(|()| submitted.set(true))
                                     .map_err(|error| error.to_string());
                             }
                             gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
@@ -542,11 +546,24 @@ fn drive_switch(
                                 body_committed = true;
                                 Ok(())
                             }).map(|_| ()).map_err(|error| error.to_string())
-                        }, std::thread::sleep, || Ok(false)).map_err(switch_io)?;
+                        }, |duration| {
+                            if submitted.get() {
+                                post_submit_grace.set(Some(duration));
+                            } else {
+                                std::thread::sleep(duration);
+                            }
+                        }, || Ok(false)).map_err(switch_io)?;
                         Ok(())
                     },
-                )?;
-            delivered.ok_or_else(|| {
+                );
+            // The immediate provider hook needs the Session lease too. Keep
+            // body/CR authorization and the input reservation, but wait for
+            // the existing submit grace only after releasing that lease.
+            // Preserve the grace even when the outer lease returns an error.
+            if let Some(duration) = post_submit_grace.get() {
+                std::thread::sleep(duration);
+            }
+            delivered?.ok_or_else(|| {
                 switch_io("Source authority changed before checkpoint delivery")
             })??;
             return Ok(false);

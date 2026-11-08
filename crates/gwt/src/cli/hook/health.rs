@@ -1868,7 +1868,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod browser_preflight_tests {
+pub(super) mod browser_preflight_tests {
     use super::*;
     use gwt_agent::session::HookCompletionOutcome::{Blocked, Normal};
     use gwt_agent::{
@@ -1880,7 +1880,7 @@ mod browser_preflight_tests {
         test_support::{ScopedEnvVar, ScopedGwtHome},
     };
 
-    fn with_source(
+    pub(in crate::cli::hook) fn with_source(
         test: impl FnOnce(&ManagedHookHealthInput, &Session, &Path, &SessionRuntimeState),
     ) {
         let _env_lock = crate::env_test_lock()
@@ -1893,6 +1893,13 @@ mod browser_preflight_tests {
         crate::cli::trusted_store::init_git_repo_with_origin(&worktree);
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let mut session = Session::new(&worktree, "work/issue-6622", AgentId::ClaudeCode);
+        // Match a normally materialized bound launch: metadata bookkeeping
+        // must not change the execution identity's Project State root.
+        session.project_state_root = Some(
+            crate::agent_project_state::canonical_project_state_root_for_session(
+                &session, &worktree,
+            ),
+        );
         session.linked_issue_number = Some(6622);
         let owner = crate::cli::execution_state::ExecutionOwnerKey {
             kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,

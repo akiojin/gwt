@@ -532,20 +532,19 @@ fn run_daemon_hook_inner<E: CliEnv>(
                 return Ok(2);
             };
             let cwd = env.repo_path().to_path_buf();
-            let completion = if publish_completion {
-                runtime_state::capture_hook_completion(&cwd)
-            } else {
-                None
-            };
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let dispatch_result = event_dispatcher::handle_with_input(
+            let (dispatch_result, completion) = event_dispatcher::dispatch_observed(
                 event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_event_output(env, &output, completion)),
+                Ok(output) => Ok(emit_event_output(
+                    env,
+                    &output,
+                    if publish_completion { completion } else { None },
+                )),
                 Err(err) => Ok(emit_event_error(env, name, event, &err)),
             }
         }
@@ -565,13 +564,8 @@ fn run_daemon_hook_inner<E: CliEnv>(
                 return Ok(2);
             };
             let cwd = env.repo_path().to_path_buf();
-            let completion = if publish_completion {
-                runtime_state::capture_hook_completion(&cwd)
-            } else {
-                None
-            };
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let dispatch_result = provider_event::handle_with_input(
+            let (dispatch_result, completion) = provider_event::dispatch_observed(
                 provider,
                 native_event,
                 &stdin,
@@ -579,7 +573,11 @@ fn run_daemon_hook_inner<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_event_output(env, &output, completion)),
+                Ok(output) => Ok(emit_event_output(
+                    env,
+                    &output,
+                    if publish_completion { completion } else { None },
+                )),
                 Err(err) => Ok(emit_event_error(
                     env,
                     name,
@@ -925,6 +923,115 @@ mod tests {
         let _runtime =
             gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &runtime);
         test(&worktree, &runtime);
+    }
+
+    #[test]
+    fn failed_missing_legacy_begin_cannot_fall_back_to_a_second_publication() {
+        with_delivery_source(|worktree, runtime| {
+            std::fs::remove_file(runtime).unwrap();
+            let sessions = gwt_agent::sessions_dir_from_runtime_path(runtime).unwrap();
+            let id = std::env::var("GWT_SESSION_ID").unwrap();
+            let metadata = sessions.join(format!("{id}.toml"));
+            let before = std::fs::read(&metadata).unwrap();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                gwt_agent::with_session_path_lease(&sessions, &id, |_| {
+                    ready_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            ready_rx.recv().unwrap();
+            let completion =
+                super::runtime_state::begin_hook_event(worktree, "Stop", "{}").unwrap();
+            release_tx.send(()).unwrap();
+            holder.join().unwrap();
+            assert!(
+                super::runtime_state::handle_with_input_owned("Stop", "{}", Some(&completion))
+                    .unwrap()
+                    .is_none()
+            );
+            completion.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            assert!(!runtime.exists());
+            assert_eq!(std::fs::read(&metadata).unwrap(), before);
+
+            let fresh = super::runtime_state::begin_hook_event(worktree, "Stop", "{}").unwrap();
+            assert!(
+                super::runtime_state::handle_with_input_owned("Stop", "{}", Some(&fresh))
+                    .unwrap()
+                    .is_some()
+            );
+            fresh.record(gwt_agent::session::HookCompletionOutcome::Normal);
+            let legacy = gwt_agent::SessionRuntimeState::load(runtime).unwrap();
+            assert!(legacy.last_completed_hook_event_at.is_some());
+            assert!(
+                !legacy.is_current_normal_stop(),
+                "legacy output remains uncertified"
+            );
+        });
+    }
+
+    #[test]
+    fn late_same_status_hook_output_cannot_complete_the_next_event() {
+        with_delivery_source(|worktree, runtime| {
+            struct OverlappingOutput<'a> {
+                worktree: &'a std::path::Path,
+                runtime: &'a std::path::Path,
+                next_event: Option<Vec<u8>>,
+            }
+            impl std::io::Write for OverlappingOutput<'_> {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    if self.next_event.is_none() {
+                        let mut next = crate::cli::TestEnv::new(self.worktree.to_path_buf());
+                        next.stdin = serde_json::json!({"tool_name":"Bash",
+                            "tool_input":{"command":"gh issue edit 2 --title blocked"}})
+                        .to_string();
+                        let (code, _) = crate::cli::run_collect(
+                            &mut next,
+                            crate::cli::CliCommand::Hook(crate::cli::HookCommand::InternalDaemon {
+                                name: "event".into(),
+                                rest: vec!["PreToolUse".into()],
+                            }),
+                        )
+                        .unwrap();
+                        assert_eq!(code, 2);
+                        self.next_event = Some(std::fs::read(self.runtime)?);
+                    }
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+            env.stdin = serde_json::json!({"tool_name":"Bash",
+                "tool_input":{"command":"gh issue edit 1 --title blocked"}})
+            .to_string();
+            let mut sink = OverlappingOutput {
+                worktree,
+                runtime,
+                next_event: None,
+            };
+            let mut overlapping = crate::cli::env::StdoutCaptureEnv {
+                inner: &mut env,
+                stdout: &mut sink,
+            };
+            assert_eq!(
+                crate::cli::dispatch(
+                    &mut overlapping,
+                    &["gwtd", "hook", "event", "PreToolUse"].map(str::to_string)
+                ),
+                2
+            );
+            assert_eq!(
+                std::fs::read(runtime).unwrap(),
+                sink.next_event
+                    .expect("event B began during event A's real output"),
+                "event A must not publish completion into the same-status event B"
+            );
+        });
     }
 
     #[test]
