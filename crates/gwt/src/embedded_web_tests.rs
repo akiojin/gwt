@@ -40,6 +40,24 @@ fn window_runtime_state_js() -> &'static str {
     root_js_module_source("/window-runtime-state.js")
 }
 
+#[test]
+fn embedded_web_status_strip_has_no_runtime_completion_indicator() {
+    for source in [
+        index_html(),
+        styles_components_css(),
+        root_js_module_source("/operator-shell.js"),
+    ] {
+        assert!(!source.contains("op-strip-mission"));
+        assert!(!source.contains("op-status-strip__cell--mission"));
+        assert!(!source.contains("op-status-strip__cell--complete"));
+    }
+    assert!(!app_js().contains("counts.done"));
+    assert!(!app_js().contains("counts?.done"));
+    assert!(index_html().contains("id=\"op-briefing\""));
+    assert!(index_html().contains("id=\"op-strip-branches\""));
+    assert!(static_asset_text("/styles/tokens.css").contains("--color-state-done"));
+}
+
 /// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
 /// app.js.
 fn project_index_search_surface_js() -> &'static str {
