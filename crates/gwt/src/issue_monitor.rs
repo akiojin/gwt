@@ -4785,6 +4785,16 @@ pub fn select_launch_profile(
         .filter(|profile| profile.agent_member_id.is_some())
         .and_then(|profile| normalize_issue_monitor_provider(&profile.agent_id));
     for (index, profile) in pool.iter().enumerate() {
+        if !gwt_agent::resolve_agent_id(&profile.agent_id)
+            .is_some_and(|agent| agent.supports_monitor_initial_prompt())
+        {
+            selection.skipped.push(LaunchProfileSkip {
+                index,
+                agent_id: profile.agent_id.clone(),
+                reason: "Unsupported initial prompt delivery; select Claude Code, Codex, Grok Build, or Hermes".into(),
+            });
+            continue;
+        }
         let provider = normalize_issue_monitor_provider(&profile.agent_id);
         if fixed_tool
             .as_ref()
@@ -9859,11 +9869,7 @@ impl IssueMonitorState {
             {
                 return false;
             }
-        } else if self
-            .launch_profiles
-            .first()
-            .is_some_and(|profile| profile.agent_member_id.is_some())
-        {
+        } else if !self.launch_profiles.is_empty() {
             let pool = self
                 .prefs()
                 .registered_launch_profiles_for_issue(issue_number);
@@ -12314,8 +12320,7 @@ impl IssueMonitorState {
                 let record =
                     self.permission_readiness_block_for_launch(delivery.issue_number, &now);
                 (record.is_some()
-                    || (self.launch_auto
-                        && !self.retry_ready_for_saved_profile(delivery.issue_number, &now)))
+                    || !self.retry_ready_for_saved_profile(delivery.issue_number, &now))
                 .then_some((delivery.issue_number, record))
             })
             .collect::<BTreeMap<_, _>>();
@@ -31317,6 +31322,49 @@ mod tests {
     }
 
     #[test]
+    fn initial_prompt_unsupported_profiles_are_skipped_before_claim() {
+        let now = "2026-11-08T00:00:00Z";
+        let unsupported = test_launch_profile("openclaw");
+        let hermes = test_launch_profile("hermes");
+        let pool = vec![unsupported.clone(), hermes.clone()];
+        let selection = select_launch_profile(&pool, &BTreeMap::new(), &[], None, now);
+        assert_eq!(selection.selected, Some(1));
+        assert!(selection.skipped[0].reason.contains("initial prompt"));
+
+        for launch_auto in [false, true] {
+            let mut prefs = IssueMonitorPrefs {
+                enabled: true,
+                launch_auto,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_tiers: vec![vec![unsupported.clone()]],
+                ..IssueMonitorPrefs::default()
+            };
+            prefs.set_launch_profile_pool(vec![unsupported.clone()]);
+            let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[42], "test", now);
+            monitor.record_candidate(issue(42));
+            assert!(!monitor.retry_ready_for_saved_profile(42, now));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", now, 1, |_| false),
+                0
+            );
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert_eq!(monitor.attempt_count(42), 0);
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.pending_effects().is_empty());
+
+            monitor.set_launch_profile_pool(vec![hermes.clone()]);
+            monitor.launch_tiers = vec![vec![hermes.clone()]];
+            assert!(monitor.retry_ready_for_saved_profile(42, now));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", now, 1, |_| false),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn select_launch_profile_skips_held_candidates() {
         let pool = vec![test_launch_profile("codex"), test_launch_profile("claude")];
         let now = "2026-08-22T03:00:00Z";
@@ -32908,7 +32956,7 @@ mod tests {
             None,
             "2026-08-22T02:01:00Z",
         );
-        assert!(unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
+        assert!(!unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
         assert_eq!(unsupported.pending_launch_delivery_id(43), None);
         assert!(!unsupported.active_issue_numbers().contains(&43));
         assert_eq!(unsupported.attempt_count(43), 1);
@@ -32946,12 +32994,11 @@ mod tests {
             ),
             0
         );
-        let blocked = unsupported.inbox_item(43).unwrap();
-        assert_eq!(blocked.state, MonitorInboxState::NotReady);
-        let reason = blocked.exclusion_reason.as_deref().unwrap();
-        for expected in ["pre_launch_block", "openclaw", "Recovery:"] {
-            assert!(reason.contains(expected), "{reason}");
-        }
+        assert_eq!(
+            unsupported.inbox_item(43).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(unsupported.attempt_count(43), 1);
 
         monitor.try_hold_provider_usage_limit(
             42,
