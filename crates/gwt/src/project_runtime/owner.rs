@@ -9775,6 +9775,20 @@ impl OwnerState {
         if self.exact(&id, incarnation).is_err() {
             return;
         }
+        // The EOF reader can deliver a pre-exit Running snapshot after the
+        // independent status worker has recorded the physical exit.
+        if raw_status == crate::WindowProcessStatus::Running
+            && !exit_confirmed
+            && self.runtimes.get(&id).is_some_and(|runtime| {
+                runtime
+                    .pane
+                    .lock()
+                    .ok()
+                    .is_some_and(|pane| pane.last_exit().is_some())
+            })
+        {
+            return;
+        }
         // Capture current ownership before terminal status revokes its writer.
         // Only the registered PM's actual nonzero exit can bypass the generic
         // Agent recovery latch; a read error or replacement grants no such cause.
@@ -11688,6 +11702,47 @@ mod tests {
             state.project_execution_status(None).effective_state,
             "stopped"
         );
+    }
+
+    #[test]
+    fn confirmed_exit_rejects_late_running_without_blocking_live_recovery() {
+        use crate::WindowState::{Error, Running};
+
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut state, _receiver, _handle) = owner_fixture(temp.path());
+        let (_, pane) = unbound_fixture(temp.path());
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let pty = state.runtimes["pane"].pty.clone();
+
+        state.owner_status_event("pane".into(), 1, Error, Some("read error".into()), false);
+        state.owner_status_event("pane".into(), 1, Running, None, false);
+        assert_eq!(OwnerState::runtime_status(&state.runtimes["pane"]), Running);
+
+        pty.kill().unwrap();
+        pty.wait().unwrap();
+        state.runtimes["pane"]
+            .pane
+            .lock()
+            .unwrap()
+            .check_status()
+            .unwrap();
+        state.owner_status_event("pane".into(), 1, Error, Some("physical exit".into()), false);
+        let mut events = state.events.subscribe();
+
+        // The reader copied Running before the independent exit worker ran,
+        // but its delivery reaches the owner after physical exit was recorded.
+        state.owner_status_event("pane".into(), 1, Running, None, false);
+        let retained = &state.runtimes["pane"];
+        assert_eq!(OwnerState::runtime_status(retained), Error);
+        assert!(Arc::ptr_eq(&retained.pty, &pty));
+        assert_eq!(retained.detail.as_deref(), Some("physical exit"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

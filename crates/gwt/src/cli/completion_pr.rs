@@ -11,6 +11,8 @@ pub struct CompletionPrCandidate {
     pub url: String,
     pub head_ref_name: String,
     pub head_sha: String,
+    /// Configured base; empty when the read did not report one.
+    pub base_ref_name: String,
 }
 
 /// Admit the autonomous owner's completion before any terminal state is
@@ -100,6 +102,22 @@ pub(super) fn admit<E: CliEnv>(
                 })
                 .collect();
         }
+        // Delivered receipt inheritance (#6893); `validate` still requires
+        // the selected PR to be merged.
+        if matching.is_empty() {
+            matching = candidates
+                .iter()
+                .copied()
+                .filter(|pr| {
+                    verification::inherits_delivered_receipt(
+                        &worktree,
+                        &pr.head_sha,
+                        verified_head,
+                        &pr.base_ref_name,
+                    )
+                })
+                .collect();
+        }
         if matching.len() != 1 {
             let numbers = candidates
                 .iter()
@@ -128,15 +146,22 @@ pub(super) fn admit<E: CliEnv>(
         if fields.number != pr.number || fields.url != pr.url || fields.head_ref_name != branch {
             return Err(refuse("PR does not belong to the execution branch"));
         }
-        // A fresh run may include the merged PR's later Work receipt.
+        // A fresh run may include the merged PR's later Work receipt, or a
+        // startup HEAD fast-forwarded onto the base that already delivered
+        // other owners' product (#6893). Undelivered product still refuses.
         let preserves_head =
             verification::preserves_verified_head(&worktree, verified_head, &snapshot.head_sha)
                 || (snapshot.state == PrState::Merged
-                    && verification::preserves_verified_head(
+                    && (verification::preserves_verified_head(
                         &worktree,
                         &snapshot.head_sha,
                         verified_head,
-                    ));
+                    ) || verification::inherits_delivered_receipt(
+                        &worktree,
+                        &snapshot.head_sha,
+                        verified_head,
+                        &fields.base_ref_name,
+                    )));
         if !preserves_head {
             return Err(refuse("PR head differs from the verified HEAD"));
         }
@@ -196,6 +221,11 @@ pub(super) fn admit<E: CliEnv>(
                 "PR head changed or became unreadable during pr.ready",
             ));
         }
+    }
+    if snapshot.state == PrState::Open {
+        return Err(refuse(
+            "PR is still open; wait for CI, auto-merge and confirmed merge before completion",
+        ));
     }
     Ok(Some(verified.content_hash.clone()))
 }
@@ -405,8 +435,66 @@ mod tests {
         assert_eq!(env.completion_pr_call_log.last(), Some(&9002));
     }
 
+    /// Simulate the configured base landing the current HEAD (another
+    /// owner's delivered PR) so the fixture mirrors a fresh launch whose
+    /// startup HEAD was fast-forwarded onto develop.
+    fn land_head_on_origin_develop(repo: &Path) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    /// #6893: a merged owner PR settles from a fresh HEAD that also contains
+    /// other owners' product commits, as long as develop already holds them.
     #[test]
-    fn autonomous_completion_rejects_reverified_product_after_merged_pr() {
+    fn autonomous_completion_inherits_merged_receipt_across_delivered_product() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let session_id = "completion-pr-inherited-receipt";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), session_id);
+        let mut env = TestEnv::new(repo.path().into());
+        seed_pr(&mut env, false, PrState::Merged);
+        std::fs::write(
+            repo.path().join("other_owner.rs"),
+            "product delivered by another owner's PR\n",
+        )
+        .unwrap();
+        commit_fixture_change(repo.path(), "other_owner.rs");
+        land_head_on_origin_develop(repo.path());
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            "work-completion-receipt",
+            Utc::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
+        commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
+        let mut out = String::new();
+        for explicit_pr in [Some(9001), None] {
+            assert!(
+                super::admit(&mut env, session_id, Some(5034), explicit_pr, &mut out)
+                    .unwrap_or_else(|error| panic!("{explicit_pr:?}: {error}"))
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            execution::load(repo.path()).unwrap().unwrap().status,
+            execution::ExecutionControlStatus::Active
+        );
+    }
+
+    /// Receipt inheritance stays limited to a merged PR whose head reaches the
+    /// verified HEAD: undelivered product on the branch, an unmerged PR (with
+    /// or without red CI) and a foreign PR head are still refused.
+    #[test]
+    fn autonomous_completion_rejects_undelivered_product_unmerged_pr_and_foreign_head() {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -425,9 +513,36 @@ mod tests {
         .unwrap();
         commit_and_reverify(repo.path(), session_id, "product.rs");
         let mut out = String::new();
-        let error =
-            super::admit(&mut env, session_id, Some(5034), Some(9001), &mut out).unwrap_err();
-        assert!(error.contains("PR head differs"), "{error}");
+        let admit = |env: &mut TestEnv, out: &mut String| {
+            super::admit(env, session_id, Some(5034), Some(9001), out).unwrap_err()
+        };
+        // Undelivered product on the work branch: develop does not hold it.
+        let error = admit(&mut env, &mut out);
+        assert!(error.contains("PR head differs"), "undelivered: {error}");
+
+        // Delivered product, but the owner PR is not merged.
+        land_head_on_origin_develop(repo.path());
+        env.completion_prs.get_mut(&9001).unwrap().state = PrState::Open;
+        let error = admit(&mut env, &mut out);
+        assert!(error.contains("PR head differs"), "unmerged: {error}");
+        env.completion_prs
+            .get_mut(&9001)
+            .unwrap()
+            .inventory
+            .ci_status = "FAILURE".into();
+        let error = admit(&mut env, &mut out);
+        assert!(
+            error.contains("PR head differs"),
+            "unmerged red CI: {error}"
+        );
+
+        // Merged, but the PR head is not an ancestor of the verified HEAD.
+        let pr = env.completion_prs.get_mut(&9001).unwrap();
+        pr.state = PrState::Merged;
+        pr.inventory.ci_status = "SUCCESS".into();
+        pr.head_sha = "foreign-pr-head".into();
+        let error = admit(&mut env, &mut out);
+        assert!(error.contains("PR head differs"), "foreign head: {error}");
         assert_eq!(
             execution::load(repo.path()).unwrap().unwrap().status,
             execution::ExecutionControlStatus::Active
@@ -603,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_completion_accepts_draft_ready_and_merged_with_only_ready_mutation() {
+    fn autonomous_completion_waits_for_merge_after_ready_handoff() {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -620,15 +735,27 @@ mod tests {
             let mut env = TestEnv::new(repo.path().into());
             seed_pr(&mut env, draft, state);
             let mut out = String::new();
+            let code =
+                execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap();
             assert_eq!(
-                execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
-                0,
+                code,
+                if state == PrState::Merged { 0 } else { 2 },
                 "{draft} {state}: {out}"
             );
             assert_eq!(
                 execution::load(repo.path()).unwrap().unwrap().status,
-                execution::ExecutionControlStatus::Completed
+                if state == PrState::Merged {
+                    execution::ExecutionControlStatus::Completed
+                } else {
+                    execution::ExecutionControlStatus::Active
+                }
             );
+            if state == PrState::Open {
+                assert!(
+                    out.contains("wait for CI, auto-merge and confirmed merge"),
+                    "{out}"
+                );
+            }
             assert_eq!(
                 env.pr_ready_call_log,
                 if draft { vec![9001] } else { vec![] }
@@ -913,6 +1040,33 @@ mod tests {
         );
         assert_eq!(
             execution::load(env.repo_path()).unwrap().unwrap().status,
+            execution::ExecutionControlStatus::Active
+        );
+
+        seed_pr(&mut env, false, PrState::Open);
+        out.clear();
+        let code = super::super::build::run(
+            &mut env,
+            SkillStateAction::Complete {
+                spec: 5034,
+                pr: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 2, "{out}");
+        assert!(
+            out.contains("wait for CI, auto-merge and confirmed merge"),
+            "{out}"
+        );
+        assert!(
+            gwt_core::skill_state::load(repo.path(), "build-spec")
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert_eq!(
+            execution::load(repo.path()).unwrap().unwrap().status,
             execution::ExecutionControlStatus::Active
         );
     }

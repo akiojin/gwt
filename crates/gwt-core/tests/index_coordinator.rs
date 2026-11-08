@@ -973,11 +973,12 @@ fn verification_pool_reserves_disk_before_grant_and_restores_it_on_release() {
 }
 
 #[test]
-fn verification_pool_checks_every_volume_before_granting_any_reservation() {
+fn verification_pool_refuses_impossible_volume_before_waiting() {
     use gwt_core::index_coordinator::{CoordinatorError, VerificationDiskBudget};
     let arena = TestArena::new();
     let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
     let guard = verification_owner(&coordinator, "multiple-volumes");
+    let total = fs2::total_space(&arena.root).unwrap();
     let mut budgets = [
         VerificationDiskBudget {
             volume: "target-volume".into(),
@@ -988,19 +989,36 @@ fn verification_pool_checks_every_volume_before_granting_any_reservation() {
         VerificationDiskBudget {
             volume: "temp-volume".into(),
             path: arena.root.clone(),
-            bytes: 0,
-            floor_bytes: u64::MAX,
+            bytes: 1,
+            floor_bytes: total,
         },
     ];
-    assert!(matches!(
-        guard.acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &budgets),
-        Err(CoordinatorError::Timeout { .. })
-    ));
+    let refusal = guard
+        .acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &budgets)
+        .err()
+        .expect("the volume can never fit the floor and one reserved byte");
+    assert!(
+        matches!(refusal, CoordinatorError::Unavailable(_)),
+        "{refusal}"
+    );
+    let diagnostic = refusal.to_string();
+    assert!(diagnostic.contains("volume=temp-volume"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&format!("path={}", arena.root.display())),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("reserve=1"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&format!("floor={total}")),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("free="), "{diagnostic}");
     assert_eq!(
         coordinator.heavy_pool_status().unwrap().used,
         0,
         "a refused volume must publish no partial grant"
     );
+    budgets[1].bytes = 0;
     budgets[1].floor_bytes = 0;
     guard
         .acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &budgets)

@@ -269,7 +269,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             return;
           }
           runtime.hasOutput = true;
-          runtime.terminal.write(text, onWritten);
+          runtime.outputWrites++;
+          try {
+            runtime.terminal.write(text, () => {
+              runtime.outputWrites--;
+              onWritten();
+            });
+          } catch (error) {
+            runtime.outputWrites--;
+            throw error;
+          }
         },
         onError: (error, windowId, projectKey) => {
           if (!socketProjectKey || projectKey !== socketProjectKey
@@ -1280,6 +1289,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (socket?.readyState !== WebSocket.OPEN) return;
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
+        releaseNotesWindow.reconnect();
         resyncSocketSurfaces();
         if (socketProjectKey) requestVisiblePmReports(true);
       }
@@ -1331,6 +1341,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
         recoveryCenterController?.reconnect();
+        let replayedReleaseNotesId = null;
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1338,7 +1349,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             continue;
           }
           pendingMessages.splice(index, 1);
+          if (recoverSnapshots === true && pending.message.kind === "load_knowledge_bridge") {
+            const state = knowledgeBridgeStateMap.get(pending.message.id);
+            if (state?.loadQueued && state.loadRequestId === pending.message.request_id
+              && (activeWorkspace()?.windows || []).some(entry => entry.id === pending.message.id)) continue;
+          }
           socket.send(JSON.stringify(pending.message));
+          if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
         }
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -1352,6 +1369,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           resyncProfile(ids);
           resyncProjectIndexSearch(ids);
         }
+        releaseNotesWindow.reconnect(replayedReleaseNotesId);
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -2427,8 +2445,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
-      // Live state uses the host census enriched by the window catalog;
-      // MISSION tracks completion across the project's agent panes.
+      // Live state uses the host census enriched by the window catalog.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
         appendRenderKeyPart(parts, "running");
@@ -2444,10 +2461,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         appendRenderKeyPart(parts, counts?.waiting ?? null);
         appendRenderKeyPart(parts, "error");
         appendRenderKeyPart(parts, counts?.error ?? null);
-        appendRenderKeyPart(parts, "done");
-        appendRenderKeyPart(parts, counts?.done ?? null);
-        appendRenderKeyPart(parts, "agents");
-        appendRenderKeyPart(parts, counts?.agents ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
@@ -2536,8 +2549,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // now it drives the WAITING strip cell instead.
           waiting: 0,
           error: 0,
-          done: 0,
-          agents: 0,
         };
         // The same host census supplies Agents and Works membership. Catalog
         // state enriches that proof; a historical Work never creates an agent.
@@ -2545,12 +2556,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        // MISSION tracks completion of project panes after their children exit.
-        for (const data of windows) {
-          if (!presetSupportsWaitingStatus(data.preset)) continue;
-          counts.agents += 1;
-          if (mapAgentTelemetryState(catalog.runtimeStates[data.id] ?? data.status) === "done") counts.done += 1;
-        }
         let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
@@ -3212,6 +3217,27 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           isReady: false,
           snapshotWriteCoordinator: null,
           hasOutput: false,
+          outputWrites: 0,
+          fitBarrierPending: false,
+          prepareFit: () => {
+            // Initial fit establishes the grid before any output can drain.
+            if (runtime.isReady !== true) return true;
+            if (runtime.fitBarrierPending) return false;
+            if (terminalOutputBatcher.pendingCount(windowId) === 0
+              && runtime.outputWrites === 0
+              && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true) return true;
+            runtime.fitBarrierPending = true;
+            terminalOutputBatcher.flushNow(windowId);
+            terminal.write("", () => {
+              runtime.fitBarrierPending = false;
+              if (terminalMap.get(windowId) !== runtime) return;
+              scheduleTerminalFocusActivation(windowId, {
+                shouldPersistGeometry: true,
+                reason: "output_drained",
+              });
+            });
+            return false;
+          },
           // Issue #2937: bounds the focus-path reflow retry in
           // scheduleTerminalFocusActivation when the revealed container's
           // layout box has not settled yet (mirrors handshakeAttempts).
@@ -3543,6 +3569,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         issueMonitorModel,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
+        knowledgeBridgeStateMap,
         requestKnowledgeBridge,
         resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
@@ -4790,6 +4817,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
       });
 
+      const windowCommandErrorModel = createUiStateStore(null);
+      windowCommandErrorModel.subscribe(event => event, event => {
+        if (!event) return;
+        const title = { input: "Input failed", resize: "Resize failed", stop: "Stop failed" }[event.operation] || "Window command failed";
+        const key = `window-command:${event.id}:${event.operation}`;
+        notificationCenter.recordError({ key, title, message: event.message });
+        alertsToasts.push({ id: key, level: "error", title, message: event.message, timeoutMs: 8000 });
+      });
+
       const launchProgressModel = createUiStateStore(null);
       launchProgressModel.subscribe(progress => progress, progress => {
         if (!progress) return;
@@ -5073,7 +5109,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyReleaseNotesPayload(event);
             break;
           case "release_notes_error":
-            applyReleaseNotesError(event.message);
+            applyReleaseNotesError(event.message, event.id);
             break;
           case "active_work_projection":
           case "active_work_projection_patch":
@@ -5161,6 +5197,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               kind: event.kind, id: event.id, status: event.status, detail: event.detail,
               retryable: event.retryable,
             }));
+            break;
+          case "window_command_error":
+            windowCommandErrorModel.update(() => ({ ...event }));
             break;
           case "attachment_progress":
             handleAttachmentProgress(event);

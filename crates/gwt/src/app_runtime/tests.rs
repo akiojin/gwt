@@ -7603,12 +7603,9 @@ fn owner_monitor_fixture_with_prefs(
         max_active_agents: 8,
         ..Default::default()
     };
-    prefs.set_launch_profile_pool(
-        agent_ids
-            .iter()
-            .map(|agent_id| pool_profile(agent_id))
-            .collect(),
-    );
+    // Reserve the delivery through a supported Monitor profile. The shell tools
+    // configured below exercise PTY ownership/ACKs, not initial-prompt admission.
+    prefs.set_launch_profile_pool(vec![pool_profile("codex")]);
     configure(&mut prefs);
     let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {

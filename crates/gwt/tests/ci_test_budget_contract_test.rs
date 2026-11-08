@@ -86,6 +86,36 @@ fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
         .expect("keep shared runtime requirements without caching disposable wheels");
     assert!(cpu_install < runtime_install);
     assert!(body.contains("pip check"));
+
+    // Cargo tests reject the runner's real HOME and resolve content-addressed assets.
+    assert!(body.contains("mktemp -d /tmp/gwt-e5-home.XXXXXX"));
+    for asset in ["chroma_index_runner.py", "project_index_requirements.txt"] {
+        assert!(body.contains(&format!("sha256sum crates/gwt-core/runtime/{asset}")));
+    }
+    assert!(body.contains("cut -c1-16"));
+    assert!(body.contains("runners/chroma_index_runner-${runner_hash}.py"));
+    assert!(body.contains("venvs/chroma-venv-${requirements_hash}"));
+    assert!(body.contains("cp crates/gwt-core/runtime/index_path_policy.json"));
+
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let job = &workflow["jobs"]["test-index-e2e"];
+    assert_eq!(job["name"], "Test (e5 e2e, optional)");
+    let run = job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Run ignored e2e tests with real e5 model")
+        .unwrap();
+    assert_eq!(run["timeout-minutes"].as_u64(), Some(30));
+    for key in ["HOME", "USERPROFILE"] {
+        assert_eq!(run["env"][key], "${{ steps.runtime.outputs.home }}");
+    }
+    assert_eq!(run["env"]["GWT_INDEX_FAKE_EMBEDDING"], "0");
+    for key in ["CARGO_HOME", "RUSTUP_HOME", "HF_HOME"] {
+        assert!(run["env"][key]
+            .as_str()
+            .is_some_and(|value| value.starts_with("${{ steps.runtime.outputs.")));
+    }
 }
 
 const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";

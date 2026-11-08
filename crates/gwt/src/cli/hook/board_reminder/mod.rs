@@ -801,7 +801,8 @@ pub fn compute_plan(
     // fixed, and `workspace.update` cannot even succeed from its detached
     // worktree (#3477). Suppress separately from the terminal-settlement path
     // so the PM gets its own reminder rather than a settlement notice.
-    let is_resident_pm = crate::cli::hook::is_resident_pm_worktree(&session.worktree_path);
+    let is_resident_pm =
+        crate::cli::hook::is_resident_pm_session(&session.worktree_path, Some(&session.id));
     let emit_work_state_reminders = !suppress_work_state_reminders && !is_resident_pm;
 
     let mut plan = plan_reminder(ReminderInputs {
@@ -1014,6 +1015,25 @@ mod tests {
         let mut session = Session::new(dir, branch, AgentId::Codex);
         session.display_name = display_name.to_string();
         session
+    }
+
+    fn register_pm(session: &Session) {
+        crate::pm_registry::save_pm_prefs(
+            &crate::board_read_receipts::project_store(&session.worktree_path)
+                .join("project-state/pm.json"),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session.id.clone(),
+                    agent_id: "codex".into(),
+                    worktree_path: session.worktree_path.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1263,6 +1283,7 @@ mod tests {
         let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
         std::fs::create_dir_all(&pm_worktree).expect("pm worktree");
         let session = make_session(&pm_worktree, "work", "Project Manager");
+        register_pm(&session);
 
         let plan = compute_plan(
             "UserPromptSubmit",
@@ -1305,6 +1326,7 @@ mod tests {
         let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
         std::fs::create_dir_all(&pm_worktree).expect("pm worktree");
         let session = make_session(&pm_worktree, "work", "Project Manager");
+        register_pm(&session);
 
         let plan = compute_plan(
             "UserPromptSubmit",
@@ -1333,9 +1355,23 @@ mod tests {
                 "PM reminder is missing `{phrase}`:\n{text}"
             );
         }
+
+        let mut foreign = session.clone();
+        foreign.id = "implementation-session".into();
+        let foreign = compute_plan(
+            "UserPromptSubmit",
+            &foreign,
+            "2026-09-03T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !additional_context(&foreign.output).contains("# Project Manager"),
+            "a different session in the PM worktree must not inherit its contract"
+        );
     }
 
-    /// The exemption is keyed on the PM worktree alone. An identical session
+    /// A registered PM's exemption also needs its canonical worktree. A session
     /// anywhere else keeps the ordinary reminder — a regression here would
     /// silently disarm the coordination discipline for the whole fleet.
     #[test]

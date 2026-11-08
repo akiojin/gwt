@@ -1468,6 +1468,18 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    /// Admission ignores inactive automatic drains and the staged version's
+    /// host-wide defer. Saved configuration remains available for diagnostics.
+    pub(crate) fn effective_update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
+        self.update_drain.as_ref().filter(|drain| {
+            drain.reason != IssueMonitorUpdateDrainReason::Auto
+                || ((self.enabled || !drain.automatic.unwrap_or(self.autonomous_mode))
+                    && !gwt_core::update::load_pending_update_manifest().is_some_and(|pending| {
+                        pending.version == drain.version && pending.auto_apply_deferred
+                    }))
+        })
+    }
+
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
@@ -4785,6 +4797,16 @@ pub fn select_launch_profile(
         .filter(|profile| profile.agent_member_id.is_some())
         .and_then(|profile| normalize_issue_monitor_provider(&profile.agent_id));
     for (index, profile) in pool.iter().enumerate() {
+        if !gwt_agent::resolve_agent_id(&profile.agent_id)
+            .is_some_and(|agent| agent.supports_monitor_initial_prompt())
+        {
+            selection.skipped.push(LaunchProfileSkip {
+                index,
+                agent_id: profile.agent_id.clone(),
+                reason: "Unsupported initial prompt delivery; select Claude Code, Codex, Grok Build, or Hermes".into(),
+            });
+            continue;
+        }
         let provider = normalize_issue_monitor_provider(&profile.agent_id);
         if fixed_tool
             .as_ref()
@@ -8354,6 +8376,7 @@ impl IssueMonitorState {
     }
 
     pub fn with_prefs(mut config: IssueMonitorConfig, prefs: IssueMonitorPrefs) -> Self {
+        let update_drain = prefs.effective_update_drain().cloned();
         config.enabled = prefs.enabled;
         config.max_active = match prefs.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => prefs.max_active_agents.max(1),
@@ -8396,7 +8419,7 @@ impl IssueMonitorState {
         state.provider_quota_accounts = normalize_provider_keyed(&prefs.provider_quota_accounts);
         state.open_pr_observations = prefs.open_pr_observations;
         state.enforce_provider_quota_hold_releases();
-        state.update_drain = prefs.update_drain.clone();
+        state.update_drain = update_drain;
         state.candidate_pool_degradation = prefs.candidate_pool_degradation.clone();
         state.generation_reclaim = prefs.generation_reclaim;
         state.duplicate_launch_refusals = prefs
@@ -9859,11 +9882,7 @@ impl IssueMonitorState {
             {
                 return false;
             }
-        } else if self
-            .launch_profiles
-            .first()
-            .is_some_and(|profile| profile.agent_member_id.is_some())
-        {
+        } else if !self.launch_profiles.is_empty() {
             let pool = self
                 .prefs()
                 .registered_launch_profiles_for_issue(issue_number);
@@ -11510,6 +11529,15 @@ impl IssueMonitorState {
         self.launch_auth_required = false;
     }
 
+    /// A failed write may change its diagnostic without changing scan inputs.
+    /// Compare all other state, including transient recovery markers that the
+    /// routine observation compatibility check intentionally does not compare.
+    pub(crate) fn scan_inputs_unchanged_after_failed_control(&self, mut previous: Self) -> bool {
+        previous.last_error = self.last_error.clone();
+        previous.launch_auth_required = self.launch_auth_required;
+        self == &previous
+    }
+
     pub(crate) fn record_authority_recovery_blocked(&mut self, error: impl Into<String>) {
         self.scan_recovery_error = Some(error.into());
         self.launch_auth_required = false;
@@ -11965,7 +11993,7 @@ impl IssueMonitorState {
         self.autonomous_mode = disk.autonomous_mode;
         // Issue #4037: the drain is raised and cleared through controls that
         // commit to disk, so disk owns it like the other config switches.
-        self.update_drain = disk.update_drain.clone();
+        self.update_drain = disk.effective_update_drain().cloned();
         // Issue #4918 AC-5: a cross-process rebase must not restart `since`, so
         // the disk copy wins whenever it has an observation at all.
         if disk.candidate_pool_degradation.is_some() {
@@ -12305,8 +12333,7 @@ impl IssueMonitorState {
                 let record =
                     self.permission_readiness_block_for_launch(delivery.issue_number, &now);
                 (record.is_some()
-                    || (self.launch_auto
-                        && !self.retry_ready_for_saved_profile(delivery.issue_number, &now)))
+                    || !self.retry_ready_for_saved_profile(delivery.issue_number, &now))
                 .then_some((delivery.issue_number, record))
             })
             .collect::<BTreeMap<_, _>>();
@@ -31308,6 +31335,49 @@ mod tests {
     }
 
     #[test]
+    fn initial_prompt_unsupported_profiles_are_skipped_before_claim() {
+        let now = "2026-11-08T00:00:00Z";
+        let unsupported = test_launch_profile("openclaw");
+        let hermes = test_launch_profile("hermes");
+        let pool = vec![unsupported.clone(), hermes.clone()];
+        let selection = select_launch_profile(&pool, &BTreeMap::new(), &[], None, now);
+        assert_eq!(selection.selected, Some(1));
+        assert!(selection.skipped[0].reason.contains("initial prompt"));
+
+        for launch_auto in [false, true] {
+            let mut prefs = IssueMonitorPrefs {
+                enabled: true,
+                launch_auto,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_tiers: vec![vec![unsupported.clone()]],
+                ..IssueMonitorPrefs::default()
+            };
+            prefs.set_launch_profile_pool(vec![unsupported.clone()]);
+            let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[42], "test", now);
+            monitor.record_candidate(issue(42));
+            assert!(!monitor.retry_ready_for_saved_profile(42, now));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", now, 1, |_| false),
+                0
+            );
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert_eq!(monitor.attempt_count(42), 0);
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.pending_effects().is_empty());
+
+            monitor.set_launch_profile_pool(vec![hermes.clone()]);
+            monitor.launch_tiers = vec![vec![hermes.clone()]];
+            assert!(monitor.retry_ready_for_saved_profile(42, now));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", now, 1, |_| false),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn select_launch_profile_skips_held_candidates() {
         let pool = vec![test_launch_profile("codex"), test_launch_profile("claude")];
         let now = "2026-08-22T03:00:00Z";
@@ -32899,7 +32969,7 @@ mod tests {
             None,
             "2026-08-22T02:01:00Z",
         );
-        assert!(unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
+        assert!(!unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
         assert_eq!(unsupported.pending_launch_delivery_id(43), None);
         assert!(!unsupported.active_issue_numbers().contains(&43));
         assert_eq!(unsupported.attempt_count(43), 1);
@@ -32937,12 +33007,11 @@ mod tests {
             ),
             0
         );
-        let blocked = unsupported.inbox_item(43).unwrap();
-        assert_eq!(blocked.state, MonitorInboxState::NotReady);
-        let reason = blocked.exclusion_reason.as_deref().unwrap();
-        for expected in ["pre_launch_block", "openclaw", "Recovery:"] {
-            assert!(reason.contains(expected), "{reason}");
-        }
+        assert_eq!(
+            unsupported.inbox_item(43).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(unsupported.attempt_count(43), 1);
 
         monitor.try_hold_provider_usage_limit(
             42,
@@ -45969,6 +46038,20 @@ mod tests {
     }
 
     #[test]
+    fn failed_control_comparison_preserves_transient_recovery_fences() {
+        let mut baseline = IssueMonitorState::new(IssueMonitorConfig::default());
+        baseline.unbound_wait_lifecycle_ends.insert(42);
+        let mut failed = baseline.clone();
+        failed.record_control_commit_error("writer budget expired");
+        assert!(failed.scan_inputs_unchanged_after_failed_control(baseline.clone()));
+
+        failed.unbound_wait_lifecycle_ends.clear();
+        assert_eq!(failed.prefs(), baseline.prefs());
+        assert!(failed.scan_observations_compatible_with(&baseline, "2026-11-06T00:00:00Z"));
+        assert!(!failed.scan_inputs_unchanged_after_failed_control(baseline));
+    }
+
+    #[test]
     fn issue_5644_census_refresh_is_compatible_only_while_contents_are_unchanged() {
         let now = "2026-10-22T00:01:00Z";
         let mut previous = IssueMonitorState::new(IssueMonitorConfig::default());
@@ -50123,7 +50206,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let now = "2026-10-05T19:10:00Z";
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
         monitor.set_update_drain_with_origin(
             IssueMonitorUpdateDrainReason::Auto,
             "9.110.0",

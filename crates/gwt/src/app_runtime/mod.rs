@@ -690,6 +690,12 @@ pub struct WindowRuntime {
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
+    pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
+    input_in_flight_reply: Option<ClientId>,
+    pub(crate) pending_input_commands: std::collections::VecDeque<(
+        gwt::project_runtime::events::OwnerCommand,
+        RemoteRuntimeCommandKind,
+    )>,
     pub(crate) output_seq: u64,
     pub(crate) status_revision: u64,
     pub(crate) raw_status: gwt::WindowProcessStatus,
@@ -728,6 +734,9 @@ impl WindowRuntime {
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input_observation: None,
             last_human_input_at: None,
+            input_in_flight: None,
+            input_in_flight_reply: None,
+            pending_input_commands: Default::default(),
             output_seq: 0,
             status_revision: 0,
             raw_status: gwt::WindowProcessStatus::Running,
@@ -778,6 +787,10 @@ impl WindowRuntime {
         }
         Some(observation.revision)
     }
+
+    fn input_delivery_pending(&self) -> bool {
+        self.input_in_flight.is_some() || !self.pending_input_commands.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -796,6 +809,7 @@ pub(crate) struct RemoteRuntimeCommandCompletion {
     pub(crate) incarnation: u64,
     pub(crate) kind: RemoteRuntimeCommandKind,
     pub(crate) approval_resolution_started: bool,
+    pub(crate) input_command_id: Option<uuid::Uuid>,
     pub(crate) result: Result<Option<gwt::project_runtime::events::OwnerInputObservation>, String>,
 }
 
@@ -1533,6 +1547,7 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
         started_at: std::time::Instant,
         // A successful launch retains its immutable operation in this owner epoch.
         accepted_owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+        observation_error_reported: bool,
     },
     LaunchedPendingAck {
         window_id: String,
@@ -11331,6 +11346,7 @@ impl AppRuntime {
             | FrontendEvent::ReopenPmRequestTask { id, .. }
             | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::UpdatePmRequestTask { id, .. }
+            | FrontendEvent::CompletePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11711,6 +11727,7 @@ impl AppRuntime {
             | FrontendEvent::ReopenPmRequestTask { id, .. }
             | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::UpdatePmRequestTask { id, .. }
+            | FrontendEvent::CompletePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12102,6 +12119,17 @@ impl AppRuntime {
                 &id,
                 request_id,
                 pm_chat::PmRequestTaskOperation::Update(request),
+            ),
+            FrontendEvent::CompletePmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Complete(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
@@ -14356,6 +14384,9 @@ impl AppRuntime {
         let changed = state.project_owner_health.as_ref() != Some(&health)
             || state.project_owner_connection_id != connection_id
             || state.project_owner_identity != identity;
+        let input_connection_changed = state.project_owner_connection_id != connection_id
+            || state.project_owner_identity != identity
+            || health.state != gwt::protocol::ProjectOwnerHealthState::Healthy;
         if changed {
             state.project_owner_execution_status = None;
         }
@@ -14388,6 +14419,20 @@ impl AppRuntime {
             ),
             self.hub_state_broadcast(),
         ];
+        if input_connection_changed {
+            let ids = self
+                .runtimes
+                .keys()
+                .filter(|id| self.project_key_for_window(id) == Some(&context.project_key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for id in ids {
+                events.extend(self.discard_pending_remote_input(
+                    &id,
+                    "Queued input was discarded because the project connection changed. Retype it.",
+                ));
+            }
+        }
         if health.state == gwt::protocol::ProjectOwnerHealthState::Healthy {
             events.extend(self.queue_owner_inventory(context, Some(connection_id), None, None));
         }
@@ -14617,7 +14662,7 @@ impl AppRuntime {
             runtime.screen_seq = snapshot.screen_seq;
         }
         runtime.has_unsent_user_input.store(
-            snapshot.has_unsent_user_input,
+            snapshot.has_unsent_user_input || runtime.input_delivery_pending(),
             std::sync::atomic::Ordering::Release,
         );
         runtime.observe_input(snapshot.input_observation);
@@ -16324,6 +16369,10 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return events;
         };
+        events.extend(self.discard_pending_remote_input(
+            window_id,
+            "Queued input was discarded because the pane runtime changed. Retype it.",
+        ));
         self.runtimes.remove(window_id);
         self.active_agent_sessions.remove(window_id);
         if let Some(tab) = self.tab_mut(&address.tab_id) {
@@ -16457,19 +16506,55 @@ impl AppRuntime {
             .get(window_id)
             .map(|runtime| runtime.status_revision)
             .unwrap_or_default();
+        let connection_id = self
+            .project_state(context)
+            .map(|state| state.project_owner_connection_id);
+        let discard_input = self.runtimes.get(window_id).is_some_and(|runtime| {
+            runtime.input_delivery_pending()
+                && (runtime.owner_pane_id != snapshot.id
+                    || runtime.incarnation != snapshot.incarnation
+                    || runtime.owner_identity != identity
+                    || runtime
+                        .input_in_flight
+                        .is_some_and(|(connection, _)| Some(connection) != connection_id))
+        });
+        let discarded_input = if discard_input {
+            self.discard_pending_remote_input(
+                window_id,
+                "Queued input was discarded because the pane owner changed. Retype it.",
+            )
+        } else {
+            Vec::new()
+        };
         let composer_hint = self
             .runtimes
-            .get(window_id)
+            .get_mut(window_id)
             .filter(|runtime| {
                 runtime.owner_pane_id == snapshot.id
                     && runtime.incarnation == snapshot.incarnation
                     && runtime.owner_identity == identity
             })
             .map(|runtime| {
+                let preserve_input = runtime
+                    .input_in_flight
+                    .is_none_or(|(connection, _)| Some(connection) == connection_id);
                 (
                     runtime.has_unsent_user_input.clone(),
                     runtime.input_observation,
                     runtime.last_human_input_at,
+                    if preserve_input {
+                        (
+                            runtime.input_in_flight.take(),
+                            runtime.input_in_flight_reply.take(),
+                        )
+                    } else {
+                        (None, None)
+                    },
+                    if preserve_input {
+                        std::mem::take(&mut runtime.pending_input_commands)
+                    } else {
+                        Default::default()
+                    },
                 )
             });
         let mut runtime = WindowRuntime::remote(
@@ -16479,10 +16564,14 @@ impl AppRuntime {
             client,
             identity,
         );
-        if let Some((hint, observation, last_human_input_at)) = composer_hint {
+        if let Some((hint, observation, last_human_input_at, input_in_flight, pending)) =
+            composer_hint
+        {
             runtime.has_unsent_user_input = hint;
             runtime.input_observation = observation;
             runtime.last_human_input_at = last_human_input_at;
+            (runtime.input_in_flight, runtime.input_in_flight_reply) = input_in_flight;
+            runtime.pending_input_commands = pending;
         }
         runtime.status_revision = status_revision;
         runtime.child_pid = snapshot.child_pid;
@@ -16490,7 +16579,7 @@ impl AppRuntime {
         runtime.screen_ansi = snapshot.screen_ansi;
         runtime.screen_seq = snapshot.screen_seq;
         runtime.has_unsent_user_input.store(
-            snapshot.has_unsent_user_input,
+            snapshot.has_unsent_user_input || runtime.input_delivery_pending(),
             std::sync::atomic::Ordering::Release,
         );
         runtime.output_seq = snapshot.screen_seq;
@@ -16517,6 +16606,7 @@ impl AppRuntime {
                 .with_terminal_stream_seq(Some(snapshot.screen_seq)),
         ];
         events.extend(status_events);
+        events.extend(discarded_input);
         events.extend(self.request_owner_snapshot(window_id, None));
         if activity_changed {
             self.invalidate_workspace_projection_patch(&context.tab_id);

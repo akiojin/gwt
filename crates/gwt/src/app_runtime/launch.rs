@@ -846,6 +846,7 @@ impl AppRuntime {
                         window_id: window_id.clone(),
                         started_at: std::time::Instant::now(),
                         accepted_owner: None,
+                        observation_error_reported: false,
                     },
                 );
             }

@@ -90,6 +90,26 @@ pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
     })
 }
 
+/// PM prompt context belongs to the registered Session, even when another
+/// Session invokes a hook from the canonical PM worktree.
+pub(crate) fn is_resident_pm_session(worktree: &std::path::Path, session_id: Option<&str>) -> bool {
+    let Some(session_id) = session_id else {
+        return false;
+    };
+    worktree.ancestors().any(|root| {
+        crate::pm_registry::is_canonical_pm_worktree(root)
+            && root
+                .parent()
+                .and_then(std::path::Path::parent)
+                .is_some_and(|project| {
+                    crate::pm_registry::session_is_registered_pm(
+                        &project.join("project-state/pm.json"),
+                        session_id,
+                    )
+                })
+    })
+}
+
 /// Every hook name exposed via `gwtd hook <name>`.
 ///
 /// Adding a new variant requires updating [`HookKind::from_name`] and

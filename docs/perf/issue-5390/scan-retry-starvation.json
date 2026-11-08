@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "owner": 5390,
+  "baseline_head": "a6e001dcf57252ab5c5a688ccebadcf385603e8e",
+  "source_path": "crates/gwt/src/cli/daemon/server.rs",
+  "incident_window_utc": {
+    "start_inclusive": "2026-11-06T04:50:20Z",
+    "end_exclusive": "2026-11-06T05:15:00Z"
+  },
+  "source": "machine-local gwt.log.2026-11-06; project-scoped scan records and host-wide unscoped control errors",
+  "provenance": {
+    "pm_reported_gui_pid": 4980,
+    "reported_pid_alive_at_collection": false,
+    "replacement_gui_pid": 7676,
+    "replacement_daemon_pid": 15112,
+    "replacement_installed_version": "9.150.0",
+    "source_pid_present_in_selected_scan_rows": false,
+    "control_error_scope": "host-wide log; selected control error rows contain neither project identity nor PID",
+    "stack_collected": false,
+    "raw_extract_sha256": {
+      "scan-fences.json": "88d19a5f1569d87890d193e3fe2a188e6eebbf5802234380f6909b1f17e9f39e",
+      "historical-scan-completions.json": "92530006d64ebadaa65476b48338412a2cb066407e9965e5fb1a28e26cae3903",
+      "historical-control-failures.json": "d1c2c0244cc6d89e7e6353526a8117c8d3822e97d3acaceba379a841fab11cb7"
+    }
+  },
+  "observations": {
+    "full_scans_finished": 31,
+    "full_duration_ms_min": 39213.0261,
+    "full_duration_ms_max": 50441.5088,
+    "proposals_rejected_revision_changed": 31,
+    "revoked_control_attempts": 3752,
+    "errors": [
+      {
+        "message": "operation deadline expired during file lock; operation=machine agent settings; lock_contention=not_observed",
+        "count": 3306
+      },
+      {
+        "message": "operation deadline expired during Issue Monitor durable rename",
+        "count": 446
+      }
+    ],
+    "control_fences": {
+      "heartbeat:invalidates=false": 83,
+      "child-progress:invalidates=true": 54,
+      "state-control:invalidates=true": 4,
+      "child-progress:invalidates=false": 2
+    },
+    "rejection_samples": [
+      {
+        "timestamp": "2026-11-06T13:51:06.094304100+09:00",
+        "message": "Issue Monitor scan proposal rejected",
+        "captured_revision": 2854,
+        "current_revision": 2969,
+        "reason": "revision-changed"
+      },
+      {
+        "timestamp": "2026-11-06T13:51:45.801646600+09:00",
+        "message": "Issue Monitor scan proposal rejected",
+        "captured_revision": 2969,
+        "current_revision": 3082,
+        "reason": "revision-changed"
+      },
+      {
+        "timestamp": "2026-11-06T14:13:34.750815800+09:00",
+        "message": "Issue Monitor scan proposal rejected",
+        "captured_revision": 6255,
+        "current_revision": 6400,
+        "reason": "revision-changed"
+      },
+      {
+        "timestamp": "2026-11-06T14:14:25.172064100+09:00",
+        "message": "Issue Monitor scan proposal rejected",
+        "captured_revision": 6400,
+        "current_revision": 6543,
+        "reason": "revision-changed"
+      }
+    ],
+    "revoked_attempt_samples": [
+      {
+        "timestamp": "2026-11-06T13:50:20.037056500+09:00",
+        "message": "issue monitor control prefs transaction failed; volatile mutation revoked",
+        "error": "operation deadline expired during file lock; operation=machine agent settings; lock_contention=not_observed"
+      },
+      {
+        "timestamp": "2026-11-06T13:50:20.405786700+09:00",
+        "message": "issue monitor control prefs transaction failed; volatile mutation revoked",
+        "error": "operation deadline expired during file lock; operation=machine agent settings; lock_contention=not_observed"
+      },
+      {
+        "timestamp": "2026-11-06T14:14:59.619838600+09:00",
+        "message": "issue monitor control prefs transaction failed; volatile mutation revoked",
+        "error": "operation deadline expired during file lock; operation=machine agent settings; lock_contention=not_observed"
+      },
+      {
+        "timestamp": "2026-11-06T14:14:59.952494100+09:00",
+        "message": "issue monitor control prefs transaction failed; volatile mutation revoked",
+        "error": "operation deadline expired during file lock; operation=machine agent settings; lock_contention=not_observed"
+      }
+    ]
+  },
+  "limits": [
+    "PM supplied the historical PID; selected project-scoped log rows do not independently carry process identity.",
+    "Control error counts are host-wide for the interval and cannot all be attributed to this project from those rows alone.",
+    "No stopped thread stack was collected from the exited original PID.",
+    "Completed scans and revision rejection prove result starvation, not a permanently blocked scan thread.",
+    "The writer-budget exhaustion behind the machine-agent-settings error remains separate; lock_contention=not_observed does not prove lock contention.",
+    "No installed runtime was replaced or restarted, and no fleet, CPU/RSS, Mac, parent AC-1/2/3 or LF6 success is claimed."
+  ],
+  "regression": {
+    "green": {
+      "log_sha256": "fd5836d28fd0699320bfe0db7a7ef46577bb6d1863c489be9b442133b498b965",
+      "command": "cargo test -p gwt --lib failed_control_ -- --nocapture",
+      "exit_code": 0,
+      "passed": 2,
+      "failed": 0
+    },
+    "red": {
+      "observed_retry_revisions": [
+        [
+          2,
+          3
+        ],
+        [
+          3,
+          4
+        ]
+      ],
+      "command": "cargo test -p gwt --lib unchanged_failed_control_retries_preserve_the_scan_revision -- --nocapture",
+      "exit_code": 101,
+      "log_sha256": "0f49b5f41b430cb24a33cbca095ad788fe99698a59733b29299a486adf72dd85"
+    },
+    "comparison": "Existing full IssueMonitorState Eq, excluding only last_error and launch_auth_required changed by record_control_commit_error.",
+    "proof": "Normal baseline scan publication plus actual unchanged failed retry revision preservation; equal serialized prefs with a dropped transient recovery marker must still fence. No post-retry installed publication measurement.",
+    "source_sha256": {
+      "crates/gwt/src/issue_monitor.rs": "10dbc74534fc96bf8014122f438601fc483ee95bacd06a34845a5bd547af25fe",
+      "crates/gwt/src/cli/daemon/server.rs": "9bcc3b59fefefd50324e179aa4fdbf0644b10871ac7c532508153e9bcd98039b"
+    }
+  }
+}

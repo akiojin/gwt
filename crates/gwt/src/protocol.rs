@@ -446,6 +446,18 @@ pub struct PmRequestTaskUpdateRequest {
     pub task: gwt_core::pm_request_tasks::TaskDraft,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PmRequestTaskCompleteRequest {
+    pub operation_id: String,
+    pub expected_revision: u64,
+    pub reason: String,
+    pub task_id: String,
+    pub condition_revision: u64,
+    pub review_generation: u64,
+    pub evidence: Vec<String>,
+}
+
 /// Selected tracking data only; originals remain outside this browser adapter.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -727,6 +739,11 @@ pub enum FrontendEvent {
         id: String,
         request_id: u64,
         request: PmRequestTaskUpdateRequest,
+    },
+    CompletePmRequestTask {
+        id: String,
+        request_id: u64,
+        request: PmRequestTaskCompleteRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -2513,6 +2530,12 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    /// A refused window operation carries no child/PTY lifecycle evidence.
+    WindowCommandError {
+        id: String,
+        operation: String,
+        message: String,
+    },
     /// Origin-connection-only terminal result for one privileged PM message.
     /// `queued` is reserved for a future durable payload queue; this slice
     /// emits `delivered` after exact acknowledgement, `unverified` when the
@@ -3512,6 +3535,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "window_command_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "pm_message_send_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -4010,6 +4038,7 @@ impl BackendEvent {
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::WindowCommandError { .. } => "window_command_error",
             BackendEvent::PaneNameResult { .. } => "pane_name_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
             BackendEvent::IssueMonitorScanRequestResult { .. } => {
@@ -4254,6 +4283,16 @@ mod tests {
         let mut forged = update;
         forged["request"]["task"]["source_id"] = serde_json::json!("claimed");
         assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        let complete = serde_json::json!({"kind":"complete_pm_request_task", "id":"pm",
+            "request_id":5,"request":{"operation_id":"complete","expected_revision":3,
+                "reason":"Verified the original outcome","task_id":"task",
+                "condition_revision":1,"review_generation":1,"evidence":["fixture:outcome"]}});
+        let _: FrontendEvent = serde_json::from_value(complete.clone()).expect("user complete");
+        for field in ["actor", "source", "project_key", "authority"] {
+            let mut forged = complete.clone();
+            forged["request"][field] = serde_json::json!("claimed");
+            assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());
+        }
     }
 
     #[test]

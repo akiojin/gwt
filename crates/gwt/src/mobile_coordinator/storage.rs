@@ -37,7 +37,7 @@ pub enum StoreError {
     CredentialTooLarge,
     #[error("mobile registry commit outcome is uncertain; drop the store and explicitly reopen to inspect current authority")]
     CommitUncertain,
-    #[error("mobile store is unusable after an uncertain commit; drop it and explicitly reopen")]
+    #[error("mobile store is unusable after a failed checkpoint or uncertain commit; drop it and explicitly reopen")]
     Unusable,
     #[error(transparent)]
     Credential(#[from] CredentialError),
@@ -148,13 +148,14 @@ impl LockedDirectory {
     }
 }
 
-/// Owns the single in-memory clock watermark/latch and the offline writer lock.
-/// Failed observations remain latched here. Durability of failed observations
-/// across restarts is a later runtime/operator contract, not supplied by reopen.
+/// Owns the clock watermark/latch and the single writer lock. Registration
+/// actors checkpoint trusted observations before processing requests; raw
+/// registry borrows alone do not establish durability across restarts.
 pub struct CoordinatorStore {
     guard: LockedDirectory,
     registry: CoordinatorRegistry,
     usable: bool,
+    persisted_wall: Option<u64>,
 }
 
 impl CoordinatorStore {
@@ -175,6 +176,7 @@ impl CoordinatorStore {
             guard,
             registry,
             usable: true,
+            persisted_wall: Some(now),
         })
     }
 
@@ -186,6 +188,8 @@ impl CoordinatorStore {
             guard,
             registry,
             usable: true,
+            // Opening advances RAM time; the first checkpoint must save it.
+            persisted_wall: None,
         })
     }
 
@@ -200,6 +204,26 @@ impl CoordinatorStore {
     pub fn registry(&mut self) -> Result<&mut CoordinatorRegistry, StoreError> {
         self.check()?;
         Ok(&mut self.registry)
+    }
+
+    /// Persist trusted time before request validation, including rejected
+    /// requests. Open's first observation is saved even in the same second;
+    /// subsequent same-second calls still check the guard and clock latch.
+    /// Any failure requires explicit reopen, never reuse of this authority.
+    pub(super) fn checkpoint(&mut self, now: u64) -> Result<(), StoreError> {
+        let result = (|| {
+            self.check()?;
+            self.registry.observe(now)?;
+            if self.persisted_wall != Some(now) {
+                let snapshot = encode(&self.registry.stored)?;
+                self.commit_registry(&snapshot, now, File::sync_all)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.usable = false;
+        }
+        result
     }
 
     pub fn issue(
@@ -318,6 +342,7 @@ impl CoordinatorStore {
         })()
         .map_err(|_| StoreError::CommitUncertain)?;
         self.registry = registry;
+        self.persisted_wall = Some(self.registry.stored.last_observed);
         self.usable = true;
         Ok(())
     }

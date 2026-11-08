@@ -128,12 +128,20 @@ impl AppRuntime {
             },
         );
         if let Some(delivery_id) = delivery_id {
-            self.issue_monitor_launch_deliveries.insert(
-                delivery_id.to_string(),
-                IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
-                    window_id: window_id.to_string(),
-                },
-            );
+            // An uncertain observation cannot discard the accepted owner epoch:
+            // replacement-owner recovery still needs its original start and identity.
+            let accepted = matches!(self.issue_monitor_launch_deliveries.get(delivery_id),
+                Some(IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id: pending, accepted_owner: Some(owner), ..
+                }) if pending == window_id && owner == &identity.owner_identity);
+            if !accepted {
+                self.issue_monitor_launch_deliveries.insert(
+                    delivery_id.to_string(),
+                    IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
+                        window_id: window_id.to_string(),
+                    },
+                );
+            }
         }
         let proxy = self.proxy.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
