@@ -601,7 +601,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         )
         .expect("valid regex");
     let streaming_write = regex::Regex::new(
-            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.terminal\.write\(text,\s*onWritten\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.outputWrites\+\+;\s*try\s*\{\s*runtime\.terminal\.write\(text,\s*\(\)\s*=>\s*\{\s*runtime\.outputWrites--;\s*onWritten\(\);\s*\}\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
         )
         .expect("valid regex");
     // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
