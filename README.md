@@ -1188,8 +1188,16 @@ than completed, invalidating its and its ancestors' previous completion evidence
 is the only target ID. The server assigns the browser user actor. Update returns
 the current task and revision observed after applying the operation, alongside
 the receipt at its original applied revision. An unchanged draft is also valid
-and records a receipt with an empty task delta. Replaying an Update preserves
-that receipt while the current task may reflect later changes. Reopen and Cancel
+and records a receipt with an empty task delta.
+`complete_pm_request_task` accepts `operation_id`, `expected_revision`, `reason`,
+`task_id`, `condition_revision`, `review_generation` and nonempty `evidence`
+inside `request`. It records the browser user's completion audit using the
+existing Task rules: stale reviews, pending PM reassessment and unfinished
+children refuse completion. Repeating the same completion under a new operation
+is valid and may record an empty task delta.
+Replaying Update or Complete preserves
+the original receipt while the current task may reflect later changes, including
+a subsequent reopen. Reopen and Cancel
 continue to return their receipt's applied task state.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
