@@ -94,17 +94,22 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
     is_branch_merged_into_existing_refs(repo_path, branch, base)
 }
 
+/// Issue #6877 AC-3: resolve both tips once, answer a real (merge-commit)
+/// landing with `merge-base --is-ancestor`, and let the persistent verdict
+/// cache decide squash merges so `git cherry` runs only for a branch tip it
+/// has not seen.
 fn is_branch_merged_into_existing_refs(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
-    let output = gwt_core::process::run_git_logged(&["cherry", base, branch], Some(repo_path))
-        .map_err(|e| GwtError::Git(format!("cherry: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(GwtError::Git(format!("cherry {base} {branch}: {stderr}")));
+    let Some((branch_sha, base_sha)) =
+        crate::merge_verdict_cache::resolve_commit_pair(repo_path, branch, base)?
+    else {
+        return Ok(false);
+    };
+    if branch_sha == base_sha
+        || crate::merge_verdict_cache::is_ancestor(repo_path, &branch_sha, &base_sha)?
+    {
+        return Ok(true);
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_cherry_output(&stdout))
+    crate::merge_verdict_cache::is_merged_cached(repo_path, &branch_sha, &base_sha)
 }
 
 /// Resolves the canonical cleanup target for `branch`.
@@ -456,14 +461,9 @@ fn ref_exists(repo_path: &Path, refname: &str) -> Result<bool> {
 /// Parse `git cherry` output. The branch is fully merged when the output is
 /// empty or contains only `-` lines (commits already in the upstream side).
 /// Any `+` line indicates an unmerged commit.
+#[cfg(test)]
 fn parse_cherry_output(stdout: &str) -> bool {
-    for line in stdout.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('+') {
-            return false;
-        }
-    }
-    true
+    crate::merge_verdict_cache::unmatched_cherry_commits(stdout).is_empty()
 }
 
 /// Ahead/behind divergence between a branch and its upstream.
@@ -940,6 +940,84 @@ mod tests {
 
         // Squash merge: same patch IDs, so cherry shows '-' for the commit.
         assert!(is_branch_merged_into(repo, "feature/sq", "main").unwrap());
+    }
+
+    /// Issue #6877 AC-3: an unchanged branch tip never pays for `git cherry`
+    /// twice. The second verdict comes from the persistent cache, so it spawns
+    /// fewer git processes than the first and the cache file names the tip.
+    #[test]
+    fn is_branch_merged_into_reuses_verdict_for_unchanged_tip() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "feature/cached"], repo);
+        make_commit(repo, "a.txt", "unmerged", "feat: unmerged");
+        run(&["checkout", "main"], repo);
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert!(!is_branch_merged_into(repo, "feature/cached", "main").unwrap());
+        let first = gwt_core::process::thread_git_spawn_count() - before;
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert!(!is_branch_merged_into(repo, "feature/cached", "main").unwrap());
+        let second = gwt_core::process::thread_git_spawn_count() - before;
+        assert!(
+            second < first,
+            "cached verdict must skip git cherry: first={first} second={second}"
+        );
+
+        let tip = String::from_utf8(
+            gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "feature/cached"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::merge_verdict_cache::cached_branch_tips(repo),
+            vec![tip.trim().to_string()],
+            "the verdict is keyed by the branch tip"
+        );
+    }
+
+    /// Issue #6877 AC-3: when only the base advanced, the cached verdict is
+    /// brought forward from the gained commits' patch ids. A squash merge that
+    /// landed after the first verdict is still detected.
+    #[test]
+    fn is_branch_merged_into_advances_cached_verdict_when_base_moves() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "feature/later"], repo);
+        make_commit(
+            repo, "a.txt", "a
+", "feat: a",
+        );
+        run(&["checkout", "main"], repo);
+        assert!(!is_branch_merged_into(repo, "feature/later", "main").unwrap());
+
+        // Unrelated base progress keeps the branch unmerged.
+        make_commit(
+            repo, "c.txt", "c
+", "feat: c",
+        );
+        assert!(!is_branch_merged_into(repo, "feature/later", "main").unwrap());
+
+        // A squash merge afterwards: the tip is unchanged, the base advanced.
+        run(&["merge", "--squash", "feature/later"], repo);
+        run(&["commit", "-m", "feat: squashed a"], repo);
+        assert!(is_branch_merged_into(repo, "feature/later", "main").unwrap());
+        // One lineage per tip, carried forward across base SHAs.
+        assert_eq!(
+            crate::merge_verdict_cache::cached_branch_tips(repo).len(),
+            1
+        );
     }
 
     #[test]
