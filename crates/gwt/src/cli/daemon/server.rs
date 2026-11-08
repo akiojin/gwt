@@ -90,6 +90,21 @@ const ISSUE_MONITOR_PREFS_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
         Duration::from_millis(250),
     );
 const ISSUE_MONITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Issue #6877 AC-2: how old a GitHub read may be for a timer-only scan. A
+/// test that drives the fake `gh` through consecutive timer scans pins it to
+/// zero (`GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS=0`) so every
+/// scan reads live, as the production control-driven scans do.
+const ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new(
+        "ISSUE_MONITOR_PERIODIC_READ_MAX_AGE",
+        crate::issue_monitor_worker::ISSUE_MONITOR_PERIODIC_READ_MAX_AGE,
+    );
+
+/// The read max age a timer-only scan enters; `None` keeps every read fresh.
+fn issue_monitor_periodic_read_max_age() -> Option<Duration> {
+    let max_age = ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET.resolve();
+    (!max_age.is_zero()).then_some(max_age)
+}
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
@@ -715,6 +730,67 @@ async fn disabled_empty_monitor_skips_periodic_scans_but_keeps_explicit_scan_now
     );
 }
 
+/// Issue #6877 AC-1: a disabled monitor whose prefs hold only ledger residue
+/// (claim identities, launch bindings, autonomous records) has no periodic
+/// scan work. Those projects used to scan GitHub every poll interval.
+#[cfg(test)]
+#[test]
+fn periodic_scan_guard_ignores_ledger_residue_on_a_disabled_monitor() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
+    let monitor = test_monitor(crate::IssueMonitorConfig::default());
+    let mut prefs = monitor.prefs();
+    assert!(!prefs.enabled, "the default monitor is disabled");
+    prefs
+        .claim_identities
+        .push(crate::issue_monitor::IssueMonitorClaimIdentity {
+            issue_number: 168,
+            claim_id: "gwt-auto-improve:stale".into(),
+            owner: "host:user:1".into(),
+        });
+    prefs
+        .launch_bindings
+        .insert("project-a::agent-17".into(), 168);
+    prefs
+        .autonomous_records
+        .push(crate::issue_monitor::AutonomousIssueRecord::new(168));
+    crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+
+    assert!(
+        !issue_monitor_needs_periodic_scan(&monitor, &prefs_path),
+        "ledger residue alone must not drive a disabled monitor's periodic scan"
+    );
+
+    prefs
+        .launched_issues
+        .push(crate::issue_monitor::IssueMonitorLaunchedIssue {
+            issue_number: 168,
+            window_id: "project-a::agent-18".into(),
+        });
+    crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(
+        issue_monitor_needs_periodic_scan(&monitor, &prefs_path),
+        "a live launch still keeps the disabled monitor reconciling"
+    );
+}
+
+/// Issue #6877 AC-2: timer-only scans enter the production read max age; a
+/// test pinning the budget to zero keeps every read live.
+#[cfg(test)]
+#[test]
+fn periodic_read_max_age_defaults_to_the_production_budget_and_zero_means_fresh() {
+    assert_eq!(
+        issue_monitor_periodic_read_max_age(),
+        Some(crate::issue_monitor_worker::ISSUE_MONITOR_PERIODIC_READ_MAX_AGE)
+    );
+    let _zero = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+        &ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET,
+        Duration::ZERO,
+    );
+    assert_eq!(issue_monitor_periodic_read_max_age(), None);
+}
+
 #[cfg(test)]
 #[test]
 fn periodic_scan_guard_keeps_late_cleanup_and_unknown_disk_state() {
@@ -1191,13 +1267,15 @@ fn issue_monitor_needs_periodic_scan(
     monitor: &crate::IssueMonitorState,
     prefs_path: &Path,
 ) -> bool {
+    // Issue #6877 AC-1: only live work drives a disabled monitor's periodic
+    // scan. `claim_identities`, `launch_bindings` and `autonomous_records` are
+    // durable ledgers that outlive their launches by design; they are consumed
+    // by controls and by the next enabled scan, not by polling GitHub every
+    // poll interval for a project the operator switched off.
     fn prefs_have_driver_work(prefs: &crate::IssueMonitorPrefs) -> bool {
         prefs.enabled
             || !prefs.pending_effects.is_empty()
             || !prefs.pending_launch_deliveries.is_empty()
-            || !prefs.claim_identities.is_empty()
-            || !prefs.launch_bindings.is_empty()
-            || !prefs.autonomous_records.is_empty()
             || !prefs.autonomous_handoffs.is_empty()
             || !prefs.launched_issues.is_empty()
             || !prefs.launching_issues.is_empty()
@@ -1436,6 +1514,8 @@ fn spawn_issue_monitor_worker_with_lease(
         let mut capacity_interval = tokio::time::interval(Duration::from_secs(5));
         let mut revision = 0_u64;
         let mut scan_requested = false;
+        // Issue #6877 AC-2: timer-driven scans accept cached GitHub reads.
+        let mut periodic_scan_requested = false;
         let mut in_flight_scan: Option<InFlightIssueMonitorScan> = None;
         let mut scan_retry_at: Option<Instant> = None;
         let mut admission_requested = false;
@@ -1558,7 +1638,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
                                 let strict_scan = matches!(&control, IssueMonitorControl::ScanNowIfIdle);
-                                if strict_scan && (scan_requested || in_flight_scan.is_some()) {
+                                if strict_scan && (scan_requested || periodic_scan_requested || in_flight_scan.is_some()) {
                                     completion.reject(IssueMonitorControlQueueError::ScanAlreadyInFlight);
                                     continue;
                                 }
@@ -2168,9 +2248,9 @@ fn spawn_issue_monitor_worker_with_lease(
                     if previous_policy != monitor.max_active_agents_policy() {
                         let Some(next_revision) = revision.checked_add(1) else { break; };
                         revision = next_revision;
-                        scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
+                        periodic_scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                     } else if previous_limit != monitor.effective_max_active_agents() {
-                        scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
+                        periodic_scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                     }
                     publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                 }
@@ -2189,7 +2269,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             revision = next_revision;
                             publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         }
-                        scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
+                        periodic_scan_requested |= issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                         // A timed-out blocking scan retains single-flight ownership.
                         // Reuse bounded admission to refill without a GUI ScanNow.
                         admission_requested |= in_flight_scan.as_ref().is_some_and(|scan| scan.watchdog_fired);
@@ -2234,14 +2314,22 @@ fn spawn_issue_monitor_worker_with_lease(
                 });
             }
 
-            if scan_requested
+            if (scan_requested || periodic_scan_requested)
                 && scan_retry_at.is_none()
                 && in_flight_scan.is_none()
                 && !pending_authority_controls
                     .as_ref()
                     .is_some_and(PendingIssueMonitorAuthorityControls::front_is_authorizing)
             {
+                // A control-driven request keeps every GitHub read fresh; a
+                // scan the timer alone asked for may reuse recent reads.
+                let read_max_age = if scan_requested {
+                    None
+                } else {
+                    issue_monitor_periodic_read_max_age()
+                };
                 scan_requested = false;
+                periodic_scan_requested = false;
                 let deadline =
                     Instant::now() + issue_monitor_scan_budget(&monitor, operation_timeout);
                 in_flight_scan = Some(InFlightIssueMonitorScan {
@@ -2252,6 +2340,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         monitor.clone(),
                         issue_monitor_gui_connected(&hub),
                         deadline,
+                        read_max_age,
                         test_hooks.clone(),
                     ),
                     deadline,
@@ -2325,6 +2414,7 @@ fn spawn_issue_monitor_worker_with_lease(
             if let Some(observe) = &test_hooks.scan_idle_observer {
                 observe(
                     !scan_requested
+                        && !periodic_scan_requested
                         && in_flight_scan.is_none()
                         && !admission_requested
                         && in_flight_admission.is_none(),
@@ -6736,6 +6826,7 @@ fn spawn_issue_monitor_scan(
         monitor,
         gui_connected,
         deadline,
+        None,
         IssueMonitorWorkerTestHooks::default(),
     )
 }
@@ -6751,6 +6842,7 @@ fn spawn_issue_monitor_scan_with_deadline(
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
     deadline: Instant,
+    read_max_age: Option<Duration>,
     test_hooks: IssueMonitorWorkerTestHooks,
 ) -> tokio::task::JoinHandle<
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
@@ -6768,6 +6860,9 @@ fn spawn_issue_monitor_scan_with_deadline(
         #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        // Issue #6877 AC-2: a timer-driven scan serves GitHub reads from the
+        // Monitor caches up to this age instead of spawning `gh` every scan.
+        let _read_max_age = read_max_age.map(gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter);
         // Issue #4391 AC-1: once free space crosses the threshold the
         // `disk_space` warning reports, reclaim merged, idle worktrees'
         // build caches. The sweep runs on its own thread and never holds the
@@ -20085,6 +20180,12 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let _worker_prefs_budget =
             ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        // Issue #6877 AC-2: scan 2 is a timer-only scan that must observe the
+        // rewritten candidate list through the fake gh; keep its reads live.
+        let _periodic_read_max_age = ScopedEnvVar::set(
+            "GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS",
+            "0",
+        );
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
