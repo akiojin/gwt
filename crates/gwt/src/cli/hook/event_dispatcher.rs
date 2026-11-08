@@ -32,21 +32,20 @@ pub fn handle_with_input(
     mark_playwright_hook_dispatcher_entry();
     diagnostics::begin_event();
     let _deadline = enter_event_deadline(event, started);
+    let is_pm = IntentBoundaryEvent::from_name(event).is_some()
+        && super::is_resident_pm_session(worktree_root, current_session);
     let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root),
-        "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
+        "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root, is_pm),
         "PreToolUse" => handle_pre_tool_use(event, input),
         "PostToolUse" => handle_post_tool_use(event, input),
         "Stop" => handle_stop(event, input, worktree_root, current_session),
         other => Err(HookError::InvalidEvent(other.to_string())),
     };
     let result = result.map(|output| match IntentBoundaryEvent::from_name(event) {
-        Some(intent_event) => append_pm_standing_context(
-            output,
-            intent_event,
-            worktree_root,
-            super::is_resident_pm_worktree(worktree_root),
-        ),
+        Some(intent_event) => {
+            append_pm_standing_context(output, intent_event, worktree_root, is_pm)
+        }
         None => output,
     });
     let result = result.map(|output| {
@@ -175,6 +174,7 @@ fn handle_user_prompt_submit(
     event: &str,
     input: &str,
     worktree_root: &Path,
+    is_pm: bool,
 ) -> Result<HookOutput, HookError> {
     // PM reporting has its own settlement path; ordinary producing obligations
     // deliberately remain unarmed in this window.
@@ -214,7 +214,11 @@ fn handle_user_prompt_submit(
             let _deadline =
                 event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
             let started = Instant::now();
-            let result = pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+            let result = if is_pm {
+                pm_loop_stop_check::handle_user_prompt_submit(worktree_root)
+            } else {
+                Ok(None)
+            };
             (started.elapsed(), result)
         });
 
@@ -891,6 +895,24 @@ mod tests {
     use std::{collections::BTreeMap, rc::Rc, sync::mpsc, time::Duration};
     use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
 
+    fn register_pm(worktree: &Path, session_id: &str) {
+        crate::pm_registry::save_pm_prefs(
+            &crate::board_read_receipts::project_store(worktree).join("project-state/pm.json"),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session_id.into(),
+                    agent_id: "codex".into(),
+                    worktree_path: worktree.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
     thread_local! {
         static ACK_JOIN_LOCK: std::cell::RefCell<Option<std::fs::File>> = const {
             std::cell::RefCell::new(None)
@@ -1132,7 +1154,7 @@ mod tests {
             // test-hygiene: allow-wall-clock-deadline the clock is pinned above; this hang guard never orders ACK and live publication.
             Instant::now() + HANG_GUARD,
         );
-        let result = handle_user_prompt_submit("UserPromptSubmit", &input, &repo);
+        let result = handle_user_prompt_submit("UserPromptSubmit", &input, &repo, false);
         shutdown.send(()).unwrap();
         runtime.block_on(server).unwrap();
         result.unwrap();
@@ -1363,6 +1385,7 @@ mod tests {
         let worktree = project.join("pm/worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         std::fs::create_dir_all(project.join("project-state")).unwrap();
+        register_pm(&worktree, "registered-pm");
         let lock_path = project.join("project-state/pm-refresh.lock");
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1373,7 +1396,7 @@ mod tests {
             release_rx.recv().unwrap();
         });
         ready_rx.recv().unwrap();
-        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, None);
+        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, Some("registered-pm"));
         release_tx.send(()).unwrap();
         holder.join().unwrap();
 
@@ -1384,7 +1407,9 @@ mod tests {
         assert!(text.contains("last recorded freshness"), "{text}");
         assert!(text.contains("state=Unknown"), "{text}");
         // Prompt reads a snapshot; launch and completed Stop validate Git.
-        assert!(handle_with_input("UserPromptSubmit", "{}", &worktree, None).is_ok());
+        assert!(
+            handle_with_input("UserPromptSubmit", "{}", &worktree, Some("registered-pm")).is_ok()
+        );
     }
 
     #[test]
@@ -2097,6 +2122,8 @@ mod tests {
         let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
         let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
         std::fs::create_dir_all(&worktree).unwrap();
+        let pm_session = "registered-pm";
+        register_pm(&worktree, pm_session);
         let saved = gwt_core::user_instruction::record(
             &worktree,
             gwt_core::user_instruction::UserInstructionInput {
@@ -2112,7 +2139,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, Some(pm_session)).unwrap();
         let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
             panic!("PM startup must inject its standing instructions: {output:?}");
         };
@@ -2121,9 +2148,30 @@ mod tests {
         assert!(text.contains(&saved.summary), "{text}");
         assert!(!text.contains(&saved.original), "inject only the summary");
 
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            let _foreign = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "implementation-session");
+            let output =
+                handle_with_input(event, "{}", &worktree, Some("implementation-session")).unwrap();
+            let mut serialized = Vec::new();
+            output.serialize_to(&mut serialized).unwrap();
+            let text = String::from_utf8(serialized).unwrap();
+            for marker in [
+                "# Project Manager",
+                "# Active user instructions",
+                saved.summary.as_str(),
+                "Unread peer PM messages",
+                "Resident PM worktree",
+            ] {
+                assert!(
+                    !text.contains(marker),
+                    "foreign {event} received PM context `{marker}`: {text}"
+                );
+            }
+        }
+
         let store_path = gwt_core::user_instruction::instructions_path(&worktree);
         std::fs::write(store_path, b"invalid instruction snapshot").unwrap();
-        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, Some(pm_session)).unwrap();
         let mut stdout = Vec::new();
         output.serialize_to(&mut stdout).unwrap();
         let envelope: Value = serde_json::from_slice(&stdout).unwrap();
