@@ -18,8 +18,37 @@ pub mod credential;
 mod config;
 pub use config::{HostConfigError, MobileHostConfig};
 
-use std::time::{Duration, Instant};
+use crate::mobile_connection::MobileAuthorization;
+use std::{
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
+
+/// One PC runtime's shared authority. Starts disabled and deliberately cannot
+/// be cloned. Trusted PC/transport adapters must use this same authority;
+/// obtaining it neither enables access nor authenticates a registration.
+#[derive(Default)]
+pub struct MobileHost {
+    authorization: Arc<RwLock<MobileAuthorization>>,
+}
+
+impl MobileHost {
+    pub fn authorization(&self) -> &Arc<RwLock<MobileAuthorization>> {
+        &self.authorization
+    }
+}
+
+impl Drop for MobileHost {
+    fn drop(&mut self) {
+        // Retained connections and queued native workers may outlive the PC
+        // runtime. Invalidate them without taking their session locks or RPCs.
+        self.authorization
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .disable();
+    }
+}
 
 const MAX_LEASE_SECS: u64 = 30;
 const RENEWAL_INTERVAL_SECS: u64 = 10;

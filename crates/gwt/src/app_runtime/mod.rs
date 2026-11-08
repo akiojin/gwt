@@ -2032,6 +2032,8 @@ pub(crate) enum WindowCloseMonitorResult {
 }
 
 pub struct AppRuntime {
+    /// Revoke mobile authority before dropping the remaining runtime fields.
+    pub(crate) mobile_host: gwt::mobile_host::MobileHost,
     #[cfg(test)]
     pub(crate) test_project_owners:
         HashMap<PathBuf, Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>>,
@@ -5117,6 +5119,7 @@ impl AppRuntime {
             Arc::new(persist_dispatcher::PersistDispatcher::new(&blocking_tasks));
         pty_io::initialize_process_window_close_finalizer()?;
         let mut app = Self {
+            mobile_host: Default::default(),
             #[cfg(test)]
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: runtime_namespace_gc,
