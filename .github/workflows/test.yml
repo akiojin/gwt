@@ -537,20 +537,40 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-cache-multilingual-e5-base-v1
       - name: Bootstrap gwt runtime assets
+        id: runtime
         run: |
           df -h "$HOME" "$RUNNER_TEMP"
-          mkdir -p ~/.gwt/runtime
-          cp crates/gwt-core/runtime/chroma_index_runner.py ~/.gwt/runtime/
-          python -m venv ~/.gwt/runtime/chroma-venv
-          ~/.gwt/runtime/chroma-venv/bin/pip install --no-cache-dir --upgrade pip
+          # Cargo tests only accept temporary HOME paths. Keep toolchains and
+          # the restored model cache at their original absolute locations.
+          echo "cargo_home=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_OUTPUT"
+          echo "rustup_home=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_OUTPUT"
+          echo "hf_home=${HF_HOME:-$HOME/.cache/huggingface}" >> "$GITHUB_OUTPUT"
+          runtime_home="$(mktemp -d /tmp/gwt-e5-home.XXXXXX)"
+          echo "home=$runtime_home" >> "$GITHUB_OUTPUT"
+          runtime_dir="$runtime_home/.gwt/runtime"
+          runner_hash="$(sha256sum crates/gwt-core/runtime/chroma_index_runner.py | cut -d ' ' -f1 | cut -c1-16)"
+          requirements_hash="$(sha256sum crates/gwt-core/runtime/project_index_requirements.txt | cut -d ' ' -f1 | cut -c1-16)"
+          venv="$runtime_dir/venvs/chroma-venv-${requirements_hash}"
+          mkdir -p "$runtime_dir/runners" "$runtime_dir/venvs"
+          cp crates/gwt-core/runtime/chroma_index_runner.py "$runtime_dir/runners/chroma_index_runner-${runner_hash}.py"
+          cp crates/gwt-core/runtime/index_path_policy.json "$runtime_dir/runners/"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-cache-dir --upgrade pip
           # This runner has no GPU; PyPI torch otherwise pulls in the CUDA stack.
-          ~/.gwt/runtime/chroma-venv/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-          ~/.gwt/runtime/chroma-venv/bin/pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
-          ~/.gwt/runtime/chroma-venv/bin/pip check
-          ~/.gwt/runtime/chroma-venv/bin/python -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
-          du -sh ~/.gwt/runtime/chroma-venv
-          df -h "$HOME" "$RUNNER_TEMP"
+          "$venv/bin/python" -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          "$venv/bin/python" -m pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
+          du -sh "$venv"
+          df -h "$runtime_home" "$RUNNER_TEMP"
       - name: Run ignored e2e tests with real e5 model
+        env:
+          HOME: ${{ steps.runtime.outputs.home }}
+          USERPROFILE: ${{ steps.runtime.outputs.home }}
+          CARGO_HOME: ${{ steps.runtime.outputs.cargo_home }}
+          RUSTUP_HOME: ${{ steps.runtime.outputs.rustup_home }}
+          HF_HOME: ${{ steps.runtime.outputs.hf_home }}
+          GWT_INDEX_FAKE_EMBEDDING: "0"
         run: cargo test -p gwt-core --test index_runner_spawn -- --ignored
         timeout-minutes: 30
         continue-on-error: true
