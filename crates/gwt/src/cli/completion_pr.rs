@@ -197,6 +197,11 @@ pub(super) fn admit<E: CliEnv>(
             ));
         }
     }
+    if snapshot.state == PrState::Open {
+        return Err(refuse(
+            "PR is still open; wait for CI, auto-merge and confirmed merge before completion",
+        ));
+    }
     Ok(Some(verified.content_hash.clone()))
 }
 
@@ -603,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_completion_accepts_draft_ready_and_merged_with_only_ready_mutation() {
+    fn autonomous_completion_waits_for_merge_after_ready_handoff() {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -620,15 +625,27 @@ mod tests {
             let mut env = TestEnv::new(repo.path().into());
             seed_pr(&mut env, draft, state);
             let mut out = String::new();
+            let code =
+                execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap();
             assert_eq!(
-                execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
-                0,
+                code,
+                if state == PrState::Merged { 0 } else { 2 },
                 "{draft} {state}: {out}"
             );
             assert_eq!(
                 execution::load(repo.path()).unwrap().unwrap().status,
-                execution::ExecutionControlStatus::Completed
+                if state == PrState::Merged {
+                    execution::ExecutionControlStatus::Completed
+                } else {
+                    execution::ExecutionControlStatus::Active
+                }
             );
+            if state == PrState::Open {
+                assert!(
+                    out.contains("wait for CI, auto-merge and confirmed merge"),
+                    "{out}"
+                );
+            }
             assert_eq!(
                 env.pr_ready_call_log,
                 if draft { vec![9001] } else { vec![] }
@@ -913,6 +930,33 @@ mod tests {
         );
         assert_eq!(
             execution::load(env.repo_path()).unwrap().unwrap().status,
+            execution::ExecutionControlStatus::Active
+        );
+
+        seed_pr(&mut env, false, PrState::Open);
+        out.clear();
+        let code = super::super::build::run(
+            &mut env,
+            SkillStateAction::Complete {
+                spec: 5034,
+                pr: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 2, "{out}");
+        assert!(
+            out.contains("wait for CI, auto-merge and confirmed merge"),
+            "{out}"
+        );
+        assert!(
+            gwt_core::skill_state::load(repo.path(), "build-spec")
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert_eq!(
+            execution::load(repo.path()).unwrap().unwrap().status,
             execution::ExecutionControlStatus::Active
         );
     }
