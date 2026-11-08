@@ -237,7 +237,22 @@ impl AppRuntime {
                 },
             )];
         }
-        self.status_events(id.to_string(), WindowProcessStatus::Error, Some(error))
+        let Some(key) = self.project_key_for_window(id).cloned() else {
+            return Vec::new();
+        };
+        let operation = match kind {
+            super::RemoteRuntimeCommandKind::Input { .. } => "input",
+            super::RemoteRuntimeCommandKind::Resize => "resize",
+            super::RemoteRuntimeCommandKind::Stop => "stop",
+        };
+        vec![OutboundEvent::project(
+            key,
+            BackendEvent::WindowCommandError {
+                id: id.to_string(),
+                operation: operation.into(),
+                message: error,
+            },
+        )]
     }
 
     pub(super) fn queue_remote_runtime_command(

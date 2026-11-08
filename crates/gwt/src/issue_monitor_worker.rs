@@ -1,8 +1,9 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     path::Path,
     sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,179 @@ use gwt_github::issue_auto_claim::{renew_claim_mutation, ClaimRenewOutcome};
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+
+/// Issue #6877 AC-2: how old a GitHub read may be before a timer-driven scan
+/// spawns `gh` for it again. The poll interval is 30s; without this every
+/// scan re-read the issue list, every candidate's timeline and every held PR.
+pub(crate) const ISSUE_MONITOR_PERIODIC_READ_MAX_AGE: Duration = Duration::from_secs(600);
+
+/// Entries kept per in-process read cache before it is cleared wholesale.
+const REMOTE_READ_CACHE_CAPACITY: usize = 4096;
+
+type PrLifecycle = (
+    gwt_git::pr_status::PrState,
+    gwt_git::pr_status::PrInventoryItem,
+);
+
+/// In-process cache of one kind of GitHub read, consulted only while the
+/// scanning thread has entered a [`gwt_git::gh_rest::ScopedMonitorReadMaxAge`].
+struct RemoteReadCache<T> {
+    entries: OnceLock<Mutex<HashMap<String, (Instant, T)>>>,
+}
+
+impl<T: Clone> RemoteReadCache<T> {
+    const fn new() -> Self {
+        Self {
+            entries: OnceLock::new(),
+        }
+    }
+
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Instant, T)>> {
+        self.entries
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn get(&self, key: &str, now: Instant, max_age: Option<Duration>) -> Option<T> {
+        let max_age = max_age?;
+        self.entries()
+            .get(key)
+            .filter(|(read_at, _)| now.saturating_duration_since(*read_at) <= max_age)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn insert(&self, key: String, now: Instant, value: T) {
+        let mut entries = self.entries();
+        if entries.len() >= REMOTE_READ_CACHE_CAPACITY {
+            entries.clear();
+        }
+        entries.insert(key, (now, value));
+    }
+}
+
+static LINKED_PR_READS: RemoteReadCache<Vec<crate::cli::LinkedPrSummary>> = RemoteReadCache::new();
+static PR_LIFECYCLE_READS: RemoteReadCache<PrLifecycle> = RemoteReadCache::new();
+
+fn monitor_read_max_age() -> Option<Duration> {
+    gwt_git::gh_rest::monitor_read_max_age_secs()
+        .map(|secs| Duration::from_secs(u64::try_from(secs).unwrap_or_default()))
+}
+
+fn linked_pr_read_key(owner: &str, repo: &str, number: u64) -> String {
+    format!(
+        "{}/{}#{number}",
+        owner.to_ascii_lowercase(),
+        repo.to_ascii_lowercase()
+    )
+}
+
+/// Linked PR timelines for the Monitor: cached per Issue within the scan's
+/// read max age, bulk-read only for the Issues the cache cannot answer.
+pub(crate) fn fetch_linked_prs_bulk_for_monitor(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
+) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>> {
+    fetch_linked_prs_bulk_for_monitor_with(
+        owner,
+        repo,
+        numbers,
+        monitor_read_max_age(),
+        Instant::now(),
+        observe,
+        |missing, observe| {
+            crate::cli::issue::fetch_linked_prs_bulk_via_gh_observing(owner, repo, missing, observe)
+        },
+    )
+}
+
+/// Injectable core of [`fetch_linked_prs_bulk_for_monitor`].
+fn fetch_linked_prs_bulk_for_monitor_with<F>(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    max_age: Option<Duration>,
+    now: Instant,
+    mut observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
+    fetch: F,
+) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>
+where
+    F: FnOnce(
+        &[u64],
+        &mut dyn FnMut(u64, &[crate::cli::LinkedPrSummary]),
+    ) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>,
+{
+    let mut linked = BTreeMap::new();
+    let mut missing = Vec::new();
+    for number in numbers {
+        match LINKED_PR_READS.get(&linked_pr_read_key(owner, repo, *number), now, max_age) {
+            Some(prs) => {
+                observe(*number, &prs);
+                linked.insert(*number, prs);
+            }
+            None => missing.push(*number),
+        }
+    }
+    if missing.is_empty() {
+        return Ok(linked);
+    }
+    let fetched = fetch(&missing, &mut |number, prs| {
+        LINKED_PR_READS.insert(linked_pr_read_key(owner, repo, number), now, prs.to_vec());
+        observe(number, prs);
+    })?;
+    linked.extend(fetched);
+    Ok(linked)
+}
+
+/// One Issue's linked PRs for the Monitor, through the same read cache.
+pub(crate) fn fetch_linked_prs_for_monitor(
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> std::io::Result<Vec<crate::cli::LinkedPrSummary>> {
+    let now = Instant::now();
+    let key = linked_pr_read_key(owner, repo, number);
+    if let Some(prs) = LINKED_PR_READS.get(&key, now, monitor_read_max_age()) {
+        return Ok(prs);
+    }
+    let prs = crate::cli::issue::fetch_linked_prs_via_gh(owner, repo, IssueNumber(number))?;
+    LINKED_PR_READS.insert(key, now, prs.clone());
+    Ok(prs)
+}
+
+/// PR lifecycle evidence for the Monitor's launch holds, cached per PR within
+/// the scan's read max age. Failures are never cached.
+pub(crate) fn fetch_pr_lifecycle_for_monitor(
+    repo_path: &Path,
+    number: u64,
+) -> gwt_core::Result<PrLifecycle> {
+    cached_remote_read(
+        &PR_LIFECYCLE_READS,
+        format!("{}#{number}", repo_path.display()),
+        monitor_read_max_age(),
+        Instant::now(),
+        || gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number),
+    )
+}
+
+/// Serve `key` from `cache` within `max_age`, otherwise run `fetch` and keep
+/// its successful result. Failures are never cached.
+fn cached_remote_read<T: Clone, E>(
+    cache: &RemoteReadCache<T>,
+    key: String,
+    max_age: Option<Duration>,
+    now: Instant,
+    fetch: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if let Some(value) = cache.get(&key, now, max_age) {
+        return Ok(value);
+    }
+    let value = fetch()?;
+    cache.insert(key, now, value.clone());
+    Ok(value)
+}
 
 pub(crate) fn record_scan_failure_ledger(
     project_root: &Path,
@@ -1627,7 +1801,7 @@ fn load_open_pr_launch_observations(
     let mut readbacks = BTreeMap::new();
     let fetch = |number| {
         run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-            gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number)
+            fetch_pr_lifecycle_for_monitor(repo_path, number)
         })
         .map_err(|error| {
             record_scan_failure_ledger(
@@ -1657,14 +1831,9 @@ fn load_open_pr_launch_observations(
     let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
     let mut linked = BTreeMap::new();
     let linked_result = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        crate::cli::issue::fetch_linked_prs_bulk_via_gh_observing(
-            owner,
-            repo,
-            &numbers,
-            |issue, prs| {
-                linked.insert(issue, prs.to_vec());
-            },
-        )
+        fetch_linked_prs_bulk_for_monitor(owner, repo, &numbers, |issue, prs| {
+            linked.insert(issue, prs.to_vec());
+        })
     });
     if let Err(error) = &branches {
         record_scan_failure_ledger(
@@ -2364,7 +2533,7 @@ impl LinkedPrProbeBatch {
             .map(|issue| issue.number)
             .collect();
         Self::prefetch_with(&numbers, linked_prs, |numbers, observe| {
-            crate::cli::issue::fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, observe)
+            fetch_linked_prs_bulk_for_monitor(owner, repo, numbers, observe)
         })
     }
 
@@ -2566,11 +2735,7 @@ pub fn try_issue_completed_by_merged_pr_classified(
         return Ok(false);
     }
     let prs = run_budgeted_readback_stage(stage, || {
-        crate::cli::issue::fetch_linked_prs_via_gh(
-            owner,
-            repo,
-            gwt_github::IssueNumber(issue.number),
-        )
+        fetch_linked_prs_for_monitor(owner, repo, issue.number)
     })
     .map_err(IssueMonitorCompletionProbeFailure::Operation)?;
     ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
@@ -9861,5 +10026,166 @@ esac
             Some("CI failed or independent review rejected — remediate")
         );
         assert!(monitor.pending_effects().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod remote_read_cache_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn summary(number: u64) -> crate::cli::LinkedPrSummary {
+        crate::cli::LinkedPrSummary {
+            number,
+            title: format!("PR {number}"),
+            state: "OPEN".into(),
+            url: format!("https://example.test/pull/{number}"),
+            will_close_target: true,
+            merged_at: None,
+        }
+    }
+
+    /// Issue #6877 AC-2: within the periodic read max age the second scan
+    /// answers every Issue from the cache and spawns no bulk read; a fresh
+    /// (control-driven) scan with no max age reads GitHub again.
+    #[test]
+    fn linked_pr_bulk_reads_are_reused_within_the_periodic_max_age() {
+        let owner = "issue6877";
+        let repo = "linked-bulk";
+        let now = Instant::now();
+        let fetches = Cell::new(0);
+        let fetch =
+            |numbers: &[u64], observe: &mut dyn FnMut(u64, &[crate::cli::LinkedPrSummary])| {
+                fetches.set(fetches.get() + 1);
+                let mut linked = BTreeMap::new();
+                for number in numbers {
+                    let prs = vec![summary(*number + 100)];
+                    observe(*number, &prs);
+                    linked.insert(*number, prs);
+                }
+                Ok(linked)
+            };
+        let max_age = Some(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+
+        let first = fetch_linked_prs_bulk_for_monitor_with(
+            owner,
+            repo,
+            &[1, 2],
+            max_age,
+            now,
+            |_, _| {},
+            fetch,
+        )
+        .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(fetches.get(), 1);
+
+        let mut observed = Vec::new();
+        let second = fetch_linked_prs_bulk_for_monitor_with(
+            owner,
+            repo,
+            &[1, 2],
+            max_age,
+            now + Duration::from_secs(60),
+            |number, _| observed.push(number),
+            fetch,
+        )
+        .unwrap();
+        assert_eq!(second, first, "cached timelines answer the second scan");
+        assert_eq!(observed, vec![1, 2], "cached Issues are still observed");
+        assert_eq!(fetches.get(), 1, "no bulk read within the max age");
+
+        let third = fetch_linked_prs_bulk_for_monitor_with(
+            owner,
+            repo,
+            &[1, 2, 3],
+            max_age,
+            now,
+            |_, _| {},
+            fetch,
+        )
+        .unwrap();
+        assert_eq!(third.len(), 3);
+        assert_eq!(fetches.get(), 2, "only the missing Issue is read");
+
+        fetch_linked_prs_bulk_for_monitor_with(owner, repo, &[1], None, now, |_, _| {}, fetch)
+            .unwrap();
+        assert_eq!(fetches.get(), 3, "a fresh scan never reuses the cache");
+
+        fetch_linked_prs_bulk_for_monitor_with(
+            owner,
+            repo,
+            &[1],
+            max_age,
+            now + ISSUE_MONITOR_PERIODIC_READ_MAX_AGE + Duration::from_secs(1),
+            |_, _| {},
+            fetch,
+        )
+        .unwrap();
+        assert_eq!(fetches.get(), 4, "an expired entry is read again");
+    }
+
+    /// Issue #6877 AC-2: a held PR's lifecycle (`gh pr view`) is read once per
+    /// read max age during periodic scans; errors are not cached and a fresh
+    /// scan (no max age) always reads again.
+    #[test]
+    fn cached_remote_reads_are_reused_within_the_periodic_max_age() {
+        let cache: RemoteReadCache<u32> = RemoteReadCache::new();
+        let key = || "E:/issue6877#7".to_string();
+        let now = Instant::now();
+        let max_age = Some(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+        let fetches = Cell::new(0);
+
+        let failed = cached_remote_read(&cache, key(), max_age, now, || {
+            fetches.set(fetches.get() + 1);
+            Err::<u32, &str>("offline")
+        });
+        assert_eq!(failed, Err("offline"));
+
+        let first = cached_remote_read(&cache, key(), max_age, now, || {
+            fetches.set(fetches.get() + 1);
+            Ok::<u32, &str>(7)
+        })
+        .unwrap();
+        assert_eq!(first, 7);
+        assert_eq!(fetches.get(), 2, "a failure is never cached");
+
+        let second = cached_remote_read(
+            &cache,
+            key(),
+            max_age,
+            now + Duration::from_secs(120),
+            || {
+                fetches.set(fetches.get() + 1);
+                Ok::<u32, &str>(8)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            second, 7,
+            "the held PR is not viewed again within the max age"
+        );
+        assert_eq!(fetches.get(), 2);
+
+        let fresh = cached_remote_read(&cache, key(), None, now, || {
+            fetches.set(fetches.get() + 1);
+            Ok::<u32, &str>(9)
+        })
+        .unwrap();
+        assert_eq!(fresh, 9, "a fresh scan reads the PR again");
+        assert_eq!(fetches.get(), 3);
+
+        let expired = cached_remote_read(
+            &cache,
+            key(),
+            max_age,
+            now + ISSUE_MONITOR_PERIODIC_READ_MAX_AGE + Duration::from_secs(1),
+            || {
+                fetches.set(fetches.get() + 1);
+                Ok::<u32, &str>(10)
+            },
+        )
+        .unwrap();
+        assert_eq!(expired, 10, "an expired entry is read again");
     }
 }

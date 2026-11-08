@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.155.1] - 2026-11-08
+
+### Bug Fixes
+
+- **workspace:** Rebuild missing close projection proofs
+- **runtime:** Keep operation failures out of lifecycle state
+- **terminal:** Drain queued redraws before resizing the grid
+
+### Documentation
+
+- **perf:** Reconcile legacy delivery prerequisites
+
+### Performance
+
+- **monitor:** 無効プロジェクトの scan 停止・GitHub 読み取りの TTL 化・cherry 判定キャッシュ
+- **monitor:** Periodic read max age を budget 化し #4783 回帰テストの live 読みを維持
+
+### Testing
+
+- **terminal:** Align parse completion contract with counted writes
+
 ## [9.155.0] - 2026-11-08
 
 ### Bug Fixes
