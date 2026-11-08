@@ -6262,12 +6262,11 @@ pub(crate) mod tests {
         assert_eq!(status.payload["last_scan_at"], "2000-01-01T00:00:00Z");
     }
 
-    /// Issue #4544 AC-2: a provider that cannot run without permission prompts
-    /// is stopped above the claim, so nothing the AC forbids is created — no
-    /// GitHub claim comment, no launch request, no active slot — and the inbox
-    /// says why in a form an operator can act on.
+    /// Issue #6868: a provider without a supported initial-prompt transport
+    /// stays queued without a claim, launch request, or active slot. Selection
+    /// explains the exclusion, and correcting the profile permits the next scan.
     #[test]
-    fn permission_readiness_blocks_an_unsupported_provider_before_anything_is_created() {
+    fn initial_prompt_readiness_skips_an_unsupported_provider_before_anything_is_created() {
         let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
@@ -6275,7 +6274,7 @@ pub(crate) mod tests {
         });
         monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
-        // OpenClaw exposes neither a skip flag nor a permission overlay.
+        // OpenClaw has no verified initial-prompt transport.
         monitor.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         let client = FakeIssueClient::new();
@@ -6286,10 +6285,7 @@ pub(crate) mod tests {
         let mut durable = monitor.clone();
         let mut preferred = unsupported_launch_profile("openclaw");
         preferred.prefer_for = vec!["kind:issue".into()];
-        durable.set_launch_tiers(
-            true,
-            vec![vec![unsupported_launch_profile("codex"), preferred]],
-        );
+        durable.set_launch_tiers(true, vec![vec![preferred]]);
         assert_eq!(
             durable
                 .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false),
@@ -6300,11 +6296,7 @@ pub(crate) mod tests {
         assert!(durable.take_pending_launch_requests().is_empty());
         assert_eq!(durable.active_count(), 0);
         let blocked = durable.inbox_item(42).expect("excluded durable candidate");
-        assert_eq!(blocked.state, MonitorInboxState::NotReady);
-        let reason = blocked.exclusion_reason.as_deref().expect("gate reason");
-        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
-            assert!(reason.contains(required), "{reason}");
-        }
+        assert_eq!(blocked.state, MonitorInboxState::Queued);
         durable.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
         durable.set_launch_tiers(false, Vec::new());
         crate::scan_issue_monitor_candidates(&mut durable, &[issue(42)], "2026-07-02T00:00:20Z");
@@ -6344,22 +6336,19 @@ pub(crate) mod tests {
         let item = monitor.inbox_item(42).expect("inbox item");
         assert_eq!(
             item.state,
-            MonitorInboxState::NotReady,
-            "the block is non-terminal and re-evaluated on every scan"
+            MonitorInboxState::Queued,
+            "the unsupported profile leaves the Issue queued for another scan"
         );
-        let reason = item
-            .exclusion_reason
-            .as_deref()
-            .expect("the inbox says why it was excluded");
-        assert!(reason.contains("pre_launch_block"), "{reason}");
-        assert!(reason.contains("openclaw"), "{reason}");
-        assert!(reason.contains("Recovery:"), "{reason}");
-        for misleading in ["implementation started", "tests ran"] {
-            assert!(
-                !reason.to_ascii_lowercase().contains(misleading),
-                "the inbox reason must not imply {misleading}: {reason}"
-            );
-        }
+        let selection = crate::select_launch_profile(
+            monitor.launch_profile_pool(),
+            &Default::default(),
+            &[],
+            None,
+            "2026-07-02T00:00:10Z",
+        );
+        assert_eq!(selection.selected, None);
+        assert_eq!(selection.skipped[0].agent_id, "openclaw");
+        assert!(selection.skipped[0].reason.contains("initial prompt"));
     }
 
     /// The same scan with a supported provider still launches — the gate must
@@ -6407,7 +6396,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn permission_readiness_rechecks_the_profile_when_a_claim_succeeds() {
+    fn initial_prompt_readiness_rechecks_the_profile_when_a_claim_succeeds() {
         let now = "2026-07-02T00:00:10Z";
         let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
@@ -6451,20 +6440,15 @@ pub(crate) mod tests {
         assert_eq!(monitor.active_count(), 0);
         assert!(monitor.take_pending_launch_requests().is_empty());
         let item = monitor.inbox_item(42).unwrap();
-        assert_eq!(item.state, MonitorInboxState::NotReady);
-        let reason = item.exclusion_reason.as_deref().unwrap();
-        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
-            assert!(reason.contains(required), "{reason}");
-        }
+        assert_eq!(item.state, MonitorInboxState::Queued);
         assert_eq!(monitor.pending_effects().len(), 1);
         assert!(matches!(&monitor.pending_effects()[0].payload,
             crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
                 if released == claim_id && released_owner == owner));
 
-        // The next scan may prepare eligibility again while the unsupported
-        // profile remains selected; every permission rejection must be idle.
+        // The unsupported profile stays queued and fails the eligibility
+        // prefilter before another provisional implementation can begin.
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
-        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
         assert_eq!(
             monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
             0
@@ -6516,8 +6500,7 @@ pub(crate) mod tests {
             assert!(pending.autonomous_in_flight_issues().is_empty());
             if !cold_start {
                 let item = pending.inbox_item(42).unwrap();
-                assert_eq!(item.state, MonitorInboxState::NotReady);
-                assert!(item.exclusion_reason.as_ref().unwrap().contains("openclaw"));
+                assert_eq!(item.state, MonitorInboxState::Queued);
             }
             assert_eq!(pending.pending_effects().iter().filter(|effect| matches!(
                 &effect.payload,

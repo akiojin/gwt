@@ -192,6 +192,11 @@ impl LaunchWizardState {
         let mut config = builder.build();
         if long_initial_prompt {
             config.pending_initial_prompt = config.args.pop();
+        } else if !initial_prompt.is_empty() {
+            // Keep the raw task in the builder for permission/entrypoint provenance,
+            // then materialize its provider-specific transport in the final argv.
+            let prompt = config.args.pop().expect("initial prompt added above");
+            config.append_initial_prompt(prompt);
         }
         if let Some(reasoning_level) = self.reasoning_level_for_launch() {
             config.reasoning_level = Some(reasoning_level.to_string());
@@ -1125,6 +1130,42 @@ mod tests {
                 assert_eq!(config.windows_shell, None);
             }
             other => panic!("expected shell launch request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hermes_initial_prompt_uses_query_for_inline_and_file_backed_tasks() {
+        let worktree = tempdir().unwrap();
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: None,
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-6868"), "work/issue-6868"),
+            options,
+            Vec::new(),
+        );
+        state.set_agent_id("hermes");
+        for prompt in ["$gwt-execute #6868".to_string(), "task\n".repeat(1_000)] {
+            state.initial_prompt = prompt.clone();
+            let mut config = state.build_launch_config().unwrap();
+            let file = crate::launch_runtime::prepare_initial_prompt(&mut config, worktree.path())
+                .unwrap();
+            assert_eq!(config.args[config.args.len() - 2], "--query");
+            assert_eq!(
+                config.args.iter().filter(|arg| *arg == "--query").count(),
+                1
+            );
+            if let Some(file) = file {
+                assert_eq!(std::fs::read_to_string(&*file).unwrap(), prompt);
+                assert!(config.args.last().unwrap().contains(file.to_str().unwrap()));
+            } else {
+                assert_eq!(config.args.last(), Some(&prompt));
+            }
         }
     }
 

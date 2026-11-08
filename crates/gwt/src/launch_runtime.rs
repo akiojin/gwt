@@ -893,7 +893,7 @@ pub fn prepare_initial_prompt(
     } else {
         file.display().to_string()
     };
-    config.args.push(format!(
+    config.append_initial_prompt(format!(
         "Read the complete initial task from the UTF-8 file `{path}`, then follow its instructions."
     ));
     Ok(Some(file))
