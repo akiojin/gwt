@@ -806,3 +806,40 @@ Only T-5390-SR4 and T-5390-SR4a are reconciled with this delivery. No new
 runtime measurement or product correction is included. Parent AC-1/2/3,
 LF6's original timeout cause, installed runtime, Mac and real-fleet CPU/RSS
 acceptance remain open. The parent Issue stays open.
+
+### Legacy delivery tasks and parent prerequisites (2026-11-09 JST)
+
+Nine earlier task checkboxes remained open beside their later completed
+delivery records. Independent read-only review and fresh Git ancestry checks
+confirmed the following producing heads and merges in `origin/develop`:
+
+| Delivery | Producing head | Merge | Legacy tasks reconciled |
+| --- | --- | --- | --- |
+| [PR #6677](https://github.com/akiojin/gwt/pull/6677) | `a9e9397f9d12` | `16f1ddf51d5b` | PF1, PF3, PF3a, PF3b, PF4a |
+| [PR #6700](https://github.com/akiojin/gwt/pull/6700) | `e87a2296bba3` | `5839e35f8c45` | PF2, UR3, UR4, UI-DELIVERY |
+| [PR #6705](https://github.com/akiojin/gwt/pull/6705) | `69cbc2d27d1c` | `1ff0b4a215c0` | Final UI correction |
+
+The [finite update-cost comparison](independent-update-cost.md),
+[backend delivery boundary](backend-delivery.md) and
+[UI recovery record](ui-resume-20261103.md) preserve the original scope.
+The final UI delivery record retains canonical
+`vrr-3a7dd8cb821643bc96a4d29a890ff210`, seven passing commands and actual
+headed dark/light results of three cases each with zero console/page errors.
+These are historical producer results, not fresh measurements in this session.
+Only the nine checkboxes change; all other task text and old failed records stay.
+
+The parent spec now declares the currently open prerequisites using the existing
+`Blocked-by` relationship: [Issue #5082](https://github.com/akiojin/gwt/issues/5082),
+[Issue #5447](https://github.com/akiojin/gwt/issues/5447),
+[Issue #5542](https://github.com/akiojin/gwt/issues/5542),
+[Issue #5561](https://github.com/akiojin/gwt/issues/5561),
+[Issue #6301](https://github.com/akiojin/gwt/issues/6301) and
+[Issue #6877](https://github.com/akiojin/gwt/issues/6877).
+Each owner's saved dependency section had no outgoing edge at this read.
+Implementation and measurement remain with those owners. This records their
+ordering requirement; it does not identify which old task caused a launch.
+
+Parent AC-1/2/3, LF6, EO/RPC composite tasks and the Mac, installed-runtime,
+real-fleet and whole-GUI CPU/RSS criteria remain unchecked. A closed child alone
+does not establish its unchecked measurements. No product/test source or
+current-runtime measurement is added by this reconciliation.
