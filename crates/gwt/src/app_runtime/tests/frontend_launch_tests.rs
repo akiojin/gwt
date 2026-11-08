@@ -3442,6 +3442,7 @@ fn owner_launch_failure_does_not_reconstruct_the_failed_delivery() {
             // test-hygiene: allow-wall-clock-deadline exercise elapsed placeholder recovery without sleeping; the error projection establishes ordering.
             started_at: Instant::now() - Duration::from_secs(61),
             accepted_owner: None,
+            observation_error_reported: false,
         },
     );
     let reason = "original owner launch failed; exact cleanup remains pending";

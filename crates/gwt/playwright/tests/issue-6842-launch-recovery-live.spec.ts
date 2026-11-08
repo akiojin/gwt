@@ -9,7 +9,8 @@ test.skip(process.env.GWT_PLAYWRIGHT_ISSUE_6842 !== "1",
   "requires checkout binaries and the isolated Monitor/provider fixture");
 test.use({ headless: false, viewport: { width: 1600, height: 1100 } });
 
-test("Issue #6842: a saved Agent without a runtime does not consume a Monitor delivery", async ({ page }, info) => {
+for (const issueNumber of [5390, 3340]) {
+test(`Issue #6861/#6842: saved runtime-less pane permits Issue #${issueNumber} launch`, async ({ page }, info) => {
   test.setTimeout(240_000);
   const theme = info.project.name.includes("light") ? "light" : "dark";
   const errors: string[] = [];
@@ -18,6 +19,7 @@ test("Issue #6842: a saved Agent without a runtime does not consume a Monitor de
   let projectState = "";
   const rawId = "agent-saved-without-runtime";
   const fixture = await startIssueQueueLaunchFixture(info, {
+    issueNumber,
     async prepare({ home, bin, project, env }) {
       const daemon = join(bin, process.platform === "win32" ? "gwtd.exe" : "gwtd");
       const envelope = JSON.parse(execFileSync(daemon, [], { cwd: project, env,
@@ -33,7 +35,7 @@ test("Issue #6842: a saved Agent without a runtime does not consume a Monitor de
       // execution ledger, owner runtime, launch capability, or delivery ACK.
       await writeFile(join(projectState, "../workspace.json"), JSON.stringify({
         windows: [{ id: rawId, title: "Saved Issue Agent", preset: "agent", status: "running",
-          z_index: 1, agent_id: "codex", linked_issue_number: 43,
+          z_index: 1, agent_id: "codex", linked_issue_number: issueNumber,
           dynamic_title_detail: "Saved presentation without a native process" }],
         next_z_index: 2,
       }));
@@ -69,7 +71,7 @@ try {
     },
   });
   const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
-  let evidence: Record<string, unknown> = { theme, isolated_home: fixture.home, project: fixture.project };
+  let evidence: Record<string, unknown> = { theme, issue_number: issueNumber, isolated_home: fixture.home, project: fixture.project };
   let passed = false;
   try {
     await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -156,6 +158,7 @@ try {
   }
   expect(errors, "zero console/page errors including owned cleanup").toEqual([]);
 });
+}
 
 async function windows(page: Page): Promise<any[]> {
   const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);

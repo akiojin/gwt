@@ -7541,6 +7541,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
                 window_id: "tab-1::missing-materializer".into(),
                 started_at: Instant::now(),
                 accepted_owner: None,
+                observation_error_reported: false,
             },
         );
         let mut replay = prepare_monitor_relaunch(
@@ -7762,7 +7763,15 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     fixture
         .runtime
         .apply_owner_window_removed_projection(&context, &live_window_id);
-    let delivery_before = fixture.runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    let mut delivery_before = fixture.runtime.issue_monitor_launch_deliveries[&delivery_id].clone();
+    if let super::super::IssueMonitorLaunchDeliveryState::Materializing {
+        observation_error_reported,
+        ..
+    } = &mut delivery_before
+    {
+        // Expired GUI observation may report once without changing owner authority.
+        *observation_error_reported = true;
+    }
     let rows_before: Vec<_> = fixture.runtime.tabs[0]
         .workspace
         .persisted()
