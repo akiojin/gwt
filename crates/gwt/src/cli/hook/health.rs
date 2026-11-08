@@ -1880,7 +1880,7 @@ pub(super) mod browser_preflight_tests {
         test_support::{ScopedEnvVar, ScopedGwtHome},
     };
 
-    pub(in crate::cli::hook) fn with_source(
+    pub(crate) fn with_source(
         test: impl FnOnce(&ManagedHookHealthInput, &Session, &Path, &SessionRuntimeState),
     ) {
         let _env_lock = crate::env_test_lock()
