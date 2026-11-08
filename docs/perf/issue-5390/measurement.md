@@ -777,3 +777,32 @@ from the exited original process. Writer-budget exhaustion remains a separate
 failure: `lock_contention=not_observed` does not prove machine-lock contention.
 No installed runtime was replaced or restarted. Parent AC-1/2/3, LF6 and
 installed-runtime, Mac, fleet and whole-GUI CPU/RSS acceptance remain unproven.
+
+### Scan-retry correction delivery reconciliation (2026-11-09 JST)
+
+[PR #6875](https://github.com/akiojin/gwt/pull/6875) merged on
+2026-11-08 at 15:14:58 UTC. A fresh fetch confirmed that `origin/develop`
+at `ee864546d9cad0a21ad464abe361a42b2d5deba6` contains both the producing
+head `542846554e1e1973ae147d5a7bd9fdb5c30bb5d0` and that merge commit.
+Its canonical pre-PR record `vrr-09409a1cc02b4a3fa14f10c35ad6945e`
+passed eight commands and 50 selected tests. This is the producer's historical
+verification, not a fresh run by the reconciliation session.
+
+The initial head's Linux fleet fixture failures were resolved by integrating
+the already-delivered `d6009d7ee` fixture correction. The integrated head's
+coverage shard logs recorded both execution-protection and claim-protection
+cases passing. All 13 currently required checks succeeded at that head;
+branch protection remained `strict=false`.
+
+The [coverage aggregation log](https://github.com/akiojin/gwt/actions/runs/42490898770/job/128768125389)
+checks out that exact producing head and validates the six-shard inventory
+(12,712 executed, 42 ignored) before aggregation. With outer shell exclusions,
+gwt-core + gwt covered **416,103/450,958 lines = 92.27%**, threshold 90%;
+other domain crates covered **65,864/70,925 lines = 92.86%**, threshold 80%.
+The initial unaggregated coverage failure remains a test failure, not a
+coverage threshold miss. Local workspace coverage was not measured.
+
+Only T-5390-SR4 and T-5390-SR4a are reconciled with this delivery. No new
+runtime measurement or product correction is included. Parent AC-1/2/3,
+LF6's original timeout cause, installed runtime, Mac and real-fleet CPU/RSS
+acceptance remain open. The parent Issue stays open.
