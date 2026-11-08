@@ -62,7 +62,7 @@ jobs:
         run: '& (Join-Path $env:GITHUB_WORKSPACE "trusted/.github/diagnostics/windows/4777-restore-f351-v1/run.ps1")'
       - name: Upload only the closed safe receipt
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: windows-diagnostic-${{ inputs.request_id }}
           path: ${{ runner.temp }}/gwt-diagnostic-result/result.json

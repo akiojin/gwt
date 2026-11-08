@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_runtime::{RemoteRuntimeCommandCompletion, RemoteRuntimeCommandKind};
 
 #[test]
 fn app_runtime_surface_owner_keeps_pm_settings_separate_and_reuses_them() {
@@ -939,6 +940,270 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
         .unwrap();
     assert!(probe.pty.tree_exit_confirmed());
     executor.block_on(owner.shutdown());
+}
+
+#[test]
+fn browser_terminal_input_waits_for_each_exact_owner_ack_before_dispatching_next_chunk() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let before = probe.pty.ordinary_input_revision().unwrap();
+    for chunk in ["ASCII", "日本語", "paste\r"] {
+        assert!(runtime.terminal_input_events(&id, chunk).is_empty());
+    }
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued input fixture");
+    };
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "independent HTTP workers can overtake earlier terminal chunks"
+    );
+    // A healthy inventory refresh must retain the exact lane and its busy hint.
+    let context = runtime.test_context();
+    let client = runtime.runtimes[&id].client.clone();
+    let snapshot = owner_fixture_block_on(client.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+        },
+    ))
+    .unwrap();
+    runtime.install_remote_owner_projection(
+        &context,
+        &id,
+        client,
+        serde_json::from_value(snapshot).unwrap(),
+        probe.session.clone(),
+    );
+    assert!(runtime.runtimes[&id]
+        .has_unsent_user_input
+        .load(Ordering::Acquire));
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert_eq!(probe.pty.ordinary_input_revision(), Some(before + 3));
+}
+
+#[test]
+fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    for client in ["first", "second", "third"] {
+        assert!(runtime
+            .pane_send_input_to_window_events(client.into(), &id, client)
+            .is_empty());
+    }
+    let context = runtime.test_context();
+    let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let completion =
+        |input_command_id: Option<uuid::Uuid>, result| RemoteRuntimeCommandCompletion {
+            context: context.clone(),
+            connection_id,
+            identity: identity.clone(),
+            id: id.clone(),
+            incarnation,
+            kind: RemoteRuntimeCommandKind::Input {
+                reply_client: input_command_id.map(|_| "first".into()),
+            },
+            approval_resolution_started: false,
+            input_command_id,
+            result,
+        };
+    for unrelated in [None, Some(uuid::Uuid::new_v4())] {
+        runtime.handle_remote_runtime_command_complete(completion(unrelated, Ok(None)));
+        assert_eq!(
+            runtime.runtimes[&id].input_in_flight,
+            Some((connection_id, token))
+        );
+        assert_eq!(runtime.runtimes[&id].pending_input_commands.len(), 2);
+    }
+    let events = runtime.handle_remote_runtime_command_complete(completion(
+        Some(token),
+        Err("uncertain input".into()),
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: false, .. }))
+            .count(),
+        3
+    );
+    assert!(runtime.runtimes[&id].input_in_flight.is_none());
+    assert!(runtime.runtimes[&id].pending_input_commands.is_empty());
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "failed input must never dispatch its tail"
+    );
+}
+
+#[test]
+fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    for client in ["first", "second", "third"] {
+        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+    }
+    let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
+    let completion = RemoteRuntimeCommandCompletion {
+        context: runtime.test_context(),
+        connection_id,
+        identity: runtime.runtimes[&id].owner_identity.clone(),
+        id: id.clone(),
+        incarnation: runtime.runtimes[&id].incarnation,
+        kind: RemoteRuntimeCommandKind::Input {
+            reply_client: Some("first".into()),
+        },
+        approval_resolution_started: false,
+        input_command_id: Some(token),
+        result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
+            revision: 1,
+            has_unsent_user_input: false,
+            human_input_elapsed_ms: None,
+        })),
+    };
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("fixture worker admission");
+    let events = runtime.handle_remote_runtime_command_complete(completion);
+    let outcomes = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            BackendEvent::PaneSendResult { ok, .. } => Some(*ok),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, vec![true, false, false]);
+    assert!(runtime.runtimes[&id].input_in_flight.is_none());
+    assert!(runtime.runtimes[&id].pending_input_commands.is_empty());
+    assert!(
+        !runtime.pane_has_unsent_user_input(&id),
+        "discarded, unwritten input must not retain the lane's busy hint"
+    );
+}
+
+#[test]
+fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    for client in ["first", "second", "third"] {
+        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+    }
+    let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
+    let old_completion = RemoteRuntimeCommandCompletion {
+        context: runtime.test_context(),
+        connection_id,
+        identity: runtime.runtimes[&id].owner_identity.clone(),
+        id: id.clone(),
+        incarnation: runtime.runtimes[&id].incarnation,
+        kind: RemoteRuntimeCommandKind::Input {
+            reply_client: Some("first".into()),
+        },
+        approval_resolution_started: false,
+        input_command_id: Some(token),
+        result: Ok(None),
+    };
+    let context = runtime.test_context();
+    let events = runtime.handle_project_owner_health(
+        &context,
+        2,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Degraded,
+            detail: Some("fixture connection loss".into()),
+        },
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: false, .. }))
+            .count(),
+        3
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::PaneSendResult { error: Some(error), .. } if error.contains("uncertain"))));
+    let outcome = runtime.handle_remote_runtime_command_complete(old_completion);
+    assert!(outcome.is_empty(), "discarded send must settle only once");
+    assert!(runtime.runtimes[&id].input_in_flight.is_none());
+    assert!(runtime.runtimes[&id].pending_input_commands.is_empty());
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "connection loss must not forward or replay the tail"
+    );
+}
+
+#[test]
+fn browser_terminal_final_ack_reconciles_a_newer_input_observation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    runtime.terminal_input_events(&id, "queued\r");
+    let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
+    let completion = |input_command_id, revision| RemoteRuntimeCommandCompletion {
+        context: runtime.test_context(),
+        connection_id,
+        identity: runtime.runtimes[&id].owner_identity.clone(),
+        id: id.clone(),
+        incarnation: runtime.runtimes[&id].incarnation,
+        kind: RemoteRuntimeCommandKind::Input { reply_client: None },
+        approval_resolution_started: false,
+        input_command_id,
+        result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
+            revision,
+            has_unsent_user_input: false,
+            human_input_elapsed_ms: None,
+        })),
+    };
+    let newer_mobile = completion(None, 2);
+    let older_desktop = completion(Some(token), 1);
+    runtime.handle_remote_runtime_command_complete(newer_mobile);
+    assert!(runtime.pane_has_unsent_user_input(&id));
+    runtime.handle_remote_runtime_command_complete(older_desktop);
+    assert_eq!(runtime.runtimes[&id].input_observation.unwrap().revision, 2);
+    assert!(!runtime.pane_has_unsent_user_input(&id));
+}
+
+#[test]
+fn browser_pane_close_reports_pending_send_outcomes_once() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    for client in ["first", "second"] {
+        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+    }
+    runtime.queue_window_close_finalizer(&id, None, None, false, None, None);
+    let AppEventProxy::Stub(events) = &runtime.proxy else {
+        panic!("event sink");
+    };
+    let immediate_failures = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(events) => Some(
+                events
+                    .iter()
+                    .filter(|event| {
+                        matches!(&event.event, BackendEvent::PaneSendResult { ok: false, .. })
+                    })
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(immediate_failures, 2);
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
 }
 
 #[test]

@@ -1,6 +1,72 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.155.0] - 2026-11-08
+
+### Bug Fixes
+
+- **monitor:** Checkpoint の停止理由を可視化する
+- **terminal:** Keep input live and preserve chunk order
+- **web:** 強制回復で未送信のKnowledge読込を重複させない
+- **test:** Pending観測とhook準備予算を決定的にする
+- **test:** Cargo復元fixtureの期待パスを正規化する
+- **ci:** 実 E5 試験の runtime 配置と隔離 HOME を一致させる
+- **test:** Detect inclusive comparisons with clocks on the right
+- **mobile:** Persist coordinator registration clock observations
+- **pm:** Keep PR owners active through merge and triage stalled work
+- **terminal:** Settle input lifecycle across owner changes
+- **monitor:** 失敗した制御再試行によるscan結果の破棄を防ぐ
+- **test:** Await monitor fixture startup before discovery
+- **test:** Continue provider cleanup after a partial log receipt
+- **ui:** Recover pending release notes reads after reconnect
+
+### Documentation
+
+- **perf:** Reconcile scan retry correction delivery
+
+### Features
+
+- **mobile:** Bound registration renewal polling
+- **pm:** ブラウザから依頼タスクを完了できるようにする
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 5876 wait acceptance
+- **work:** Preserve issue 5876 PR receipt
+- **work:** Reconcile issue 5876 wait acceptance
+- **work:** Record terminal input delivery handoff
+- **work:** Record terminal input pull request
+- **work:** Issue #5016 のPR関連付けを記録
+- **work:** Record fixture follow-up PR association
+- **work:** Record issue 5876 review re-acceptance owner routing
+- **work:** Issue #4735 の PR 参照を記録する
+- **work:** Record Issue #4735 PR reference
+- **work:** #5098 の起動履歴を配送
+- **work:** #5098 の配送記録を追加
+- **work:** Record input lifecycle delivery handoff
+- **work:** Record latest issue 5876 reliability measurements
+- **work:** Attach issue 5876 measurement pull request
+- **work:** Record issue 5390 scan retry delivery continuation
+- **work:** Monitor fixture 修復の引継ぎと検証を記録する
+- **work:** Record clipboard fixture cleanup delivery
+- **work:** 画像貼り付け検証修正の配送記録を保存
+- **work:** Release Notes 回復の配送引き継ぎを記録
+- **work:** Issue #3431 の完了操作の配送記録を保存
+
+### Refactor
+
+- **terminal:** Clarify input lane preservation
+
+### Testing
+
+- **terminal:** Record resumed input continuity verification
+- **pm:** Wait for composer input acknowledgements
+- **git:** 共有fixtureの初回コミット前に自動maintenanceを隔離
+- **windows:** Wait for child readiness before CPU sampling
+- **playwright:** Align Works provider fixture paths
+- **process:** 注入時計の復元ガードを生成スレッドに固定
+- **ui:** Align socket replay contract with read recovery
+
 ## [9.154.0] - 2026-11-07
 
 ### Bug Fixes

@@ -475,9 +475,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     throw new Error("Fixture has no authenticated GUI-managed owner to drain");
   }
-  async function stop(coldOwnerDrain = false) {
-    const owner = coldOwnerDrain ? await captureGuiOwner() : undefined;
-    const ownedPid = child?.pid;
+  async function stopGui() {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
@@ -489,6 +487,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
       }
     }
+    if (child?.pid && processCommand(child.pid)) {
+      throw new Error(`Fixture gwt process ${child.pid} remained after shutdown`);
+    }
+  }
+  async function stop(coldOwnerDrain = false) {
+    const owner = coldOwnerDrain ? await captureGuiOwner() : undefined;
+    const ownedPid = child?.pid;
+    await stopGui();
     let drainError: Error | undefined;
     if (owner) {
       // Cold restore starts after the real GUI lifetime drain. Killing providers
@@ -580,6 +586,6 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
     async restart(options: { coldOwnerDrain?: boolean } = {}) { await stop(options.coldOwnerDrain); return start(); } };
 }

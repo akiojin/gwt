@@ -1081,8 +1081,14 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 `reason`・`task: TaskDraft` で保存済みの依頼内容を訂正します。対象 ID は `task.id`
 だけで、変更者はサーバーがブラウザ接続から確定します。Update は適用後に読み取った
 現在の Task と revision に、元の適用 revision の receipt を添えて返します。内容を
-変えない更新も有効で、Task 差分が空の receipt を保存します。同じ Update を再実行
-しても receipt は変わらず、現在の Task は後続の変更を反映する場合があります。
+変えない更新も有効で、Task 差分が空の receipt を保存します。
+`complete_pm_request_task` は `request` 内の `operation_id`・`expected_revision`・
+`reason`・`task_id`・`condition_revision`・`review_generation`・空でない `evidence`
+で完了を記録します。変更者はブラウザ接続から確定し、既存 Task の規則に従って、
+古い確認・PM の再評価待ち・未完了の子がある場合は拒否します。同じ完了内容を別の
+operation で確認することも有効で、Task 差分が空の receipt を保存する場合があります。
+同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
+後続の変更や再開を反映する場合があります。
 Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
