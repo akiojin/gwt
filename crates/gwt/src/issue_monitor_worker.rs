@@ -1511,6 +1511,57 @@ fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
     }
 }
 
+fn spec_cache_entry_readiness_failure(entry: &CacheEntry) -> Option<String> {
+    if let Some(error) = entry.spec_parse_error.as_ref() {
+        return Some(format!("targeted refresh parse failed: {error}"));
+    }
+    let missing = ["plan", "tasks"]
+        .into_iter()
+        .filter(|name| {
+            entry
+                .spec_body
+                .sections
+                .get(&SectionName((*name).into()))
+                .is_none_or(|content| content.trim().is_empty())
+        })
+        .map(|name| {
+            if name == "tasks" {
+                "tasks section missing or empty (0 tasks)"
+            } else {
+                "plan section missing or empty"
+            }
+        })
+        .collect::<Vec<_>>();
+    (!missing.is_empty())
+        .then(|| format!("plan/tasks readiness incomplete: {}", missing.join("; ")))
+}
+
+fn cached_readiness_failures(
+    issues: &[IssueMonitorIssue],
+    cache_roots: &[Option<std::path::PathBuf>],
+) -> Vec<IssueReadinessFailure> {
+    issues
+        .iter()
+        .filter(|issue| issue.readiness == IssueMonitorReadiness::NotReady)
+        .filter_map(|issue| {
+            cache_roots
+                .iter()
+                .flatten()
+                .find_map(|root| {
+                    let entry = Cache::new(root.clone()).load_entry(IssueNumber(issue.number))?;
+                    if issue.updated_at.as_deref() != Some(entry.snapshot.updated_at.0.as_str()) {
+                        return None;
+                    }
+                    spec_cache_entry_readiness_failure(&entry)
+                })
+                .map(|reason| IssueReadinessFailure {
+                    number: issue.number,
+                    reason,
+                })
+        })
+        .collect()
+}
+
 /// The legacy empty section index (SPEC #2780): a `gwt-spec` body whose index
 /// map is the JSON literal `{}`.
 ///
@@ -1602,7 +1653,12 @@ where
         // through the targeted refresh and reports the parse failure.
         let cache_matches_live = issue.updated_at.as_ref().is_some_and(|updated_at| {
             cached.as_ref().is_some_and(|entry| {
-                entry.spec_parse_error.is_none() && entry.snapshot.updated_at.0 == *updated_at
+                entry.spec_parse_error.is_none()
+                    && entry.snapshot.updated_at.0 == *updated_at
+                    // A partially read artifact can parse as an empty section.
+                    // Retry it even when comment edits keep the Issue revision.
+                    && (spec_cache_entry_has_no_sections(entry)
+                        || spec_cache_entry_readiness(entry) != IssueMonitorReadiness::NotReady)
             })
         });
         let issue_number = issue.number;
@@ -1644,6 +1700,12 @@ where
                         Some(entry)
                             if issue.updated_at.as_ref().is_some_and(|updated_at| {
                                 entry.snapshot.updated_at.0 == *updated_at
+                                    // The replacement may finish after the list read.
+                                    // A newer authoritative read supersedes that list.
+                                    || chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+                                        .ok()
+                                        .zip(chrono::DateTime::parse_from_rfc3339(updated_at).ok())
+                                        .is_some_and(|(refreshed, listed)| refreshed > listed)
                             }) =>
                         {
                             Some(entry)
@@ -1680,27 +1742,51 @@ where
         // no structured artifacts to classify and never will, so it is read as
         // the plain Issue its body already is instead of being parked as
         // `NotReady` with nothing to fix.
+        let current_is_spec = cache_matches_live
+            || entry.as_ref().is_none_or(|entry| {
+                entry
+                    .snapshot
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+            });
         let degraded_to_plain = entry.as_ref().is_some_and(spec_cache_entry_has_no_sections);
         let readiness = match entry.as_ref() {
-            Some(_) if degraded_to_plain => IssueMonitorReadiness::NotApplicable,
+            Some(_) if !current_is_spec || degraded_to_plain => {
+                IssueMonitorReadiness::NotApplicable
+            }
             Some(entry) => spec_cache_entry_readiness(entry),
             None => IssueMonitorReadiness::NotReady,
         };
+        if readiness == IssueMonitorReadiness::NotReady {
+            if let Some(reason) = entry.as_ref().and_then(spec_cache_entry_readiness_failure) {
+                fail(reason);
+            }
+        }
         if degraded_to_plain {
             tracing::warn!(
                 issue = issue.number,
                 "gwt-spec Issue has no SPEC sections; evaluating its body as a plain Issue"
             );
         }
-        let mut issue = issue;
-        if let Some(entry) = entry.as_ref() {
-            // Issue #3930 AC-4: the generation-matched cache entry knows where
-            // the `spec` section lives; a comment-resident block must reach
-            // the acceptance classifier too.
-            let body = issue.body.as_deref().unwrap_or(&entry.snapshot.body);
-            issue.body = Some(acceptance_source_text(body, &entry.spec_body));
-        }
-        candidates.push(issue_monitor_candidate(issue, readiness));
+        let candidate = match entry {
+            Some(entry) if !cache_matches_live => {
+                // Keep labels, closure, acceptance text and revision from the same
+                // snapshot; only changing readiness could launch a now-closed Issue.
+                let mut candidate = cached_issue_monitor_candidate(entry);
+                candidate.readiness = readiness;
+                candidate.url = (!issue.url.is_empty()).then_some(issue.url);
+                candidate
+            }
+            Some(entry) => {
+                let mut issue = issue;
+                let body = issue.body.as_deref().unwrap_or(&entry.snapshot.body);
+                issue.body = Some(acceptance_source_text(body, &entry.spec_body));
+                issue_monitor_candidate(issue, readiness)
+            }
+            None => issue_monitor_candidate(issue, readiness),
+        };
+        candidates.push(candidate);
     }
 
     (candidates, errors)
@@ -2106,8 +2192,8 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
             owner, repo,
         )),
     ];
-    let cache_results = cache_roots.into_iter().flatten().map(|cache_root| {
-        let result = load_cached_issue_monitor_candidates(&cache_root);
+    let cache_results = cache_roots.iter().flatten().map(|cache_root| {
+        let result = load_cached_issue_monitor_candidates(cache_root);
         if let Err(error) = &result {
             tracing::warn!(
                 "issue monitor cache fallback failed for {}: {error}",
@@ -2131,6 +2217,7 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
             )
         });
     }
+    loaded.readiness_failures = cached_readiness_failures(&loaded.issues, &cache_roots);
     Ok(loaded)
 }
 
@@ -5325,14 +5412,157 @@ pub(crate) mod tests {
             },
         );
 
-        assert!(errors.is_empty());
-        assert_eq!(refreshes, 0, "matching generations must not hit GitHub");
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].reason.contains("plan section missing or empty"));
+        assert!(errors[1]
+            .reason
+            .contains("tasks section missing or empty (0 tasks)"));
+        assert_eq!(
+            refreshes, 2,
+            "incomplete artifacts must be retried even at the same revision"
+        );
         assert_eq!(
             issues[0].readiness,
             crate::IssueMonitorReadiness::ReadyWithOpenTasks
         );
+        assert_eq!(
+            issues[0].title, "Issue 42",
+            "cache reuse preserves live metadata"
+        );
+        assert_eq!(issues[0].labels, vec!["GWT-SPEC"]);
         assert_eq!(issues[1].readiness, crate::IssueMonitorReadiness::NotReady);
         assert_eq!(issues[2].readiness, crate::IssueMonitorReadiness::NotReady);
+    }
+
+    fn multipart_spec(updated_at: &str) -> IssueSnapshot {
+        let mut snapshot = structured_spec(42, updated_at, "Plan", "");
+        snapshot.body = snapshot
+            .body
+            .replace("tasks=body", "tasks=comment:701,comment:702");
+        snapshot.comments = vec![
+            CommentSnapshot {
+                id: CommentId(701),
+                body: "<!-- artifact:tasks BEGIN part=1/2 -->\n- [x] T-001\n<!-- artifact:tasks END part=1/2 -->".into(),
+                updated_at: UpdatedAt::new(updated_at),
+            },
+            CommentSnapshot {
+                id: CommentId(702),
+                body: "<!-- artifact:tasks BEGIN part=2/2 -->\n- [ ] T-002\n<!-- artifact:tasks END part=2/2 -->".into(),
+                updated_at: UpdatedAt::new(updated_at),
+            },
+        ];
+        snapshot
+    }
+
+    #[test]
+    fn issue_6880_multipart_repost_accepts_newer_authoritative_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut replacement = multipart_spec("2026-11-08T15:39:00Z");
+        replacement.title = "Replacement title".into();
+        replacement.author_login = Some("akiojin".into());
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(42, &["gwt-spec"], Some("2026-11-08T15:38:53Z"))],
+            dir.path(),
+            |_| {
+                cache
+                    .write_snapshot(&replacement)
+                    .map_err(|error| error.to_string())
+            },
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            issues[0].readiness,
+            IssueMonitorReadiness::ReadyWithOpenTasks
+        );
+        assert_eq!(
+            issues[0].updated_at.as_deref(),
+            Some("2026-11-08T15:39:00Z")
+        );
+        assert_eq!(issues[0].title, replacement.title);
+        assert_eq!(issues[0].author_login, replacement.author_login);
+
+        // A later close/label change must travel with that same authoritative read.
+        replacement.state = IssueState::Closed;
+        replacement.labels = vec!["bug".into()];
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(42, &["gwt-spec"], Some("2026-11-08T15:38:53Z"))],
+            dir.path(),
+            |_| {
+                cache
+                    .write_snapshot(&replacement)
+                    .map_err(|error| error.to_string())
+            },
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(issues[0].state, IssueMonitorIssueState::Closed);
+        assert_eq!(issues[0].labels, vec!["bug"]);
+        assert_eq!(issues[0].readiness, IssueMonitorReadiness::NotApplicable);
+    }
+
+    #[test]
+    fn issue_6880_incomplete_artifacts_recover_on_next_scan_without_requeue() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf());
+        let revision = "2026-11-08T15:39:00Z";
+        let mut partial = multipart_spec(revision);
+        partial.comments.pop();
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", revision);
+        let mut projections = Vec::new();
+        for (snapshot, reason) in [
+            (partial, Some("702")),
+            (structured_spec(42, revision, "Plan", ""), Some("tasks")),
+            (multipart_spec(revision), None),
+        ] {
+            cache.write_snapshot(&snapshot).unwrap();
+            let mut refreshes = 0;
+            let (issues, errors) = issue_monitor_candidates_with_readiness(
+                vec![live_issue(42, &["gwt-spec"], Some(revision))],
+                dir.path(),
+                |_| {
+                    refreshes += 1;
+                    Ok(())
+                },
+            );
+            monitor.record_candidate(issues[0].clone());
+            monitor.record_readiness_refresh_failures(&errors);
+            let row = monitor.inbox_item(42).unwrap();
+            if let Some(reason) = reason {
+                assert_eq!(refreshes, 1, "incomplete cache must not be sticky");
+                assert_eq!(row.state, crate::MonitorInboxState::NotReady);
+                assert!(
+                    row.exclusion_reason.as_deref().unwrap().contains(reason),
+                    "{:?}",
+                    row.exclusion_reason
+                );
+                if reason == "tasks" {
+                    assert!(row.exclusion_reason.as_deref().unwrap().contains("0 tasks"));
+                }
+                let cached_issues = load_cached_issue_monitor_candidates(dir.path()).unwrap();
+                let fallback_errors =
+                    cached_readiness_failures(&cached_issues, &[Some(dir.path().to_path_buf())]);
+                assert_eq!(fallback_errors.len(), 1);
+                assert!(fallback_errors[0].reason.contains(reason));
+                assert!(monitor.queued_issue_numbers().is_empty());
+            } else {
+                assert_eq!(
+                    issues[0].readiness,
+                    IssueMonitorReadiness::ReadyWithOpenTasks
+                );
+                assert_eq!(row.state, crate::MonitorInboxState::Queued);
+                assert!(row.exclusion_reason.is_none());
+                assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            }
+            projections.push(serde_json::json!({
+                "status": monitor.agent_status(),
+                "inbox": monitor.inbox_view_at(revision),
+            }));
+        }
+        println!(
+            "ISSUE6880_NORMALIZED={}",
+            serde_json::to_string(&projections).unwrap()
+        );
     }
 
     #[test]
