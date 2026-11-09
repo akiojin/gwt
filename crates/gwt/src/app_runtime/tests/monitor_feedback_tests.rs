@@ -1,6 +1,85 @@
 use super::*;
 
 #[test]
+fn issue6861_missing_accepted_owner_projection_reports_one_bounded_observation_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("repo");
+    fs::create_dir_all(&project).unwrap();
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            project.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.test_context();
+    let accepted = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: std::process::id(),
+        host_started_at: 1,
+        host_instance_id: "accepted-epoch".into(),
+    };
+    // test-hygiene: allow-wall-clock-deadline Inject expired observation age without waiting; assertions inspect control flow, not scheduler timing.
+    let started_at = Instant::now() - Duration::from_secs(61);
+    let original = super::super::IssueMonitorLaunchDeliveryState::Materializing {
+        window_id: "tab-1::missing-projection".into(),
+        started_at,
+        accepted_owner: Some(accepted.clone()),
+        observation_error_reported: false,
+    };
+    runtime
+        .issue_monitor_launch_deliveries
+        .insert("accepted-delivery".into(), original);
+    let mut events = Vec::new();
+    for identity in [None, Some(accepted.clone()), None] {
+        runtime
+            .project_state_mut(&context)
+            .unwrap()
+            .project_owner_identity = identity;
+        events.extend(
+            runtime.auto_launch_issue_monitor_delivery_events_for_project(
+                &project,
+                5390,
+                LinkedIssueKind::Issue,
+                Some("accepted-delivery".into()),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            ),
+        );
+        events.extend(runtime.auto_launch_issue_monitor_delivery_events(
+            &context,
+            5390,
+            LinkedIssueKind::Issue,
+            Some("accepted-delivery".into()),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        ));
+    }
+    assert_eq!(events.iter().filter(|event| matches!(&event.event,
+        BackendEvent::IssueMonitorToast { level, message, issue_number: Some(5390), .. }
+            if level == "error" && message.contains("owner projection") && message.contains("60")
+    )).count(), 1, "missing GUI progress must fail observation once without an infinite defer");
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "missing metadata grants no new owner operation"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    assert!(
+        matches!(runtime.issue_monitor_launch_deliveries.get("accepted-delivery"),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id, started_at: original_start, accepted_owner: Some(owner), ..
+        }) if window_id == "tab-1::missing-projection" && *original_start == started_at && owner == &accepted)
+    );
+}
+
+#[test]
 fn issue6842_persisted_pane_without_runtime_does_not_swallow_launch() {
     let _subscriber =
         tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
@@ -51,7 +130,7 @@ fn issue6842_persisted_pane_without_runtime_does_not_swallow_launch() {
         "a persisted Running row without a runtime must reach spawn, not an empty ACK"
     );
     drain_queued_blocking_tasks(&queued);
-    let (_, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
+    let (window_id, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
     let launched = launched.expect("the actual owner creates a physical pane");
     eprintln!(
         "Issue #6842 phantom-pane recovery: actual PTY pid={:?}, elapsed={:?}",
@@ -107,6 +186,32 @@ fn issue6842_persisted_pane_without_runtime_does_not_swallow_launch() {
         "a live owner must not lose its delivery to a prepare-budget rejection"
     );
     assert!(after.failed_issues.is_empty());
+    assert!(launched.pty.try_wait().unwrap().is_none());
+    authenticate_monitor_owner_readiness(&owner, &launched);
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    fixture.runtime.finish_queued_delivery_acks(&queued);
+    assert!(
+        matches!(fixture.runtime.issue_monitor_launch_deliveries.get(&expected_delivery),
+            Some(super::super::IssueMonitorLaunchDeliveryState::Launched { window_id: id })
+                if id == &window_id),
+        "Issue #6861: accepted replay must observe the exact owner's successful ACK"
+    );
+    assert_eq!(
+        fixture.runtime.runtimes[&window_id].child_pid,
+        launched.pty.process_id()
+    );
+    assert_eq!(
+        fixture.runtime.active_agent_sessions[&window_id].session_id,
+        launched.session.as_ref().unwrap().id
+    );
     assert!(launched.pty.try_wait().unwrap().is_none());
     pane_control_tests::control_close(&owner, &launched);
 }

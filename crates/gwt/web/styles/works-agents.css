@@ -114,8 +114,10 @@
 .work-stripe { background: var(--color-state-active); }
 .work-row[data-state="waiting"] .work-stripe { background: var(--color-state-needs-input); }
 .work-row[data-state="idle"] .work-stripe,
+.work-row[data-state="stopped"] .work-stripe,
 .work-row[data-state="unknown"] .work-stripe { background: var(--color-state-idle); }
-.work-row[data-state="error"] .work-stripe { background: var(--color-state-blocked); }
+.work-row[data-state="error"] .work-stripe,
+.work-row[data-state="interrupted"] .work-stripe { background: var(--color-state-blocked); }
 .work-body {
   display: grid;
   grid-template-columns: minmax(150px, 1.1fr) minmax(0, 2fr) minmax(140px, auto);
@@ -201,11 +203,15 @@
 .work-row[data-state="waiting"] .work-state,
 .work-row[data-state="waiting"] .work-spark { color: var(--color-state-needs-input); }
 .work-row[data-state="idle"] .work-state,
+.work-row[data-state="stopped"] .work-state,
 .work-row[data-state="unknown"] .work-state,
 .work-row[data-state="idle"] .work-spark,
+.work-row[data-state="stopped"] .work-spark,
 .work-row[data-state="unknown"] .work-spark { color: var(--color-state-idle); }
 .work-row[data-state="error"] .work-state,
-.work-row[data-state="error"] .work-spark { color: var(--color-state-blocked); }
+.work-row[data-state="interrupted"] .work-state,
+.work-row[data-state="error"] .work-spark,
+.work-row[data-state="interrupted"] .work-spark { color: var(--color-state-blocked); }
 .work-stats { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); min-width: 0; padding-top: var(--space-2); border-top: 1px dashed var(--color-border); overflow-wrap: anywhere; }
 .work-stats span { max-width: 100%; }
 .works-empty { margin: 0; padding: var(--space-3); color: var(--color-text-muted); }

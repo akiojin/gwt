@@ -188,6 +188,21 @@ fn pm_request_task_browser_reopen_resolves_user_and_reconciles_receipts() {
     );
     assert_eq!(store.read().unwrap().unwrap().revision, 4);
 
+    let mut complete = serde_json::json!({"kind":"complete_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
+        "request":{"operation_id":"user-complete", "expected_revision":4,
+            "reason":"Verified the original outcome", "task_id":"synthetic-task",
+            "condition_revision":1,"review_generation":1,"evidence":["synthetic:verified-outcome"]}});
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone())["code"],
+        "stale_review"
+    );
+    complete["request"]["review_generation"] = serde_json::json!(2);
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone())["code"],
+        "reassessment_required"
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), committed);
+
     store
         .apply(
             &gwt_core::pm_request_tasks::Actor {
@@ -223,6 +238,69 @@ fn pm_request_task_browser_reopen_resolves_user_and_reconciles_receipts() {
     assert_eq!(current["receipt"]["revision"], 4);
     assert_eq!(current["receipt"]["actor"]["id"], "browser:browser-a");
     assert_eq!(current["receipt"]["tasks"][0]["review_required"], true);
+
+    complete["request"]["expected_revision"] = serde_json::json!(5);
+    let mut empty_evidence = complete.clone();
+    empty_evidence["request"]["evidence"] = serde_json::json!([]);
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", empty_evidence)["code"],
+        "invalid_request"
+    );
+    let completed = invoke(&mut runtime, "browser-a", complete.clone());
+    assert_eq!(completed["state"], "ready");
+    assert_eq!(completed["revision"], 6);
+    assert_eq!(completed["task"]["status"], "completed");
+    assert_eq!(
+        completed["task"]["completion"]["evidence"],
+        complete["request"]["evidence"]
+    );
+    assert_eq!(
+        completed["receipt"]["actor"],
+        serde_json::json!({"kind":"user","id":"browser:browser-a"})
+    );
+    assert_eq!(
+        completed["receipt"]["reason"],
+        complete["request"]["reason"]
+    );
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone()),
+        completed
+    );
+    let mut noop = complete.clone();
+    noop["request"]["operation_id"] = serde_json::json!("user-complete-noop");
+    noop["request"]["expected_revision"] = serde_json::json!(6);
+    let noop_result = invoke(&mut runtime, "browser-a", noop);
+    assert_eq!(noop_result["state"], "ready");
+    assert_eq!(noop_result["revision"], 7);
+    assert_eq!(noop_result["receipt"]["tasks"], serde_json::json!([]));
+    let mut reopened = serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":6,
+        "request":{"operation_id":"user-reopen-again", "expected_revision":7, "reason":"Recheck original outcome", "task_id":"synthetic-task"}});
+    let pending = invoke(&mut runtime, "browser-a", reopened.clone());
+    let saved = fs::read(&state_path).unwrap();
+    let replay = invoke(&mut runtime, "browser-a", complete.clone());
+    assert_eq!(replay["revision"], 8);
+    assert_eq!(replay["task"], pending["task"]);
+    assert_eq!(replay["receipt"], completed["receipt"]);
+    assert_eq!(
+        invoke(&mut runtime, "browser-b", complete.clone())["code"],
+        "operation_conflict"
+    );
+    complete["request"]["reason"] = serde_json::json!("Changed payload");
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete.clone())["code"],
+        "operation_conflict"
+    );
+    complete["request"]["operation_id"] = serde_json::json!("stale-complete");
+    assert_eq!(
+        invoke(&mut runtime, "browser-a", complete)["code"],
+        "conflict"
+    );
+    reopened["kind"] = serde_json::json!("load_pm_request_task");
+    reopened.as_object_mut().unwrap().remove("request");
+    reopened["task_id"] = serde_json::json!("synthetic-task");
+    reopened["receipt_operation_id"] = serde_json::json!("user-complete");
+    assert_eq!(invoke(&mut runtime, "browser-b", reopened), replay);
+    assert_eq!(fs::read(&state_path).unwrap(), saved);
 }
 
 #[test]
@@ -456,6 +534,9 @@ fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access()
             "request":{"operation_id":"foreign-reopen", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task"}}),
             serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":3,
             "request":{"operation_id":"foreign-cancel", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task"}}),
+            serde_json::json!({"kind":"complete_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
+            "request":{"operation_id":"foreign-complete", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task",
+                "condition_revision":1,"review_generation":1,"evidence":["synthetic:outcome"]}}),
             serde_json::json!({"kind":"update_pm_request_task", "id":"tab-1::agent-1", "request_id":4,
             "request":{"operation_id":"foreign-update", "expected_revision":3, "reason":"Synthetic foreign request",
                 "task":{"id":"synthetic-task","title":"Changed","purpose":"Changed","completion_conditions":["Outcome"],
@@ -487,6 +568,9 @@ fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access()
             "request":{"operation_id":"closed-project-reopen", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task"}}),
         serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
             "request":{"operation_id":"closed-project-cancel", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task"}}),
+        serde_json::json!({"kind":"complete_pm_request_task", "id":"tab-1::agent-1", "request_id":7,
+            "request":{"operation_id":"closed-project-complete", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task",
+                "condition_revision":1,"review_generation":1,"evidence":["synthetic:outcome"]}}),
         serde_json::json!({"kind":"update_pm_request_task", "id":"tab-1::agent-1", "request_id":6,
             "request":{"operation_id":"closed-project-update", "expected_revision":3, "reason":"Synthetic closed project request",
                 "task":{"id":"synthetic-task","title":"Changed","purpose":"Changed","completion_conditions":["Outcome"],

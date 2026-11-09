@@ -3191,12 +3191,14 @@ fn prepare_active_work_projection(
     // The stability window includes the load, including synthesized empty
     // Work state whose Arc identity can legitimately change on every read.
     let work_items_stamp = projection_work_items_stamp(&input.project_root);
-    let cache_lock_started = Instant::now();
+    let cache_lock_started = gwt_core::operation_deadline::now();
     let mut work_items_cache = input
         .work_items_cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cache_lock_wait_micros = cache_lock_started.elapsed().as_micros() as u64;
+    let cache_lock_wait_micros = gwt_core::operation_deadline::now()
+        .saturating_duration_since(cache_lock_started)
+        .as_micros() as u64;
     let (work_items, mut load_profile) =
         work_items_cache.load_or_synthesize_shared(&input.project_root)?;
     load_profile.lock_wait_micros = load_profile
@@ -3217,15 +3219,17 @@ fn prepare_active_work_projection(
     FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(count.get() + 1));
     // Read Current after the cache loader admits the canonical Work state.
     // Legacy layouts fail the same load boundary instead of creating new state.
-    let saved_parse_started = Instant::now();
+    let saved_parse_started = gwt_core::operation_deadline::now();
     let saved_projection_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&input.project_root);
     let saved_projection = gwt_core::workspace_projection::load_workspace_projection_from_path(
         &saved_projection_path,
     )?;
-    load_profile.parse_micros = load_profile
-        .parse_micros
-        .saturating_add(saved_parse_started.elapsed().as_micros() as u64);
+    load_profile.parse_micros = load_profile.parse_micros.saturating_add(
+        gwt_core::operation_deadline::now()
+            .saturating_duration_since(saved_parse_started)
+            .as_micros() as u64,
+    );
     let loaded_projection = saved_projection.or_else(|| {
         (!work_items.work_items.is_empty()).then(|| {
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(

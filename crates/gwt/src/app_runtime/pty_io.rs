@@ -1,7 +1,7 @@
 //! Rust GUI adapters for the authenticated project owner. Terminal state is a read-only cache.
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::window::PeerPaneCloseReply;
 
@@ -9,6 +9,9 @@ use super::{
     combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, UserEvent,
     WindowCloseMonitorResult, WindowProcessStatus,
 };
+
+pub(super) const REMOTE_COMMAND_RECOVERY_GRACE: Duration = Duration::from_secs(10);
+const REMOTE_COMMAND_RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
 
 fn settle_window_lifecycle_generation(
     generations: &Arc<Mutex<std::collections::HashMap<String, u64>>>,
@@ -183,6 +186,205 @@ fn stop_all_before_joining<I, T>(
 }
 
 impl AppRuntime {
+    fn remote_command_session_id(&self, id: &str) -> Option<&str> {
+        let address = self.window_lookup.get(id)?;
+        self.tab(&address.tab_id)?
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| window.id == address.raw_id)?
+            .session_id
+            .as_deref()
+    }
+
+    fn remote_command_owner_problem(&self, id: &str) -> Option<String> {
+        let runtime = self.runtimes.get(id)?;
+        let context = self.project_context(&self.window_lookup.get(id)?.tab_id)?;
+        let state = self.project_state(&context)?;
+        let mut reasons = Vec::new();
+        if state
+            .project_owner_health
+            .as_ref()
+            .is_some_and(|health| health.state != gwt::protocol::ProjectOwnerHealthState::Healthy)
+        {
+            reasons.push("owner is not Healthy");
+        }
+        if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity) {
+            reasons.push("owner identity mismatch");
+        }
+        if runtime.owner_pane_id.is_empty() {
+            reasons.push("owner pane unset");
+        }
+        (!reasons.is_empty()).then(|| {
+            format!(
+                "owner health: {:?}; {}",
+                state
+                    .project_owner_health
+                    .as_ref()
+                    .map(|health| &health.state),
+                reasons.join("; ")
+            )
+        })
+    }
+
+    fn warn_remote_command_recovery(
+        &self,
+        id: &str,
+        reason: &str,
+        attempts: u32,
+        waited: Duration,
+    ) {
+        let Some(runtime) = self.runtimes.get(id) else {
+            return;
+        };
+        let Some(context) = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.project_context(&address.tab_id))
+        else {
+            return;
+        };
+        let Some(state) = self.project_state(&context) else {
+            return;
+        };
+        tracing::warn!(
+            target: "gwt.terminal.delivery",
+            id,
+            project_owner_identity = ?state.project_owner_identity,
+            runtime.owner_identity = ?runtime.owner_identity,
+            health_state = ?state.project_owner_health.as_ref().map(|health| &health.state),
+            connection_id = state.project_owner_connection_id,
+            attempts,
+            waited_ms = waited.as_millis() as u64,
+            reason,
+            "remote command automatic recovery"
+        );
+    }
+
+    pub(super) fn retry_remote_runtime_commands(
+        &mut self,
+        id: &str,
+        now: Instant,
+    ) -> Vec<OutboundEvent> {
+        use gwt::project_runtime::events::OwnerCommand;
+        if self
+            .runtimes
+            .get(id)
+            .is_none_or(|runtime| runtime.pending_owner_commands.is_empty())
+        {
+            return Vec::new();
+        }
+        let problem = self.remote_command_owner_problem(id);
+        let session_id = self.remote_command_session_id(id).map(str::to_owned);
+        let Some(runtime) = self.runtimes.get_mut(id) else {
+            return Vec::new();
+        };
+        let mut pending = std::mem::take(&mut runtime.pending_owner_commands);
+        let mut retained = std::collections::VecDeque::new();
+        let mut ready = Vec::new();
+        let mut failed = Vec::new();
+        let mut refresh = false;
+        while let Some(mut pending) = pending.pop_front() {
+            let waited = now.saturating_duration_since(pending.queued_at);
+            if waited >= REMOTE_COMMAND_RECOVERY_GRACE {
+                failed.push((pending, waited, problem.clone()));
+                continue;
+            }
+            if problem.is_none() {
+                // Incarnation counters can restart with the owner. Only a
+                // matching durable Session permits crossing owner identities.
+                if pending.session_id != session_id
+                    || (session_id.is_none() && pending.owner_identity != runtime.owner_identity)
+                {
+                    failed.push((
+                        pending,
+                        waited,
+                        Some("target Session or pane owner changed".into()),
+                    ));
+                    continue;
+                }
+                let target = match &mut pending.command {
+                    OwnerCommand::Input {
+                        id, incarnation, ..
+                    }
+                    | OwnerCommand::SendInput {
+                        id, incarnation, ..
+                    }
+                    | OwnerCommand::Resize {
+                        id, incarnation, ..
+                    }
+                    | OwnerCommand::Close { id, incarnation } => Some((id, incarnation)),
+                    _ => None,
+                };
+                if let Some((pane, incarnation)) = target.filter(|(pane, incarnation)| {
+                    **incarnation == runtime.incarnation
+                        && (pane.is_empty() || **pane == runtime.owner_pane_id)
+                }) {
+                    *pane = runtime.owner_pane_id.clone();
+                    *incarnation = runtime.incarnation;
+                    ready.push(pending);
+                } else {
+                    failed.push((
+                        pending,
+                        waited,
+                        Some("target pane incarnation changed".into()),
+                    ));
+                }
+            } else {
+                if now >= pending.retry_at {
+                    pending.attempts += 1;
+                    pending.retry_at = now + REMOTE_COMMAND_RECOVERY_INTERVAL;
+                    refresh = true;
+                }
+                retained.push_back(pending);
+            }
+        }
+        runtime.pending_owner_commands = retained;
+        let mut events = Vec::new();
+        for (pending, waited, reason) in failed {
+            let reason = reason.as_deref().unwrap_or(&pending.reason);
+            self.warn_remote_command_recovery(id, reason, pending.attempts, waited);
+            events.extend(self.remote_command_refusal(id, &pending.kind, format!(
+                "The project command could not be delivered: {reason}. Automatic recovery stopped after {} attempts and {} ms.",
+                pending.attempts, waited.as_millis()
+            )));
+        }
+        for pending in ready {
+            events.extend(self.queue_remote_runtime_command(id, pending.command, pending.kind));
+        }
+        if refresh {
+            if let Some(context) = self
+                .window_lookup
+                .get(id)
+                .and_then(|address| self.project_context(&address.tab_id))
+            {
+                if let Some(connection_id) = self
+                    .project_state(&context)
+                    .filter(|state| state.project_owner_identity.is_some())
+                    .map(|state| state.project_owner_connection_id)
+                {
+                    events.extend(self.queue_owner_inventory(
+                        &context,
+                        Some(connection_id),
+                        None,
+                        None,
+                    ));
+                }
+            }
+        }
+        if let Some(runtime) = self.runtimes.get(id) {
+            runtime.has_unsent_user_input.store(
+                runtime.input_delivery_pending()
+                    || runtime
+                        .input_observation
+                        .is_none_or(|observation| observation.has_unsent_user_input),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+        events
+    }
+
     pub(super) fn discard_pending_remote_input(
         &mut self,
         id: &str,
@@ -192,8 +394,18 @@ impl AppRuntime {
             return Vec::new();
         };
         runtime.input_in_flight = None;
+        let in_flight_reply = runtime.input_in_flight_reply.take();
         let pending = std::mem::take(&mut runtime.pending_input_commands);
         let mut events = Vec::new();
+        if let Some(client_id) = in_flight_reply {
+            events.extend(self.remote_command_refusal(
+                id,
+                &super::RemoteRuntimeCommandKind::Input {
+                    reply_client: Some(client_id),
+                },
+                "Input delivery is uncertain. Check the pane before retrying.".into(),
+            ));
+        }
         let mut raw_reported = false;
         for (_, kind) in pending {
             if matches!(
@@ -206,6 +418,25 @@ impl AppRuntime {
             events.extend(self.remote_command_refusal(id, &kind, reason.into()));
         }
         events
+    }
+
+    pub(super) fn discard_recovering_remote_commands(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let pending = self
+            .runtimes
+            .get_mut(id)
+            .map(|runtime| std::mem::take(&mut runtime.pending_owner_commands))
+            .unwrap_or_default();
+        pending
+            .into_iter()
+            .flat_map(|pending| {
+                self.remote_command_refusal(
+                    id,
+                    &pending.kind,
+                    "The pane closed or changed before automatic command recovery completed."
+                        .into(),
+                )
+            })
+            .collect()
     }
 
     fn remote_command_refusal(
@@ -233,7 +464,25 @@ impl AppRuntime {
                 },
             )];
         }
-        self.status_events(id.to_string(), WindowProcessStatus::Error, Some(error))
+        let Some(key) = self.project_key_for_window(id).cloned() else {
+            return Vec::new();
+        };
+        let operation = match kind {
+            super::RemoteRuntimeCommandKind::Input { .. } => "input",
+            super::RemoteRuntimeCommandKind::Resize => "resize",
+            super::RemoteRuntimeCommandKind::Stop => "stop",
+            super::RemoteRuntimeCommandKind::AttachmentInput(_) => {
+                unreachable!("attachment refusal returned above")
+            }
+        };
+        vec![OutboundEvent::project(
+            key,
+            BackendEvent::WindowCommandError {
+                id: id.to_string(),
+                operation: operation.into(),
+                message: error,
+            },
+        )]
     }
 
     pub(super) fn queue_remote_runtime_command(
@@ -275,14 +524,48 @@ impl AppRuntime {
                 Vec::new()
             };
         };
-        if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity)
-            || runtime.owner_pane_id.is_empty()
-        {
-            return self.remote_command_refusal(
-                id,
-                &kind,
-                "Refresh the project connection and try again.".into(),
-            );
+        if let Some(reason) = self.remote_command_owner_problem(id).or_else(|| {
+            (!runtime.pending_owner_commands.is_empty())
+                .then(|| "earlier command is awaiting owner recovery".into())
+        }) {
+            let connection_id = state
+                .project_owner_identity
+                .as_ref()
+                .map(|_| state.project_owner_connection_id);
+            let first = runtime.pending_owner_commands.is_empty();
+            let now = Instant::now();
+            if first {
+                self.warn_remote_command_recovery(id, &reason, 1, Duration::ZERO);
+            }
+            let session_id = self.remote_command_session_id(id).map(str::to_owned);
+            let runtime = self.runtimes.get_mut(id).expect("validated remote command");
+            let owner_identity = runtime.owner_identity.clone();
+            if matches!(kind, super::RemoteRuntimeCommandKind::Input { .. }) {
+                runtime
+                    .has_unsent_user_input
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            runtime
+                .pending_owner_commands
+                .push_back(super::PendingRemoteRuntimeCommand {
+                    command,
+                    kind,
+                    session_id,
+                    owner_identity,
+                    queued_at: now,
+                    retry_at: now + REMOTE_COMMAND_RECOVERY_INTERVAL,
+                    attempts: 1,
+                    reason,
+                });
+            return if first {
+                connection_id
+                    .map(|connection_id| {
+                        self.queue_owner_inventory(&context, Some(connection_id), None, None)
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
         }
         let approval_resolution_started = match &command {
             gwt::project_runtime::events::OwnerCommand::Input { data, .. } => {
@@ -326,6 +609,9 @@ impl AppRuntime {
             }
             let token = uuid::Uuid::new_v4();
             runtime.input_in_flight = Some((connection_id, token));
+            if let super::RemoteRuntimeCommandKind::Input { reply_client } = &kind {
+                runtime.input_in_flight_reply = reply_client.clone();
+            }
             Some(token)
         } else {
             None
@@ -394,6 +680,10 @@ impl AppRuntime {
                 error.to_string(),
             ));
             if is_input {
+                // No worker started; this command's refusal above is final.
+                if let Some(runtime) = self.runtimes.get_mut(&failure_id) {
+                    runtime.input_in_flight_reply = None;
+                }
                 events.extend(self.discard_pending_remote_input(
                     &failure_id,
                     "Queued input was discarded because input dispatch failed. Retype it.",
@@ -479,9 +769,24 @@ impl AppRuntime {
             }
             return vec![operation.progress(phase, message)];
         }
+        // A discarded lane has already reported its outcome. Ignore its late
+        // completion even when the owner/runtime fence no longer matches.
+        if input_command_id.is_some_and(|token| {
+            self.runtimes
+                .get(&id)
+                .is_none_or(|runtime| runtime.input_in_flight != Some((connection_id, token)))
+        }) {
+            return Vec::new();
+        }
         if !self.project_owner_event_is_current(&context, connection_id, &identity)
             || !self.remote_runtime_is_current(&context, &identity, &id, incarnation)
         {
+            if input_command_id.is_some() {
+                return self.discard_pending_remote_input(
+                    &id,
+                    "Queued input was discarded because the pane owner changed. Retype it.",
+                );
+            }
             return Vec::new();
         }
         if let Some(token) = input_command_id {
@@ -490,6 +795,7 @@ impl AppRuntime {
                 return Vec::new();
             }
             runtime.input_in_flight = None;
+            runtime.input_in_flight_reply = None;
         }
         let observation = match result {
             Err(error) => {
@@ -509,17 +815,18 @@ impl AppRuntime {
         };
         if let Some(observation) = observation {
             let runtime = self.runtimes.get_mut(&id).expect("fenced remote input");
-            if runtime
+            runtime.observe_input(Some(observation));
+        }
+        if observation.is_some() || input_command_id.is_some() {
+            let runtime = self.runtimes.get_mut(&id).expect("fenced input completion");
+            let busy = runtime
                 .input_observation
-                .is_none_or(|old| old.revision <= observation.revision)
-            {
-                runtime.has_unsent_user_input.store(
-                    observation.has_unsent_user_input || runtime.input_delivery_pending(),
-                    std::sync::atomic::Ordering::Release,
-                );
-                runtime.observe_input(Some(observation));
-            }
-            if !observation.has_unsent_user_input && !self.runtimes[&id].input_delivery_pending() {
+                .is_none_or(|retained| retained.has_unsent_user_input)
+                || runtime.input_delivery_pending();
+            runtime
+                .has_unsent_user_input
+                .store(busy, std::sync::atomic::Ordering::Release);
+            if !busy {
                 self.flush_pending_pm_wake(&id);
             }
         }
@@ -693,6 +1000,17 @@ impl AppRuntime {
         peer_reply: Option<PeerPaneCloseReply>,
     ) {
         let _ = initialize_process_window_close_finalizer();
+        let cancelled = self.discard_recovering_remote_commands(window_id);
+        if !cancelled.is_empty() {
+            self.proxy.send(UserEvent::Dispatch(cancelled));
+        }
+        let discarded_input = self.discard_pending_remote_input(
+            window_id,
+            "Queued input was discarded because the pane closed. Retype it.",
+        );
+        if !discarded_input.is_empty() {
+            self.proxy.send(UserEvent::Dispatch(discarded_input));
+        }
         let runtime = self.runtimes.remove(window_id);
         let pending = self.pending_launch_completions.remove(window_id);
         if let Some(pending) = &pending {

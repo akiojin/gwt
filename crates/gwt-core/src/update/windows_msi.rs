@@ -189,8 +189,14 @@ fn registered_component(component: &str, target_exe: &Path) -> Result<(), String
         "Current GWT executable path could not be verified; apply the update manually.".to_string()
     })?;
     let component = wide(component);
+    registered_component_result(&target, registered_client_paths(&component))
+}
+
+fn registered_client_paths(
+    component: &[u16],
+) -> impl Iterator<Item = Result<(msi::MSIINSTALLCONTEXT, PathBuf), String>> + '_ {
     let mut index = 0;
-    loop {
+    std::iter::from_fn(move || loop {
         let mut product = [0u16; 39];
         let mut context = msi::MSIINSTALLCONTEXT_NONE;
         // SAFETY: buffers have documented sizes. NULL SID limits user contexts to the current user.
@@ -207,9 +213,12 @@ fn registered_component(component: &str, target_exe: &Path) -> Result<(), String
             )
         };
         if code == 259 {
-            break;
+            return None;
         }
-        checked(code, "installed scope enumeration")?;
+        if let Err(error) = checked(code, "installed scope enumeration") {
+            return Some(Err(error));
+        }
+        index += 1;
         let mut buffer = vec![0u16; 32768];
         let mut length = buffer.len() as u32;
         // SAFETY: product/component are NUL terminated; the output buffer matches its declared size.
@@ -226,15 +235,28 @@ fn registered_component(component: &str, target_exe: &Path) -> Result<(), String
         if state == msi::INSTALLSTATE_LOCAL {
             if let Ok(path) = String::from_utf16(&buffer[..length as usize]) {
                 if let Ok(path) = std::fs::canonicalize(path) {
-                    if let Some(result) = registration_result(context, &path, &target) {
-                        return result;
-                    }
+                    return Some(Ok((context, path)));
                 }
             }
         }
-        index += 1;
+    })
+}
+
+fn registered_component_result(
+    target: &Path,
+    clients: impl Iterator<Item = Result<(msi::MSIINSTALLCONTEXT, PathBuf), String>>,
+) -> Result<(), String> {
+    let mut matched = None;
+    for client in clients {
+        let (context, path) = client?;
+        if matched.is_none() {
+            matched = registration_result(context, &path, target);
+        }
     }
-    Err("Current GWT installation scope could not be verified as per-user; apply the update manually.".into())
+    // MSI keeps a per-thread enumeration cursor. Even a matching registration
+    // must be consumed through ERROR_NO_MORE_ITEMS before a later scan starts
+    // at index zero; otherwise Windows returns ERROR_INVALID_PARAMETER (87).
+    matched.unwrap_or_else(|| Err("Current GWT installation scope could not be verified as per-user; apply the update manually.".into()))
 }
 
 fn registration_result(
@@ -261,6 +283,46 @@ mod tests {
     use windows::Win32::System::ApplicationInstallationAndServicing::*;
 
     const COMPONENT: &str = "{11111111-2222-3333-4444-555555555555}";
+
+    #[test]
+    fn issue_6914_matching_registration_finishes_enumeration_before_the_next_scan() {
+        let target = Path::new("C:/fixture/user/gwt.exe");
+        for context in [MSIINSTALLCONTEXT_USERUNMANAGED, MSIINSTALLCONTEXT_MACHINE] {
+            let mut previous_scan_finished = true;
+            for _ in 0..2 {
+                assert!(
+                    previous_scan_finished,
+                    "restarting an unfinished MSI scan returns error 87"
+                );
+                previous_scan_finished = false;
+                let mut client = Some(Ok((context, target.to_path_buf())));
+                let clients = std::iter::from_fn(|| {
+                    let next = client.take();
+                    if next.is_none() {
+                        previous_scan_finished = true;
+                    }
+                    next
+                });
+                assert_eq!(
+                    registered_component_result(target, clients).is_ok(),
+                    context == MSIINSTALLCONTEXT_USERUNMANAGED
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_6914_enumeration_error_after_a_match_still_refuses_automatic_apply() {
+        let target = Path::new("C:/fixture/user/gwt.exe");
+        let clients = [
+            Ok((MSIINSTALLCONTEXT_USERUNMANAGED, target.to_path_buf())),
+            Err("MSI enumeration failed".to_string()),
+        ];
+        assert_eq!(
+            registered_component_result(target, clients.into_iter()),
+            Err("MSI enumeration failed".to_string())
+        );
+    }
 
     #[test]
     fn issue_5343_registered_scope_fixture_requires_the_current_per_user_executable() {

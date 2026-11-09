@@ -1,0 +1,67 @@
+   Compiling gwt-core v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 03s
+     Running unittests src\lib.rs (target\debug\deps\gwt_core-3fbc04dce49b9c3e.exe)
+
+running 59 tests
+test work_events_intake::tests::accepted_event_duplicate_cannot_repair_a_conflicting_session_container ... ok
+test work_events_intake::tests::close_kinds_are_never_ingested ... ok
+test work_events_intake::tests::close_proof_recovery_refuses_incomplete_shared_history ... ok
+test work_events_intake::tests::conflicting_session_event_cannot_pollute_terminal_work_after_reload_or_reingest ... ok
+test work_events_intake::tests::container_repair_cas_rejects_concurrent_terminal_writer ... ok
+test work_events_intake::tests::container_repair_converges_poisoned_done_without_changing_other_work ... ok
+test work_events_intake::tests::container_repair_refuses_missing_or_ambiguous_provenance_without_writes ... ok
+test work_events_intake::tests::container_repair_refuses_pending_transaction_without_recovery ... ok
+test work_events_intake::tests::content_fingerprint_is_stable_sha256 ... ok
+test work_events_intake::tests::contextual_shared_content_decodes_once_without_inventing_containers ... ok
+test work_events_intake::tests::contextual_source_never_overwrites_an_event_container ... ok
+test work_events_intake::tests::cross_source_duplicate_conflict_keeps_deterministic_canonical_in_both_source_orders ... ok
+test work_events_intake::tests::discarded_close_cutoff_is_stable_after_later_updates ... ok
+test work_events_intake::tests::double_ingest_is_idempotent ... ok
+test work_events_intake::tests::duplicate_conflict_incremental_and_full_rebuild_converge ... ok
+test work_events_intake::tests::duplicate_event_can_repair_missing_execution_container ... ok
+test work_events_intake::tests::duplicate_event_ids_within_one_source_dedup ... ok
+test work_events_intake::tests::eventless_legacy_merge_keeps_two_worktrees_on_one_branch ... ok
+test work_events_intake::tests::eventless_legacy_merge_retains_duplicate_event_provenance ... ok
+test work_events_intake::tests::identical_copies_are_collected_at_most_twice ... ok
+test work_events_intake::tests::identical_copies_beyond_the_first_duplicate_do_not_change_the_rebuild ... ok
+test work_events_intake::tests::incremental_intake_counts_one_applied_event_across_timestamp_variants ... ok
+test work_events_intake::tests::incremental_intake_refolds_late_earlier_events_with_accepted_history ... ok
+test work_events_intake::tests::incremental_intake_retains_all_provenance_for_the_same_duplicate_container ... ok
+test work_events_intake::tests::ingest_leaves_sessions_current_and_journal_untouched ... ok
+test work_events_intake::tests::ingest_restores_work_skeleton_from_source_content ... ok
+test work_events_intake::tests::intake_group_of_partitions_worktree_and_ref_keys ... ok
+test work_events_intake::tests::intake_state_roundtrip_and_lenient_load ... ok
+test work_events_intake::tests::intake_store_evicts_only_clean_successful_groups ... ok
+test work_events_intake::tests::intake_store_migrates_legacy_flat_state_without_losing_fingerprints ... ok
+test work_events_intake::tests::intake_store_reports_unreadable_group_file ... ok
+test work_events_intake::tests::intake_store_save_writes_only_changed_groups ... ok
+test work_events_intake::tests::issue_5335_measure_copied_store ... ignored, requires GWT_STARTUP_STORE_COPY pointing to a copied production store
+test work_events_intake::tests::issue_5380_containerless_warning_is_once_per_event_across_sources_and_rebuilds ... ok
+test work_events_intake::tests::issue_5380_measure_replayed_containerless_events ... ignored, paired intake timing and log-volume measurement for Issue #5380
+test work_events_intake::tests::late_cross_host_supersession_retains_both_audits_without_reopening ... ok
+test work_events_intake::tests::late_owner_refold_drops_container_from_newly_rejected_event ... ok
+test work_events_intake::tests::late_owner_refold_restores_eventless_legacy_snapshot_without_rejected_metadata ... ok
+test work_events_intake::tests::late_session_owner_rechecks_duplicate_event_provenance ... ok
+test work_events_intake::tests::later_duplicate_is_evaluated_after_intervening_session_owner_event ... ok
+test work_events_intake::tests::legacy_claim_does_not_acquire_new_launch_source_containers ... ok
+test work_events_intake::tests::legacy_snapshot_cutoff_does_not_advance_past_later_discovered_metadata ... ok
+test work_events_intake::tests::machine_local_lifecycle_reader_rejects_unknown_or_additive_event_schema ... ok
+test work_events_intake::tests::malformed_lines_are_skipped_leniently ... ok
+test work_events_intake::tests::rebuild_accepts_mixed_machine_local_lifecycle_log ... ok
+test work_events_intake::tests::rebuild_applies_lifecycle_events_newer_than_persisted_legacy_snapshots ... ok
+test work_events_intake::tests::rebuild_merges_same_id_eventless_legacy_metadata_with_rebuilt_history ... ok
+test work_events_intake::tests::rebuild_preserves_corrupt_projection_when_sources_are_empty_or_incomplete ... ok
+test work_events_intake::tests::rebuild_preserves_syntactically_valid_incompatible_projection ... ok
+test work_events_intake::tests::rebuild_propagates_unrelated_projection_io_errors ... ok
+test work_events_intake::tests::rebuild_recovers_syntactically_corrupt_projection_from_complete_event_source ... ok
+test work_events_intake::tests::rejected_same_id_copy_does_not_hide_later_valid_timestamp_copy ... ok
+test work_events_intake::tests::shared_intake_applies_known_event_with_additive_fields_without_rewriting_source ... ok
+test work_events_intake::tests::shared_intake_keeps_identity_and_container_extensions_invalid ... ok
+test work_events_intake::tests::shared_intake_resolves_portable_containers_only_against_each_source_root ... ok
+test work_events_intake::tests::shared_intake_skips_unknown_kind_and_continues_with_subsequent_known_event ... ok
+test work_events_intake::tests::shared_source_keeps_group_container_allocation_and_owned_constructor_compatibility ... ok
+test work_events_intake::tests::single_conflicting_primary_is_counted_as_skipped ... ok
+test work_events_intake::tests::terminal_items_skip_events_at_or_before_close_time ... ok
+
+test result: ok. 57 passed; 0 failed; 2 ignored; 0 measured; 1302 filtered out; finished in 2.01s
+

@@ -569,6 +569,33 @@ pub(crate) fn prepare_owner_saved_session_restore(
     }
     *config = crate::session_launch::launch_config_from_persisted_session(&restore.source);
     config.automatic_restore = restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+    if config.automatic_restore && !restore.source.review_dispatch {
+        // Saved Issue links outlive Monitor launches. Re-resolve the owner from
+        // the exact saved window; an unprovable owner stays observation-only.
+        config.linked_issue_number = if is_pm {
+            None
+        } else {
+            match crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                root,
+            )) {
+                Ok(prefs) => {
+                    let monitor = crate::IssueMonitorState::with_prefs(
+                        crate::IssueMonitorConfig::default(),
+                        prefs,
+                    );
+                    restore.placeholders.iter().find_map(|row| {
+                        let id =
+                            format!("{}::{}", gwt_core::paths::project_scope_hash(root), row.id);
+                        super::monitor::restored_issue_number(&monitor, &restore.source, &id, row)
+                    })
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "restored Issue owner unavailable; keeping launch unlinked");
+                    None
+                }
+            }
+        };
+    }
     if restore.origin == gwt_agent::SessionLaunchOrigin::UserRestart {
         config.launch_route = gwt_agent::LaunchRoute::Manual;
     }
@@ -627,8 +654,8 @@ pub(crate) fn prepare_owner_saved_session_restore(
             member_root,
             sessions_dir,
             &token,
-            restore.source.linked_issue_number,
-            restore.source.linked_issue_number.and_then(|number| {
+            config.linked_issue_number,
+            config.linked_issue_number.and_then(|number| {
                 crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
             }),
             None,
@@ -2293,11 +2320,7 @@ pub fn prepare_host_update_drain_launch_hold(
     project_roots: &[PathBuf],
 ) -> Result<Option<String>, String> {
     let pending = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
-        !manifest.auto_apply_deferred
-            && gwt_core::update::pending_version_is_newer(
-                &manifest.version,
-                env!("CARGO_PKG_VERSION"),
-            )
+        gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
     });
     let mut hold = None;
     for project_root in project_roots {
@@ -2305,17 +2328,30 @@ pub fn prepare_host_update_drain_launch_hold(
             &crate::issue_monitor_prefs_path_for_repo_path(project_root),
         )
         .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
-        if let Some(drain) = prefs.update_drain.filter(|drain| {
+        if let Some(drain) = prefs.effective_update_drain().filter(|drain| {
             pending
                 .as_ref()
                 .is_some_and(|manifest| manifest.version == drain.version)
         }) {
             hold.get_or_insert_with(|| {
+                let release = if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                    format!(
+                        "release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                        drain.version
+                    )
+                } else {
+                    format!(
+                        "{} in {}",
+                        crate::UPDATE_DRAIN_RELEASE_OPERATION,
+                        project_root.display()
+                    )
+                };
                 format!(
-                    "Host update_drain for v{} in {} holds new agent launches; release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                    "Host update_drain for v{} in {} since {} holds new agent launches; {}",
                     drain.version,
                     project_root.display(),
-                    drain.version,
+                    drain.since,
+                    release,
                 )
             });
         }
@@ -3898,10 +3934,16 @@ pub fn restore_saved_session_work_terminality(
     project_root: &Path,
     window_id: Option<&str>,
 ) -> RestoreAdmission {
-    if session.linked_issue_number.is_none() {
-        // A Session with no Issue link has no Work whose terminality this
-        // predicate can read (a PM pane, a manual launch). Restore keeps
-        // the "everything the user did not explicitly close" rule.
+    if session.linked_issue_number.is_none()
+        || crate::pm_registry::registered_pm_worktree_authority(
+            project_root,
+            &session.id,
+            &session.worktree_path,
+        )
+    {
+        // The registered PM owns no implementation Work, even if an old link
+        // remains. Unlinked manual launches likewise have no Work to inspect.
+        // Keep the "everything the user did not explicitly close" rule.
         return RestoreAdmission::Admit;
     }
     let facts = read_terminal_window_facts(

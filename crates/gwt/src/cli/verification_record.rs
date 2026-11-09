@@ -1256,6 +1256,35 @@ pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &st
             .is_ok_and(|(commits, _)| commits.is_empty())
 }
 
+/// A merged owner PR's receipt is inherited by a later verified HEAD when the
+/// PR head reaches that HEAD and every product commit between them is already
+/// contained in the configured base (`origin/<base>`): other owners' delivered
+/// work on a fresh startup HEAD is not undelivered source (#6893). Product
+/// commits that only the work branch holds still refuse the inheritance.
+pub(crate) fn inherits_delivered_receipt(
+    worktree: &Path,
+    merged_head: &str,
+    verified: &str,
+    base_ref_name: &str,
+) -> bool {
+    if base_ref_name.trim().is_empty() {
+        return false;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", merged_head, verified])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && super::pr::head_check::product_changes_since(
+            &worktree,
+            merged_head,
+            verified,
+            &format!("origin/{}", base_ref_name.trim()),
+        )
+        .is_ok_and(|(commits, _)| commits.is_empty())
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],

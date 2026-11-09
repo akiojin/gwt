@@ -3476,7 +3476,7 @@ pub(crate) fn run_cached_list_command_with_observed_at(
         &cache_dir,
         &args.join(" "),
         chrono::Utc::now(),
-        crate::gh_rest::LIST_CACHE_TTL_SECS,
+        crate::gh_rest::monitor_list_cache_ttl_secs(),
         || {
             let output = run_gh_command(repo_path, args).map_err(|error| error.to_string())?;
             if output.success {

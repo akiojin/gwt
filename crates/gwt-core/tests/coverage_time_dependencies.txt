@@ -573,7 +573,6 @@ crates/gwt/tests/index_resource_harness_test.rs|real_e5_all_scopes_build_and_sea
 crates/gwt/tests/index_resource_harness_test.rs|real_e5_all_scopes_build_and_search|assert!(posted_at.elapsed()<Duration::from_secs(60),)|1
 crates/gwt/tests/index_resource_harness_test.rs|real_e5_all_scopes_build_and_search|assert!(warm_ms<=5_000,)|1
 crates/gwt/tests/index_resource_harness_test.rs|real_warm_search_finishes_during_background_build_and_build_resumes|assert!(cold_query_ms<=30_000,)|1
-crates/gwt/tests/index_resource_harness_test.rs|real_warm_search_finishes_during_background_build_and_build_resumes|assert!(warm_search_ms<=5_000,)|1
 crates/gwt/tests/index_resource_harness_test.rs|real_warm_search_finishes_during_background_build_and_build_resumes|assert!(warming_started.elapsed()<Duration::from_secs(30),)|1
 crates/gwt/tests/index_search_batch_test.rs|concurrent_non_blocking_searches_coalesce_into_one_repair_admission|assert!(Instant::now()<deadline,)|1
 crates/gwt/tests/index_search_batch_test.rs|concurrent_non_blocking_searches_coalesce_into_one_repair_admission|letdeadline=Instant::now()+Duration::from_secs(15)|1

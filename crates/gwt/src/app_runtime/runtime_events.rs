@@ -463,6 +463,13 @@ impl AppRuntime {
                     .values()
                     .filter_map(|runtime| runtime.pending_snapshot.as_ref()?.retry_at),
             )
+            .chain(self.runtimes.values().flat_map(|runtime| {
+                runtime.pending_owner_commands.iter().map(|pending| {
+                    pending
+                        .retry_at
+                        .min(pending.queued_at + super::pty_io::REMOTE_COMMAND_RECOVERY_GRACE)
+                })
+            }))
             .min()
     }
 
@@ -493,6 +500,20 @@ impl AppRuntime {
             for target in targets {
                 events.extend(self.request_owner_snapshot(&id, target));
             }
+        }
+        let recovery_retries = self
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.pending_owner_commands.iter().any(|pending| {
+                    pending.retry_at <= now
+                        || pending.queued_at + super::pty_io::REMOTE_COMMAND_RECOVERY_GRACE <= now
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in recovery_retries {
+            events.extend(self.retry_remote_runtime_commands(&id, now));
         }
         events
     }

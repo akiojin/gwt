@@ -1,7 +1,7 @@
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const seconds = value => finite(value) ? `${Math.floor(value / 3600)}h ${Math.floor(value % 3600 / 60)}m` : "—";
-const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", error: "error", interrupted: "error" })[status] || "unknown";
+const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", stopped: "stopped", exited: "stopped", error: "error", interrupted: "interrupted" })[status] || "unknown";
 const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 
 // Live activity owns membership; a separately arriving catalog only enriches
@@ -323,7 +323,7 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
       updateEntry(entry, work, maximum);
       if (list.children[index] !== entry.row) list.insertBefore(entry.row, list.children[index] || null);
     });
-    for (const state of ["running", "waiting", "idle", "error"]) element.querySelector(`[data-count="${state}"]`).textContent = activity.count === null ? "—" : String(works.filter(work => work.state === state).length);
+    for (const state of ["running", "waiting", "idle", "error"]) element.querySelector(`[data-count="${state}"]`).textContent = activity.count === null ? "—" : String(works.filter(work => work.state === state || (state === "error" && work.state === "interrupted")).length);
     element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
     for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens), cost: finite(today.cost_usd) ? `$${today.cost_usd.toFixed(2)}` : "—", landed: number(today.landed_pr_count) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
     for (const key of ["today", "fleet"]) {

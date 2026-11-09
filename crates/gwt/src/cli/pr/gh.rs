@@ -112,7 +112,7 @@ pub fn fetch_completion_pr_candidates_via_gh(
     let repo = github_remote_owner_and_repo(repo_path)
         .ok_or_else(|| io::Error::other("completion repository identity is unknown"))?;
     let slug = format!("{}/{}", repo.0, repo.1);
-    let fields = "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner";
+    let fields = "number,url,headRefName,headRefOid,baseRefName,headRepository,headRepositoryOwner";
     let args = if let Some(number) = number {
         vec![
             "pr".into(),
@@ -194,6 +194,11 @@ fn parse_completion_pr_candidates(
                 url: required("url")?,
                 head_ref_name: branch.to_string(),
                 head_sha: required("headRefOid")?,
+                base_ref_name: value
+                    .get("baseRefName")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             })
         })
         .collect()

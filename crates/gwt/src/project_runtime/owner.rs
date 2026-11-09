@@ -10086,6 +10086,20 @@ impl OwnerState {
         if self.exact(&id, incarnation).is_err() {
             return;
         }
+        // The EOF reader can deliver a pre-exit Running snapshot after the
+        // independent status worker has recorded the physical exit.
+        if raw_status == crate::WindowProcessStatus::Running
+            && !exit_confirmed
+            && self.runtimes.get(&id).is_some_and(|runtime| {
+                runtime
+                    .pane
+                    .lock()
+                    .ok()
+                    .is_some_and(|pane| pane.last_exit().is_some())
+            })
+        {
+            return;
+        }
         // Capture current ownership before terminal status revokes its writer.
         // Only the registered PM's actual nonzero exit can bypass the generic
         // Agent recovery latch; a read error or replacement grants no such cause.
@@ -11028,6 +11042,8 @@ pub(super) fn retire_unspawned_launch_runtime(
                         || captured.source_event.is_some()
                         || captured.active_tool_calls.is_some()
                         || captured.last_completed_hook_event_at.is_some()
+                        || captured.last_completed_hook_outcome.is_some()
+                        || captured.current_hook_event.is_some()
                         || captured.pending_discussion.is_some()
                         || std::fs::read(&path)? != *expected
                     {
@@ -11093,6 +11109,8 @@ fn finish_agent_session(
             },
             |session| {
                 let path = gwt_agent::runtime_state_path(sessions_dir, &session.id);
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
                 let mut runtime = gwt_agent::SessionRuntimeState::load(&path)?;
                 let child_pid = pty
                     .process_id()
@@ -11116,14 +11134,30 @@ fn finish_agent_session(
                         "unbound Session physical proof changed before close",
                     ));
                 }
+                drop(_publication);
+                drop(writer);
                 if !crate::session_finalizer::kill_and_reap(pty, id)
                     .map_err(|error| std::io::Error::other(error.to_string()))?
                 {
                     return Err(std::io::Error::other("agent process tree did not exit"));
                 }
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
+                let latest = gwt_agent::SessionRuntimeState::load(&path)?;
+                if latest.execution_identity != runtime.execution_identity
+                    || latest.runtime_incarnation != runtime.runtime_incarnation
+                    || latest.host_started_at != runtime.host_started_at
+                    || latest.child_pid != runtime.child_pid
+                    || latest.child_started_at != runtime.child_started_at
+                {
+                    return Err(std::io::Error::other(
+                        "unbound runtime changed during close",
+                    ));
+                }
+                runtime = latest;
                 runtime.status = gwt_agent::AgentStatus::Stopped;
                 runtime.updated_at = chrono::Utc::now();
-                runtime.save(&path)?;
+                writer.save(&runtime)?;
                 session.update_status(gwt_agent::AgentStatus::Stopped);
                 if let Some(receipt) = exit_receipt {
                     session.record_process_exit(receipt);
@@ -11234,7 +11268,7 @@ fn publish_repaired_inspection_runtime(
                         std::process::id(),
                         &source.id,
                     );
-                    let _writer = gwt_agent::session::runtime_writer_lease(&path)
+                    let writer = gwt_agent::session::runtime_writer_lease(&path)
                         .map_err(|error| error.to_string())?;
                     let _publication = gwt_agent::session::runtime_publication_lease(&path)
                         .map_err(|error| error.to_string())?;
@@ -11262,7 +11296,7 @@ fn publish_repaired_inspection_runtime(
                         );
                     }
                     proof.execution_identity = Some(identity);
-                    proof.save(&path).map_err(|error| error.to_string())
+                    writer.save(&proof).map_err(|error| error.to_string())
                 })
                 .ok_or("legacy repair Active bearer changed before runtime publication")??;
             Ok(snapshot)
@@ -12078,6 +12112,47 @@ mod tests {
             state.project_execution_status(None).effective_state,
             "stopped"
         );
+    }
+
+    #[test]
+    fn confirmed_exit_rejects_late_running_without_blocking_live_recovery() {
+        use crate::WindowState::{Error, Running};
+
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut state, _receiver, _handle) = owner_fixture(temp.path());
+        let (_, pane) = unbound_fixture(temp.path());
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let pty = state.runtimes["pane"].pty.clone();
+
+        state.owner_status_event("pane".into(), 1, Error, Some("read error".into()), false);
+        state.owner_status_event("pane".into(), 1, Running, None, false);
+        assert_eq!(OwnerState::runtime_status(&state.runtimes["pane"]), Running);
+
+        pty.kill().unwrap();
+        pty.wait().unwrap();
+        state.runtimes["pane"]
+            .pane
+            .lock()
+            .unwrap()
+            .check_status()
+            .unwrap();
+        state.owner_status_event("pane".into(), 1, Error, Some("physical exit".into()), false);
+        let mut events = state.events.subscribe();
+
+        // The reader copied Running before the independent exit worker ran,
+        // but its delivery reaches the owner after physical exit was recorded.
+        state.owner_status_event("pane".into(), 1, Running, None, false);
+        let retained = &state.runtimes["pane"];
+        assert_eq!(OwnerState::runtime_status(retained), Error);
+        assert!(Arc::ptr_eq(&retained.pty, &pty));
+        assert_eq!(retained.detail.as_deref(), Some("physical exit"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

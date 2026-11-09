@@ -132,7 +132,10 @@ pub(crate) fn checked_update(
         validate_change(change)?;
     }
     ensure_migrated()?;
-    let _lock = lock()?;
+    // A read-only CAS observes one atomic settings snapshot. The write lock
+    // was never held through the later project commit, so acquiring it here
+    // adds no cross-file atomicity and couples unrelated controls to its budget.
+    let _lock = change.map(|_| lock()).transpose()?;
     let stored = load_stored()?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -235,6 +238,28 @@ pub(crate) fn migration_before_project_save(project_path: &Path) -> io::Result<(
         })
     {
         ensure_migrated()?;
+        let project = match fs::read_to_string(project_path) {
+            Ok(content) => serde_json::from_str::<serde_json::Value>(&content).ok(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if project.is_some_and(|value| {
+            // This shape is written only after the machine policy was made
+            // durable. A roster keeps its own capacity keys instead of
+            // deleting legacy machine settings, so it needs no recheck either.
+            value
+                .get("agent_roster")
+                .is_some_and(|roster| !roster.is_null())
+                || (value.get("max_active_agents").and_then(|n| n.as_u64()) == Some(1)
+                    && value
+                        .get("last_auto_max_active_agents")
+                        .and_then(|n| n.as_u64())
+                        .is_some()
+                    && value.get("max_active_agents_mode").is_none()
+                    && value.get("max_active_last_change").is_none())
+        }) {
+            return Ok(());
+        }
         let _lock = lock()?;
         confirm_durable()?;
     }
@@ -277,6 +302,16 @@ fn lock() -> io::Result<gwt_core::operation_deadline::NamedFileLock> {
     gwt_config::home::assert_test_path(&lock_path);
     fs::create_dir_all(path.parent().expect("machine settings parent"))?;
     gwt_core::operation_deadline::NamedFileLock::acquire(&lock_path, "machine agent settings")
+        .map_err(|error| {
+            if gwt_core::operation_deadline::is_deadline_expired(&error) {
+                io::Error::new(
+                    error.kind(),
+                    format!("machine agent settings lock deadline: {error}"),
+                )
+            } else {
+                error
+            }
+        })
 }
 
 fn save(stored: &StoredPolicy) -> io::Result<()> {
@@ -471,6 +506,39 @@ mod tests {
         assert_eq!(policy.mode, IssueMonitorMaxActiveMode::Manual);
         assert_eq!(policy.manual_limit, Some(7));
         assert_eq!(policy.last_change, None);
+    }
+
+    #[test]
+    fn migrated_project_and_read_only_check_ignore_expired_settings_budget() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project =
+            gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&project, &IssueMonitorPrefs::default()).unwrap();
+        let prefs = crate::load_issue_monitor_prefs(&project).unwrap();
+        let token = prefs.config_token();
+        let policy = load().unwrap().unwrap();
+        let before = fs::read(path()).unwrap();
+        let _held = lock().unwrap();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now(),
+        );
+
+        migration_before_project_save(&project)
+            .expect("completed migration needs no settings lock");
+        assert_eq!(
+            checked_update(&prefs, Some(&token), None, "read").unwrap(),
+            policy
+        );
+        assert_eq!(fs::read(path()).unwrap(), before);
+        let error = set(Some(2), IssueMonitorMaxActiveChangeSource::Gui, "now").unwrap_err();
+        assert!(
+            error.to_string().contains("settings lock deadline"),
+            "{error}"
+        );
     }
 
     #[test]

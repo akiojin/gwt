@@ -1989,6 +1989,7 @@ fn sample_runtime_with_events(
         next_project_incarnation += 1;
     }
     let mut runtime = AppRuntime {
+        mobile_host: Default::default(),
         test_project_owners: HashMap::new(),
         _runtime_namespace_gc: None,
         tabs,
@@ -2062,6 +2063,8 @@ fn sample_runtime_with_events(
         pending_restore_summaries: Vec::new(),
         restore_launch_windows: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
+        startup_auto_resume_admission_in_flight: false,
+        startup_restore_drain_phase: None,
         update_resume_tab_ids: HashSet::new(),
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
@@ -7152,6 +7155,71 @@ fn drive_owner_agent_fixture(
     runtime.handle_remote_owner_launch_complete(completion)
 }
 
+/// Issue #5379: pull the blocking worker's startup admission verdicts out of
+/// the stub proxy so a test can hand them to the GUI handler.
+pub(super) fn take_startup_auto_resume_admission_prepared(
+    runtime: &AppRuntime,
+) -> Option<super::StartupAutoResumeAdmissionPrepared> {
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("test runtime must use a stub event proxy");
+    };
+    let mut events = recorded.lock().expect("event log");
+    let index = events.iter().position(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::StartupAutoResumeAdmissionPrepared(_)
+        )
+    })?;
+    match into_recorded_project_payload(events.remove(index)) {
+        UserEvent::StartupAutoResumeAdmissionPrepared(prepared) => Some(*prepared),
+        _ => unreachable!("matched above"),
+    }
+}
+
+/// Issue #5379: the surface-ready drain evaluates Project admission on the
+/// blocking worker. Run that worker inline and apply its verdicts, so a test
+/// observes the same restores the GUI thread spawns after the round trip.
+pub(super) fn drain_startup_auto_resume(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let (mut events, completion) = with_inline_startup_admission(runtime, |runtime| {
+        runtime.startup_auto_resume_ready_events()
+    });
+    events.extend(completion);
+    events
+}
+
+/// The frontend surface-ready round trip, with the admission worker settled.
+pub(super) fn handle_startup_auto_resume_ready(
+    runtime: &mut AppRuntime,
+    client_id: &str,
+) -> Vec<OutboundEvent> {
+    let (mut events, completion) = with_inline_startup_admission(runtime, |runtime| {
+        runtime.handle_frontend_event(
+            client_id.to_string(),
+            FrontendEvent::StartupAutoResumeReady {},
+        )
+    });
+    events.extend(completion);
+    events
+}
+
+/// Run `act` with a queued blocking spawner, execute whatever it enqueued on
+/// this thread, then hand the startup admission verdicts (if any) to the GUI
+/// handler. Returns `act`'s result and the handler's events.
+pub(super) fn with_inline_startup_admission<T>(
+    runtime: &mut AppRuntime,
+    act: impl FnOnce(&mut AppRuntime) -> T,
+) -> (T, Vec<OutboundEvent>) {
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    let original = std::mem::replace(&mut runtime.blocking_tasks, spawner);
+    let result = act(runtime);
+    drain_queued_blocking_tasks(&tasks);
+    runtime.blocking_tasks = original;
+    let completion = take_startup_auto_resume_admission_prepared(runtime)
+        .map(|prepared| runtime.startup_auto_resume_admission_prepared_events(prepared))
+        .unwrap_or_default();
+    (result, completion)
+}
+
 fn drain_owner_launch_fixtures(
     runtime: &mut AppRuntime,
     tasks: &BlockingTestTaskQueue,
@@ -7643,12 +7711,9 @@ fn owner_monitor_fixture_with_prefs(
         max_active_agents: 8,
         ..Default::default()
     };
-    prefs.set_launch_profile_pool(
-        agent_ids
-            .iter()
-            .map(|agent_id| pool_profile(agent_id))
-            .collect(),
-    );
+    // Reserve the delivery through a supported Monitor profile. The shell tools
+    // configured below exercise PTY ownership/ACKs, not initial-prompt admission.
+    prefs.set_launch_profile_pool(vec![pool_profile("codex")]);
     configure(&mut prefs);
     let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {

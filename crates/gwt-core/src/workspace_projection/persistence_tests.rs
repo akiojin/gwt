@@ -434,6 +434,7 @@ fn issue_5335_rebuild_decode_allows_another_process_to_ensure() {
             ))
         },
         None,
+        true,
     )
     .expect_err("decode-time writer invalidates the rebuild snapshot");
     assert!(error.to_string().contains("changed"), "{error}");
@@ -472,6 +473,7 @@ fn issue_5335_rebuild_loader_allows_writer_and_refuses_older_source_snapshot() {
             ))
         },
         None,
+        true,
     )
     .expect_err("capturing Works after the loader would wrongly accept stale sources");
     assert!(error.to_string().contains("changed"), "{error}");
@@ -502,6 +504,7 @@ fn issue_5335_rebuild_loader_allows_writer_and_refuses_older_source_snapshot() {
             ))
         },
         None,
+        true,
     )
     .expect("the next complete-source snapshot includes the writer");
     assert_eq!(
@@ -538,6 +541,7 @@ fn issue_5335_rebuild_refuses_local_ledger_only_change_and_retries() {
             ))
         },
         Some(&ledger),
+        true,
     )
     .expect_err("ledger-only writes invalidate the prepared lifecycle snapshot");
     assert!(error.to_string().contains("changed"), "{error}");
@@ -554,6 +558,7 @@ fn issue_5335_rebuild_refuses_local_ledger_only_change_and_retries() {
             ))
         },
         Some(&ledger),
+        true,
     )
     .expect("retry folds the durable machine-local close");
     let saved = load_workspace_work_items_from_path(&works)
@@ -598,6 +603,7 @@ fn issue_5335_rebuild_refuses_detachments_only_change_and_retries() {
             ))
         },
         None,
+        true,
     )
     .expect_err("repair-only writes invalidate the prepared snapshot");
     assert!(error.to_string().contains("changed"), "{error}");
@@ -614,6 +620,7 @@ fn issue_5335_rebuild_refuses_detachments_only_change_and_retries() {
             ))
         },
         None,
+        true,
     )
     .expect("retry enforces the durable detachment receipt");
     assert!(load_workspace_work_items_from_path(&works)
@@ -16521,6 +16528,15 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
     let done = WorkEvent::new(WorkEventKind::Done, "proof-work", now);
     let mut full = WorkItemsProjection::empty(now);
     full.apply_event(done.clone());
+    save_workspace_work_items_projection_to_path(&works, &full).unwrap();
+    append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
+    let proof_path = workspace_close_projection_proofs_path(&works);
+    fs::remove_file(&proof_path).unwrap();
+    let inline_bytes = fs::read(&works).unwrap();
+    assert!(!workspace_close_projection_needs_rebuild(&works, &closes).unwrap());
+    assert_eq!(fs::read(&works).unwrap(), inline_bytes);
+    assert!(!proof_path.exists(), "inspection must not create proof");
+    assert!(!works.with_extension("lock").exists());
     for index in 1..=99 {
         full.apply_event(WorkEvent::new(
             WorkEventKind::Update,
@@ -16529,13 +16545,12 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
         ));
     }
     save_workspace_work_items_projection_to_path(&works, &full).unwrap();
-    append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
     let stored = load_workspace_work_items_from_path(&works)
         .unwrap()
         .unwrap();
     let item = &stored.work_items[0];
     validate_exact_work_machine_local_close_events_read_only(item, &works, &closes).unwrap();
-    let proof_path = workspace_close_projection_proofs_path(&works);
+    assert!(!workspace_close_projection_needs_rebuild(&works, &closes).unwrap());
     let valid = fs::read(&proof_path).unwrap();
     for replacement in [None, Some(b"{broken".as_slice())] {
         if let Some(bytes) = replacement {
@@ -16543,6 +16558,9 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
         } else {
             fs::remove_file(&proof_path).unwrap();
         }
+        let proof_before = fs::read(&proof_path).ok();
+        assert!(workspace_close_projection_needs_rebuild(&works, &closes).unwrap());
+        assert_eq!(fs::read(&proof_path).ok(), proof_before);
         let error = validate_exact_work_machine_local_close_events_read_only(item, &works, &closes)
             .unwrap_err();
         assert!(
@@ -16559,6 +16577,7 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
         fs::write(&redirected, &valid).unwrap();
         fs::remove_file(&proof_path).unwrap();
         std::os::unix::fs::symlink(&redirected, &proof_path).unwrap();
+        assert!(workspace_close_projection_needs_rebuild(&works, &closes).is_err());
         assert!(
             validate_exact_work_machine_local_close_events_read_only(item, &works, &closes)
                 .is_err()
@@ -16572,6 +16591,7 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
     let mut old_writer = stored.clone();
     old_writer.updated_at += chrono::Duration::seconds(1);
     fs::write(&works, serde_json::to_vec_pretty(&old_writer).unwrap()).unwrap();
+    assert!(workspace_close_projection_needs_rebuild(&works, &closes).unwrap());
     assert!(validate_exact_work_machine_local_close_events_read_only(
         &old_writer.work_items[0],
         &works,
@@ -16584,6 +16604,10 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
     unprojected.id = "never-accepted-old-close".into();
     unprojected.updated_at -= chrono::Duration::seconds(1);
     append_workspace_work_events_to_path(&closes, &[unprojected]).unwrap();
+    assert!(
+        !workspace_close_projection_needs_rebuild(&works, &closes).unwrap(),
+        "a matching proof must not rebuild merely to accept an omitted ID"
+    );
     assert!(
         validate_exact_work_machine_local_close_events_read_only(item, &works, &closes).is_err()
     );
@@ -16732,6 +16756,10 @@ fn incremental_refold_does_not_certify_a_rejected_previous_close() {
     assert!(
         validate_exact_work_machine_local_close_events_read_only(target, &works, &closes).is_err(),
         "an event rejected by the new fold must lose its old projection proof"
+    );
+    assert!(
+        !workspace_close_projection_needs_rebuild(&works, &closes).unwrap(),
+        "an intentionally rejected close must not cause repeated full rebuilds"
     );
 }
 

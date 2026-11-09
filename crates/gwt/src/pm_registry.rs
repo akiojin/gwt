@@ -50,7 +50,7 @@ pub const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 /// stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Full supervision continues; submit material changes through `pm.report.post` `submission` \
-     (max 6 summary lines, full details); unchanged state stays silent, including open PRs and waits.";
+     (max 6 summary lines, full details); unchanged report state stays silent while PR/triage work advances.";
 
 /// Physical wake decorations shared by producers and human-prompt classification.
 pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
@@ -102,7 +102,9 @@ pub const PM_STEERING_CLAUSE: &str =
      more than twice the monitor scan interval), drifting outside its owner Issue's scope, or \
      waiting for its next action, and give the directive through `board.post` with a mention or \
      `pm.message.send` — the ruling channels only; never inject launch or bootstrap instructions \
-     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle.";
+     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle. \
+     CI-RED or AUTO-MERGE-STALLED PRs (including owners gone before merge) and pending gwt-feedback \
+     triage also require action or escalation before no-change.";
 
 /// Issue #3767 AC-2: the same steering obligation for the two PTY wake prompts.
 /// Kept terse on purpose — those prompts must stay under the 1024-byte PTY
@@ -110,8 +112,9 @@ pub const PM_STEERING_CLAUSE: &str =
 /// carry this line while the Stop-gate continuation and the gwt-pm guidance
 /// carry [`PM_STEERING_CLAUSE`] in full.
 pub const PM_STEERING_WAKE_CLAUSE: &str =
-    "Steer stalled/off-scope/waiting launches (`board.post` mention or `pm.message.send`, never \
-     past the Monitor) before judging no change.";
+    "Steer stalled/off-scope/waiting launches via `board.post` or `pm.message.send` (never past \
+     Monitor); act/escalate on CI-RED/AUTO-MERGE-STALLED PRs, gone owners, and pending \
+     gwt-feedback before judging no change.";
 
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5402,11 +5405,26 @@ mod tests {
     }
 
     #[test]
+    fn wake_clauses_reconcile_prs_and_feedback_before_no_change() {
+        for clause in [PM_STEERING_CLAUSE, PM_STEERING_WAKE_CLAUSE] {
+            for phrase in ["CI-RED", "AUTO-MERGE-STALLED", "gwt-feedback"] {
+                assert!(
+                    clause.contains(phrase),
+                    "wake clause is missing {phrase}: {clause}"
+                );
+            }
+        }
+        assert!(PM_STEERING_CLAUSE.contains("before no-change"));
+        assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    #[test]
     fn cycle_reporting_clause_keeps_supervision_without_duplicate_reports() {
         assert!(PM_CYCLE_REPORTING_CLAUSE.contains("Full supervision continues"));
         assert!(PM_CYCLE_REPORTING_CLAUSE.contains("material changes"));
         assert!(PM_CYCLE_REPORTING_CLAUSE.contains("`submission`"));
-        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("unchanged state stays silent"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("unchanged report state stays silent"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("PR/triage work advances"));
         assert!(!PM_CYCLE_REPORTING_CLAUSE.contains("no open PR"));
         assert!(
             PM_CYCLE_REPORTING_CLAUSE.len() <= 220,

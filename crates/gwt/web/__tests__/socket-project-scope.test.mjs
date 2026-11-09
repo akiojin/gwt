@@ -7,6 +7,8 @@ import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
 import { createPmWindowModel } from "../pm-chat.js";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createAgentSwitchModel } from "../agent-activity-model.js";
+import { createReleaseNotesWindow } from "../release-notes-window.js";
+import { createRecoveryCenterController } from "../recovery-center-modal.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const boardSource = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
@@ -101,6 +103,13 @@ function fixture({ routeProjectKey = null } = {}) {
     },
     received: [], receive(event) { context.received.push(event); },
     uiTraceWiring: { isTracing: () => false }, traceUi() {},
+  });
+  let releaseRequestSequence = 0;
+  context.releaseNotesWindow = createReleaseNotesWindow({
+    document: parseHTML("<html><body></body></html>").document,
+    send: message => context.send(message),
+    generateId: () => `release-${++releaseRequestSequence}`,
+    scheduleFrame: callback => { callback(); return () => {}; },
   });
   for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult", "sendStartupAutoResumeReady"]) {
     vm.runInContext(functionSource(name), context);
@@ -294,6 +303,7 @@ test("route-bound Project tab reconnects to the same Project only", t => {
   draft.saveTimer = 17;
   profile.requestProfile("profile");
   profile.requestProfile("foreign-profile");
+  context.releaseNotesWindow.openAbout("9.38.0");
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.reconnectCallbacks.at(-1)();
@@ -319,7 +329,12 @@ test("route-bound Project tab reconnects to the same Project only", t => {
     { kind: "load_board", id: "board", all: false },
     { kind: "load_logs", id: "logs", scope: "global" },
     { kind: "load_profile", id: "profile" },
+    { kind: "open_release_notes", id: "release-2", focus_version: "9.38.0" },
   ], "ordinary reconnect recovers interrupted reads without replaying the pending post");
+  context.releaseNotesWindow.handlePayload({ id: "release-2", focus_version: "9.38.0",
+    entries: [{ version: "9.38.0", sections: [] }] });
+  assert.equal(context.releaseNotesWindow.isOpen(), true);
+  assert.equal(context.releaseNotesWindow._state.mode, "about");
   assert.deepEqual(context.resyncCalls, [
     ["settings"],
     ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
@@ -468,30 +483,60 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
 
 test("receive recovery requests pane and open surface snapshots only on the owning socket", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  let recoverySequence = 0;
+  const { document } = parseHTML(readFileSync(new URL("../index.html", import.meta.url), "utf8"));
+  context.recoveryCenterController = createRecoveryCenterController({
+    document,
+    modalEl: document.getElementById("recovery-center-modal"),
+    dialogEl: document.querySelector("#recovery-center-modal > .modal-shell"),
+    send: message => context.send(message),
+    createRequestId: () => `recovery-${++recoverySequence}`,
+  });
   context.connectSocket();
+  context.releaseNotesWindow.open("9.38.0");
+  context.recoveryCenterController.open();
   sockets[1].open();
+  assert.equal(sockets[1].sent.filter(message => message.kind === "open_release_notes").length, 1,
+    "an offline-first Release Notes request uses the existing queue once");
+  assert.deepEqual(sockets[1].sent.filter(message => message.kind === "load_recovery_center"),
+    [{ kind: "load_recovery_center", request_id: "recovery-1" }],
+    "a queued Recovery Center read must remain the final backend generation and handle owner");
   context.resyncCalls.length = 0;
   const old = context.dispatcherOptions.at(-1);
-  let recoveryLoads = 0;
-  context.recoveryCenterController = { reconnect() { recoveryLoads++; } };
   assert.equal(typeof old.onResync, "function", "overflow must have a snapshot recovery callback");
   old.onResync("overflow");
   assert.equal(sockets.length, 3, "overflow also fences the native receive backlog");
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" },
+    { kind: "open_release_notes", id: "release-1", focus_version: "9.38.0" },
+    { kind: "load_recovery_center", request_id: "recovery-1" }, { kind: "get_system_settings" }]);
   sockets.at(-1).open();
   assert.equal(sockets[1].readyState, 3, "the input handoff ends when recovery opens");
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" },
+    { kind: "load_recovery_center", request_id: "recovery-2" }, { kind: "get_system_settings" },
+    { kind: "open_release_notes", id: "release-2", focus_version: "9.38.0" }]);
+  context.releaseNotesWindow.handlePayload({ id: "release-2", entries: [] });
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
     ["profile", "pane-a"],
     ["index", "pane-a"], ["settings"],
   ]);
-  assert.equal(recoveryLoads, 1, "a lost Recovery Center read is reissued");
+  context.dispatcherOptions.at(-1).onResync("visible");
+  context.recoveryCenterController.open();
+  context.pendingMessages.push({ projectKey: projectB.project_key,
+    message: { kind: "load_recovery_center", request_id: "foreign-recovery" } });
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent.filter(message => message.kind === "load_recovery_center"),
+    [{ kind: "load_recovery_center", request_id: "recovery-3" }],
+    "forced recovery also adopts only the read actually replayed on its own project");
+  assert.equal(context.pendingMessages.length, 1, "foreign queued reads stay fenced");
   sockets.at(-1).close();
   context.connectSocket();
   sockets.at(-1).open();
   old.onResync("visible");
-  assert.equal(sockets.at(-1).sent.length, 2, "a stale dispatcher cannot resync a replacement socket");
+  assert.equal(sockets.at(-1).sent.length, 3, "a stale dispatcher cannot resync a replacement socket");
+  assert.deepEqual(sockets.at(-1).sent.filter(message => message.kind === "load_recovery_center"),
+    [{ kind: "load_recovery_center", request_id: "recovery-4" }],
+    "a sent read whose reply was lost still gets one fresh request owner");
 });
 
 test("a terminal receive failure replaces the owning connection and fences its old dispatcher", () => {

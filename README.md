@@ -1198,8 +1198,16 @@ than completed, invalidating its and its ancestors' previous completion evidence
 is the only target ID. The server assigns the browser user actor. Update returns
 the current task and revision observed after applying the operation, alongside
 the receipt at its original applied revision. An unchanged draft is also valid
-and records a receipt with an empty task delta. Replaying an Update preserves
-that receipt while the current task may reflect later changes. Reopen and Cancel
+and records a receipt with an empty task delta.
+`complete_pm_request_task` accepts `operation_id`, `expected_revision`, `reason`,
+`task_id`, `condition_revision`, `review_generation` and nonempty `evidence`
+inside `request`. It records the browser user's completion audit using the
+existing Task rules: stale reviews, pending PM reassessment and unfinished
+children refuse completion. Repeating the same completion under a new operation
+is valid and may record an empty task delta.
+Replaying Update or Complete preserves
+the original receipt while the current task may reflect later changes, including
+a subsequent reopen. Reopen and Cancel
 continue to return their receipt's applied task state.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
@@ -2070,6 +2078,16 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
+The PM window opens **Tasks**, a read-only preview of saved request tasks. It
+shows unfinished work first, including parent relationships, assignees, waiting
+reasons, next actions, and pending PM reassessment. **Include completed** also
+shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows the total and any requests awaiting classification. Long summaries are
+shortened; the saved tasks remain complete. A read failure retains the last
+confirmed list with a warning. Task editing, automatic intake, and history import
+are not available in this preview. **Reports** and **Execution log** remain
+available from the same toolbar.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
@@ -2585,6 +2603,9 @@ the target and temporary volumes above the configured build-artifact GC floor;
 `verification.disk_budget_bytes` overrides the measured per-run byte budget.
 The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
 volume, based on measured target and temporary growth plus 20% headroom.
+If a volume cannot fit its reservation plus the GC floor even when empty,
+`verify.run` refuses immediately and reports its path, reserve, floor, total, and
+free bytes. Move the affected Cargo target or `TMPDIR` to a larger filesystem.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 

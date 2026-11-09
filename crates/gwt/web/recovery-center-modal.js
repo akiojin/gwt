@@ -321,7 +321,8 @@ export function createRecoveryCenterController({
     focusBoardEntry?.(entryId);
   }
 
-  function reconnect() {
+  function reconnect(replayedRequestId = null) {
+    if (state.open && state.requestId && state.requestId === replayedRequestId) return;
     state.items = [];
     state.requestId = null;
     state.generation = 0;

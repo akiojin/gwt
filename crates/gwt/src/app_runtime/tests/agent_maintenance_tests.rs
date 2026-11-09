@@ -609,13 +609,15 @@ fn startup_surface_ready_preserves_pm_queue_until_maintenance_finishes() {
         "the paused restore placeholder must survive maintenance"
     );
     assert!(runtime.agent_maintenance.deferred_startup_ready);
-    runtime.handle_supported_agent_maintenance_complete(
-        super::super::agent_maintenance::AgentMaintenanceCompletion {
-            results: Vec::new(),
-            cache: None,
-            catalog: None,
-        },
-    );
+    with_inline_startup_admission(&mut runtime, |runtime| {
+        runtime.handle_supported_agent_maintenance_complete(
+            super::super::agent_maintenance::AgentMaintenanceCompletion {
+                results: Vec::new(),
+                cache: None,
+                catalog: None,
+            },
+        )
+    });
     assert!(runtime.issue_monitor_materializer_ready());
     assert!(runtime.pending_startup_pm_tabs.is_empty());
     assert!(

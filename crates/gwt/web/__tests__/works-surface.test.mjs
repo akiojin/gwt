@@ -376,6 +376,14 @@ test("Works retains native input and fixed names when runtime state and purpose 
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /New purpose.*Error.*Input unavailable/);
   assert.equal(f.runtimes.get("one"), input);
   assert.equal(f.surface.element.querySelector('[data-count="error"]').textContent, "1");
+  for (const [status, label] of [["stopped", "Stopped"], ["exited", "Stopped"], ["interrupted", "Interrupted"]]) {
+    f.windowCatalogModel.update(() => ({ catalog: { ...catalog(windows, 3), runtimeStates: { one: status } } }));
+    f.flush();
+    assert.match(f.surface.element.querySelector(".works-full-meta").textContent, new RegExp(`${label}.*Input unavailable`));
+    assert.equal(f.surface.element.querySelector('[data-window-id="one"] .work-state').textContent, label);
+    assert.equal(f.surface.element.querySelector('[data-count="error"]').textContent, status === "interrupted" ? "1" : "0");
+    assert.equal(f.runtimes.get("one"), input);
+  }
   f.windowCatalogModel.update(() => ({ catalog: { ...catalog(windows.map(w => w.id === "one" ? { ...w, status: "interrupted" } : w), 3), runtimeStates: { one: "running" } } }));
   f.flush();
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Running.*Interactive/,

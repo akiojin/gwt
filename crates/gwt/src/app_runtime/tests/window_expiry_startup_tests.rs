@@ -967,10 +967,7 @@ fn app_runtime_startup_auto_resume_refuses_closed_issue_window_and_disables_rest
         "the real startup worker releases its gate"
     );
     runtime.handle_startup_generation_reaper_completed();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
     let pending_ids = runtime
         .pending_launch_completions
         .keys()
@@ -1512,10 +1509,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
         "the drained project is released for the Issue Monitor (#4037 seam)"
     );
 
-    let events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "exactly one resume notice: {toasts:?}");
     assert_eq!(toasts[0].0, "info");
@@ -1551,10 +1545,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     restarted.bootstrap();
     assert!(restarted.update_drain_released_projects.is_empty());
     assert!(!update_drain_is_raised(&worktree));
-    let events = restarted.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    let events = handle_startup_auto_resume_ready(&mut restarted, "client-1");
     assert!(
         update_resume_toasts(&events).is_empty(),
         "no marker means no update notice"
@@ -1606,10 +1597,7 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
         "the Issue Monitor must not stay drained after a failed apply"
     );
 
-    let events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "exactly one failure notice: {toasts:?}");
     assert_eq!(toasts[0].0, "error");
@@ -1813,7 +1801,7 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
     runtime.blocking_tasks = spawner;
     let logs = capture_tracing_events(|| {
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
         drain_queued_blocking_tasks(&tasks);
         let completion = take_remote_owner_launch_completion(match &runtime.proxy {
             AppEventProxy::Stub(events) => events,
@@ -1939,7 +1927,7 @@ fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics()
     runtime.blocking_tasks = spawner;
 
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-    runtime.startup_auto_resume_ready_events();
+    drain_startup_auto_resume(&mut runtime);
     let events = drain_owner_launch_fixtures(&mut runtime, &tasks);
     let actual = owner_fixture_block_on(
         owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
@@ -2140,7 +2128,7 @@ fn startup_restore_queues_only_one_session_per_worktree() {
     // start a second process for that worktree.
     runtime.restore_open_project_windows("tab-duplicate");
     assert!(runtime.pending_auto_resume_sources.is_empty());
-    runtime.startup_auto_resume_ready_events();
+    drain_startup_auto_resume(&mut runtime);
     drain_queued_blocking_tasks(&tasks);
     let mut installed = 0;
     let mut refused = 0;

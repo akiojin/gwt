@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -4126,7 +4126,7 @@ fn decode_workspace_work_items(
     bytes: &[u8],
     detachments: &ContainerDetachments,
 ) -> Result<WorkItemsProjection> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_before_work_items_decode();
     #[cfg(debug_assertions)]
     mark_playwright_work_items_decode_started(path);
@@ -4201,7 +4201,7 @@ fn load_or_synthesize_workspace_work_items_profiled(
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let started = Instant::now();
+    let started = crate::operation_deadline::now();
     let (snapshot, lock_wait_micros, signature) =
         with_workspace_current_and_work_items_lock_profiled(
             &current_path,
@@ -4244,7 +4244,10 @@ fn load_or_synthesize_workspace_work_items_profiled(
         WorkItemsLoadProfile {
             cache_hit: false,
             lock_wait_micros,
-            parse_micros: (started.elapsed().as_micros() as u64).saturating_sub(lock_wait_micros),
+            parse_micros: (crate::operation_deadline::now()
+                .saturating_duration_since(started)
+                .as_micros() as u64)
+                .saturating_sub(lock_wait_micros),
         },
         signature,
     ))
@@ -4408,6 +4411,28 @@ impl WorkItemsIntakeSnapshot {
             .transpose()
     }
 
+    pub(crate) fn close_projection_needs_rebuild(
+        &self,
+        projection: &WorkItemsProjection,
+        close_content: Option<&str>,
+    ) -> Result<bool> {
+        let Some(close_content) = close_content else {
+            return Ok(false);
+        };
+        let previous = self.files[0].1.as_deref();
+        let proofs = self.files.last().and_then(|(_, bytes)| bytes.as_deref());
+        // A valid snapshot may intentionally omit a close rejected by the fold.
+        // Only a missing or unusable snapshot calls for complete-source repair.
+        if matching_close_projection_snapshot(previous, proofs)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Ok(false);
+        }
+        has_compacted_machine_local_closes(projection, close_content)
+    }
+
     pub(crate) fn apply_detachments(&self, projection: &mut WorkItemsProjection) -> Result<()> {
         remove_detached_containers(projection, &self.detachments()?);
         Ok(())
@@ -4521,15 +4546,43 @@ pub struct WorkItemsCache {
     pub deep_copy_count: u64,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BEFORE_WORK_ITEMS_DECODE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-    static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
+thread_local! {
+    static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Observe the next Work-items decode on this thread.
+/// Restores the preceding observer when the guard is dropped.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScopedWorkItemsDecodeObserver {
+    previous: Option<Box<dyn FnOnce()>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ScopedWorkItemsDecodeObserver {
+    pub fn set(on_decode: impl FnOnce() + 'static) -> Self {
+        Self {
+            previous: BEFORE_WORK_ITEMS_DECODE
+                .with(|observer| observer.replace(Some(Box::new(on_decode)))),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScopedWorkItemsDecodeObserver {
+    fn drop(&mut self) {
+        BEFORE_WORK_ITEMS_DECODE.with(|observer| observer.replace(self.previous.take()));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn run_before_work_items_decode() {
     BEFORE_WORK_ITEMS_DECODE.with(|slot| {
         let operation = slot.borrow_mut().take();
@@ -4846,7 +4899,7 @@ fn with_workspace_work_items_locks_profiled<T>(
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let lock_started = Instant::now();
+        let lock_started = crate::operation_deadline::now();
         // Issue #4850 / #4686 AC-5: a named lock, so a contender that runs
         // out of its deadline is told who holds the Work items (pid /
         // operation / since) instead of only that the deadline expired.
@@ -4855,8 +4908,11 @@ fn with_workspace_work_items_locks_profiled<T>(
             lock_path,
             WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
         )?;
-        lock_wait_micros =
-            lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
+        lock_wait_micros = lock_wait_micros.saturating_add(
+            crate::operation_deadline::now()
+                .saturating_duration_since(lock_started)
+                .as_micros() as u64,
+        );
         locks.push(lock);
     }
     drop(acquisition_deadline);
@@ -8685,6 +8741,78 @@ fn machine_local_close_event_matches_projected_lifecycle(
 // Each snapshot authenticates exact accepted close identities for one byte-exact
 // projection. A watermark or a raw event shard never establishes acceptance.
 type ProjectedCloseEvents = BTreeMap<String, BTreeMap<String, String>>;
+
+/// Inspect whether compacted local closes need a complete-source proof rebuild.
+/// This never recovers transactions, creates locks, or changes persisted bytes.
+pub fn workspace_close_projection_needs_rebuild(
+    works_path: &Path,
+    close_path: &Path,
+) -> Result<bool> {
+    ensure_supported_workspace_layout(works_path)?;
+    validate_workspace_local_close_path(works_path)?;
+    validate_workspace_local_close_path(close_path)?;
+    let proofs_path = workspace_close_projection_proofs_path(works_path);
+    validate_workspace_local_close_path(&proofs_path)?;
+    let previous = read_intake_snapshot_file(works_path)?;
+    let proofs = read_intake_snapshot_file(&proofs_path)?;
+    if matching_close_projection_snapshot(previous.as_deref(), proofs.as_deref())
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Ok(false);
+    }
+    let (Some(previous), Some(closes)) = (previous, read_intake_snapshot_file(close_path)?) else {
+        return Ok(false);
+    };
+    let close_content = std::str::from_utf8(&closes).map_err(|error| {
+        GwtError::Other(format!("work events local lifecycle is not UTF-8: {error}"))
+    })?;
+    let projection = decode_workspace_work_items(
+        works_path,
+        &previous,
+        &load_container_detachments(works_path)?,
+    )?;
+    has_compacted_machine_local_closes(&projection, close_content)
+}
+
+fn has_compacted_machine_local_closes(
+    projection: &WorkItemsProjection,
+    close_content: &str,
+) -> Result<bool> {
+    let inline_ids = projection
+        .work_items
+        .iter()
+        .map(|item| {
+            (
+                item.id.as_str(),
+                item.events
+                    .iter()
+                    .map(|event| event.id.as_str())
+                    .collect::<HashSet<_>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut needs_rebuild = false;
+    for line in close_content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let event: WorkEvent = serde_json::from_str(line)
+            .map_err(|error| GwtError::Other(format!("machine-local close event json: {error}")))?;
+        if matches!(
+            event.kind,
+            WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+        ) && inline_ids
+            .get(event.work_item_id.as_str())
+            .is_some_and(|ids| !ids.contains(event.id.as_str()))
+        {
+            needs_rebuild = true;
+        }
+    }
+    Ok(needs_rebuild)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -969,16 +969,20 @@ impl AppRuntime {
                 if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
                     if drain.automatic.unwrap_or(prefs.autonomous_mode) {
                         events.extend(
-                            self.release_update_auto_apply_for_project(&context, &drain.version)
-                                .unwrap_or_else(|error| {
-                                    self.issue_monitor_control_error_events(
-                                        Some(&context.project_root),
-                                        None,
-                                        error,
-                                        "update-drain",
-                                        None,
-                                    )
-                                }),
+                            self.release_update_auto_apply_for_project(
+                                &context,
+                                &drain.version,
+                                &prefs.config_token(),
+                            )
+                            .unwrap_or_else(|error| {
+                                self.issue_monitor_control_error_events(
+                                    Some(&context.project_root),
+                                    None,
+                                    error,
+                                    "update-drain",
+                                    None,
+                                )
+                            }),
                         );
                     }
                 }

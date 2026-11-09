@@ -293,10 +293,7 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -404,7 +401,7 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
     let owner = executor.block_on(production_owner_fixture(&worktree));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    runtime.startup_auto_resume_ready_events();
+    drain_startup_auto_resume(&mut runtime);
     drain_queued_blocking_tasks(&tasks);
     let completion = take_remote_owner_launch_completion(match &runtime.proxy {
         AppEventProxy::Stub(events) => events,
@@ -595,10 +592,7 @@ fn app_runtime_startup_auto_resume_restores_each_eligible_session() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agents = runtime.tabs[0]
         .workspace
@@ -677,10 +671,7 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let resumed_sources = runtime
         .pending_auto_resume_sources
@@ -1183,10 +1174,7 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
         .expect("save legacy open session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let resumed_sources = runtime
         .pending_auto_resume_sources
@@ -1316,10 +1304,7 @@ fn app_runtime_bootstrap_auto_resumes_same_repo_worktree_session_from_restored_p
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.tabs.len(),
@@ -1377,10 +1362,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_without_lifecycle() 
         .expect("save stale session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -1433,10 +1415,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_with_placeholder_res
         .expect("save placeholder session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -1488,10 +1467,7 @@ fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert!(
             runtime.tabs.is_empty(),
@@ -1567,10 +1543,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),

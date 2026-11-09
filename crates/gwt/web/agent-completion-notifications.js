@@ -53,7 +53,7 @@ function appendStatusDetail(body, detail) {
 /**
  * Source-tagged notification inputs. Runtime states come from WindowProcessStatus;
  * NeedsHuman comes only from the Monitor's typed transition, never Waiting/text.
- * @typedef {{source: "runtime", state: "stopped" | "error", windowData?: object,
+ * @typedef {{source: "runtime", state: "stopped" | "interrupted" | "error", windowData?: object,
  * projectTab?: object} | {source: "monitor", state: "needs_human", issueNumber: number}} NotificationTransition
  */
 export function notificationForTransition(input) {
@@ -66,6 +66,9 @@ export function notificationForTransition(input) {
   const projectName = projectLabel(input.projectTab);
   if (input.state === "stopped") {
     return { kind: "agent_stopped", title: "Agent stopped", body: `${agentName} stopped in ${projectName}.` };
+  }
+  if (input.state === "interrupted") {
+    return { kind: "agent_interrupted", title: "Agent interrupted", body: `${agentName} was interrupted in ${projectName}.` };
   }
   if (input.state === "error") {
     return { kind: "agent_error", title: "Agent error", body: `${agentName} hit an error in ${projectName}.` };
@@ -86,7 +89,7 @@ export function createAgentCompletionNotifier({
 
   function handleIntent(notice) {
     if (!notice || typeof notice.transition_id !== "string" || !notice.transition_id.trim()
-      || !["stopped", "error", "needs_human"].includes(notice.category)
+      || !["stopped", "interrupted", "error", "needs_human"].includes(notice.category)
       || seenTransitions.has(notice.transition_id)) return null;
     seenTransitions.add(notice.transition_id);
     if (getDesktopNotificationPermission() !== "granted") return null;
@@ -107,7 +110,7 @@ export function createAgentCompletionNotifier({
 //
 // Distinct from the server-intent desktop sink above. This is the
 // in-app, always-on counterpart: the moment an agent transitions into a state
-// that wants the operator's eyes (needs_input / blocked / error / done), a
+// that wants the operator's eyes (needs_input / error), a
 // quiet in-app toast appears even while the operator is present. Clicking a
 // toast selects that window in its surface (frameWindow), so attention is one
 // click from action. Pure controller: DOM rendering is injected via
@@ -116,8 +119,6 @@ export function createAgentCompletionNotifier({
 const ATTENTION_STATES = Object.freeze({
   waiting: "needs_input",
   error: "error",
-  stopped: "done",
-  exited: "done",
 });
 
 function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail = "" }) {
@@ -135,13 +136,6 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail =
         flavor,
         title: "Agent error",
         body: appendStatusDetail(`${agentName} hit an error.`, statusDetail),
-        windowId,
-      };
-    case "done":
-      return {
-        flavor,
-        title: "Agent stopped",
-        body: `${agentName} stopped.`,
         windowId,
       };
     default:

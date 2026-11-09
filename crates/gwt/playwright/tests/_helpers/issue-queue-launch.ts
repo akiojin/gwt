@@ -11,6 +11,7 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   page?: ExactRelaunchSetup["page"];
+  issueNumber?: number;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
   prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
@@ -18,10 +19,10 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   const comments: { id: number; body: string; updated_at: string }[] = [];
   const requests: { method: string; url: string }[] = [];
   const issue = {
-    number: 43, title: "Queue launch fixture", state: "OPEN",
+    number: options.issueNumber ?? 43, title: "Queue launch fixture", state: "OPEN",
     body: "## Acceptance Criteria\n- [ ] AC-1: Record the provider handoff.",
     labels: [{ name: "bug" }, { name: "auto-improve" }],
-    url: "https://github.com/fixture/queue/issues/43",
+    url: `https://github.com/fixture/queue/issues/${options.issueNumber ?? 43}`,
     updatedAt: new Date().toISOString(),
   };
   const issues = [issue, ...(options.targetIssueNumber ? [{ ...issue, number: options.targetIssueNumber,

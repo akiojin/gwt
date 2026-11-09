@@ -715,52 +715,103 @@ pub fn load_pending_goal(worktree: &Path) -> io::Result<Option<PendingDiscussion
 pub fn load_pending_goal_from_worktree_files(
     worktree: &Path,
 ) -> io::Result<Option<PendingDiscussionGoal>> {
-    for document in read_discussion_documents_from_worktree_files(worktree)? {
-        let proposals = parse_document_proposals(&document, None);
-        if let Some(goal) = select_pending_goal(&proposals) {
-            return Ok(Some(goal));
-        }
-    }
-    Ok(None)
+    PendingGoalReader::default().load(worktree)
 }
 
-fn read_discussion_documents_from_worktree_files(
-    worktree: &Path,
-) -> io::Result<Vec<DiscussionDocument>> {
-    let mut documents = Vec::new();
-    // SPEC-3214 (FR-007): prefer the machine-local home work-notes file.
-    // Unlike `canonical_discussions_path` this stays subprocess-free (the
-    // repo hash comes from config-file reads), which is why this worktree
-    // variant exists for the hook health snapshot.
-    let home_path = gwt_core::paths::gwt_work_notes_discussions_path(worktree);
-    let canonical_path = if home_path.exists() {
-        home_path
-    } else {
-        worktree.join(CANONICAL_DISCUSSIONS_DISPLAY_PATH)
-    };
-    let should_read_legacy = if canonical_path.exists() {
-        let content = std::fs::read_to_string(&canonical_path)?;
-        let should_read_legacy = canonical_allows_legacy_fallback(&content, None);
-        documents.push(DiscussionDocument {
-            content,
-            path: canonical_path,
-            source: DiscussionSource::Canonical,
-        });
-        should_read_legacy
-    } else {
-        true
-    };
+#[cfg(test)]
+thread_local! {
+    /// Issue #5379: canonical discussion documents read from disk on this
+    /// thread. The Work projection must not pay this once per Work row.
+    static CANONICAL_DISCUSSION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-    let legacy_path = worktree.join(DISCUSSION_RELATIVE_PATH);
-    if should_read_legacy && legacy_path.exists() {
-        documents.push(DiscussionDocument {
+#[cfg(test)]
+pub fn canonical_discussion_reads() -> usize {
+    CANONICAL_DISCUSSION_READS.with(|count| count.get())
+}
+
+/// Pending-goal reads for one Work projection.
+///
+/// Issue #5379: every Work row of a repository resolves to the same
+/// machine-local discussions file, and the projection asked for it once per
+/// row (hundreds of reads and parses of the same file per refresh). The
+/// canonical document is read once per reader; only the worktree-local legacy
+/// fallback is still consulted per worktree.
+#[derive(Debug, Default, Clone)]
+pub struct PendingGoalReader {
+    canonical: std::cell::RefCell<
+        std::collections::HashMap<PathBuf, std::sync::Arc<CanonicalPendingGoal>>,
+    >,
+}
+
+#[derive(Debug)]
+struct CanonicalPendingGoal {
+    goal: Option<PendingDiscussionGoal>,
+    allows_legacy: bool,
+}
+
+impl PendingGoalReader {
+    pub fn load(&self, worktree: &Path) -> io::Result<Option<PendingDiscussionGoal>> {
+        // SPEC-3214 (FR-007): prefer the machine-local home work-notes file.
+        // Unlike `canonical_discussions_path` this stays subprocess-free (the
+        // repo hash comes from config-file reads), which is why this worktree
+        // variant exists for the hook health snapshot.
+        let home_path = gwt_core::paths::gwt_work_notes_discussions_path(worktree);
+        let canonical_path = if home_path.exists() {
+            home_path
+        } else {
+            worktree.join(CANONICAL_DISCUSSIONS_DISPLAY_PATH)
+        };
+        let cached = self.canonical.borrow().get(&canonical_path).cloned();
+        let canonical = match cached {
+            Some(canonical) => canonical,
+            None => {
+                let canonical = std::sync::Arc::new(read_canonical_pending_goal(&canonical_path)?);
+                self.canonical
+                    .borrow_mut()
+                    .insert(canonical_path, std::sync::Arc::clone(&canonical));
+                canonical
+            }
+        };
+        if canonical.goal.is_some() {
+            return Ok(canonical.goal.clone());
+        }
+        let legacy_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+        if !canonical.allows_legacy || !legacy_path.exists() {
+            return Ok(None);
+        }
+        let document = DiscussionDocument {
             content: std::fs::read_to_string(&legacy_path)?,
             path: legacy_path,
             source: DiscussionSource::Legacy,
+        };
+        Ok(select_pending_goal(&parse_document_proposals(
+            &document, None,
+        )))
+    }
+}
+
+fn read_canonical_pending_goal(canonical_path: &Path) -> io::Result<CanonicalPendingGoal> {
+    if !canonical_path.exists() {
+        return Ok(CanonicalPendingGoal {
+            goal: None,
+            allows_legacy: true,
         });
     }
-
-    Ok(documents)
+    #[cfg(test)]
+    CANONICAL_DISCUSSION_READS.with(|count| count.set(count.get() + 1));
+    let document = DiscussionDocument {
+        content: std::fs::read_to_string(canonical_path)?,
+        path: canonical_path.to_path_buf(),
+        source: DiscussionSource::Canonical,
+    };
+    let goal = select_pending_goal(&parse_document_proposals(&document, None));
+    // The legacy fallback only matters when the canonical log yields nothing.
+    let allows_legacy = goal.is_none() && canonical_allows_legacy_fallback(&document.content, None);
+    Ok(CanonicalPendingGoal {
+        goal,
+        allows_legacy,
+    })
 }
 
 pub fn set_proposal_goal_pending_by_label(

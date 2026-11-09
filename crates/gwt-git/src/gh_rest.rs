@@ -22,6 +22,45 @@ use serde_json::Value;
 /// Queue-labelled Issue pages and authoritative per-resource reads bypass it.
 pub(crate) const LIST_CACHE_TTL_SECS: i64 = 120;
 
+thread_local! {
+    static MONITOR_READ_MAX_AGE_SECS: std::cell::Cell<Option<i64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Issue #6877 AC-2: the freshness a timer-driven Issue Monitor scan accepts
+/// for its GitHub reads. While a scope is entered on the scanning thread,
+/// Monitor list pages and the in-process timeline / PR lifecycle caches serve
+/// entries up to this age instead of spawning `gh` again. Control-driven scans
+/// (ScanNow, agent completion, GUI actions) never enter one and stay fresh.
+pub struct ScopedMonitorReadMaxAge {
+    previous: Option<i64>,
+}
+
+impl ScopedMonitorReadMaxAge {
+    pub fn enter(max_age: std::time::Duration) -> Self {
+        let secs = i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
+        let previous = MONITOR_READ_MAX_AGE_SECS.with(|cell| cell.replace(Some(secs)));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedMonitorReadMaxAge {
+    fn drop(&mut self) {
+        MONITOR_READ_MAX_AGE_SECS.with(|cell| cell.set(self.previous));
+    }
+}
+
+/// The periodic-scan read max age entered on this thread, if any.
+pub fn monitor_read_max_age_secs() -> Option<i64> {
+    MONITOR_READ_MAX_AGE_SECS.with(std::cell::Cell::get)
+}
+
+/// Monitor list pages are never served older than the entered max age allows,
+/// and never fresher than the ordinary [`LIST_CACHE_TTL_SECS`] bound.
+pub(crate) fn monitor_list_cache_ttl_secs() -> i64 {
+    monitor_read_max_age_secs().map_or(LIST_CACHE_TTL_SECS, |age| age.max(LIST_CACHE_TTL_SECS))
+}
+
 #[derive(Serialize, Deserialize)]
 struct CachedListResponse {
     key: String,
@@ -35,7 +74,7 @@ pub(crate) fn cached_list_response_with(
     now: DateTime<Utc>,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
-    cached_list_response_at_with(cache_dir, key, now, LIST_CACHE_TTL_SECS, fetch)
+    cached_list_response_at_with(cache_dir, key, now, monitor_list_cache_ttl_secs(), fetch)
         .map(|(_, stdout)| stdout)
 }
 
@@ -820,5 +859,27 @@ mod tests {
         );
         assert!(parsed[1].body.is_none());
         assert!(parsed[1].author_login.is_none());
+    }
+}
+
+#[cfg(test)]
+mod monitor_read_max_age_tests {
+    use super::*;
+
+    /// Issue #6877 AC-2: a periodic scan widens the Monitor list TTL to its
+    /// read max age; outside the scope (and for a shorter max age) the
+    /// ordinary bound applies.
+    #[test]
+    fn monitor_list_cache_ttl_follows_the_scoped_periodic_max_age() {
+        assert_eq!(monitor_list_cache_ttl_secs(), LIST_CACHE_TTL_SECS);
+        {
+            let _scope = ScopedMonitorReadMaxAge::enter(std::time::Duration::from_secs(600));
+            assert_eq!(monitor_list_cache_ttl_secs(), 600);
+            assert_eq!(monitor_read_max_age_secs(), Some(600));
+        }
+        assert_eq!(monitor_list_cache_ttl_secs(), LIST_CACHE_TTL_SECS);
+        assert_eq!(monitor_read_max_age_secs(), None);
+        let _short = ScopedMonitorReadMaxAge::enter(std::time::Duration::from_secs(1));
+        assert_eq!(monitor_list_cache_ttl_secs(), LIST_CACHE_TTL_SECS);
     }
 }

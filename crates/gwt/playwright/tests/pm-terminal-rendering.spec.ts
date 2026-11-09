@@ -9,6 +9,46 @@ const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
 
+test("PM spinner redraw queued before resize keeps its original wrap grid", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await expectGridConverged(page);
+  await emit(page, "terminal_output", Array.from({ length: 400 }, (_, i) => `Tool output ${i}\r\n`).join(""));
+  await expect.poll(() => text(page)).toContain("Tool output 399");
+  const cols = (await metrics(page)).cols;
+  // The old-width repaint arrives in the same turn as the host resize. It
+  // wraps once, then erases both physical spinner rows with relative CSI.
+  await page.evaluate(({ cols }) => {
+    const fixture = (window as any).__pmTerminalFixture;
+    const bytes = "\x1b[2J\x1b[3J\x1b[HHEADER\r\n" + "* Spinning... ".padEnd(cols, "S")
+      + "97\r\x1b[2K\x1b[1A\x1b[2KCURRENT";
+    fixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa(bytes) });
+    const host = document.querySelector('.workspace-window[data-id="pm-terminal"] .terminal-root') as HTMLElement;
+    host.style.width = "480px";
+    window.dispatchEvent(new Event("resize"));
+  }, { cols });
+  await expect.poll(async () => (await metrics(page)).cols).toBeLessThan(cols);
+  try {
+    await expect.poll(async () => (await text(page)).trim()).toBe("HEADER\nCURRENT");
+  } finally {
+    const screenshot = info.outputPath(`pm-spinner-resize-${theme}.png`);
+    await pm.screenshot({ path: screenshot });
+    await info.attach("spinner after resize", { path: screenshot, contentType: "image/png" });
+    await info.attach("terminal buffer", { body: await text(page), contentType: "text/plain" });
+  }
+  expect(errors).toEqual([]);
+});
+
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
 // from a particular Codex version. browser-check still serves every UI asset.
 test("PM terminal keeps redraw, grid and input consistent across view changes", async ({ page }, info) => {

@@ -786,23 +786,36 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
         .open(work_items_path.with_extension("lock"))
         .expect("open Work lease");
     lease.lock_exclusive().expect("hold Work lease");
+    let clock_start = Instant::now();
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(clock_start);
+    let contention_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let decode_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let on_contention_clock = contention_clock.clone();
     let (contention_tx, contention_rx) = std::sync::mpsc::channel();
     let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
         &work_items_path.with_extension("lock"),
         move || {
+            *on_contention_clock.borrow_mut() =
+                Some(gwt_core::operation_deadline::ScopedOperationClock::set(
+                    clock_start + Duration::from_millis(120),
+                ));
             contention_tx
                 .send(())
                 .expect("report Work lease contention")
         },
     );
+    let on_decode_clock = decode_clock.clone();
+    let _decode = gwt_core::workspace_projection::ScopedWorkItemsDecodeObserver::set(move || {
+        // Parsing may legitimately take longer than waiting for the lock.
+        *on_decode_clock.borrow_mut() =
+            Some(gwt_core::operation_deadline::ScopedOperationClock::set(
+                clock_start + Duration::from_millis(360),
+            ));
+    });
     let release = thread::spawn(move || {
-        // Start the existing hold interval only after the loader is waiting.
         // Always unlock before reporting a missing notification to avoid a hang.
         // test-hygiene: allow-wall-clock-deadline Bounds a missing notification, not the measured lock wait; unlock before failing.
         let contention = contention_rx.recv_timeout(Duration::from_secs(30));
-        if contention.is_ok() {
-            thread::sleep(Duration::from_millis(120));
-        }
         lease.unlock().expect("release Work lease");
         contention.expect("observe Work lease contention before release");
     });
@@ -811,15 +824,13 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
     let completion = run_queued_projection_prepare(&tasks, &recorded_events);
     release.join().expect("join Work lease holder");
 
-    assert!(
-        completion.profile.lock_wait_ms >= 75,
-        "filesystem Work lease wait must be attributed to lock_wait_ms: {:?}",
-        completion.profile
+    assert_eq!(
+        completion.profile.lock_wait_ms, 120,
+        "filesystem Work lease wait must retain its own interval",
     );
-    assert!(
-        completion.profile.parse_ms < completion.profile.lock_wait_ms,
-        "parse_ms must exclude the Work lease wait: {:?}",
-        completion.profile
+    assert_eq!(
+        completion.profile.parse_ms, 240,
+        "parsing must exclude the separate Work lease interval",
     );
 }
 

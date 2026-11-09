@@ -1088,8 +1088,14 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 `reason`・`task: TaskDraft` で保存済みの依頼内容を訂正します。対象 ID は `task.id`
 だけで、変更者はサーバーがブラウザ接続から確定します。Update は適用後に読み取った
 現在の Task と revision に、元の適用 revision の receipt を添えて返します。内容を
-変えない更新も有効で、Task 差分が空の receipt を保存します。同じ Update を再実行
-しても receipt は変わらず、現在の Task は後続の変更を反映する場合があります。
+変えない更新も有効で、Task 差分が空の receipt を保存します。
+`complete_pm_request_task` は `request` 内の `operation_id`・`expected_revision`・
+`reason`・`task_id`・`condition_revision`・`review_generation`・空でない `evidence`
+で完了を記録します。変更者はブラウザ接続から確定し、既存 Task の規則に従って、
+古い確認・PM の再評価待ち・未完了の子がある場合は拒否します。同じ完了内容を別の
+operation で確認することも有効で、Task 差分が空の receipt を保存する場合があります。
+同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
+後続の変更や再開を反映する場合があります。
 Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
@@ -1892,6 +1898,13 @@ gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
 
+PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲覧できます。未完了を優先し、
+親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
+で完了・取消も表示できます。プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
+長い概要は短縮しますが、保存済みの内容は保持します。読取り失敗時は最後に確認できた一覧を
+警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+同じツールバーから **Reports** と **Execution log** に切り替えられます。
+
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
 **Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
@@ -2368,6 +2381,9 @@ GC の空き容量閾値を残してディスク容量を予約します。
 `verification.disk_budget_bytes` で実測に基づく run 単位の予算を上書きできます。
 既定の予約量は各 volume で 5,904,433,337 bytes（約 5.5 GiB）です。
 target と一時領域の実測増分に 20% の余裕を加えて算出しています。
+volume が空でも予約量と GC の閾値を収容できない場合、`verify.run` は即時に拒否し、
+対象 path、予約量、閾値、総容量、空き容量を表示します。
+対象の Cargo target または `TMPDIR` をより大きな filesystem に移してください。
 `verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
 共通 FIFO queue を表示します。再試行前に確認してください。
 

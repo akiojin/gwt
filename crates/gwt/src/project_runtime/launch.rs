@@ -405,6 +405,8 @@ pub fn prepare_agent_launch(
         // so every resume of a Session that had settled its generation —
         // i.e. every Issue that had progressed far enough to push — died
         // before the PTY. Both outcomes carry Active authority.
+        // An automatic restore without a current Monitor owner must not recover
+        // the predecessor's historical Issue through its producing binding.
         let mut rebound_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
         if !pm_launch
             && matches!(
@@ -415,6 +417,7 @@ pub fn prepare_agent_launch(
                 config.session_mode,
                 gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
             )
+            && (!config.automatic_restore || config.linked_issue_number.is_some())
         {
             if let Some(predecessor) = config.predecessor_session_id.clone() {
                 // Issue #4783 AC-2: an automatic restore never reactivates
