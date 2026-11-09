@@ -4086,7 +4086,10 @@ fn embedded_web_pm_tasks_uses_the_shared_model_and_operator_tokens() {
 #[test]
 fn embedded_web_react_bundle_is_self_contained() {
     let bundle = root_js_module_source("/react/islands.js");
-    assert!(bundle.contains("mountIsland"), "bundle must export mountIsland");
+    assert!(
+        bundle.contains("mountIsland"),
+        "bundle must export mountIsland"
+    );
     for primitive in [
         "import(",
         "from\"",
@@ -4104,8 +4107,7 @@ fn embedded_web_react_bundle_is_self_contained() {
         );
     }
     assert!(
-        root_js_module_source("/workspace-state-notice.js")
-            .contains("from \"./react/islands.js\""),
+        root_js_module_source("/workspace-state-notice.js").contains("from \"./react/islands.js\""),
         "the notice surface must mount through the embedded same-origin bundle"
     );
 }
