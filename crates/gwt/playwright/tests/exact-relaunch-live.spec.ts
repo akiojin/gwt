@@ -574,6 +574,7 @@ const at = new Date().toISOString();`);
   }
   if (line.trim() === 'GWT_FIXTURE_EXIT')`);
         let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
+          .replace("const hookProvider = 'codex';", "const hookProvider = 'claude';")
           .replace("'.codex', 'hooks.json'", "'.claude', 'settings.local.json'")
           .replace("const resumed = resumeAt < 0 ? null :", "const resumed = option('--resume') || (resumeAt < 0 ? null :")
           .replace(" ?? null);\nconst requested", " ?? null));\nconst requested");

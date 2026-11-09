@@ -336,6 +336,7 @@ const terminalActorFailure = error => {
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
+const hookProvider = 'codex';
 const args = process.argv.slice(2);
 if (args.includes('--version') || args.includes('-V')) {
   console.log('codex-cli 0.116.0'); process.exit(0);
@@ -376,9 +377,12 @@ try {
   const input = JSON.stringify({session_id:native,hook_event_name:'SessionStart',source:resumed ? 'resume' : 'startup',cwd:process.cwd(),transcript_path:rollout,model:option('--model')});
   for (const group of hooks.hooks?.SessionStart ?? []) for (const hook of group.hooks ?? []) {
     if (hook.type !== 'command') continue;
-    const windows = process.platform === 'win32';
+    // Claude interprets managed hooks through a POSIX shell on every platform.
+    const windows = process.platform === 'win32' && hookProvider === 'codex';
+    const posixShell = process.platform === 'win32'
+      ? path.join(process.env.ProgramFiles, 'Git', 'bin', 'bash.exe') : '/bin/sh';
     startupEvent('session_start_hook_begin');
-    const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh',
+    const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : posixShell,
       windows ? ['/d','/s','/c',hook.command] : ['-c',hook.command],
       {input, stdio:['pipe','ignore','inherit'], timeout:60000, windowsHide:true, windowsVerbatimArguments:windows});
     startupEvent('session_start_hook_returned',{exit_status:result.status,signal:result.signal,error_code:result.error?.code ?? null});
