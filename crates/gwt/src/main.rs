@@ -2236,6 +2236,8 @@ enum UserEvent {
         waiting: bool,
     },
     IssueMonitorLaunchPrepared(Box<app_runtime::IssueMonitorLaunchPrepared>),
+    /// Issue #5379: startup restore admission verdicts from the blocking worker.
+    StartupAutoResumeAdmissionPrepared(Box<app_runtime::StartupAutoResumeAdmissionPrepared>),
     IssueMonitorPreflightRejected(Box<app_runtime::IssueMonitorPreflightRejected>),
     IssueMonitorLaunchFactsPrefetched(Box<app_runtime::IssueMonitorLaunchFactsPrefetched>),
     IssueMonitorLaunchRequest {
@@ -4846,6 +4848,7 @@ mod tests {
             next_project_incarnation += 1;
         }
         let mut runtime = AppRuntime {
+            mobile_host: Default::default(),
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: None,
             issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
@@ -4915,6 +4918,8 @@ mod tests {
             pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
+            startup_auto_resume_admission_in_flight: false,
+            startup_restore_drain_phase: None,
             update_resume_tab_ids: std::collections::HashSet::new(),
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
@@ -11359,6 +11364,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchPrepared(prepared)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
+            }
+            Event::UserEvent(UserEvent::StartupAutoResumeAdmissionPrepared(prepared)) => {
+                clients.dispatch(app.startup_auto_resume_admission_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
                 clients.dispatch(app.handle_monitor_preflight_rejected(*completion));

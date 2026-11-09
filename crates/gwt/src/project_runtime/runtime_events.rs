@@ -260,11 +260,8 @@ impl OrdinaryAgentErrorDetail {
         {
             return None;
         }
-        let tail = screen_tail_text(final_screen, 3, " ");
-        let (detail, kind) = tagged_agent_error_detail(self.base_detail.clone(), tail.as_deref());
-        (kind == AgentErrorDetailKind::RecognizedActionable)
-            .then_some(detail)
-            .flatten()
+        let tail = screen_tail_text(final_screen, 3, " ")?;
+        tagged_agent_error_detail(self.base_detail.clone(), Some(&tail)).0
     }
 }
 
@@ -780,7 +777,7 @@ mod tests {
     use crate as gwt;
 
     #[test]
-    fn late_agent_detail_promotes_only_new_actionable_output_from_the_original_base() {
+    fn late_agent_detail_refines_final_output_from_the_original_base() {
         use super::{classify_exit, ExitPolicyInput, RuntimePolicyState};
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-22T09:00:00Z")
             .unwrap()
@@ -813,9 +810,14 @@ mod tests {
             Some("Process exited with status 1 — last output: partial output")
         );
         assert!(context.promote("", Some("codex"), None).is_none());
-        assert!(context
-            .promote("more generic output", Some("codex"), None)
-            .is_none());
+        assert_eq!(
+            context
+                .promote("unexpected fatal: config parse error", Some("codex"), None)
+                .as_deref(),
+            Some(
+                "Process exited with status 1 — last output: unexpected fatal: config parse error"
+            )
+        );
         let promoted = context
             .promote(super::EXACT_RESUME_FAILURE_SIGNATURE, Some("codex"), None)
             .expect("new actionable diagnosis");

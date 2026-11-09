@@ -1,6 +1,10 @@
 #Requires -Version 7.0
 [CmdletBinding(PositionalBinding = $false)]
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments)
+param(
+    [string]$Spec = 'window-interrupted-state.spec.ts',
+    [string]$Grep = 'operation failure',
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
+)
 
 $ErrorActionPreference = 'Stop'
 $checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -140,7 +144,7 @@ try {
         $savedRunner[$key] = [Environment]::GetEnvironmentVariable($key)
         [Environment]::SetEnvironmentVariable($key, $runner[$key])
     }
-    & node $cli test window-interrupted-state.spec.ts --grep "operation failure" --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
+    & node $cli test $Spec --grep $Grep --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
     $exitCode = $LASTEXITCODE
 } finally {
     foreach ($key in $savedRunner.Keys) { [Environment]::SetEnvironmentVariable($key, $savedRunner[$key]) }

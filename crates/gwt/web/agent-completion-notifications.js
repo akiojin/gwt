@@ -107,7 +107,7 @@ export function createAgentCompletionNotifier({
 //
 // Distinct from the server-intent desktop sink above. This is the
 // in-app, always-on counterpart: the moment an agent transitions into a state
-// that wants the operator's eyes (needs_input / blocked / error / done), a
+// that wants the operator's eyes (needs_input / error), a
 // quiet in-app toast appears even while the operator is present. Clicking a
 // toast selects that window in its surface (frameWindow), so attention is one
 // click from action. Pure controller: DOM rendering is injected via
@@ -116,8 +116,6 @@ export function createAgentCompletionNotifier({
 const ATTENTION_STATES = Object.freeze({
   waiting: "needs_input",
   error: "error",
-  stopped: "done",
-  exited: "done",
 });
 
 function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail = "" }) {
@@ -135,13 +133,6 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail =
         flavor,
         title: "Agent error",
         body: appendStatusDetail(`${agentName} hit an error.`, statusDetail),
-        windowId,
-      };
-    case "done":
-      return {
-        flavor,
-        title: "Agent stopped",
-        body: `${agentName} stopped.`,
         windowId,
       };
     default:

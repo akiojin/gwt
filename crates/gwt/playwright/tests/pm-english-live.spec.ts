@@ -27,6 +27,7 @@ test.describe('English application UI', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
 
       const pm = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      await pm.getByRole('button', { name: 'Reports', exact: true }).click();
       await expect(pm.getByRole('log', { name: 'PM reports', exact: true })).toBeVisible({ timeout: 30_000 });
       await expect(pm.getByRole('button', { name: 'Reports', exact: true })).toBeVisible();
       await expect(pm.getByRole('button', { name: 'Execution log', exact: true })).toBeVisible();
