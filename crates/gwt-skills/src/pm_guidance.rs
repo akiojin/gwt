@@ -439,14 +439,32 @@ Hard limits, no exceptions:
   - two user instructions that genuinely conflict and both still apply.
     When one is newer and clearly supersedes the other, follow the newer
     one without asking.
-- When you do ask, ask once: state the question, your recommendation
-  and why, and a copy-paste answer, so one reply settles it.
+- When you do ask, ask once using the [choice-first question format](#choice-first-questions):
+  state the question, your recommendation and why, so one reply settles it.
 - While a question is pending, proceed with the recommended option when
   it is reversible and already within your authority, and say so; keep other
   fleet work moving. A pending permission request does not authorize the action.
 - When the user leaves a decision to you ("任せる" or equivalent),
   record that this class of decision is delegated and do not ask it
   again. Delegation does not create permission for a gated operation.
+
+## Choice-first questions
+
+- For a decision or confirmation whose answers can be enumerated, offer
+  2-4 distinct choices. Put the recommended choice first and mark it
+  `(Recommended)` in the user's language. Include one line explaining the
+  outcome of each choice and a brief reason for the recommendation.
+- Use the provider's native choice UI when available, such as Claude Code's
+  `AskUserQuestion`. Always allow an `Other` free-text answer; do not invent
+  a predefined answer when the user needs to provide their own.
+- When no choice UI is available, show numbered choices and say that
+  replying with the number is enough. Keep the free-text alternative.
+- Free-text-only questions with an answer example are allowed when the
+  answer inherently needs names, numbers, or original descriptions.
+  Never use a free-text-only question when the answers can be enumerated.
+- A recommended or preselected choice is not a submitted answer or approval.
+  Keep the existing permission boundaries and wait for actual authorization
+  whenever it is required.
 
 ## Scoped permissions and native approval
 
@@ -800,10 +818,14 @@ Use this wire through the existing operation; do not attach legacy `body`,
   or update. Do not repeat the offer for status queries, monitor events, or
   replies within the same intake. Immediate registration remains the default
   for every request type unless the user opts into refinement.
-- Before registration, offer one optional line in the user's language:
-  "Would you like to refine the details? Otherwise I will proceed with the
-  defaults." Do not wait for a reply or repeat the question. If the user says
-  no or gives no answer, continue the default intake and registration below.
+- Before registration, offer one optional choice in the user's language using
+  the [choice-first question format](role-and-boundaries.md#choice-first-questions).
+  Use a nonblocking native choice UI, or numbered text if the available UI
+  would wait for input: "1. Proceed with defaults (Recommended) — register now;
+  2. Refine details — discuss and refine the same Issue; Other — describe your
+  preference." Recommend defaults to keep registration moving. Do not wait
+  for a reply or repeat the question. If the user chooses defaults or gives no
+  answer, continue the default intake and registration below.
 - If the user opts in, follow the existing `gwt-discussion` skill and its
   references for investigation and clarification; do not duplicate its dialogue
   flow here. Explicit opt-in permits that skill's questions instead of the
@@ -827,8 +849,8 @@ Use this wire through the existing operation; do not attach legacy `body`,
   asking the user.
 - Outside opted-in refinement, ask the user only when a branch is irreversible
   or determines a core specification choice. Present all remaining questions in a single batch;
-  each question includes your recommendation and rationale plus a copy-paste
-  answer example.
+  use the [choice-first question format](role-and-boundaries.md#choice-first-questions)
+  for each question, including your recommendation and rationale.
 - For every branch registered using a PM default, add a Notes entry to the
   Issue body in the form `PM default ruling (override available): ...`.
   Record the branch, chosen default, and rationale, and tell the user that a
@@ -2579,7 +2601,8 @@ and urgency.
   immediately when first detected or materially changed, using the affected
   window title and the action required
   from the user. For a decision wait, include the question, your
-  recommendation and rationale, and a copy-paste answer example. Never
+  recommendation and rationale using the
+  [choice-first question format](role-and-boundaries.md#choice-first-questions). Never
   reduce the handoff to an instruction to write something in another
   window. Reuse the sanitized episode summary; subsequent supervision does not
   authorize another `pane.read`.
@@ -3058,7 +3081,7 @@ mod tests {
             "every branch that is neither irreversible nor a core specification choice",
             "irreversible or determines a core specification choice",
             "single batch",
-            "copy-paste answer example",
+            "role-and-boundaries.md#choice-first-questions",
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
@@ -3638,6 +3661,44 @@ mod tests {
     }
 
     #[test]
+    fn generated_user_questions_default_to_choices_for_both_providers() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let references = dir.path().join(provider).join("skills/gwt-pm/references");
+            let role = unwrapped(
+                &std::fs::read_to_string(references.join("role-and-boundaries.md")).unwrap(),
+            );
+            for required in [
+                "## Choice-first questions",
+                "2-4 distinct choices",
+                "recommended choice first",
+                "one line explaining the outcome of each choice",
+                "`Other` free-text answer",
+                "provider's native choice UI",
+                "`AskUserQuestion`",
+                "numbered choices",
+                "replying with the number is enough",
+                "names, numbers, or original descriptions",
+                "Never use a free-text-only question when the answers can be enumerated",
+            ] {
+                assert!(role.contains(required), "{provider}: missing {required}");
+            }
+            for name in ["intake-and-priority.md", "escalation-and-reporting.md"] {
+                let reference = std::fs::read_to_string(references.join(name)).unwrap();
+                assert!(
+                    reference.contains("role-and-boundaries.md#choice-first-questions"),
+                    "{provider}/{name}: missing shared question format"
+                );
+                assert!(
+                    !reference.contains("Would you like to refine the details?"),
+                    "{provider}/{name}: stale free-text-only intake question"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn contract_delegates_request_intake_and_minimizes_user_questions() {
         assert!(body().contains(
             "No intermediate confirmation questions except for the intake questions explicitly allowed below"
@@ -3659,17 +3720,21 @@ mod tests {
             "every branch that is neither irreversible nor a core specification choice",
             "irreversible or determines a core specification choice",
             "single batch",
-            "copy-paste answer example",
+            "role-and-boundaries.md#choice-first-questions",
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
             "Offer once for each new user work request that may require Issue registration or update.",
             "Do not repeat the offer for status queries, monitor events, or replies within the same intake.",
             "Immediate registration remains the default for every request type unless the user opts into refinement.",
-            "Before registration, offer one optional line",
-            "Would you like to refine the details?",
+            "Before registration, offer one optional choice",
+            "Use a nonblocking native choice UI",
+            "numbered text if the available UI would wait for input",
+            "1. Proceed with defaults (Recommended)",
+            "2. Refine details",
+            "Other",
             "Do not wait for a reply",
-            "If the user says no or gives no answer",
+            "If the user chooses defaults or gives no answer",
             "If the user opts in, follow the existing `gwt-discussion` skill",
             "Use `gwt-plan-spec` when the resulting design-required Issue needs planning",
             "same Issue's `spec` section / acceptance criteria",
@@ -3723,7 +3788,8 @@ mod tests {
             "Default each user-facing report to 3-6 lines",
             "Every unresolved user-input or decision wait is an escalation",
             "first detected or materially changed",
-            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "the question, your recommendation and rationale using the",
+            "role-and-boundaries.md#choice-first-questions",
             "Build a stalled-item inventory every cycle",
             "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, `AUTO-MERGE-STALLED`, or `escalation_due`, pending PM-owned feedback triage, and quiet agents",
             "Advance at least one item from that inventory in every cycle",
@@ -4989,9 +5055,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         ] {
             assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
         }
-        assert!(intake.contains("Before registration, offer one optional line"));
+        assert!(intake.contains("Before registration, offer one optional choice"));
         assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
-        assert!(intake.contains("If the user says no or gives no answer"));
+        assert!(intake.contains("If the user chooses defaults or gives no answer"));
         assert!(claude.contains("Only canonical `verify.run` acquires the host-wide lease"));
         for phrase in [
             "develop uses `strict=false`",
