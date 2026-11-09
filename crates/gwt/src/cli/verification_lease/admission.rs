@@ -698,13 +698,8 @@ fn admit_inner<E: CliEnv>(
     let shared = target.is_some() || short_slot_gate;
     let budgets = match command {
         Some(command) => {
-            let temporary = verification_lease::command_temporary_base(worktree, command)
-                .map_err(unexpected)?;
-            let paths = vec![
-                target.clone().unwrap_or_else(|| worktree.join("target")),
-                temporary,
-            ];
-            verification_lease::command_disk_budgets(&paths).map_err(unexpected)?
+            verification_lease::command_admission_disk_budgets(worktree, command, target.as_deref())
+                .map_err(unexpected)?
         }
         None => Vec::new(),
     };

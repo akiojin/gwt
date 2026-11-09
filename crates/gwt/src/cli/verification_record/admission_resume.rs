@@ -8,7 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gwt_core::index_coordinator::IndexCoordinator;
+use gwt_core::index_coordinator::{IndexCoordinator, VerificationDiskBudget};
+
+use crate::cli::verification_lease;
 
 const POLL: Duration = Duration::from_secs(5);
 const MAX_WATCH: Duration = Duration::from_secs(3 * 60 * 60);
@@ -53,6 +55,7 @@ fn run_resume(worktree: &Path, id: &str, token: &str, admitted: bool) -> io::Res
             &session,
             &coordinator,
             admitted,
+            |command| command_disk_budgets(worktree, command),
             |commands| {
                 let text = if admitted {
                     "[gwt] Your waiting verify.run has been admitted. Resume the unfinished task by inspecting verify.status and waiting for the existing tool result. Do not start another verify.run while this attempt is alive.".to_string()
@@ -91,9 +94,48 @@ pub(super) fn poll(
     coordinator: &IndexCoordinator,
     notify: impl FnMut(&[String]) -> io::Result<bool>,
 ) -> io::Result<bool> {
-    poll_resume(worktree, id, token, session, coordinator, false, notify)
+    poll_resume(
+        worktree,
+        id,
+        token,
+        session,
+        coordinator,
+        false,
+        |_| Ok(Vec::new()),
+        notify,
+    )
 }
 
+#[cfg(test)]
+pub(super) fn poll_with_disk_budgets(
+    worktree: &Path,
+    id: &str,
+    token: &str,
+    session: &str,
+    coordinator: &IndexCoordinator,
+    budgets: impl FnMut(&str) -> io::Result<Vec<VerificationDiskBudget>>,
+    notify: impl FnMut(&[String]) -> io::Result<bool>,
+) -> io::Result<bool> {
+    poll_resume(
+        worktree,
+        id,
+        token,
+        session,
+        coordinator,
+        false,
+        budgets,
+        notify,
+    )
+}
+
+fn command_disk_budgets(worktree: &Path, command: &str) -> io::Result<Vec<VerificationDiskBudget>> {
+    let target = verification_lease::effective_cargo_target(worktree, command, false)
+        .map_err(io::Error::other)?;
+    verification_lease::command_admission_disk_budgets(worktree, command, target.as_deref())
+        .map_err(io::Error::other)
+}
+
+#[allow(clippy::too_many_arguments)] // Keep the deferred disk probe and admitted notification on one fenced poll.
 fn poll_resume(
     worktree: &Path,
     id: &str,
@@ -101,19 +143,42 @@ fn poll_resume(
     session: &str,
     coordinator: &IndexCoordinator,
     admitted: bool,
+    mut budgets: impl FnMut(&str) -> io::Result<Vec<VerificationDiskBudget>>,
     mut notify: impl FnMut(&[String]) -> io::Result<bool>,
 ) -> io::Result<bool> {
     let Some(commands) = candidate(worktree, id, token, session, admitted)? else {
         return Ok(false);
     };
-    if !admitted
-        && coordinator
+    if !admitted {
+        if coordinator
             .heavy_pool_status()
             .map_err(io::Error::other)?
             .available
             == 0
-    {
-        return Ok(true);
+        {
+            return Ok(true);
+        }
+        for command in commands.iter().filter(|command| {
+            verification_lease::classify_command(command)
+                == verification_lease::CommandWeight::Heavy
+        }) {
+            // Fail closed on an unavailable disk observation: a free slot is
+            // not proof that this matrix can pass admission.
+            let observation = budgets(command).and_then(|budgets| {
+                coordinator
+                    .heavy_pool_status_with_disk_budgets(&budgets)
+                    .map_err(io::Error::other)
+            });
+            match observation {
+                Ok((pool, disks))
+                    if pool.available > 0 && disks.iter().all(|disk| !disk.blocked) => {}
+                Ok(_) => return Ok(true),
+                Err(error) => {
+                    tracing::debug!(%error, "verification resume disk admission observation unavailable");
+                    return Ok(true);
+                }
+            }
+        }
     }
     Ok(!notify(&commands)?)
 }
