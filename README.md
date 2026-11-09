@@ -162,6 +162,12 @@ gwt supports the following built-in agents. Launch Agent lists only installed
 built-in agents that gwt detects; other CLI commands remain available through
 custom agents.
 
+Codex model choices follow its local `models_cache.json` in Launch Wizard and
+Agents settings, with a bundled fallback when the cache is unavailable. Saved
+models that disappear remain unchanged and show a warning. Once every seven
+days, gwt checks for catalog and saved-profile differences and adds each new
+difference to PM Reports once.
+
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
 official distribution metadata confirms a newer version: npm for Codex, Grok,
