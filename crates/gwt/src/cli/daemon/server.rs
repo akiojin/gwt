@@ -730,6 +730,93 @@ async fn disabled_empty_monitor_skips_periodic_scans_but_keeps_explicit_scan_now
     );
 }
 
+/// Automatic retries reuse successful reads even when the previous proposal
+/// lost its revision fence. A new explicit request still bypasses the cache.
+#[cfg(test)]
+#[tokio::test]
+async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fresh() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let _read_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+        &ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_BUDGET,
+        crate::issue_monitor_worker::ISSUE_MONITOR_PERIODIC_READ_MAX_AGE,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let scope = RuntimeScope::new(
+        "abcdef0123456789",
+        "feedfacecafebeef",
+        root,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .unwrap();
+    let hub = BroadcastHub::new();
+    let shutdown = Arc::new(DaemonShutdown::new());
+    let scans = AtomicUsize::new(0);
+    let (observed, mut observations) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let worker = spawn_issue_monitor_worker_with_lease(
+        scope,
+        hub.clone(),
+        shutdown.clone(),
+        crate::IssueMonitorConfig::default(),
+        gwt_core::deadline_budget::HANG_GUARD,
+        IssueMonitorWorkerTestHooks {
+            scan_override: Some(Arc::new(move |monitor| {
+                let index = scans.fetch_add(1, Ordering::SeqCst);
+                observed
+                    .send(gwt_git::gh_rest::monitor_read_max_age_secs())
+                    .unwrap();
+                if index == 0 {
+                    gwt_core::test_support::recv_event(
+                        &release_rx.lock().unwrap(),
+                        "release first scan",
+                    );
+                }
+                Ok(monitor)
+            })),
+            admission_override: Some(Arc::new(Ok)),
+            hold_effects: true,
+            ..Default::default()
+        },
+        None,
+    );
+    let publish = |payload| {
+        hub.publish_issue_monitor_control(DaemonFrame::Event {
+            channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
+            payload: crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                payload,
+                std::process::id(),
+            ),
+        })
+    };
+    // test-hygiene: allow-wall-clock-deadline Channels order the real driver; this timeout only bounds a broken fixture.
+    let result = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+        publish(serde_json::json!({"scan_now": {}})).await.ok()?;
+        let first = observations.recv().await?;
+        // Change the revision while the first scan is blocked, without asking
+        // for a fresh remote read. Its proposal must be rejected and retried.
+        publish(serde_json::json!({"issue_state": {
+            "number": 42, "state": "closed", "updated_at": "2026-11-09T00:00:00Z"
+        }}))
+        .await
+        .ok()?;
+        release_tx.send(()).ok()?;
+        let retry = observations.recv().await?;
+        publish(serde_json::json!({"scan_now": {}})).await.ok()?;
+        let explicit = observations.recv().await?;
+        Some((first, retry, explicit))
+    })
+    .await;
+    let _ = release_tx.send(());
+    shutdown.request();
+    worker.await.unwrap();
+    assert_eq!(result.unwrap(), Some((None, Some(600), None)));
+}
+
 /// Issue #6877 AC-1: a disabled monitor whose prefs hold only ledger residue
 /// (claim identities, launch bindings, autonomous records) has no periodic
 /// scan work. Those projects used to scan GitHub every poll interval.
@@ -1514,7 +1601,8 @@ fn spawn_issue_monitor_worker_with_lease(
         let mut capacity_interval = tokio::time::interval(Duration::from_secs(5));
         let mut revision = 0_u64;
         let mut scan_requested = false;
-        // Issue #6877 AC-2: timer-driven scans accept cached GitHub reads.
+        // Issue #6877 AC-2: timer-driven scans and automatic retries accept
+        // cached reads; controls and effect completion still request fresh reads.
         let mut periodic_scan_requested = false;
         let mut in_flight_scan: Option<InFlightIssueMonitorScan> = None;
         let mut scan_retry_at: Option<Instant> = None;
@@ -1927,7 +2015,7 @@ fn spawn_issue_monitor_worker_with_lease(
                 }
                 _ = wait_for_issue_monitor_deadline(scan_retry_at) => {
                     scan_retry_at = None;
-                    scan_requested = true;
+                    periodic_scan_requested = true;
                 }
                 _ = wait_for_issue_monitor_deadline(admission_watchdog_deadline) => {
                     if let Some(admission) = in_flight_admission.as_mut() {
@@ -1997,7 +2085,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         // Coalesce one retry, but preserve the in-flight handle:
                         // started spawn_blocking work is not abortable and must
                         // remain the sole lane owner until it really joins.
-                        scan_requested = true;
+                        periodic_scan_requested = true;
                         scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                     }
                 }
@@ -2049,7 +2137,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 revision = next_revision;
                                 persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
                                 publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
-                                scan_requested = true;
+                                periodic_scan_requested = true;
                                 scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                             } else {
                                 // A direct prefs writer (for example launch-
@@ -2063,7 +2151,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // Preserve deliveries until a fresh scan commits. In particular,
                                 // a host-drain deferral must not immediately emit itself again.
                                 publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
-                                scan_requested = true;
+                                periodic_scan_requested = true;
                                 tokio::task::yield_now().await;
                             }
                         }
@@ -6848,6 +6936,8 @@ fn spawn_issue_monitor_scan_with_deadline(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
+        // Automatic scans and their retries share the bounded Monitor cache.
+        let _read_max_age = read_max_age.map(gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter);
         #[cfg(any(test, feature = "test-gh-guard"))]
         if let Some(scan) = &test_hooks.scan_override {
             return scan(monitor);
@@ -6860,9 +6950,6 @@ fn spawn_issue_monitor_scan_with_deadline(
         #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
-        // Issue #6877 AC-2: a timer-driven scan serves GitHub reads from the
-        // Monitor caches up to this age instead of spawning `gh` every scan.
-        let _read_max_age = read_max_age.map(gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter);
         // Issue #4391 AC-1: once free space crosses the threshold the
         // `disk_space` warning reports, reclaim merged, idle worktrees'
         // build caches. The sweep runs on its own thread and never holds the
