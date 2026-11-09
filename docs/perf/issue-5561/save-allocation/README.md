@@ -63,4 +63,32 @@ test still verifies unsaved migration data, reloading exact saved values, and
 retaining failed-read negative cache. Index-last publication, disk format,
 public API and event semantics are unchanged. Rollback is a revert of this slice.
 
+## Current headed fixture prerequisites
+
+Canonical run `vrr-185c6723fd664e228d0e2fc46296ac10`, HEAD
+`227da2ae9a18d52921865cdc084a1a8835a5de77`, passed seven commands and failed
+the headed command before observation in both themes. The fresh Projects had
+only a default Codex member, so the custom workload correctly failed admission:
+`No idle Agent member is available`. The subsequent launch error reopened the
+wizard and blocked the Works click. This was not a successful memory observation
+or a simple rendering delay. Original [dark](headed-setup-failed/runtime-memory-dark.json),
+[light](headed-setup-failed/runtime-memory-light.json),
+[source identity](headed-setup-failed/source.json) and
+[owned cleanup](headed-setup-failed/shutdown.json) remain failed evidence.
+
+The fixture now registers the configured command tool through the existing
+correlated Agent roster read/add API, using its committed revision, in each
+disposable Project. Wizard error frames are rejected and actual DOM closure is
+checked before interacting with Works. No overlay is forcibly hidden or closed.
+Producer count, output/survival assertions, duration, budget and browser-error
+checks retain their original values.
+
+The PowerShell wrapper also uses the real managed caller for the typed
+`managed_browser` hook preflight, then launches the GUI and fixture commands in
+the fresh HOME. A fabricated missing runtime path is no longer passed. The
+preflight must report current context, normal completion and converged state;
+[its RED](preflight-red.log) and [GREEN](preflight-green.log) contract also retain
+the existing real-producer cleanup-on-GUI-timeout test. These changes repair
+verification prerequisites; they do not change the product's admission policy.
+
 User Verification Result: n/a (autonomous).

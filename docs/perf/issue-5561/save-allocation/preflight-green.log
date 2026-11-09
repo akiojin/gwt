@@ -1,0 +1,2 @@
+PASS: managed-browser preflight requires the current authenticated context.
+PASS: GUI timeout still stops the real owned producer and writes failure evidence.
