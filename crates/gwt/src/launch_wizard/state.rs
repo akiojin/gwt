@@ -1273,7 +1273,7 @@ impl LaunchWizardState {
     pub(super) fn set_model(&mut self, model: &str) {
         if current_model_options(self.effective_agent_id())
             .iter()
-            .any(|candidate| candidate == &model)
+            .any(|candidate| candidate == model)
         {
             self.model = model.to_string();
             // Issue #3962 AC-5: an explicit pick answers the fallback hint.

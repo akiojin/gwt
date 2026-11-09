@@ -186,7 +186,7 @@ pub fn parse_models_cache(body: &str) -> Option<Vec<CodexModelRow>> {
 pub fn models_cache_path() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        return test_override::path();
+        test_override::path()
     }
     #[cfg(not(test))]
     gwt_core::usage::codex::codex_home().map(|home| home.join("models_cache.json"))
