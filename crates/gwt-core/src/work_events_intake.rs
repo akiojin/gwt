@@ -1794,6 +1794,9 @@ impl WorkEventsIntakeStore {
             }
             report.groups_written += 1;
             report.bytes_written += body.len() as u64;
+            // Persisted sources can be reloaded; do not retain every saved
+            // group while later groups and the index are serialized.
+            self.loaded.remove(&group);
         }
 
         self.index.format = INTAKE_STORE_FORMAT;
@@ -4064,7 +4067,10 @@ mod tests {
         );
         assert!(store.loaded.contains_key(group));
         store.save().unwrap();
-        assert!(store.evict_clean_group_sources(group));
+        assert!(
+            store.loaded.is_empty(),
+            "successfully persisted groups must release their source maps"
+        );
         assert!(!store.loaded.contains_key(group));
         assert_eq!(store.group_sources(group).unwrap().len(), 4);
         assert_eq!(store.to_state().unwrap(), expected);

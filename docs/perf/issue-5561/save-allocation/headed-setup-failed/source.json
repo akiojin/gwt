@@ -1,0 +1,17 @@
+{
+  "limitations": "Deterministic command Agent PTYs, not real model inference/hooks/builds.",
+  "requested_seconds": 60,
+  "head": "227da2ae9a18d52921865cdc084a1a8835a5de77",
+  "source_sha256": {
+    "crates/gwt/src/work_events_ingest.rs": "4e2048628cfa06835bd836c877da12346eb4ba5e94b536dfe5e21e8397f1c1da",
+    "crates/gwt-git/src/blob.rs": "57d990e314b4b9dc0ea3af233cb1dd40a603bde5dca33162268f364615220a09",
+    "crates/gwt-core/src/work_events_intake.rs": "7facc1cffdd12f13e1825a56af674ffc7901c31d40316a387e815b910a804d58"
+  },
+  "budget_bytes": 1500000000,
+  "source_hash_rule": "UTF-8/LF, excluding the exact temporary source-probe include line",
+  "pane_count": 12,
+  "started_at": "2026-11-09T03:32:11.9971043Z",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "label": "after",
+  "binary_sha256": "ac80b0e0e4d103e8184a00daeed797d828d9972e05bbe586dce03d84f2b5a176"
+}

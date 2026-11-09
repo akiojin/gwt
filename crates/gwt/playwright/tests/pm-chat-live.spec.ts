@@ -14,7 +14,7 @@ const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
 const ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? '';
 const SESSION = 'pm-reports-fixture';
 
-async function gotoPmReports(page: Page, projectKey?: string, base = BASE) {
+async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepTasks = false) {
   await gotoLiveGwt(page, base, { enableTestBridge: true, projectKey });
   // PM registration settles after the first workspace projection in this
   // stopped-PM fixture. Read its current projection before testing views.
@@ -26,6 +26,7 @@ async function gotoPmReports(page: Page, projectKey?: string, base = BASE) {
   // selects its surface without starting an agent.
   await expect(page.locator('#op-pm-entry')).toHaveAttribute('data-pm-state', 'stopped');
   await page.locator('#op-pm-entry').click();
+  if (!keepTasks) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
 }
 
 async function refreshPmReports(page: Page) {
@@ -72,6 +73,7 @@ test.describe('PM reports', () => {
         await expect(messages).toHaveCount(37);
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
         await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+        await pane.getByRole('button', { name: 'Tasks', exact: true }).click();
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
 
@@ -142,6 +144,7 @@ test.describe('PM reports', () => {
       await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
       await pane.getByRole('button', { name: 'Reports', exact: true }).click();
       await emit('terminal_snapshot', 220);
+      await pane.getByRole('button', { name: 'Tasks', exact: true }).click();
       await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
       await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 220');
       await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
@@ -1337,7 +1340,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-UTASK-USER-REOPEN/CANCEL/UPDATE and T-UTASK-USER-COMPLETE persist browser authority and reconcile receipts after reconnect', async ({ page }, info) => {
+  test('T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1565,6 +1568,71 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: noopRequest.operation_id })).toEqual({ ...updated, receipt: noop.receipt });
       expect(readFileSync(statePath, 'utf8')).toBe(updatedBytes);
+
+      // Extend this owned, receipt-consistent fixture for read-only overview
+      // coverage. This scaffolding does not prove native intake or PM actions.
+      const overviewState = JSON.parse(updatedBytes);
+      const overviewSource = { ...seed.sources[pendingTask.source_id], id: 'overview-source',
+        authority: { ...seed.sources[pendingTask.source_id].authority, turn_id: 'synthetic-overview-turn' } };
+      const rootTask = { ...pendingTask, source_id: overviewSource.id,
+        draft: { ...draft, id: 'overview-root', title: 'Original request still pending', assignee: 'PM' } };
+      const childTask = { ...pendingTask, source_id: overviewSource.id, parent_id: rootTask.draft.id,
+        draft: { ...draft, id: 'overview-child', title: 'Verify remaining outcome', assignee: 'Reviewer' } };
+      const appendFixtureReceipt = (actor: { kind: string; id: string }, action: Record<string, unknown>, tasks: unknown[]) => {
+        const operation_id = `overview-fixture-${overviewState.revision}`;
+        const request = { operation_id, expected_revision: overviewState.revision, reason: 'Synthetic overview fixture only', action };
+        overviewState.receipts.push({ operation_id, action: action.kind,
+          request_digest: createHash('sha256').update(JSON.stringify([actor, request])).digest('hex'),
+          revision: ++overviewState.revision, actor, at: '2026-11-06T00:00:00Z', reason: request.reason,
+          source_id: overviewSource.id, tasks });
+      };
+      appendFixtureReceipt({ kind: 'intake', id: 'synthetic-fixture-intake' }, { kind: 'capture', source: overviewSource }, []);
+      appendFixtureReceipt(fixturePm, { kind: 'decompose', source_id: overviewSource.id,
+        root: rootTask.draft, children: [childTask.draft] }, [rootTask, childTask]);
+      const waitingChild = { ...childTask, status: 'waiting', wait_reason: 'CI verdict', next_action: 'Review required checks' };
+      appendFixtureReceipt(fixturePm, { kind: 'progress', task_id: childTask.draft.id, status: 'waiting',
+        wait_reason: waitingChild.wait_reason, next_action: waitingChild.next_action }, [waitingChild]);
+      overviewState.sources[overviewSource.id] = overviewSource;
+      overviewState.tasks[rootTask.draft.id] = rootTask;
+      overviewState.tasks[childTask.draft.id] = waitingChild;
+      const overviewBytes = JSON.stringify(overviewState);
+      writeFileSync(statePath, overviewBytes);
+      await gotoPmReports(page, undefined, target.url, true);
+      const chat = page.locator('.pm-chat');
+      const tasksView = chat.getByRole('region', { name: 'Request tasks' });
+      await expect(chat.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(tasksView).toBeVisible();
+      await expect(tasksView.locator('.pm-chat__task')).toHaveCount(2);
+      await expect(tasksView).toContainText('Part of: Original request still pending');
+      await expect(tasksView).toContainText('Waiting: CI verdict');
+      await expect(tasksView).toContainText('Next: Review required checks');
+      const completedFilter = tasksView.getByRole('button', { name: 'Include completed', exact: true });
+      await completedFilter.focus();
+      await page.keyboard.press('Enter');
+      await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+      await expect(tasksView).toContainText('Cancelled');
+      await expect(tasksView).toContainText('PM reassessment required');
+      await expect(completedFilter).toBeFocused();
+      try {
+        writeFileSync(statePath, 'broken task store');
+        await refreshPmReports(page);
+        await expect(tasksView.getByRole('status')).toContainText('last confirmed list');
+        await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+      } finally {
+        writeFileSync(statePath, overviewBytes);
+      }
+      await refreshPmReports(page);
+      await expect(tasksView.getByRole('status')).toContainText('3 of 3 recorded tasks shown');
+      await chat.getByRole('button', { name: 'Reports', exact: true }).click();
+      await expect(chat.locator('.pm-chat__body')).toBeVisible();
+      await chat.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await expect(page.locator('.pm-conversation-log')).toBeVisible();
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      await expect(completedFilter).toHaveAttribute('aria-pressed', 'true');
+      await page.setViewportSize({ width: 720, height: 1000 });
+      await expect(tasksView).toBeVisible();
+      expect(await tasksView.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await info.attach(`T-UTASK-OV ${theme} Tasks`, { body: await tasksView.screenshot(), contentType: 'image/png' });
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
@@ -1573,7 +1641,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       try {
         await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE ${theme} transport and persistence`, {
           body: JSON.stringify({ synthetic_fixture_seed: true, native_intake_proof: false,
-            production_task_ui: false, theme, seed, exchanges, console_page_errors: errors,
+            production_task_ui: true, read_only_overview: true, theme, seed, exchanges, console_page_errors: errors,
             persisted: JSON.parse(readFileSync(statePath, 'utf8')) }), contentType: 'application/json',
         });
         const screenshot = info.outputPath(`task-reopen-transport-${theme}.png`);
@@ -1651,6 +1719,7 @@ test('typed model content selects the renderer across surfaces', async ({ page }
       const pm = pmModule.createPmWindowModel();
       const reports = pmModule.createPmChat({ document, root: reportsRoot, sessionId: 'typed-session',
         onLogVisibility: noop, copyText: async (text: string) => { copied.push(text); } });
+      reports.showReports();
       cleanup.push(() => reports.dispose(), () => pm.removePmWindowState('typed-pm'));
       pm.bindPmWindowState('typed-pm', 'typed-session');
       cleanup.push(pm.subscribePmWindowState((state: any) => state.windows['typed-pm'], (state: any) => reports.update(state)));

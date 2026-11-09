@@ -3035,13 +3035,16 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     );
     drain_queued_blocking_tasks(&queued_tasks);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    // An unrelated prefs edit makes freshness revalidation deterministic.
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        prefs.priority_order.push(9001);
-        Ok(())
-    })
-    .unwrap();
+    // A legitimate prefs refresh can add a preparation callback before the
+    // exact live holder's physical submit is scheduled.
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            prefs.priority_order.push(9001);
+            Ok(())
+        },
+    )
+    .expect("change unrelated queue priority before handoff revalidation");
     fixture
         .runtime
         .handle_issue_monitor_launch_prepared(prepared);

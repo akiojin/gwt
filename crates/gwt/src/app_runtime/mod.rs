@@ -1065,6 +1065,7 @@ mod title_sync;
 mod ui_trace;
 mod window;
 mod wizard;
+pub(crate) use startup::StartupAutoResumeAdmissionPrepared;
 pub(crate) use wizard::{
     IssueMonitorLaunchFactsPrefetched, IssueMonitorLaunchPrepared, IssueMonitorPreflightRejected,
 };
@@ -2035,6 +2036,8 @@ pub(crate) enum WindowCloseMonitorResult {
 }
 
 pub struct AppRuntime {
+    /// Revoke mobile authority before dropping the remaining runtime fields.
+    pub(crate) mobile_host: gwt::mobile_host::MobileHost,
     #[cfg(test)]
     pub(crate) test_project_owners:
         HashMap<PathBuf, Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>>,
@@ -2189,6 +2192,11 @@ pub struct AppRuntime {
     /// the PTY is live or the window closes.
     pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
+    /// Issue #5379: a blocking worker holds the queued startup restores while
+    /// it evaluates their Project admission off the GUI thread.
+    pub(crate) startup_auto_resume_admission_in_flight: bool,
+    /// The startup restore drain phase, closed by the drain's tail.
+    pub(crate) startup_restore_drain_phase: Option<gwt::perf::startup::PhaseTimer>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
     /// terminal close, keyed by combined window id. Process-local only.
@@ -5120,6 +5128,7 @@ impl AppRuntime {
             Arc::new(persist_dispatcher::PersistDispatcher::new(&blocking_tasks));
         pty_io::initialize_process_window_close_finalizer()?;
         let mut app = Self {
+            mobile_host: Default::default(),
             #[cfg(test)]
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: runtime_namespace_gc,
@@ -5189,6 +5198,8 @@ impl AppRuntime {
             pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
+            startup_auto_resume_admission_in_flight: false,
+            startup_restore_drain_phase: None,
             active_agent_sessions: HashMap::new(),
             issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),

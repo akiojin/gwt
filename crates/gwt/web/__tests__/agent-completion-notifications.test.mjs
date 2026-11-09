@@ -129,14 +129,15 @@ test("FR-040: needs_input (waiting) fires an in-app toast even while present", (
   assert.equal(toasts.length, 1);
 });
 
-test("FR-040: blocked/error and done states also toast", () => {
+test("AS-01: errors toast but stopped/exited/interrupted never claim completion", () => {
   const { toaster, toasts } = collectAttentionToaster();
   toaster.handleRuntimeState({ windowId: "w-err", runtimeState: "error", windowData: { title: "a" } });
   toaster.handleRuntimeState({ windowId: "w-done", runtimeState: "stopped", windowData: { title: "b" } });
   toaster.handleRuntimeState({ windowId: "w-exit", runtimeState: "exited", windowData: { title: "c" } });
+  toaster.handleRuntimeState({ windowId: "w-intr", runtimeState: "interrupted", windowData: { title: "d" } });
   assert.deepEqual(
     toasts.map((t) => t.flavor),
-    ["error", "done", "done"],
+    ["error"],
   );
 });
 
@@ -177,11 +178,12 @@ test("FR-040: leaving and re-entering an attention state toasts again", () => {
   assert.equal(toasts.length, 2, "re-entry into waiting after running must toast again");
 });
 
-test("FR-040: error -> done transition toasts each distinct flavor", () => {
-  const { toaster, toasts } = collectAttentionToaster();
+test("AS-01: error -> stopped clears error attention without a completion toast", () => {
+  const { toaster, toasts, dismissed } = collectAttentionToaster();
   toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "error", windowData: {} });
   toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "stopped", windowData: {} });
-  assert.deepEqual(toasts.map((t) => t.flavor), ["error", "done"]);
+  assert.deepEqual(toasts.map((t) => t.flavor), ["error"]);
+  assert.deepEqual(dismissed, ["attention-w-1"]);
 });
 
 test("FR-040: forgetWindow clears dedupe so a fresh window toasts", () => {
@@ -295,9 +297,8 @@ test("typed inputs retain source authority and never infer NeedsHuman from Waiti
   assert.doesNotMatch(notice.title, /complete|finish/i);
 });
 
-test("Stopped attention says stopped, without claiming work finished", () => {
-  const {toaster} = collectAttentionToaster();
-  const notice = toaster.handleRuntimeState({windowId: "one", runtimeState: "stopped"});
+test("Stopped desktop copy stays factual without claiming work finished", () => {
+  const notice = notifications.notificationForTransition({source: "runtime", state: "stopped"});
   assert.equal(notice.title, "Agent stopped");
   assert.doesNotMatch(notice.title, /finish|complete/i);
 });

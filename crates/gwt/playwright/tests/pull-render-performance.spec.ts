@@ -1094,6 +1094,7 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
     }
     const pm = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
     await expect(pm).toHaveCount(1);
+    await pm.getByRole('button', { name: 'Reports', exact: true }).click();
     await expect(pm.getByRole('log', { name: 'PM reports' })).toBeVisible();
     const fixedRendererPids = rendererPids((await browserCdp.send('SystemInfo.getProcessInfo')).processInfo);
     clockBrackets.push(await browserClock(page));

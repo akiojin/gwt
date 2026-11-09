@@ -4064,3 +4064,19 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );
 }
+
+#[test]
+fn embedded_web_pm_tasks_uses_the_shared_model_and_operator_tokens() {
+    let pm_chat = root_js_module_source("/pm-chat.js");
+    assert!(pm_chat.contains("requestTasks"));
+    assert!(pm_chat.contains("pm-chat__tasks"));
+    assert!(pm_chat.contains("showTasks"));
+    let styles = styles_components_css();
+    let tasks = styles.split(".pm-chat__tasks").nth(1).expect("Task styles");
+    let block = tasks.split('}').next().unwrap();
+    assert!(block.contains("var(--"));
+    assert!(!block.contains('#'));
+    assert!(!block.contains("rgb("));
+    assert!(!block.contains("rgba("));
+    assert!(!block.contains("position: fixed"));
+}

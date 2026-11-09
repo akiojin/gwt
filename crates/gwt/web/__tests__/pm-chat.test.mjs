@@ -14,12 +14,13 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
     details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
   details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
 
-function fixture() {
+function fixture({ tasksDefault = false } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [];
   const view = createPmChat({ document, root, sessionId: 'session',
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text) });
+  if (!tasksDefault) view.showReports();
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
@@ -34,6 +35,71 @@ function fixture() {
   };
   return { root, model, view, visibility, copied, update };
 }
+
+const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
+  pending_intake, tasks });
+const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task ${key}`,
+  status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
+  review_required: false, ...extra });
+
+test('Tasks is the default PM view and preserves the unfinished filter and stable rows', () => {
+  const { root, update, view, model } = fixture({ tasksDefault: true });
+  update([report()], null, { request_tasks: taskOverview([
+    trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
+      wait_reason: 'Waiting for CI', review_required: true }),
+    trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
+  ]) });
+  const tasks = root.querySelector('.pm-chat__tasks');
+  assert.ok(tasks, 'a separate Tasks surface exists');
+  assert.equal(tasks.hidden, false);
+  assert.equal(root.querySelector('.pm-chat__body').hidden, true);
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 2);
+  assert.match(tasks.textContent, /Waiting for CI/);
+  assert.match(tasks.textContent, /PM reassessment required/);
+  assert.match(tasks.textContent, /Part of: Task parent/);
+  assert.match(tasks.textContent, /2 requests await classification/);
+  const row = root.querySelector('.pm-chat__task');
+  update([report('new')], null, { request_tasks: taskOverview([
+    trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
+      wait_reason: 'Waiting for CI', review_required: true }),
+    trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
+  ], 0) });
+  assert.match(tasks.textContent, /0 requests await classification/);
+  assert.equal(root.querySelector('.pm-chat__task'), row, 'report polls do not replace Task rows');
+  const noticeNode = tasks.querySelector('[role="status"]').firstChild;
+  update([report('poll')], null, model.readPmWindowState().windows.pm.current);
+  assert.ok(tasks.querySelector('[role="status"]').firstChild === noticeNode,
+    'unchanged polls do not replace the live status text');
+  const filter = [...tasks.querySelectorAll('button')].find(node => node.textContent === 'Include completed');
+  filter.click();
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+  view.showReports();
+  assert.equal(tasks.hidden, true);
+  assert.equal(root.querySelector('.pm-chat__body').hidden, false);
+  view.showTasks();
+  assert.equal(filter.getAttribute('aria-pressed'), 'true');
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
+  const { root, model, update } = fixture({ tasksDefault: true });
+  update([], null, { request_tasks: taskOverview([trackedTask('known')]) });
+  const before = model.readPmWindowState().windows.pm.requestTasks;
+  assert.equal(before?.state, 'ready');
+  assert.ok(Object.isFrozen(before));
+  update([], null, { request_tasks: { state: 'error', message: 'Unreadable task store' } });
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks, before);
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 1);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /last confirmed list.*Unreadable task store/s);
+  update([], 'Unreadable reports', { request_tasks: taskOverview([trackedTask('fresh')]) });
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks.tasks[0].key, 'fresh',
+    'Reports failure cannot hide independently confirmed Task data');
+  update([], null, { request_tasks: { state: 'absent' } });
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 0);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /No request tasks have been recorded/);
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks, null, 'a new session clears the old projection');
+});
 
 test('Reports revisions recover gaps and fence stale requests without starving slow replies', () => {
   const model = createPmWindowModel();
@@ -332,10 +398,10 @@ test('report kind filter retains its selection on polling and hides with the exe
   }
   choose('blocker');
   assert.equal(root.querySelectorAll('article').length, 0);
-  assert.match(root.querySelector('[role="status"]').textContent, /No Blocker reports yet/);
-  root.querySelectorAll('.pm-chat__toolbar button')[1].click();
+  assert.match(root.querySelector('.pm-chat__body [role="status"]').textContent, /No Blocker reports yet/);
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Execution log').click();
   assert.equal(select.closest('.pm-chat__body').hidden, true);
-  root.querySelectorAll('.pm-chat__toolbar button')[0].click();
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Reports').click();
   assert.equal(select.value, 'blocker');
   assert.equal(select.closest('.pm-chat__body').hidden, false);
   choose('all');
@@ -364,9 +430,9 @@ test('Reports starts at the tail, follows new reports and preserves history acro
   body.dispatchEvent(new root.ownerDocument.defaultView.Event('scroll'));
   update([...history, report('two'), report('three')]);
   assert.equal(body.scrollTop, 100, 'new reports do not move a reader in history');
-  root.querySelectorAll('.pm-chat__toolbar button')[1].click();
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Execution log').click();
   update([...history, report('four')]);
-  root.querySelectorAll('.pm-chat__toolbar button')[0].click();
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Reports').click();
   assert.equal(body.scrollTop, 100, 'hidden zero-size updates must not overwrite the saved position');
 });
 
@@ -386,7 +452,7 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   assert.equal(root.querySelectorAll('article').length, 1);
   update([], 'Reports could not be loaded');
   assert.equal(root.querySelectorAll('article').length, 1);
-  assert.match(root.querySelector('[role="status"]').textContent, /could not be loaded/);
+  assert.match(root.querySelector('.pm-chat__body [role="status"]').textContent, /could not be loaded/);
   update([report(), report('two'), report('pm-peer-a'), report('pm-peer-b')], null,
     { observed_at: '2026-10-15T00:00:00Z' });
   update([report(), report('two'), { ...report('qa'), kind: 'qa', question: 'Can we continue?' }], null,
@@ -417,7 +483,7 @@ test('Execution log toggle retains Reports; stale sessions and native transcript
   const { root, model, view, update, visibility } = fixture();
   update([report()]);
   const buttons = root.querySelectorAll('.pm-chat__toolbar button');
-  buttons[1].click();
+  [...buttons].find(button => button.textContent === 'Execution log').click();
   assert.equal(visibility.at(-1), true);
   view.showReports();
   assert.equal(visibility.at(-1), false);
