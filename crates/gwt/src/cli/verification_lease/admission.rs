@@ -1199,6 +1199,8 @@ mod tests {
                     priority: JobPriority::ManualRebuild,
                     mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
                     scheduling_reason: None,
+                    disk_admission: None,
+                    disk_admission_error: None,
                     queued_at_ms: 1,
                     waiting_ms: 200,
                     resident: false,
@@ -1260,6 +1262,8 @@ mod tests {
                     job_status: Some(gwt_core::index_coordinator::JobStatus::Running),
                     bypass_reason: None,
                     scheduling_reason: Some("draining later shared requests".into()),
+                    disk_admission: None,
+                    disk_admission_error: None,
                 }],
                 ..HeavyLeaseStatus::default()
             },

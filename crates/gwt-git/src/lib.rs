@@ -11,6 +11,7 @@ pub mod diff;
 pub mod gh_rest;
 pub mod issue;
 pub mod merge_conflict;
+mod merge_verdict_cache;
 pub mod merged_branch_prune;
 pub mod merged_pr_sync;
 pub mod migration;

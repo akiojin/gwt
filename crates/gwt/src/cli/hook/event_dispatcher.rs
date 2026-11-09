@@ -27,26 +27,59 @@ pub fn handle_with_input(
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
+    dispatch_observed(event, input, worktree_root, current_session).0
+}
+
+pub(crate) fn dispatch_observed(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+    current_session: Option<&str>,
+) -> (
+    Result<HookOutput, HookError>,
+    Option<super::runtime_state::HookCompletionContext>,
+) {
+    let mut completion = None;
+    let result = handle_with_observation(
+        event,
+        input,
+        worktree_root,
+        current_session,
+        &mut completion,
+    );
+    (result, completion)
+}
+
+fn handle_with_observation(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+    current_session: Option<&str>,
+    completion: &mut Option<super::runtime_state::HookCompletionContext>,
+) -> Result<HookOutput, HookError> {
     let started = Instant::now();
     #[cfg(debug_assertions)]
     mark_playwright_hook_dispatcher_entry();
     diagnostics::begin_event();
     let _deadline = enter_event_deadline(event, started);
+    *completion = super::runtime_state::begin_hook_event(worktree_root, event, input);
+    let completion = completion.as_ref();
+    let is_pm = IntentBoundaryEvent::from_name(event).is_some()
+        && super::is_resident_pm_session(worktree_root, current_session);
     let result = match event {
-        "SessionStart" => handle_session_start(event, input, worktree_root),
-        "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
-        "PreToolUse" => handle_pre_tool_use(event, input),
-        "PostToolUse" => handle_post_tool_use(event, input),
-        "Stop" => handle_stop(event, input, worktree_root, current_session),
+        "SessionStart" => handle_session_start(event, input, worktree_root, completion),
+        "UserPromptSubmit" => {
+            handle_user_prompt_submit(event, input, worktree_root, is_pm, completion)
+        }
+        "PreToolUse" => handle_pre_tool_use(event, input, completion),
+        "PostToolUse" => handle_post_tool_use(event, input, completion),
+        "Stop" => handle_stop(event, input, worktree_root, current_session, completion),
         other => Err(HookError::InvalidEvent(other.to_string())),
     };
     let result = result.map(|output| match IntentBoundaryEvent::from_name(event) {
-        Some(intent_event) => append_pm_standing_context(
-            output,
-            intent_event,
-            worktree_root,
-            super::is_resident_pm_worktree(worktree_root),
-        ),
+        Some(intent_event) => {
+            append_pm_standing_context(output, intent_event, worktree_root, is_pm)
+        }
         None => output,
     });
     let result = result.map(|output| {
@@ -113,9 +146,10 @@ fn handle_session_start(
     event: &str,
     input: &str,
     worktree_root: &Path,
+    completion: Option<&super::runtime_state::HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
+        crate::daemon_runtime::handle_runtime_state_owned(event, input, completion).map(|_| ())
     })?;
     let session_start_diagnostic = run_value(event, "session-start-session-id-diagnostic", || {
         super::runtime_state::session_start_agent_session_diagnostic(input)
@@ -175,6 +209,8 @@ fn handle_user_prompt_submit(
     event: &str,
     input: &str,
     worktree_root: &Path,
+    is_pm: bool,
+    completion: Option<&super::runtime_state::HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
     // PM reporting has its own settlement path; ordinary producing obligations
     // deliberately remain unarmed in this window.
@@ -214,7 +250,11 @@ fn handle_user_prompt_submit(
             let _deadline =
                 event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
             let started = Instant::now();
-            let result = pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+            let result = if is_pm {
+                pm_loop_stop_check::handle_user_prompt_submit(worktree_root)
+            } else {
+                Ok(None)
+            };
             (started.elapsed(), result)
         });
 
@@ -224,7 +264,7 @@ fn handle_user_prompt_submit(
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         let prepared_session = run_step(event, "runtime-state", || {
-            crate::daemon_runtime::handle_runtime_state_prepared(event, input)
+            crate::daemon_runtime::handle_runtime_state_owned(event, input, completion)
         });
         diagnostics::record_handler_duration(
             event,
@@ -546,7 +586,11 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
     Some(format!("Issue Monitor requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
 }
 
-fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
+fn handle_pre_tool_use(
+    event: &str,
+    input: &str,
+    completion: Option<&super::runtime_state::HookCompletionContext>,
+) -> Result<HookOutput, HookError> {
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
     // later check that returns first would let the provider open the question
@@ -564,7 +608,7 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     // policies accept it, otherwise no matching completion will arrive.
     if !matches!(output, HookOutput::PreToolUsePermission { .. }) {
         run_step(event, "runtime-state", || {
-            crate::daemon_runtime::handle_runtime_state(event, input)
+            crate::daemon_runtime::handle_runtime_state_owned(event, input, completion).map(|_| ())
         })?;
         run_step(event, "forward", || {
             crate::daemon_runtime::handle_forward_for_event(event, input)
@@ -573,9 +617,13 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     Ok(output)
 }
 
-fn handle_post_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
+fn handle_post_tool_use(
+    event: &str,
+    input: &str,
+    completion: Option<&super::runtime_state::HookCompletionContext>,
+) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
+        crate::daemon_runtime::handle_runtime_state_owned(event, input, completion).map(|_| ())
     })?;
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward_for_event(event, input)
@@ -591,9 +639,10 @@ fn handle_stop(
     input: &str,
     worktree_root: &Path,
     current_session: Option<&str>,
+    completion: Option<&super::runtime_state::HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
+        crate::daemon_runtime::handle_runtime_state_owned(event, input, completion).map(|_| ())
     })?;
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward_for_event(event, input)
@@ -706,13 +755,14 @@ fn handle_stop(
         }
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
-                crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
+                crate::daemon_runtime::handle_blocked_stop_runtime_state_owned(input, completion)
             })?;
             return Ok(append_stop_warning(output, stop_warnings));
         }
     }
-    run_step(event, "completed-stop", || {
-        super::runtime_state::record_completed_stop_from_env()
+    run_step(event, "completed-stop", || match completion {
+        Some(completion) => completion.finish_stop(false).map(|_| ()),
+        None => Ok(()),
     })?;
 
     Ok(append_stop_warning(reminder, stop_warnings))
@@ -890,6 +940,24 @@ mod tests {
     use serde_json::Value;
     use std::{collections::BTreeMap, rc::Rc, sync::mpsc, time::Duration};
     use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
+
+    fn register_pm(worktree: &Path, session_id: &str) {
+        crate::pm_registry::save_pm_prefs(
+            &crate::board_read_receipts::project_store(worktree).join("project-state/pm.json"),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session_id.into(),
+                    agent_id: "codex".into(),
+                    worktree_path: worktree.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
 
     thread_local! {
         static ACK_JOIN_LOCK: std::cell::RefCell<Option<std::fs::File>> = const {
@@ -1132,7 +1200,15 @@ mod tests {
             // test-hygiene: allow-wall-clock-deadline the clock is pinned above; this hang guard never orders ACK and live publication.
             Instant::now() + HANG_GUARD,
         );
-        let result = handle_user_prompt_submit("UserPromptSubmit", &input, &repo);
+        let completion =
+            super::super::runtime_state::begin_hook_event(&repo, "UserPromptSubmit", &input);
+        let result = handle_user_prompt_submit(
+            "UserPromptSubmit",
+            &input,
+            &repo,
+            false,
+            completion.as_ref(),
+        );
         shutdown.send(()).unwrap();
         runtime.block_on(server).unwrap();
         result.unwrap();
@@ -1363,6 +1439,7 @@ mod tests {
         let worktree = project.join("pm/worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         std::fs::create_dir_all(project.join("project-state")).unwrap();
+        register_pm(&worktree, "registered-pm");
         let lock_path = project.join("project-state/pm-refresh.lock");
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1373,7 +1450,7 @@ mod tests {
             release_rx.recv().unwrap();
         });
         ready_rx.recv().unwrap();
-        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, None);
+        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, Some("registered-pm"));
         release_tx.send(()).unwrap();
         holder.join().unwrap();
 
@@ -1384,7 +1461,9 @@ mod tests {
         assert!(text.contains("last recorded freshness"), "{text}");
         assert!(text.contains("state=Unknown"), "{text}");
         // Prompt reads a snapshot; launch and completed Stop validate Git.
-        assert!(handle_with_input("UserPromptSubmit", "{}", &worktree, None).is_ok());
+        assert!(
+            handle_with_input("UserPromptSubmit", "{}", &worktree, Some("registered-pm")).is_ok()
+        );
     }
 
     #[test]
@@ -2097,6 +2176,8 @@ mod tests {
         let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
         let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
         std::fs::create_dir_all(&worktree).unwrap();
+        let pm_session = "registered-pm";
+        register_pm(&worktree, pm_session);
         let saved = gwt_core::user_instruction::record(
             &worktree,
             gwt_core::user_instruction::UserInstructionInput {
@@ -2112,7 +2193,7 @@ mod tests {
         )
         .unwrap();
 
-        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, Some(pm_session)).unwrap();
         let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
             panic!("PM startup must inject its standing instructions: {output:?}");
         };
@@ -2121,9 +2202,30 @@ mod tests {
         assert!(text.contains(&saved.summary), "{text}");
         assert!(!text.contains(&saved.original), "inject only the summary");
 
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            let _foreign = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "implementation-session");
+            let output =
+                handle_with_input(event, "{}", &worktree, Some("implementation-session")).unwrap();
+            let mut serialized = Vec::new();
+            output.serialize_to(&mut serialized).unwrap();
+            let text = String::from_utf8(serialized).unwrap();
+            for marker in [
+                "# Project Manager",
+                "# Active user instructions",
+                saved.summary.as_str(),
+                "Unread peer PM messages",
+                "Resident PM worktree",
+            ] {
+                assert!(
+                    !text.contains(marker),
+                    "foreign {event} received PM context `{marker}`: {text}"
+                );
+            }
+        }
+
         let store_path = gwt_core::user_instruction::instructions_path(&worktree);
         std::fs::write(store_path, b"invalid instruction snapshot").unwrap();
-        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, Some(pm_session)).unwrap();
         let mut stdout = Vec::new();
         output.serialize_to(&mut stdout).unwrap();
         let envelope: Value = serde_json::from_slice(&stdout).unwrap();
@@ -2470,6 +2572,8 @@ mod tests {
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
 
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let session_before = std::fs::read(&session_path).unwrap();
         for input in [
             serde_json::json!({
                 "tool_name": "Edit",
@@ -2515,9 +2619,10 @@ mod tests {
                 "general issue-owned work must not depend on Host binding availability: {input}"
             );
         }
+        assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
         assert!(
-            runtime_path.exists(),
-            "removing the binding step must preserve later runtime-state handling"
+            !runtime_path.exists(),
+            "a stale bound source must not fall back to a legacy sidecar"
         );
     }
 

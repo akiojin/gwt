@@ -940,6 +940,16 @@ export function runTerminalActivationSequence({
   }
   const { terminal, fitAddon } = runtime;
   const currentGrid = currentTerminalGrid(terminal);
+  // Relative cursor moves were generated for the current grid. A fit must
+  // not change their wrap width while asynchronous output is still parsing.
+  if (runtime.prepareFit?.() === false) {
+    return activationResult({
+      ran: false,
+      cols: currentGrid.cols,
+      rows: currentGrid.rows,
+      reason: "output-pending",
+    });
+  }
   let fullActivationReason = "activated";
   if (allowFastPath && !shouldPersistGeometry) {
     const fastPath = terminalActivationFastPathState({

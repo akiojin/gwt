@@ -179,6 +179,9 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       } finally {
         await page.evaluate(() => { window.requestAnimationFrame = (window as any).__updateStatusRaf; });
       }
+      transport!.send(JSON.stringify({ kind: "update_settings", project_root: PROJECT, status }));
+      await expect(panel).toContainText("No update pending");
+      await expect(panel.getByRole("list", { name: "Update blockers" })).toHaveCount(0);
       await info.attach(`update-status-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
       expect(errors, "zero console/page errors through update status burst and rollback").toEqual([]);
     });

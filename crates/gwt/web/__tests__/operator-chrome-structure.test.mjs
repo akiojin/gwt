@@ -344,7 +344,7 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Issue #6362 Status Strip counts live census separately from catalog mission progress", () => {
+test("Issue #3340 AS-03: Status Strip counts live census without catalog completion totals", () => {
   let activity = { count: 2, agents: [
     { window_id: "agent", session_id: "current" },
     { window_id: "pm", session_id: "manager", is_pm: true },
@@ -376,8 +376,8 @@ test("Issue #6362 Status Strip counts live census separately from catalog missio
   recompute();
   assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
   assert.equal(counts.waiting, 1);
-  assert.equal(counts.agents, 3, "MISSION includes the project's agent panes without requiring a census");
-  assert.equal(counts.done, 1, "runtime state overrides catalog status for completed panes");
+  assert.equal(Object.hasOwn(counts, "agents"), false);
+  assert.equal(Object.hasOwn(counts, "done"), false);
   const [implementation, pm] = activity.agents;
   activity = { count: 1, agents: [pm] }; runtimeStates.pm = "running"; recompute();
   assert.equal(counts.running, 1, "a PM-only census still contributes to runtime telemetry");
@@ -388,16 +388,10 @@ test("Issue #6362 Status Strip counts live census separately from catalog missio
   assert.equal(counts.running, 1, "an implementation child resuming work returns to RUNNING");
   activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
   assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
-  assert.equal(counts.agents, 0, "another project's catalog cannot supply MISSION progress");
-  assert.equal(counts.done, 0);
   activity = { count: 0, agents: [] }; recompute();
   assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
-  assert.equal(counts.agents, 3, "retiring a live child does not erase MISSION panes");
-  assert.equal(counts.done, 1);
   activity = { count: null, agents: [] }; recompute();
   assert.equal(counts.running, "—", "unknown is never a measured zero");
-  assert.equal(counts.agents, 3, "an unavailable census preserves MISSION progress");
-  assert.equal(counts.done, 1);
   activeWorks = []; recompute();
   assert.equal(Object.hasOwn(counts, "branches"), false, "catalog refresh preserves independent branch inventory");
 });

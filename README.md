@@ -2584,6 +2584,9 @@ the target and temporary volumes above the configured build-artifact GC floor;
 `verification.disk_budget_bytes` overrides the measured per-run byte budget.
 The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
 volume, based on measured target and temporary growth plus 20% headroom.
+If a volume cannot fit its reservation plus the GC floor even when empty,
+`verify.run` refuses immediately and reports its path, reserve, floor, total, and
+free bytes. Move the affected Cargo target or `TMPDIR` to a larger filesystem.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 
