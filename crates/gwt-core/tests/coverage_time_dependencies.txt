@@ -492,7 +492,6 @@ crates/gwt/src/issue_cache.rs|resync_skips_issue_view_for_spec_entries_whose_cac
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|Some(result)=>result,None=>done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect(),|1
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|letcompleted_while_locked=done_rx.recv_timeout(std::time::Duration::from_millis(100)).ok()|1
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|started_rx.recv_timeout(std::time::Duration::from_secs(1)).expect()|1
-crates/gwt/src/issue_monitor.rs|expired_deadline_rejects_durable_write_before_canonical_rename|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_millis(1),)|1
 crates/gwt/src/issue_monitor_worker.rs|a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window|let_scan_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+scan_window,)|1
 crates/gwt/src/issue_monitor_worker.rs|github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline|assert!(started.elapsed()<std::time::Duration::from_millis(1_500),,started.elapsed())|1
 crates/gwt/src/issue_monitor_worker.rs|the_readback_fan_out_stops_while_the_launch_stage_still_has_budget|let_almost_spent=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+ISSUE_MONITOR_LAUNCH_RESERVE-std::time::Duration::from_millis(1),)|1
