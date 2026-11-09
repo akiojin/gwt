@@ -7579,7 +7579,14 @@ fn owner_monitor_fixture(
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
-    owner_monitor_fixture_with_prefs(temp, issue, delivery, agent_ids, |_| {})
+    owner_monitor_fixture_with_prefs(
+        temp,
+        issue,
+        delivery,
+        agent_ids,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
+    )
 }
 
 fn owner_monitor_fixture_with_prefs(
@@ -7587,6 +7594,7 @@ fn owner_monitor_fixture_with_prefs(
     issue: u64,
     delivery: bool,
     agent_ids: &[&str],
+    control_budget: Duration,
     configure: impl FnOnce(&mut gwt::IssueMonitorPrefs),
 ) -> (
     PathBuf,
@@ -7661,7 +7669,10 @@ fn owner_monitor_fixture_with_prefs(
     )
     .unwrap();
     let owner = owner_fixture_block_on(
-        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor_control_budget(
+            &root,
+            control_budget,
+        ),
     )
     .unwrap();
     configure_owner_fixture_start_gate(&owner);
@@ -7788,8 +7799,30 @@ fn owner_monitor_fresh_fixture(
     delivery: bool,
     prepty_failure: bool,
 ) -> OwnerFreshLaunchFixture {
-    let (root, owner, delivery_id) =
-        owner_monitor_fixture(temp, 2359, delivery, &["fixture", "pane-contract-fixture"]);
+    owner_monitor_fresh_fixture_with_control_budget(
+        temp,
+        operation_id,
+        delivery,
+        prepty_failure,
+        gwt_core::deadline_budget::HANG_GUARD,
+    )
+}
+
+fn owner_monitor_fresh_fixture_with_control_budget(
+    temp: &Path,
+    operation_id: &str,
+    delivery: bool,
+    prepty_failure: bool,
+    control_budget: Duration,
+) -> OwnerFreshLaunchFixture {
+    let (root, owner, delivery_id) = owner_monitor_fixture_with_prefs(
+        temp,
+        2359,
+        delivery,
+        &["fixture", "pane-contract-fixture"],
+        control_budget,
+        |_| {},
+    );
     let owner = Arc::new(owner);
     let selected = pane_control_tests::control_launch_config(&root, 2359);
     let repo = selected.working_dir.unwrap();

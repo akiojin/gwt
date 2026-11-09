@@ -3351,6 +3351,7 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
             4774,
             false,
             &["pane-contract-fixture"],
+            gwt_core::deadline_budget::HANG_GUARD,
             |prefs| {
                 prefs.autonomous_mode = true;
                 prefs.launch_auto = true;
