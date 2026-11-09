@@ -53,7 +53,7 @@ function appendStatusDetail(body, detail) {
 /**
  * Source-tagged notification inputs. Runtime states come from WindowProcessStatus;
  * NeedsHuman comes only from the Monitor's typed transition, never Waiting/text.
- * @typedef {{source: "runtime", state: "stopped" | "error", windowData?: object,
+ * @typedef {{source: "runtime", state: "stopped" | "interrupted" | "error", windowData?: object,
  * projectTab?: object} | {source: "monitor", state: "needs_human", issueNumber: number}} NotificationTransition
  */
 export function notificationForTransition(input) {
@@ -66,6 +66,9 @@ export function notificationForTransition(input) {
   const projectName = projectLabel(input.projectTab);
   if (input.state === "stopped") {
     return { kind: "agent_stopped", title: "Agent stopped", body: `${agentName} stopped in ${projectName}.` };
+  }
+  if (input.state === "interrupted") {
+    return { kind: "agent_interrupted", title: "Agent interrupted", body: `${agentName} was interrupted in ${projectName}.` };
   }
   if (input.state === "error") {
     return { kind: "agent_error", title: "Agent error", body: `${agentName} hit an error in ${projectName}.` };
@@ -86,7 +89,7 @@ export function createAgentCompletionNotifier({
 
   function handleIntent(notice) {
     if (!notice || typeof notice.transition_id !== "string" || !notice.transition_id.trim()
-      || !["stopped", "error", "needs_human"].includes(notice.category)
+      || !["stopped", "interrupted", "error", "needs_human"].includes(notice.category)
       || seenTransitions.has(notice.transition_id)) return null;
     seenTransitions.add(notice.transition_id);
     if (getDesktopNotificationPermission() !== "granted") return null;
