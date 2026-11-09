@@ -323,6 +323,20 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
 });
 
+test("Codex warns about a saved model even when the public catalog is empty", () => {
+  const { document } = parseHTML("<section></section>");
+  const choices = structuredClone(candidateChoices);
+  choices.agents.find(agent => agent.id === "codex").models = [];
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired-model" }],
+    choices,
+    send: () => {},
+  });
+  assert.equal(panel.querySelector("[data-model-unavailable]").hidden, false);
+  assert.match(panel.querySelector("[data-model-unavailable]").textContent, /retired-model/);
+});
+
 test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -339,6 +353,11 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   }
   assert.equal(control("model").value, "retired-model");
   assert.equal(control("reasoning").value, "retired-effort");
+  // Issue #6933 AC-3: a saved model the tool no longer lists is announced, never swapped.
+  const retiredNotice = () => control("model").closest("fieldset").querySelector("[data-model-unavailable]");
+  assert.equal(retiredNotice().hidden, false);
+  assert.equal(retiredNotice().textContent,
+    "Saved model retired-model is no longer offered by Codex. It is kept as saved and not replaced; choose a listed model before launching.");
   assert.ok([...control("agent_member_id").options].some(option => option.value === "m-hermes"),
     "shared choices populate Agent before the separate catalog response arrives");
   assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
@@ -354,6 +373,7 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   selectValue(control("model"), "gpt-6-luna");
   control("model").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("reasoning").value, "medium", "a new model uses its shared default");
+  assert.equal(retiredNotice().hidden, true, "choosing a listed model clears the notice");
   assert.equal(sent.at(-1).profiles[0].reasoning, "medium");
   const custom = panel.querySelector('[data-agent-id="custom"]');
   for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);

@@ -5,6 +5,7 @@ use std::{
 
 use crate::BranchListEntry;
 
+pub mod codex_models;
 mod launch_request;
 mod memory_cache;
 mod options;

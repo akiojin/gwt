@@ -9322,6 +9322,21 @@ impl AppRuntime {
                     .iter()
                     .find(|(tab_id, _)| *tab_id == worker_expected_project_tab_id)
                     .map(|(_, live_window_ids)| live_window_ids);
+                // Issue #6933 AC-4: the weekly Codex model-list check rides
+                // the scheduled scan worker; it is a no-op until seven days
+                // have passed; a failure does not stop the scan.
+                if let Err(error) = gwt::launch_wizard::codex_models::run_weekly_check(
+                    &worker_project_root,
+                    &gwt::launch_wizard::codex_models::saved_codex_profile_models(
+                        &worker_prefs_path,
+                    ),
+                    chrono::Utc::now(),
+                ) {
+                    tracing::warn!(
+                        project_root = %worker_project_root.display(),
+                        "Codex model list weekly check failed: {error}"
+                    );
+                }
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
