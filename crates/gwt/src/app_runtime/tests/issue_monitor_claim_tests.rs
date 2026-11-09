@@ -2375,6 +2375,50 @@ fn app_runtime_inactive_automatic_drain_does_not_schedule_or_apply() {
         gwt::load_issue_monitor_prefs(&prefs_path)
             .unwrap()
             .update_drain,
+        Some(drain.clone())
+    );
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.enabled = true;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(105));
+    let scheduled =
+        runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(120));
+    assert!(scheduled.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateAutoApply {
+            phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+            ..
+        }
+    )));
+    prefs.enabled = false;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let cancelled =
+        runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(135));
+    assert_eq!(
+        cancelled
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                BackendEvent::UpdateAutoApply {
+                    version,
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                    ..
+                } if version == "99.0.0"
+            ))
+            .count(),
+        1,
+        "disabling the last scheduled project withdraws the CTA once"
+    );
+    for secs in [150, 210] {
+        assert!(runtime
+            .update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(secs))
+            .is_empty());
+    }
+    assert!(user_events.lock().unwrap().is_empty());
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain,
         Some(drain)
     );
 }
@@ -3470,7 +3514,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     let payload = temp.path().join("manual-update");
     fs::write(&payload, "payload").unwrap();
     gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
-        version: "9.99.0".into(),
+        version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
         downloaded_at: chrono::Utc::now().to_rfc3339(),
@@ -3557,7 +3601,58 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         0,
         "nothing applies inside the grace"
     );
-    let applying = runtime.update_drain_tick_events_and_drain_at(at(120));
+    let held = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .update_drain;
+    gwt_core::update::defer_pending_update("99.0.0").unwrap();
+    let cancelled = runtime.update_drain_tick_events_and_drain_at(at(75));
+    assert_eq!(
+        cancelled
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                BackendEvent::UpdateAutoApply {
+                    version,
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                    ..
+                } if version == "99.0.0"
+            ))
+            .count(),
+        1,
+        "defer withdraws an announced manual schedule once"
+    );
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain,
+        held
+    );
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(90))
+        .is_empty());
+    assert_eq!(drained_events(&user_events), 0);
+    runtime.apply_update_when_idle_events("manual-client");
+    assert!(
+        !gwt_core::update::load_pending_update_manifest()
+            .unwrap()
+            .auto_apply_deferred
+    );
+    assert!(runtime
+        .update_drain_tick_events_and_drain_at(at(105))
+        .is_empty());
+    let rearmed = runtime.update_drain_tick_events_and_drain_at(at(120));
+    assert!(
+        rearmed.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                grace_secs: Some(60),
+            } if version == "99.0.0"
+        )),
+        "a later explicit wait can rearm the same version: {rearmed:?}"
+    );
+    let applying = runtime.update_drain_tick_events_and_drain_at(at(180));
     assert!(
         applying.iter().any(|event| matches!(
             &event.event,
@@ -3748,6 +3843,32 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
         runtime.project_state(&context_a).unwrap().update_auto_apply,
         gwt::update_drain::UpdateAutoApplyPlanner::default(),
         "both project planners must retain the quiescence streak",
+    );
+    let prefs_path_a = gwt::issue_monitor_prefs_path_for_repo_path(&repos[0]);
+    let mut disabled = gwt::load_issue_monitor_prefs(&prefs_path_a).unwrap();
+    disabled.enabled = false;
+    gwt::save_issue_monitor_prefs(&prefs_path_a, &disabled).unwrap();
+    let still_scheduled = runtime.update_drain_tick_events_and_drain_at(at(45));
+    assert!(
+        !still_scheduled.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateAutoApply {
+                phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                ..
+            }
+        )),
+        "another active schedule keeps the host CTA scheduled"
+    );
+    assert!(runtime
+        .project_state(&context_b)
+        .unwrap()
+        .update_auto_apply
+        .is_scheduled_for("99.0.0"));
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path_a)
+            .unwrap()
+            .update_drain,
+        disabled.update_drain
     );
     runtime.update_drain_tick_events_and_drain_at(at(90));
     assert_eq!(

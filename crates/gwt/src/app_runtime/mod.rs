@@ -10737,6 +10737,29 @@ impl AppRuntime {
             observation.snapshot.panes = panes.clone();
             events.extend(self.update_drain_tick_events_for_project(observation, now));
         }
+        // A disabled project withdraws its schedule, while another project
+        // may still own the host announcement for the same version.
+        events.retain(|event| {
+            let BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                ..
+            } = &event.event
+            else {
+                return true;
+            };
+            !self.project_contexts().iter().any(|context| {
+                self.project_state(context)
+                    .is_some_and(|state| state.update_auto_apply.is_scheduled_for(version))
+                    && self
+                        .project_auto_update_drain(context)
+                        .is_some_and(|(prefs, drain)| {
+                            drain.version == *version
+                                && (!drain.automatic.unwrap_or(prefs.autonomous_mode)
+                                    || prefs.enabled)
+                        })
+            })
+        });
         let events = Self::deduplicate_update_host_events(events);
         for event in &events {
             if let BackendEvent::UpdateAutoApply {
@@ -10774,10 +10797,20 @@ impl AppRuntime {
         };
         let automatic = drain.automatic.unwrap_or(prefs.autonomous_mode);
         if automatic && !prefs.enabled {
-            if let Some(state) = self.project_state_mut(context) {
+            let withdrawn = self.project_state_mut(context).is_some_and(|state| {
+                let scheduled = state.update_auto_apply.is_scheduled_for(&drain.version);
                 state.update_auto_apply.reset();
-            }
-            return Vec::new();
+                scheduled
+            });
+            return if withdrawn {
+                vec![OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                    version: drain.version,
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                    grace_secs: None,
+                })]
+            } else {
+                Vec::new()
+            };
         }
         if automatic && !self.automatic_updates_enabled() {
             return self
@@ -11062,6 +11095,12 @@ impl AppRuntime {
                 Some((prefs, drain)) if drain.version == version => {
                     if release == UpdateAutoApplyRelease::Deferred {
                         if !drain.automatic.unwrap_or(prefs.autonomous_mode) {
+                            if let Some(state) = self.project_state_mut(&context) {
+                                if state.update_auto_apply.is_scheduled_for(version) {
+                                    state.update_auto_apply.reset();
+                                    released = true;
+                                }
+                            }
                             continue;
                         }
                         if !prefs.enabled {

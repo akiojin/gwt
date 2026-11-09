@@ -10730,6 +10730,9 @@ mod tests {
     #[test]
     fn issue_6899_config_clear_releases_automatic_update_drain_across_projects() {
         use crate::project_runtime::installation::prepare_host_update_drain_launch_hold;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         issue_6899_stage_update(tmp.path());
