@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
+// Apply the deadline before Playwright creates the headed browser/page fixtures.
+test.describe.configure({ timeout: 180_000 });
+
 test("Issue #6933 Codex cache drives both pickers and warns about saved retired models", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME;
   test.skip(!base || !home, "requires browser-check isolated checkout and HOME");
-  test.setTimeout(180_000);
   await withLiveGwtBackendLock(base!, info, async () => {
     const cache = JSON.parse(await readFile(join(home!, ".codex/models_cache.json"), "utf8"));
     const expected = cache.models.filter((row: any) => row.visibility === "list")
