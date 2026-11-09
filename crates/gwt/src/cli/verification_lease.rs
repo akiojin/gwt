@@ -1434,6 +1434,20 @@ pub(super) fn command_temporary_base(worktree: &Path, command: &str) -> Result<P
     })
 }
 
+pub(super) fn command_admission_disk_budgets(
+    worktree: &Path,
+    command: &str,
+    target: Option<&Path>,
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
+    let temporary = command_temporary_base(worktree, command)?;
+    command_disk_budgets(&[
+        target
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| worktree.join("target")),
+        temporary,
+    ])
+}
+
 // #5082: sampled target growth 4,650,508,061 + temporary growth 269,853,053
 // bytes across the changed-surface matrix, with 20% headroom (rounded up).
 const DEFAULT_VERIFICATION_DISK_BUDGET_BYTES: u64 = 5_904_433_337;

@@ -177,6 +177,21 @@ impl PmReportsReader {
                 .data
                 .as_ref()
                 .is_none_or(|old| !old.same_content(&next));
+            let task_failed = matches!(
+                next.current
+                    .as_ref()
+                    .and_then(|current| current.request_tasks.as_ref()),
+                Some(super::PmTaskOverview::Error { .. })
+            );
+            if task_failed {
+                // Share the existing retry cadence across viewers instead of
+                // rebuilding the whole projection on every failed Task poll.
+                let retry_at = now + chrono::Duration::seconds(5);
+                next.refresh_at = Some(
+                    next.refresh_at
+                        .map_or(retry_at, |deadline| deadline.min(retry_at)),
+                );
+            }
             self.inputs = if next.error.is_none() { inputs } else { None };
             self.data = Some(next);
         }

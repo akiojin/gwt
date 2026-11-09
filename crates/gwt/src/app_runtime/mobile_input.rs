@@ -1047,36 +1047,6 @@ mod tests {
         owner_fixture_block_on(settle_native_input(&native, &fresh_ready));
         assert_unchanged();
 
-        // A Commit delayed until after logical revocation must be refused at
-        // the real owner's final writer boundary, even with an exact Ready.
-        let delayed_permit = NativeInputPermit::new().unwrap();
-        let data = b"must-not-write\n".to_vec();
-        let mut delayed_identity = private_identity(&data);
-        delayed_identity.permit = delayed_permit.reference();
-        let delayed_ready =
-            owner_fixture_block_on(prepare_native_input(&native, &delayed_identity, data)).unwrap();
-        delayed_permit
-            .arm(test_now(), test_now() + 300, test_now())
-            .unwrap();
-        delayed_permit.revoke();
-        if let Ok(value) = owner_fixture_block_on(native.mobile_input_command(
-            OwnerCommand::CommitMobileInput {
-                ready: delayed_ready.clone(),
-            },
-        )) {
-            let outcome = input_outcome(value, &delayed_identity, Some(&delayed_ready)).unwrap();
-            assert_ne!(outcome.phase, OwnerMobileInputPhase::Written);
-        }
-        let prevented = owner_fixture_block_on(cancel_native_input(
-            &native,
-            &delayed_identity,
-            Some(&delayed_ready),
-        ))
-        .unwrap();
-        assert_eq!(prevented.phase, OwnerMobileInputPhase::Prevented);
-        owner_fixture_block_on(settle_native_input(&native, &delayed_ready));
-        assert_unchanged();
-
         let (abandoned_connection, _) = paired_connection(&auth, &project);
         let abandoned = app
             .mobile_input_task(
@@ -1223,6 +1193,48 @@ mod tests {
         .unwrap();
         agent_app.test_project_owners.clear();
         owner_fixture_block_on(Arc::try_unwrap(agent_owner).ok().unwrap().shutdown());
+        // Shutdown revokes before AppRuntime Drop, even while the Project
+        // owner survives and a prepared input retains the old authority.
+        let (shutdown_connection, _) = paired_connection(&auth, &project);
+        let shutdown_request = ready_request(shutdown_connection.clone());
+        let delayed_permit = shutdown_request.native_permit().unwrap();
+        let data = b"must-not-write\n".to_vec();
+        let mut delayed_identity = private_identity(&data);
+        delayed_identity.permit = delayed_permit.reference();
+        let delayed_ready =
+            owner_fixture_block_on(prepare_native_input(&native, &delayed_identity, data)).unwrap();
+        shutdown_request
+            .authorize_native(&delayed_permit, || Some(project.clone()), test_now)
+            .unwrap();
+        app.stop_all_runtimes();
+        assert!(app.runtimes.is_empty());
+        assert!(delayed_permit.is_revoked());
+        assert!(delayed_permit
+            .arm(test_now(), test_now() + 300, test_now())
+            .is_err());
+        assert_eq!(
+            shutdown_connection.dispatch(&project, 1, test_now, || panic!("closed Host effect")),
+            Err(AuthorizationError::Disabled)
+        );
+        owner_fixture_block_on(native.command(OwnerCommand::Health)).unwrap();
+        if let Ok(value) = owner_fixture_block_on(native.mobile_input_command(
+            OwnerCommand::CommitMobileInput {
+                ready: delayed_ready.clone(),
+            },
+        )) {
+            let outcome = input_outcome(value, &delayed_identity, Some(&delayed_ready)).unwrap();
+            assert_ne!(outcome.phase, OwnerMobileInputPhase::Written);
+        }
+        let prevented = owner_fixture_block_on(cancel_native_input(
+            &native,
+            &delayed_identity,
+            Some(&delayed_ready),
+        ))
+        .unwrap();
+        assert_eq!(prevented.phase, OwnerMobileInputPhase::Prevented);
+        owner_fixture_block_on(settle_native_input(&native, &delayed_ready));
+        assert_unchanged();
+
         owner_fixture_block_on(owner.command(OwnerCommand::Close {
             id,
             incarnation: probe.incarnation,
