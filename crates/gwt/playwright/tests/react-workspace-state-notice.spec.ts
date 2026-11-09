@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { APP_URL, ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { liveGwtRouteUrl } from "./_helpers/live-gwt";
 
 // SPEC #6943 Phase 1: the workspace state notice is the first React surface.
 // It mounts as an island inside the unmigrated shell, renders from the shared
@@ -57,17 +58,19 @@ test.describe("React workspace state notice", () => {
   test("renders from the store, retries, clears, and loads only same-origin assets", async ({ page }, testInfo) => {
     const errors: string[] = [];
     const foreignRequests: string[] = [];
-    const origin = new URL(ORIGIN_URL).origin;
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const appUrl = liveBase ? await liveGwtRouteUrl(page, liveBase) : APP_URL;
+    const origin = new URL(appUrl).origin;
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     page.on("request", request => {
       const url = new URL(request.url());
       if (["http:", "https:"].includes(url.protocol) && url.origin !== origin) foreignRequests.push(request.url());
     });
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installNoticeBackend(page);
     const islandResponse = page.waitForResponse(response => response.url().endsWith("/react/islands.js"));
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
     expect((await islandResponse).status()).toBe(200);
     await page.waitForFunction(() => Boolean(window.__gwtReactNoticeSocket), undefined, { timeout: 10_000 });
     await expect(page.locator("html")).toHaveAttribute("data-theme",
