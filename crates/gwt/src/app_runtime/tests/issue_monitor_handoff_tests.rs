@@ -3034,20 +3034,40 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         "completion is emitted by the worker callback: {events:#?}"
     );
     drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    // An unrelated prefs edit makes freshness revalidation deterministic.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.priority_order.push(9001);
+        Ok(())
+    })
+    .unwrap();
     fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ));
-    // Both the outer facts callback and the nested answer adapter emit their
-    // own verified telemetry job; only the remaining task is the owner RPC.
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
-    assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
+        .handle_issue_monitor_launch_prepared(prepared);
+    // Settle freshness callbacks before holding the actual answer RPC.
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
             if window_id == &holder_window_id
     ));
+    let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     let before_owner = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -3298,7 +3318,28 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    assert!(matches!(
+        fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &holder_window_id
+    ));
+    let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     // Apply the real GUI canvas before the held answer RPC. An unobserved
     // canvas must not make a claim pass merely because it ran first.
     let context = fixture.runtime.test_context();
@@ -3492,7 +3533,18 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&retry_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&retry_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    let diagnostics = (1..retry_tasks.lock().expect("retry tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&retry_tasks, &diagnostics);
     assert_eq!(
         retry_tasks.lock().unwrap().len(),
         1,
