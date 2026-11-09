@@ -10731,6 +10731,8 @@ fn retire_unspawned_launch_runtime(
                         || captured.source_event.is_some()
                         || captured.active_tool_calls.is_some()
                         || captured.last_completed_hook_event_at.is_some()
+                        || captured.last_completed_hook_outcome.is_some()
+                        || captured.current_hook_event.is_some()
                         || captured.pending_discussion.is_some()
                         || std::fs::read(&path)? != *expected
                     {
@@ -10796,6 +10798,8 @@ fn finish_agent_session(
             },
             |session| {
                 let path = gwt_agent::runtime_state_path(sessions_dir, &session.id);
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
                 let mut runtime = gwt_agent::SessionRuntimeState::load(&path)?;
                 let child_pid = pty
                     .process_id()
@@ -10819,14 +10823,30 @@ fn finish_agent_session(
                         "unbound Session physical proof changed before close",
                     ));
                 }
+                drop(_publication);
+                drop(writer);
                 if !crate::session_finalizer::kill_and_reap(pty, id)
                     .map_err(|error| std::io::Error::other(error.to_string()))?
                 {
                     return Err(std::io::Error::other("agent process tree did not exit"));
                 }
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
+                let latest = gwt_agent::SessionRuntimeState::load(&path)?;
+                if latest.execution_identity != runtime.execution_identity
+                    || latest.runtime_incarnation != runtime.runtime_incarnation
+                    || latest.host_started_at != runtime.host_started_at
+                    || latest.child_pid != runtime.child_pid
+                    || latest.child_started_at != runtime.child_started_at
+                {
+                    return Err(std::io::Error::other(
+                        "unbound runtime changed during close",
+                    ));
+                }
+                runtime = latest;
                 runtime.status = gwt_agent::AgentStatus::Stopped;
                 runtime.updated_at = chrono::Utc::now();
-                runtime.save(&path)?;
+                writer.save(&runtime)?;
                 session.update_status(gwt_agent::AgentStatus::Stopped);
                 if let Some(receipt) = exit_receipt {
                     session.record_process_exit(receipt);
@@ -10937,7 +10957,7 @@ fn publish_repaired_inspection_runtime(
                         std::process::id(),
                         &source.id,
                     );
-                    let _writer = gwt_agent::session::runtime_writer_lease(&path)
+                    let writer = gwt_agent::session::runtime_writer_lease(&path)
                         .map_err(|error| error.to_string())?;
                     let _publication = gwt_agent::session::runtime_publication_lease(&path)
                         .map_err(|error| error.to_string())?;
@@ -10965,7 +10985,7 @@ fn publish_repaired_inspection_runtime(
                         );
                     }
                     proof.execution_identity = Some(identity);
-                    proof.save(&path).map_err(|error| error.to_string())
+                    writer.save(&proof).map_err(|error| error.to_string())
                 })
                 .ok_or("legacy repair Active bearer changed before runtime publication")??;
             Ok(snapshot)

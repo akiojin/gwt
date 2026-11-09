@@ -35,7 +35,13 @@ impl ParentProcess {
         refresh(&mut system, parent);
         Ok(system
             .process(parent)
-            .map(|process| (parent, process.start_time())))
+            .map(|process| {
+                (
+                    parent,
+                    crate::process::snapshot_process_start_identity(parent.as_u32(), process),
+                )
+            })
+            .filter(|(_, started)| *started > 0))
     }
 
     pub fn is_alive(&self) -> bool {
@@ -66,7 +72,9 @@ impl ParentProcess {
             };
             refresh(&mut system, pid);
             system.process(pid).is_some_and(|process| {
-                process.start_time() == started
+                // Linux epoch start times move with WSL btime; this opaque
+                // token stays fixed for the same process incarnation.
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process) == started
                     && !matches!(
                         process.status(),
                         ProcessStatus::Dead | ProcessStatus::Zombie
@@ -129,6 +137,16 @@ mod tests {
         assert!(!ParentProcess(Ok(None)).is_alive());
         assert!(ParentProcess(Err(sysinfo::Error::Unsupported)).is_alive());
         let parent = ParentProcess::capture();
+        #[cfg(target_os = "linux")]
+        {
+            let (pid, started) = parent.0.as_ref().unwrap().unwrap();
+            let native = crate::process::host_process_start_time(pid.as_u32()).unwrap();
+            assert_eq!(
+                started, native,
+                "parent identity must use the shared opaque token"
+            );
+            assert!(!ParentProcess(Ok(Some((pid, native + 1)))).is_alive());
+        }
         #[cfg(windows)]
         let refreshes_before_poll = REFRESH_COUNT.get();
         assert!(parent.is_alive());
