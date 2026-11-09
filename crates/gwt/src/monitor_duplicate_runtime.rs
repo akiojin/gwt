@@ -33,6 +33,115 @@ pub struct RegisteredMonitorRuntime {
     pub handle: Arc<PtyHandle>,
 }
 
+/// The matching Session exclusion already held by a prompt's caller. These
+/// snapshots identify that existing exclusion; they grant no execution authority.
+#[derive(Clone, Copy)]
+pub enum HeldMonitorPromptSession<'a> {
+    Bound(&'a gwt_agent::SessionExecutionIdentity),
+    Unbound(&'a gwt_agent::Session),
+}
+
+/// Fence an explicit prompt at its existing protected input commit.
+pub(crate) fn with_monitor_prompt_acceptance<T>(
+    registration: &MonitorRuntimeRegistration,
+    child_pid: u32,
+    held_session: Option<HeldMonitorPromptSession<'_>>,
+    commit: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    gwt_agent::validate_session_id_path_component(&registration.session_id)
+        .map_err(io::Error::other)?;
+    let accept = |session: &gwt_agent::Session| {
+        let identity =
+            gwt_agent::SessionExecutionIdentity::from_session(session).map_err(io::Error::other)?;
+        if registration.review_dispatch
+            || session.id != registration.session_id
+            || session.linked_issue_number != Some(registration.issue_number)
+            || dunce::canonicalize(&session.worktree_path)?
+                != dunce::canonicalize(&registration.worktree_path)?
+        {
+            return Err(io::Error::other("Monitor prompt Session identity changed"));
+        }
+        let matches_held = match held_session {
+            Some(HeldMonitorPromptSession::Bound(expected)) => identity.as_ref() == Some(expected),
+            Some(HeldMonitorPromptSession::Unbound(expected)) => {
+                identity.is_none()
+                    && expected.execution_binding.is_none()
+                    && session.id == expected.id
+                    && session.created_at == expected.created_at
+                    && session.worktree_path == expected.worktree_path
+                    && session.agent_id == expected.agent_id
+                    && session.exact_resume_session_id() == expected.exact_resume_session_id()
+            }
+            None => true,
+        };
+        if !matches_held {
+            return Err(io::Error::other("Monitor prompt held Session changed"));
+        }
+        let Some(identity) = identity else {
+            // Existing degraded Resume remains input-capable. Without a bound
+            // execution identity it cannot authorize Switch, so no fence is needed.
+            return commit();
+        };
+        if identity.execution_binding.owner_number != registration.issue_number {
+            return Err(io::Error::other("Monitor prompt execution owner changed"));
+        }
+        let path = gwt_agent::runtime_state_path(&registration.sessions_dir, &session.id);
+        {
+            let _writer = gwt_agent::session::runtime_writer_lease(&path)?;
+            let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
+            let bytes = std::fs::read(&path)?;
+            let runtime: gwt_agent::SessionRuntimeState = serde_json::from_slice(&bytes)?;
+            if registration.incarnation == 0
+                || child_pid == 0
+                || runtime.execution_identity.as_ref() != Some(&identity)
+                || runtime.runtime_incarnation != Some(registration.incarnation)
+                || runtime.host_started_at.is_none()
+                || runtime.host_started_at
+                    != crate::process::host_process_start_time(std::process::id())
+                || runtime.child_pid != Some(child_pid)
+                || runtime.child_started_at.is_none()
+                || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
+                || matches!(
+                    runtime.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                )
+            {
+                return Err(io::Error::other("Monitor prompt runtime identity changed"));
+            }
+            if runtime.current_hook_event.is_some() {
+                // Retain every historical/status/native field, including unknown
+                // fields. A stale hook receipt cannot restore the removed current.
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| io::Error::other("Monitor prompt runtime is not an object"))?
+                    .remove("current_hook_event");
+                gwt_github::cache::write_atomic_with_durability(
+                    &path,
+                    &serde_json::to_vec_pretty(&value)?,
+                    gwt_github::cache::Durability::RenameOnly,
+                )?;
+            }
+        }
+        // Never carry writer/publication locks into input-state or physical I/O.
+        // Failure after invalidation keeps current unknown; it is not restored.
+        gwt_core::operation_deadline::ensure_remaining("Monitor prompt input")?;
+        commit()
+    };
+    if held_session.is_some() {
+        // These callers are inside their exact owner/Session transaction and
+        // pass its matching snapshot explicitly. Do not infer a path from TLS.
+        let session = gwt_agent::Session::load(
+            &registration
+                .sessions_dir
+                .join(format!("{}.toml", registration.session_id)),
+        )?;
+        accept(&session)
+    } else {
+        gwt_agent::with_session_lease(&registration.sessions_dir, &registration.session_id, accept)
+    }
+}
+
 /// Capture a live holder's complete runtime identity before revoking its launch.
 /// No OS process is signalled here; the owning host uses its retained PTY later.
 #[doc(hidden)]

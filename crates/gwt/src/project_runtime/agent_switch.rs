@@ -530,7 +530,14 @@ fn drive_switch(
                                 if !exact_writer_is_current(writers, intent, entry) {
                                     return Err("Source writer changed after checkpoint body delivery".into());
                                 }
-                                return reservation.write_input_authorized(bytes, |commit| commit(&mut || {}))
+                                return reservation.write_input_authorized(bytes, |commit| {
+                                    super::agent_dispatch::with_current_monitor_prompt_input(entry, Some(crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(&proof.execution_identity)), || {
+                                        if !exact_writer_is_current(writers, intent, entry) {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError { details: "Source writer changed before checkpoint submit".into() });
+                                        }
+                                        commit(&mut || {})
+                                    })
+                                })
                                     .map(|()| submitted.set(true))
                                     .map_err(|error| error.to_string());
                             }
@@ -541,7 +548,12 @@ fn drive_switch(
                                     return Err(switch_io("Switch cancelled or source changed before checkpoint delivery"));
                                 }
                                 reservation.write_input_authorized(bytes, |commit| {
-                                    reservation.with_unchanged_ordinary_input(revision, || commit(&mut || {}))
+                                    super::agent_dispatch::with_current_monitor_prompt_input(entry, Some(crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(&proof.execution_identity)), || {
+                                        if !exact_writer_is_current(writers, intent, entry) {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError { details: "Source writer changed before checkpoint body".into() });
+                                        }
+                                        reservation.with_unchanged_ordinary_input(revision, || commit(&mut || {}))
+                                    })
                                 }).map_err(switch_io)?;
                                 body_committed = true;
                                 Ok(())

@@ -1,5 +1,6 @@
 //! Monitor commits made by the fixed project's physical owner.
 use super::launch_payload::LaunchFeedbackContext;
+use crate::monitor_duplicate_runtime::HeldMonitorPromptSession;
 use crate::runtime_daemon_events::{
     IssueMonitorAgentFailureSource, IssueMonitorControlPublishError,
 };
@@ -1353,6 +1354,10 @@ pub(crate) fn deliver_existing_answer(
     let write = || -> Result<(), String> {
         launch.check_current()?;
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)?;
+        let held_session = match identity.as_ref() {
+            Some(identity) => HeldMonitorPromptSession::Bound(identity),
+            None => HeldMonitorPromptSession::Unbound(&session),
+        };
         let commit = || -> Result<(), String> {
             launch.check_current()?;
             if let Some(binding) = &session.execution_binding {
@@ -1365,11 +1370,17 @@ pub(crate) fn deliver_existing_answer(
                     );
                 }
             }
-            super::agent_dispatch::write_current_pane_input(&writers, &launch.id, &writer, &prompt)
+            super::agent_dispatch::write_current_pane_input(
+                &writers,
+                &launch.id,
+                &writer,
+                &prompt,
+                Some(held_session),
+            )
         };
-        if let Some(identity) = identity {
+        if let Some(identity) = identity.as_ref() {
             crate::cli::execution_state::with_current_active_session_execution_identity_lease(
-                &sessions, &identity, commit,
+                &sessions, identity, commit,
             )
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "autonomous answer producing Session changed".to_string())?

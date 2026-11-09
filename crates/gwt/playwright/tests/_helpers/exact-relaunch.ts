@@ -123,7 +123,10 @@ const actorEvent = (stage, extra = {}) => fs.appendFileSync(actorLog, JSON.strin
 const observedRuntime = () => {
   const bytes = fs.readFileSync(process.env.GWT_SESSION_RUNTIME_PATH);
   const runtime = JSON.parse(bytes);
+  const withoutCurrent = {...runtime};
+  delete withoutCurrent.current_hook_event;
   return {runtime_status:runtime.status,current_hook_event:runtime.current_hook_event ?? null,
+    runtime_without_current_sha256:require('node:crypto').createHash('sha256').update(JSON.stringify(withoutCurrent)).digest('hex'),
     runtime_sha256:require('node:crypto').createHash('sha256').update(bytes).digest('hex')};
 };
 const sourceEnvelope = (operation, params = {}) => {
