@@ -144,8 +144,6 @@ short-wall-clock|crates/gwt/src/index_worker.rs|project_index_git_context_does_n
 short-wall-clock|crates/gwt/src/index_worker.rs|run_coordinated_index_job_coalesces_into_a_running_equivalent_job
 short-wall-clock|crates/gwt/src/issue_monitor.rs|expired_deadline_rejects_durable_write_before_canonical_rename
 short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window
-short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|expired_scan_deadline_still_fails_default_base_resolution
-short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|proposal_return_deadline_expiry_is_stage_typed
 short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|the_readback_fan_out_stops_while_the_launch_stage_still_has_budget
 short-wall-clock|crates/gwt/src/main.rs|frontend_timing_warns_for_receive_latency_without_logging_input
 short-wall-clock|crates/gwt/src/main.rs|wait_for_active_work_projection
