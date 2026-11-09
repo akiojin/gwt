@@ -79,6 +79,7 @@ agentType = "command"
 command = "$nodeToml"
 defaultArgs = ["$producerToml", "$_"]
 "@ }) -join [Environment]::NewLine))
+$sourceEnvironment = [Environment]::GetEnvironmentVariables()
 $childEnvironment = @{}
 foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
     if ($entry.Key -notmatch '^(GWT_|CODEX_|CLAUDE_|GH_TOKEN$|GITHUB_TOKEN$|OPENAI_API_KEY$|ANTHROPIC_API_KEY$)') {
@@ -111,8 +112,13 @@ function New-IsolatedProcess([string]$FileName, [string]$WorkingDirectory = $che
     foreach ($key in $childEnvironment.Keys) { $start.Environment[$key] = $childEnvironment[$key] }
     return $start
 }
-function Invoke-IsolatedGwtd([string]$Operation, [hashtable]$Parameters, [string]$Project = $checkout) {
+function Invoke-IsolatedGwtd([string]$Operation, [hashtable]$Parameters, [string]$Project = $checkout, [switch]$SourceContext) {
     $start = New-IsolatedProcess $gwtd $Project
+    if ($SourceContext) {
+        $start.Environment.Clear()
+        foreach ($key in $sourceEnvironment.Keys) { $start.Environment[$key] = $sourceEnvironment[$key] }
+        [void]$start.Environment.Remove('GWT_BIN_PATH')
+    }
     $start.Environment['GWT_PROJECT_ROOT'] = $Project
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
@@ -130,9 +136,22 @@ function Invoke-IsolatedGwtd([string]$Operation, [hashtable]$Parameters, [string
         return $result
     } finally { $process.Dispose() }
 }
-function Assert-HookHealth($Health) {
-    $blocking = @($Health.issues | Where-Object { $_ -notmatch '^managed hook failure: .* state=fail-open( |$)' })
-    if ($Health.status -eq 'inactive' -or $blocking.Count) { throw "Hook convergence failed: $($blocking -join '; ')" }
+function Assert-ManagedBrowserPreflight($Doctor) {
+    $preflight = $Doctor.preflight
+    if (!$preflight -or $preflight.schema_version -isnot [ValueType] -or
+        $preflight.schema_version -is [bool] -or $preflight.schema_version -ne 1 -or
+        $preflight.result -cne 'proceed' -or $preflight.context -cne 'current' -or
+        $preflight.normal_completion -cne 'normal' -or $preflight.convergence -cne 'converged' -or
+        $preflight.reasons -isnot [Array] -or $preflight.reasons.Count -ne 0 -or
+        $preflight.diagnostics -isnot [Array]) {
+        throw "Managed-browser preflight refused: $($preflight | ConvertTo-Json -Depth 5 -Compress)"
+    }
+    foreach ($diagnostic in $preflight.diagnostics) {
+        if ($diagnostic.id -isnot [string] -or [string]::IsNullOrWhiteSpace($diagnostic.id) -or
+            $diagnostic.classification -cnotin @('recovered', 'fail_open', 'foreign')) {
+            throw 'Managed-browser preflight contains an invalid retained diagnostic.'
+        }
+    }
 }
 function Invoke-FixtureGit([string]$Project, [string[]]$Arguments) {
     $start = New-IsolatedProcess (Get-Command git -CommandType Application).Source $Project
@@ -148,16 +167,17 @@ function Invoke-FixtureGit([string]$Project, [string[]]$Arguments) {
         return $output.GetAwaiter().GetResult().Trim()
     } finally { $process.Dispose() }
 }
-$resolver = Invoke-IsolatedGwtd 'hook.doctor' @{}
+$resolver = Invoke-IsolatedGwtd 'hook.doctor' @{} -SourceContext
 $hookBin = ($resolver.output | ConvertFrom-Json).managed_hook_bin
 if (-not $hookBin -or $hookBin -match '(?i)[/\\]target[/\\].*[/\\]gwtd(\.exe)?$') { throw 'Stable hook fallback unavailable.' }
 $childEnvironment.GWT_HOOK_BIN = $hookBin
-$hookParams = @{expected_hook_bin=$hookBin;runtime_state_path="$checkHome/.gwt/missing-runtime.json"}
-[void](Invoke-IsolatedGwtd 'hook.doctor' ($hookParams + @{repair=$true}))
+$hookParams = @{purpose='managed_browser';expected_hook_bin=$hookBin}
+$doctor = Invoke-IsolatedGwtd 'hook.doctor' ($hookParams + @{repair=$true}) -SourceContext
+Assert-ManagedBrowserPreflight ($doctor.output | ConvertFrom-Json)
 [void](Invoke-IsolatedGwtd 'hook.register_codex_managed_hook_trust' @{
     codex_config="$checkHome/.codex/config.toml";codex_hook_discovery='both';project_root=$checkout
-})
-Assert-HookHealth ((Invoke-IsolatedGwtd 'hook.health' $hookParams).output | ConvertFrom-Json)
+} -SourceContext)
+Assert-ManagedBrowserPreflight ((Invoke-IsolatedGwtd 'hook.doctor' $hookParams -SourceContext).output | ConvertFrom-Json)
 $tabs = @()
 $projects = @()
 for ($index = 0; $index -lt 5; $index++) {
@@ -215,7 +235,9 @@ try {
     $anchor = [Net.WebSockets.ClientWebSocket]::new()
     $anchor.Options.SetRequestHeader('Origin', $baseUrl.TrimEnd('/'))
     $anchor.ConnectAsync([Uri](($baseUrl -replace '^http','ws') + 'ws'), [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
-    Assert-HookHealth ((Invoke-IsolatedGwtd 'hook.health' $hookParams).output | ConvertFrom-Json)
+    $health = Invoke-IsolatedGwtd 'hook.doctor' $hookParams -SourceContext
+    Assert-ManagedBrowserPreflight ($health.output | ConvertFrom-Json)
+    [IO.File]::WriteAllText("$checkHome/hook-health.json", $health.output)
     $version = [IO.File]::ReadAllText((Join-Path $checkout 'scripts/playwright-version.txt')).Trim()
     $deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path $artifactRoot "gwt-playwright-$version" }
     $cli = Join-Path $deps 'node_modules/playwright/cli.js'
