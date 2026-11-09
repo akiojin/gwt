@@ -27,6 +27,9 @@ mod work_items;
 
 pub(crate) use persistence::resolve_workspace_work_event_container;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use persistence::ScopedWorkItemsDecodeObserver;
+
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{
     can_upgrade_work_owner, canonical_work_id, successor_work_id, work_owner_for_branch,
