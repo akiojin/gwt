@@ -3344,9 +3344,9 @@ mod tests {
             .join("worktrees/linked-index/keep");
         std::fs::create_dir_all(kept.parent().expect("parent")).expect("index directory");
         std::fs::write(&kept, b"live index").expect("live index");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() - Duration::from_millis(1),
-        );
+        let now = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         assert!(
             project_index_git_context(&checkout_root).is_none(),

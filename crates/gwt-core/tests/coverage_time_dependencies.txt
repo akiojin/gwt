@@ -480,7 +480,6 @@ crates/gwt/src/index_worker.rs|background_issue_runner_backstop_marks_its_owned_
 crates/gwt/src/index_worker.rs|deadline_aware_git_context_matches_public_resolver_path_semantics|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(10),)|1
 crates/gwt/src/index_worker.rs|deadline_default_worktree_matches_public_workspace_home_fallbacks|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(10),)|2
 crates/gwt/src/index_worker.rs|issues_build_has_a_deadline_and_bounded_heavy_lease|assert!(deadline.saturating_duration_since(Instant::now())<=Duration::from_secs(600))|1
-crates/gwt/src/index_worker.rs|project_index_git_context_does_not_fall_through_an_expired_deadline|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1),)|1
 crates/gwt/src/index_worker.rs|run_coordinated_index_job_coalesces_into_a_running_equivalent_job|assert!(Instant::now()<deadline,)|2
 crates/gwt/src/index_worker.rs|run_coordinated_index_job_coalesces_into_a_running_equivalent_job|letdeadline=Instant::now()+Duration::from_secs(10)|1
 crates/gwt/src/index_worker.rs|run_coordinated_index_job_coalesces_into_a_running_equivalent_job|letdeadline=Instant::now()+Duration::from_secs(20)|1
