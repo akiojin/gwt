@@ -37,7 +37,6 @@ short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behi
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|lease_extension_pushes_the_expiry_out
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|wait_until
 short-wall-clock|crates/gwt-core/src/operation_deadline.rs|contended_file_lock_stops_at_the_shared_deadline
-short-wall-clock|crates/gwt-core/src/operation_deadline.rs|expired_deadline_rejects_an_available_file_lock
 short-wall-clock|crates/gwt-core/src/process_console/hub.rs|snapshot_all_is_time_sorted
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|cleanup_future_is_abandoned_after_grace
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|expired_deadline_does_not_spawn_child
