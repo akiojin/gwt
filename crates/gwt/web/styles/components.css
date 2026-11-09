@@ -1481,7 +1481,9 @@ button.op-runtime-health-detail__process {
 }
 
 .workspace-window[data-agent-state="idle"],
-.workspace-window[data-agent-state="not_started"] {
+.workspace-window[data-agent-state="not_started"],
+.workspace-window[data-agent-state="stopped"],
+.workspace-window[data-agent-state="interrupted"] {
   opacity: 1;
 }
 
@@ -1503,10 +1505,14 @@ button.op-runtime-health-detail__process {
   animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
 }
 
-[data-agent-state="done"] {
-  --agent-color: var(--color-state-done);
+[data-agent-state="stopped"] {
+  --agent-color: var(--color-state-idle);
   box-shadow: 0 0 0 1px var(--agent-color);
-  opacity: 0.65;
+}
+
+[data-agent-state="interrupted"] {
+  --agent-color: var(--color-state-blocked);
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
 @keyframes op-rim-pulse {
@@ -3264,7 +3270,8 @@ button.workspace-board-ref:focus-visible {
 :root[data-theme] .status-chip.waiting { color: var(--color-state-idle); border-color: var(--color-state-idle); }
 :root[data-theme] .status-chip.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
 :root[data-theme] .status-chip.stopped,
-:root[data-theme] .status-chip.exited { color: var(--color-state-done); border-color: var(--color-state-done); }
+:root[data-theme] .status-chip.exited { color: var(--color-state-idle); border-color: var(--color-state-idle); }
+:root[data-theme] .status-chip.interrupted { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
 
 /* Project picker / onboarding cards */
 :root[data-theme] .project-picker,

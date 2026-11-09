@@ -62,6 +62,50 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     }
   });
 
+  test("AS-01: stopped and interrupted retain runtime meaning without completion or dimming", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installKillSwitchBackend(page);
+    await page.goto(appUrl);
+    const win = page.locator('.workspace-window[data-id="agent-1"]');
+    await expect(win).toBeAttached();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await expect(page.locator('.works-terminal[data-window-id="agent-1"]')).toBeVisible();
+    for (const [wire, state, label] of [
+      ["stopped", "stopped", "Stopped"],
+      ["exited", "stopped", "Stopped"],
+      ["interrupted", "interrupted", "Interrupted"],
+    ]) {
+      await page.evaluate(state => window.__emit({ kind: "terminal_status", id: "agent-1", status: state }), wire);
+      await expect(win.locator(".status-label")).toHaveText(label);
+      await expect(page.locator(".works-full-meta")).toContainText(` · ${label} · `);
+      const row = page.locator('.work-row[data-window-id="agent-1"]');
+      await expect(row.locator(".work-state")).toHaveText(label);
+      const colors = await row.locator(".work-state").evaluate((node, token) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${token})`;
+        document.body.append(probe);
+        const expected = getComputedStyle(probe).color;
+        probe.remove();
+        return { expected, actual: getComputedStyle(node).color };
+      }, state === "stopped" ? "--color-state-idle" : "--color-state-blocked");
+      expect(colors.actual).toBe(colors.expected);
+      await expect(win).toHaveAttribute("data-agent-state", state);
+      await expect(win).toHaveCSS("opacity", "1");
+      await expect(win).toHaveCSS("pointer-events", "auto");
+      await expect(page.locator('.toast-alerts__item[data-level="done"]')).toHaveCount(0);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: /Agent (stopped|finished)/ })).toHaveCount(0);
+    }
+    await info.attach("runtime-without-completion", {
+      body: await page.screenshot({ path: info.outputPath("runtime-without-completion.png") }), contentType: "image/png",
+    });
+    await page.locator('.works-full [data-action="back"]').click();
+    await expect(page.locator('.work-row[data-window-id="agent-1"] .work-state')).toBeVisible();
+    await info.attach("runtime-list", {
+      body: await page.screenshot({ path: info.outputPath("runtime-list.png") }), contentType: "image/png",
+    });
+  });
+
   // SPEC #3885 FR-015 (user ruling 2026-09-03) supersedes FR-041's titlebar
   // STOP: stopping an agent is offered only from the Issue row's ⋯ menu
   // (issue-preview.spec.ts). The chrome keeps close and, once stopped, RESTART.
