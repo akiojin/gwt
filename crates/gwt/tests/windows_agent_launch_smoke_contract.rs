@@ -11,6 +11,11 @@ mod shell_observer;
 fn public_shell_waits_for_prompt_after_startup_banner() {
     let mut parser = vt100::Parser::new(32, 120, 0);
     assert!(!shell_observer::input_ready(parser.screen()));
+    parser.process(b"startup output>\r\n");
+    assert!(
+        !shell_observer::input_ready(parser.screen()),
+        "output on the previous line must not trigger the one-shot Shell input"
+    );
     // PR #6958: the first 149 bytes preceded the actual PowerShell prompt.
     let banner = format!(
         "\x1b[m\x1b[H\x1b[JPowerShell 7.6.9{}\x1b[2;1H\x1b[1;32r\x1b[?6l\x1b[H\x1b7\x1b[1;32r\x1b[?6l\x1b[2;1H\x1b[?25h\x1b>\x1b[?1l\x1b[?2004l",
