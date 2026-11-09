@@ -11,6 +11,8 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   issueNumber?: number;
+  additionalIssueNumbers?: number[];
+  monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
   prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
@@ -25,7 +27,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
     updatedAt: new Date().toISOString(),
   };
   const issues = [issue, ...(options.targetIssueNumber ? [{ ...issue, number: options.targetIssueNumber,
-    title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : [])];
+    title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : []),
+    ...(options.additionalIssueNumbers ?? []).map(number => ({ ...issue, number,
+      title: `Queue refill fixture ${number}`, url: `https://github.com/fixture/queue/issues/${number}` }))];
   const issueComments = new Map(issues.map(value => [value.number, value.number === issue.number ? comments : [] as typeof comments]));
   let nextCommentId = 1;
   const restIssue = (value: typeof issue) => ({ ...value, state: value.state.toLowerCase(), html_url: value.url,
@@ -168,6 +172,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
         enabled: true, autonomous_mode: options.autonomousMode ?? false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
         launch_profile: { agent_id: "codex", version: "installed", runtime_target: "Host", skip_permissions: true },
+        ...options.monitorPreferences,
       },
       async beforeStart({ home, project, env, preferences }) {
         if (options.terminalConvergence)

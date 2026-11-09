@@ -170,6 +170,19 @@ test("Settings launch controls retain their nodes and save once across status re
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
+test("Issue #6922: Refill limit displays the saved zero and confirmed default after enabling", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { name: "A" }, send: () => {} };
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0", "missing saved fields use the stored default");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:0 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:3 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "3");
+});
+
 test("Project settings never writes capacity when opened, remounted or updated", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -197,7 +210,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
     ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
-    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
     const control = panel.querySelector(`[aria-label="${name}"]`);

@@ -1198,6 +1198,27 @@ test("Issue board auto-refill renders confirmed state and preserves the configur
   assert.deepEqual(sent.at(-1), {kind:"set_issue_monitor_auto_refill", enabled:true, limit:0});
 });
 
+test("Issue #6922: stopped Auto-refill explains Start beside the switch and in the empty queue", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({kind:"knowledge_entries",id:"win-1",knowledge_kind:"issue",request_id:load.request_id,
+    entries:[],refresh_enabled:true});
+  const hint = () => body.querySelector('[data-role="monitor-refill-guidance"]');
+  const empty = () => body.querySelector('[data-queue-column="queued"] .knowledge-empty');
+  surface.applyIssueMonitorStatus({enabled:false,terminal_queue_auto_refill:true,terminal_queue:[]});
+  assert.ok(hint(), "the stopped explanation is visible near Monitor controls");
+  assert.equal(hint().hidden, false);
+  assert.equal(hint().getAttribute("role"), "status");
+  assert.equal(hint().textContent, "Start the Monitor to begin Auto-refill.");
+  assert.match(empty().textContent, /Start the Monitor to begin Auto-refill/);
+  surface.applyIssueMonitorStatus({enabled:true});
+  assert.equal(hint().hidden, true);
+  assert.doesNotMatch(empty().textContent, /Start the Monitor/);
+  surface.applyIssueMonitorStatus({enabled:false,terminal_queue_auto_refill:false});
+  assert.equal(hint().hidden, true);
+  assert.match(empty().textContent, /turn on Auto-refill/);
+});
+
 test("Issue queue drops include hold-labeled cards and retain server projection", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
