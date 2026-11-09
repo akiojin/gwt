@@ -844,6 +844,13 @@ impl AppRuntime {
 
     /// GUI shutdown detaches its caches; owner residency performs the exact lifetime drain.
     pub(crate) fn stop_all_runtimes(&mut self) {
+        // Revoke before detaching: queued native inputs may outlive the GUI,
+        // and the exit backstop does not run MobileHost's Drop fallback.
+        self.mobile_host
+            .authorization()
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .disable();
         let ids = self.runtimes.keys().cloned().collect();
         self.stop_runtimes_in_shutdown_order(ids);
     }
