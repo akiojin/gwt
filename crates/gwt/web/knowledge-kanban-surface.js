@@ -2,6 +2,7 @@ import { isContainedPlacement } from "./agent-kanban-surface.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { renderUiContent } from "./ui-content.js";
+import { monitorDiagnostic } from "./agent-completion-notifications.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
@@ -1054,17 +1055,22 @@ export function createKnowledgeKanbanSurface({
         return meanings[primary.key] || `Reported issue state: ${primary.label}.`;
       }
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
-      // is re-broadcast constantly, so only a CHANGED text is a new event) and
+      // is re-broadcast constantly; only a new diagnosis or failed scan counts) and
       // remember which of the two sources changed last for the summary line.
-      const ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
+      let ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
       let reportedIssueMonitorError = "";
       let issueMonitorErrorSequence = 0;
       let surfaceErrorSequence = 0;
 
       function issueMonitorErrorText() {
-        return typeof issueMonitorModel.read().status?.last_error === "string"
-          ? issueMonitorModel.read().status.last_error.trim()
-          : "";
+        return currentMonitorDiagnostic()?.message || "";
+      }
+
+      function currentMonitorDiagnostic() {
+        const status = issueMonitorModel.read().status;
+        return monitorDiagnostic({ message: status?.last_error,
+          kind: status?.last_error_source,
+          stage: status?.last_error_source === "scan_failure" ? status.last_scan_error?.phase : undefined });
       }
 
       // Issue #3628 (AC-5) / SPEC #3885 FR-022: the fleet outage used to be a
@@ -1092,13 +1098,22 @@ export function createKnowledgeKanbanSurface({
       function syncIssueMonitorErrorReport() {
         syncIssueMonitorBlackoutReport();
         syncIssueMonitorCapacityReport();
-        const lastError = issueMonitorErrorText();
-        if (lastError === reportedIssueMonitorError) return;
-        reportedIssueMonitorError = lastError;
-        if (lastError) {
+        const diagnostic = currentMonitorDiagnostic();
+        const status = issueMonitorModel.read().status;
+        const occurrence = diagnostic ? JSON.stringify([diagnostic.key, diagnostic.message,
+          !diagnostic.stalled && status.last_error_source === "scan_failure"
+            ? status.last_scan_error?.recorded_at || status.last_scan_at : ""]) : "";
+        if (occurrence === reportedIssueMonitorError) return;
+        const previousKey = reportedIssueMonitorError && ISSUE_MONITOR_ERROR_KEY;
+        reportedIssueMonitorError = occurrence;
+        if (diagnostic) {
+          if (previousKey && previousKey !== diagnostic.key) resolveSurfaceError(previousKey);
+          ISSUE_MONITOR_ERROR_KEY = diagnostic.key;
           surfaceErrorSequence += 1;
           issueMonitorErrorSequence = surfaceErrorSequence;
-          reportSurfaceError({ key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: lastError });
+          const notice = { key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: diagnostic.message };
+          if (diagnostic.stalled) reportSurfaceNotice({ ...notice, level: "error" });
+          else reportSurfaceError(notice);
         } else {
           resolveSurfaceError(ISSUE_MONITOR_ERROR_KEY);
         }

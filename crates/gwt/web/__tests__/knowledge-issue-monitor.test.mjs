@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { monitorDiagnostic } from "../agent-completion-notifications.js";
 import { createAgentActivityModel } from "../agent-activity-model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-completion-notifications.js"', `from "${new URL("../agent-completion-notifications.js", import.meta.url).href}"`).replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -896,6 +897,28 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
 // User ruling 2026-09-04: the Issue window shows no error surface of its own.
 // It reports every error to the notification center and renders nothing.
 
+test("Issue #6932 counts scan occurrences without treating repeated snapshots or continued diagnostics as new errors", async (t) => {
+  const spies = errorSpies();
+  const { surface } = await makeFixture(spies.options);
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const status = { enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1,
+    last_error_source: "scan_failure", last_error: "issue monitor scan failed at open-pr-readback stage: deadline exceeded after 30s", last_scan_at: "2026-11-09T00:00:00Z" };
+  surface.applyIssueMonitorStatus(status);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(spies.reported.length, 1);
+  surface.applyIssueMonitorStatus({ ...status, last_scan_at: "2026-11-09T00:01:00Z", last_error: status.last_error.replace("30s", "31s") });
+  assert.equal(spies.reported.length, 2);
+  assert.equal(spies.reported[0].key, spies.reported[1].key);
+  for (const disposition of ["stale_readback", "previous_candidates"]) {
+    surface.applyIssueMonitorStatus({ ...status, last_error: `scan continued: candidate-load failed (continued_with_${disposition}): offline` });
+  }
+  assert.equal(spies.reported.length, 2);
+  assert.deepEqual(spies.resolved, [spies.reported[0].key]);
+  surface.applyIssueMonitorStatus({ ...status, last_error_source: "failed_issues", last_error: "issue #42: previous failure" });
+  surface.applyIssueMonitorStatus({ ...status, last_error_source: "failed_issues", last_error: "issue #42: previous failure", last_scan_at: "2026-11-09T01:00:00Z" });
+  assert.equal(spies.reported.length, 3, "a healthy scan does not repeat a retained Issue failure");
+});
+
 test("FR-017 / #5284: current Monitor error is read in the center through the labelled diagnostics action", async (t) => {
   const spies = errorSpies();
   const { body, surface, opened } = await makeFixture(spies.options);
@@ -905,11 +928,11 @@ test("FR-017 / #5284: current Monitor error is read in the center through the la
 
   surface.applyIssueMonitorStatus({ enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: "issue #3785: scan failed" });
   assert.deepEqual(spies.reported, [
-    { key: "issue-monitor:last_error", title: "Issue Monitor", message: "issue #3785: scan failed" },
+    { key: monitorDiagnostic({ message: "issue #3785: scan failed" }).key, title: "Issue Monitor", message: "issue #3785: scan failed" },
   ]);
   assert.equal(body.querySelector(".surface-error-indicator"), null, "still nothing in the surface");
   body.querySelector('[data-action="monitor-diagnostics"]').click();
-  assert.equal(opened.at(-1), "issue-monitor:last_error");
+  assert.equal(opened.at(-1), monitorDiagnostic({ message: "issue #3785: scan failed" }).key);
 
   // issue_monitor_status is re-broadcast constantly — an unchanged error is
   // not a new occurrence.
@@ -917,7 +940,7 @@ test("FR-017 / #5284: current Monitor error is read in the center through the la
   assert.equal(spies.reported.length, 1);
 
   surface.applyIssueMonitorStatus({ enabled: true, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: null });
-  assert.deepEqual(spies.resolved, ["issue-monitor:last_error"], "recovery resolves the center row");
+  assert.deepEqual(spies.resolved, [monitorDiagnostic({ message: "issue #3785: scan failed" }).key], "recovery resolves the center row");
 });
 
 test("FR-017: Issue window load errors report to the center without a red status band", async (t) => {
@@ -1000,7 +1023,7 @@ test("A fleet outage is shown even while a per-issue error occupies the error li
         "issue-monitor:agent_blackout",
         "No implementation agent has been running for 1800s while 9 issue(s) were runnable; the fleet has been down since 2026-08-17T00:00:00Z",
       ],
-      ["issue-monitor:last_error", "issue #2338: an execution generation already exists"],
+      [monitorDiagnostic({ message: "issue #2338: an execution generation already exists" }).key, "issue #2338: an execution generation already exists"],
     ],
     "the per-issue error keeps its own channel rather than being overwritten",
   );
