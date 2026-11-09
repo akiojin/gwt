@@ -871,7 +871,7 @@ test("Workspace state notice receiver resolves only shared model updates", () =>
     'case "workspace_state_notice": element.textContent = event.kind;');
   assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
   const directRender = notice.replace('function receive(notice) {',
-    'function receive(notice) { render(notice);');
+    'function receive(notice) { container.textContent = notice.message;');
   assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
   assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
 });
