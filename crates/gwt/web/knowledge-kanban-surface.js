@@ -1454,6 +1454,9 @@ export function createKnowledgeKanbanSurface({
           const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
+        const refillGuidance = element.querySelector('[data-role="monitor-refill-guidance"]');
+        if (refillGuidance) refillGuidance.hidden = !issueMonitorModel.read().status.terminal_queue_auto_refill
+          || Boolean(issueMonitorModel.read().status.enabled);
 
       }
 
@@ -3541,10 +3544,18 @@ export function createKnowledgeKanbanSurface({
             },
           });
           let empty = column.querySelector(".knowledge-empty");
-          if (!items.length && !empty) {
-            empty = createNode("div", "knowledge-empty", phase === "queued"
-              ? "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above." : `No ${phase} items`);
-            column.appendChild(empty);
+          if (!items.length) {
+            if (!empty) {
+              empty = createNode("div", "knowledge-empty");
+              column.appendChild(empty);
+            }
+            const refill = issueMonitorModel.read().status.terminal_queue_auto_refill;
+            const stopped = !issueMonitorModel.read().status.enabled;
+            empty.textContent = phase === "queued"
+              ? (refill && stopped ? "Start the Monitor to begin Auto-refill."
+                : refill ? "Auto-refill adds eligible Backlog issues on the next Monitor scan."
+                  : "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above.")
+              : `No ${phase} items`;
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
           const refuses = phase === "active" || phase === "done";
@@ -5418,6 +5429,7 @@ export function createKnowledgeKanbanSurface({
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>
                     <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                   </div>
+                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the Monitor to begin Auto-refill.</p>
                 </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
@@ -5503,7 +5515,7 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
-              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; 0 disables refill."],
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the Monitor to begin Auto-refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
               ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
