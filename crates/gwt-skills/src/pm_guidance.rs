@@ -652,7 +652,9 @@ Use this wire through the existing operation; do not attach legacy `body`,
   are optional. Each summary string is one nonblank logical line of at most
   240 Unicode characters. A decision event requires both `action.kind:decide`
   and a decision packet with `question`, `recommendation`, `reason`, and
-  2-3 `options`. Put a copy-paste answer example in the full details.
+  2-4 `options`. Put the recommended option first and explain each outcome in
+  its option text. Reports display numbered options; the user can reply with
+  the option number or an `Other` free-text answer in the execution log.
 - Preserve complete supporting detail in `details` and `refs`; never truncate
   evidence to fit the summary. Bounds are 1-32 events, 64 KiB details per event,
   at most 16 single-line refs of 2 KiB each, and 256 KiB for the submission.
@@ -3695,6 +3697,14 @@ mod tests {
                     "{provider}/{name}: stale free-text-only intake question"
                 );
             }
+            assert!(
+                role.contains("2-4 `options`"),
+                "{provider}: stale Reports choice bound"
+            );
+            assert!(
+                role.contains("option number"),
+                "{provider}: missing Reports fallback"
+            );
         }
     }
 

@@ -1210,7 +1210,8 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         const decision = { ...event('judgment', `RPT-F decision ${theme}`), kind: 'decision',
           state: { status: 'waiting', severity: 'routine', impact: 'project', action: { id: 'choose-recovery', kind: 'decide' } },
           summary: { result: `RPT-F decision ${theme}`, decision: { question: 'Which recovery?', recommendation: 'Retry',
-            reason: 'The saved work is intact', options: ['Retry', 'Wait'] } } };
+            reason: 'The saved work is intact', options: ['Retry — repeat the check', 'Wait — keep the current state',
+              'Investigate — collect more evidence', 'Cancel — stop this attempt'] } } };
         const mixed = post(request('mixed', [
           { ...event('routine-a', 'Routine item A'), state: { ...initialEvent.state, action: { id: 'monitor-a', kind: 'monitor' } } },
           fatal, decision,
@@ -1236,6 +1237,12 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         for (const receipt of [mixed, resolved]) {
           for (const row of receipt.reports) await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(1);
         }
+        const decisionRow = reports.locator(`article[data-report-id="${mixed.reports[1].id}"]`);
+        await expect(decisionRow).toContainText('1. Retry — repeat the check\n2. Wait — keep the current state\n3. Investigate — collect more evidence\n4. Cancel — stop this attempt');
+        await expect(decisionRow).toContainText('Reply with the option number, or Other: your own answer.');
+        await decisionRow.getByRole('button', { name: 'Copy report' }).click();
+        await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('4. Cancel — stop this attempt');
+        await saveEvidence('four-choice-decision', await decisionRow.screenshot(), 'image/png');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
         await expect(qaRow.locator('.pm-chat__question')).toHaveText(qaQuestion);
         await expect(qaRow.getByRole('region', { name: 'Answer', exact: true })).toContainText(qaAnswer);

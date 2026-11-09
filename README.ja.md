@@ -1917,6 +1917,8 @@ PM の更新は共通の短い概要で表示し、**Details** を開くと説�
 **Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
 切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
 1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
+判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Execution log** で
+番号または自由文を回答できます。**Copy** には番号付き選択肢と詳細を含めます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、
