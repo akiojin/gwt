@@ -77,7 +77,7 @@ export function createPmWindowModel() {
         if (version?.epoch === event.version.epoch && version.revision === event.version.revision) return state;
         const taskOverview = event.current?.request_tasks;
         const taskError = taskOverview?.state === 'error' ? taskOverview.message
-          : (!taskOverview ? event.error || null : null);
+          : (!taskOverview ? event.error || 'Request tasks are unavailable. Reload this page to try again.' : null);
         next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
           requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
           requestTasksError: taskError,

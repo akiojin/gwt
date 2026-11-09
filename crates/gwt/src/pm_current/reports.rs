@@ -177,7 +177,17 @@ impl PmReportsReader {
                 .data
                 .as_ref()
                 .is_none_or(|old| !old.same_content(&next));
-            self.inputs = if next.error.is_none() { inputs } else { None };
+            let task_failed = matches!(
+                next.current
+                    .as_ref()
+                    .and_then(|current| current.request_tasks.as_ref()),
+                Some(super::PmTaskOverview::Error { .. })
+            );
+            self.inputs = if next.error.is_none() && !task_failed {
+                inputs
+            } else {
+                None
+            };
             self.data = Some(next);
         }
         let data = self.data.as_mut()?;

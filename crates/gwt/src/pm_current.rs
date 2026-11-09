@@ -347,6 +347,13 @@ mod tests {
                     .collect(),
             },
         );
+        apply(
+            2,
+            ActorKind::User,
+            Action::Cancel {
+                task_id: "private-child-000".into(),
+            },
+        );
         let (updated, data) = reader.poll(&repo, None, Some(&captured)).unwrap();
         let value = serde_json::to_value(data.current).unwrap();
         let overview = &value["request_tasks"];
@@ -355,6 +362,9 @@ mod tests {
         assert_eq!(overview["pending_intake"], 0);
         let rows = overview["tasks"].as_array().unwrap();
         assert_eq!(rows.len(), 50);
+        let beyond_id_limit = format!("{:x}", Sha256::digest(b"private-child-050"));
+        assert!(rows.iter().any(|row| row["key"] == beyond_id_limit));
+        assert!(rows.iter().all(|row| row["status"] != "cancelled"));
         assert_eq!(rows[0]["key"].as_str().unwrap().len(), 64);
         assert!(rows[0]["title"].as_str().unwrap().chars().count() <= 241);
         assert!(rows[0]["parent_key"].as_str().is_some());
@@ -386,10 +396,10 @@ mod tests {
             "ready"
         );
         apply(
-            2,
+            3,
             ActorKind::Pm,
             Action::Progress {
-                task_id: "private-child-000".into(),
+                task_id: "private-child-001".into(),
                 status: gwt_core::pm_request_tasks::TaskStatus::Waiting,
                 wait_reason: Some("CI verdict".into()),
                 next_action: "Review the checks".into(),
@@ -470,6 +480,31 @@ mod tests {
                 .0,
             recovered
         );
+        let task_input = Some(vec![super::reports::SourceStamp::Update(
+            serde_json::json!(2),
+        )]);
+        changed.error = None;
+        changed.current = Some(PmCurrentSnapshot {
+            observed_at: now,
+            status: None,
+            stale_minutes: None,
+            facts: PmMonitorFacts::default(),
+            request_tasks: Some(PmTaskOverview::Error {
+                message: "temporarily unreadable tasks".into(),
+            }),
+        });
+        let (failed, _) = reader
+            .poll_with(task_input.clone(), Some(&recovered), now, || changed)
+            .unwrap();
+        let (recovered, _) = reader
+            .poll_with(task_input.clone(), Some(&failed), now, || data)
+            .expect("task reads retry without a stamp change or Reports deadline");
+        assert_eq!(recovered.revision, failed.revision + 1);
+        assert!(reader
+            .poll_with(task_input, Some(&recovered), now, || panic!(
+                "the acknowledged task recovery stays silent"
+            ))
+            .is_none());
     }
 
     #[cfg(unix)]
