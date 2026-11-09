@@ -2,9 +2,11 @@ import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
 
 // Apply the deadline before Playwright creates the headed browser/page fixtures.
 test.describe.configure({ timeout: 180_000 });
+useManagedBrowserSource(test);
 
 test("Issue #6933 Codex cache drives both pickers and warns about saved retired models", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
