@@ -1055,7 +1055,11 @@ fn run_monitor_status<E: CliEnv>(
                 format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
             } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
         });
-        output["update_drain"] = serde_json::to_value(drain).expect("update drain serializes");
+        let drain = serde_json::to_value(drain).expect("update drain serializes");
+        output["update_drain"] = drain.clone();
+        if let Some(gui) = output["gui_status"].as_object_mut() {
+            gui.insert("update_drain".into(), drain);
+        }
     }
     let mut effective_queue = prefs
         .terminal_queues
@@ -2664,7 +2668,7 @@ fn monitor_admission_exclusions(
         .into_iter()
         .flat_map(|reason| reason.split("; "))
         .filter(|reason| {
-            (has_update_drain || !reason.starts_with("update_drain"))
+            !reason.starts_with("update_drain")
                 && (!terminal_member
                     || !(reason.starts_with("not_in_terminal_queue:")
                         || *reason == "not selected in this terminal queue"))
@@ -2735,7 +2739,18 @@ fn attach_monitor_admission_diagnostics(
     status: &crate::IssueMonitorAgentStatus,
     prefs: &crate::IssueMonitorPrefs,
 ) {
-    if prefs.effective_update_drain().is_none() {
+    if let Some(drain) = prefs.effective_update_drain() {
+        let drain = serde_json::to_value(drain).expect("update drain serializes");
+        output["update_drain"] = drain.clone();
+        output["update_drain_release"] = crate::UPDATE_DRAIN_RELEASE_OPERATION.into();
+        if let Some(gui) = output["gui_status"].as_object_mut() {
+            gui.insert("update_drain".into(), drain);
+            gui.insert(
+                "update_drain_release".into(),
+                crate::UPDATE_DRAIN_RELEASE_OPERATION.into(),
+            );
+        }
+    } else {
         if let Some(output) = output.as_object_mut() {
             output.remove("update_drain");
             output.remove("update_drain_release");
@@ -4856,6 +4871,40 @@ fn run_monitor_config_set<E: CliEnv>(
         }
     }
 
+    // Keep the captured raw hold available if the manifest cannot be saved.
+    // A later local CAS failure is a partial success: only this version's
+    // host-wide automatic holds have been released, and replacements stay intact.
+    let deferred_version = if let Some(version) = defer_version {
+        if let Some(pending) = gwt_core::update::load_pending_update_manifest().filter(|pending| {
+            pending.version == version
+                && !pending.auto_apply_deferred
+                && gwt_core::update::pending_version_is_newer(
+                    &pending.version,
+                    env!("CARGO_PKG_VERSION"),
+                )
+        }) {
+            gwt_core::update::defer_pending_update(&pending.version).map_err(|error| {
+                io_as_api_error(io::Error::other(format!(
+                    "Host update v{} could not be deferred; this request did not save Issue Monitor configuration: {error}",
+                    pending.version,
+                )))
+            })?;
+            Some(pending.version)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let local_save_error = |error: io::Error| {
+        io_as_api_error(if let Some(version) = &deferred_version {
+            io::Error::other(format!(
+                "Host update v{version} deferred; local configuration save result is unconfirmed. Re-read issue.monitor.status before retrying: {error}"
+            ))
+        } else {
+            error
+        })
+    };
     let mut config = serde_json::json!({
         "allowed_labels": allowed_labels,
         "enabled": enabled,
@@ -4884,7 +4933,7 @@ fn run_monitor_config_set<E: CliEnv>(
     let publication = publish_monitor_config_set(&project_root, payload);
     if let Err(error) = publication {
         if !error.allows_local_fallback() {
-            return Err(io_as_api_error(io::Error::other(error.to_string())));
+            return Err(local_save_error(io::Error::other(error.to_string())));
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         let control_id = uuid::Uuid::new_v4().to_string();
@@ -4915,34 +4964,18 @@ fn run_monitor_config_set<E: CliEnv>(
         })
         .map_err(|error| {
             if shared_write_started && error.to_string() != crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR {
-                io_as_api_error(io::Error::other(format!(
+                local_save_error(io::Error::other(format!(
                     "shared Max active save outcome is uncertain (control {control_id}); machine policy may be committed while project configuration is not. Re-read issue.monitor.status before retrying: {error}"
                 )))
             } else {
-                io_as_api_error(error)
+                local_save_error(error)
             }
         })?;
-    }
-    if let Some(version) = defer_version {
-        if let Some(pending) = gwt_core::update::load_pending_update_manifest().filter(|pending| {
-            pending.version == version
-                && !pending.auto_apply_deferred
-                && gwt_core::update::pending_version_is_newer(
-                    &pending.version,
-                    env!("CARGO_PKG_VERSION"),
-                )
-        }) {
-            gwt_core::update::defer_pending_update(&pending.version).map_err(|error| {
-                io_as_api_error(io::Error::other(format!(
-                    "Issue Monitor config saved, but host update defer failed; re-read issue.monitor.status before retrying: {error}"
-                )))
-            })?;
-        }
     }
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
     ))
-    .map_err(io_as_api_error)?;
+    .map_err(local_save_error)?;
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     monitor.refresh_agent_capacity(&project_root);
@@ -10570,6 +10603,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("llmlb"));
+        assert_eq!(status["gui_status"]["update_drain"], status["update_drain"]);
         assert!(status["update_drain_evaluation"]["release"]
             .as_str()
             .unwrap()
@@ -10708,6 +10742,9 @@ mod tests {
     #[test]
     fn issue_6899_config_clear_releases_automatic_update_drain_across_projects() {
         use crate::project_runtime::installation::prepare_host_update_drain_launch_hold;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         issue_6899_stage_update(tmp.path());
@@ -10740,21 +10777,42 @@ mod tests {
         let other_before = std::fs::read(&other_path).unwrap();
         let mut out = String::new();
         let env = crate::cli::TestEnv::new(repo);
-        run_monitor_config_set(
-            &env,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-            &mut out,
-        )
-        .unwrap();
+        let clear = |out: &mut String| {
+            run_monitor_config_set(
+                &env,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                out,
+            )
+        };
+        let before = std::fs::read(&path).unwrap();
+        let token = prefs.config_token();
+        let manifest_lock =
+            gwt_core::update::pending_update_manifest_lock(&gwt_core::update::pending_update_dir())
+                .unwrap();
+        assert!(clear(&mut out).is_err());
+        assert!(out.is_empty());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a failed host defer must preserve the captured retry intent"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .config_token(),
+            token
+        );
+        drop(manifest_lock);
+        clear(&mut out).unwrap();
         assert!(
             gwt_core::update::load_pending_update_manifest()
                 .unwrap()
@@ -10800,21 +10858,7 @@ mod tests {
         gwt_core::update::persist_pending_update_manifest(&newer).unwrap();
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         out.clear();
-        run_monitor_config_set(
-            &env,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-            &mut out,
-        )
-        .unwrap();
+        clear(&mut out).unwrap();
         assert!(
             !gwt_core::update::load_pending_update_manifest()
                 .unwrap()
@@ -10832,21 +10876,7 @@ mod tests {
             }
             crate::save_issue_monitor_prefs(&path, &unrelated).unwrap();
             out.clear();
-            run_monitor_config_set(
-                &env,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                false,
-                None,
-                None,
-                Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-                &mut out,
-            )
-            .unwrap();
+            clear(&mut out).unwrap();
             assert!(
                 !gwt_core::update::load_pending_update_manifest()
                     .unwrap()
@@ -10854,6 +10884,26 @@ mod tests {
                 "clearing an {release_kind} hold must not defer an unrelated host update"
             );
         }
+
+        gwt_core::update::resume_pending_update("99.0.0").unwrap();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let _fault = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &path,
+        );
+        std::fs::write(path.with_extension("parent-sync-fail-once"), "fail").unwrap();
+        out.clear();
+        let partial = clear(&mut out).unwrap_err().to_string();
+        assert!(
+            partial.contains("Host update v99.0.0 deferred"),
+            "{partial}"
+        );
+        assert!(partial.contains("local configuration save"), "{partial}");
+        assert!(
+            gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
     }
 
     #[test]
@@ -11033,7 +11083,21 @@ mod tests {
         published.stall_reason = Some(crate::IssueMonitorStallReason::UpdateDrain);
         published.gui_status.as_mut().unwrap().state = "update_drain".into();
         published.inbox = vec![mismatch_row(42, crate::MonitorInboxState::Queued, None)];
-        published.inbox[0].exclusion_reason = Some("update_drain; independent_hold".into());
+        published.inbox[0].exclusion_reason =
+            Some("update_drain: old version 99.0.0; independent_hold".into());
+        let mut replacement = prefs.clone();
+        replacement.update_drain.as_mut().unwrap().version = "100.0.0".into();
+        let mut replaced_output = serde_json::to_value(&published).unwrap();
+        attach_monitor_admission_diagnostics(&mut replaced_output, &published, &replacement);
+        assert_eq!(replaced_output["update_drain"]["version"], "100.0.0");
+        assert_eq!(
+            replaced_output["gui_status"]["update_drain"],
+            replaced_output["update_drain"]
+        );
+        assert!(!replaced_output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap()
+            .contains("99.0.0"));
         gwt_core::update::defer_pending_update("99.0.0").unwrap();
         let mut output = serde_json::to_value(&published).unwrap();
         attach_monitor_admission_diagnostics(&mut output, &published, &prefs);
