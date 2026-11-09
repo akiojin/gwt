@@ -3,7 +3,7 @@
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
-test("live Project reports ephemeral capability and consumes desktop intents without duplicate history", async ({ page }, testInfo) => {
+test("live Project reports ephemeral capability and consumes Interrupted desktop intents without duplicate history", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base, "requires browser-check isolated checkout");
   test.setTimeout(90_000);
@@ -40,37 +40,44 @@ test("live Project reports ephemeral capability and consumes desktop intents wit
     await sendLiveGwtEvent(page, { kind: "frontend_ready" });
     const key = new URL(page.url()).pathname.split("/")[2];
     expect(key).toMatch(/^[a-f0-9]{16}$/);
-    // The stopped-Agent metadata fixture has its existing in-app attention row.
-    // Desktop intents must preserve that history without adding another row.
+    // Preserve existing history, including independently updating capacity diagnostics.
+    // Desktop intents must not add another row.
     await page.locator("#op-notifications-button").click();
     const history = page.locator("#notification-center .notification-center__item");
-    await expect(history).toHaveCount(1);
-    await expect(history.first()).toContainText("Metadata fixture");
+    const historyTitles = history.locator(".notification-center__title");
+    const initialTitles = await historyTitles.allTextContents();
     const result = await page.evaluate((projectKey) => {
       const state = window as any;
-      const emit = (id: string, key = projectKey) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      const emit = (id: string, key = projectKey, category = "needs_human") => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
         detail: { kind: "project_notification", notification: {
           transition_id: id, project_key: key, window_id: null,
-          category: "needs_human", title: "Needs human", body: "A monitored issue needs human attention.",
+          category, title: category === "interrupted" ? "gwt — Agent interrupted" : "Needs human",
+          body: category === "interrupted"
+            ? "An agent was interrupted after running for at least five minutes."
+            : "A monitored issue needs human attention.",
         } },
       }));
-      emit("default");
+      emit("default", projectKey, "interrupted");
       (Notification as any).permission = "granted";
       window.dispatchEvent(new Event("blur"));
-      emit("foreign", "0000000000000000");
+      emit("foreign", "0000000000000000", "interrupted");
       emit("granted"); emit("granted");
+      emit("interrupted", projectKey, "interrupted"); emit("interrupted", projectKey, "interrupted");
       const notice = state.__desktopIntents[0];
       notice?.onclick();
       (Notification as any).permission = "denied";
       window.dispatchEvent(new Event("focus"));
-      emit("denied");
-      return { count: state.__desktopIntents.length, closed: notice?.closed,
+      emit("denied", projectKey, "interrupted");
+      return { titles: state.__desktopIntents.map((item: any) => item.title),
+        interruptedBody: state.__desktopIntents[1]?.options.body, closed: notice?.closed,
         focus: state.__desktopFocus, requests: state.__permissionRequests };
     }, key);
-    expect(result).toEqual({ count: 1, closed: true, focus: 1, requests: 0 });
+    expect(result).toEqual({ titles: ["Needs human", "gwt — Agent interrupted"],
+      interruptedBody: "An agent was interrupted after running for at least five minutes.",
+      closed: true, focus: 1, requests: 0 });
     await expect.poll(() => sent.filter((event) => event.kind === "project_client_attention").at(-1)?.notification_permission).toBe("denied");
-    await expect(history).toHaveCount(1);
-    await expect(history.first()).toContainText("Metadata fixture");
+    await expect(historyTitles).toHaveText(initialTitles);
+    await expect(page.locator(".toast-alerts__item").filter({ hasText: /Needs human|Agent interrupted/i })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("live-project-notifications.png") });
     expect(errors).toEqual([]);
   });
