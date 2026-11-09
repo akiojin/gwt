@@ -303,6 +303,11 @@ impl ProjectOwnerHarness {
     }
 
     fn bind(root: &std::path::Path, with_monitor: bool) -> Result<Self, String> {
+        // Outcome fixtures wait for the real daemon ACK. Pin before spawning
+        // the actor so its cleanup workers inherit this incidental budget.
+        let _control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+            &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+        );
         // A physical owner can attach to its controller's accepted view.
         // Other owner fixtures model an already opened Project; policy
         // rejection tests remove that receipt rather than bypassing admission.

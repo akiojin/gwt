@@ -7593,6 +7593,11 @@ fn owner_monitor_fixture_with_prefs(
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
+    // This shared fixture verifies scan/launch outcomes, not the production
+    // five-second control deadline on the caller thread.
+    let _control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+    );
     assert!(!agent_ids.is_empty());
     let root = temp.join("monitor-project");
     fs::create_dir_all(&root).unwrap();

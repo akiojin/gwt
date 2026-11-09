@@ -794,6 +794,22 @@ fn coverage_inventory_rejects_a_new_deadline_in_each_regression_test() {
     let recorded = recorded_time_dependencies();
     for (file, name) in [
         (
+            "crates/gwt/src/app_runtime/tests.rs",
+            "owner_monitor_fixture_with_prefs",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/pm_context_tests.rs",
+            "pm_crash_with_unreadable_registration_preserves_durable_state",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs",
+            "issue_5642_consumed_delivery_ack_replay_preserves_the_exact_live_pane",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/monitor_feedback_tests.rs",
+            "assert_issue5596_unsubmitted_answer_packet_retries",
+        ),
+        (
             "crates/gwt/src/app_runtime/tests/pane_control_tests.rs",
             "agent_pane_close_bypasses_a_contended_pane_lock",
         ),
