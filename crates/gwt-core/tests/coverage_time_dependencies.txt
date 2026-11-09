@@ -29,9 +29,6 @@ crates/gwt-core/src/coordination.rs|prompt_board_tail_bounds_reads_with_twelve_t
 crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter|granted_rx.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt-core/src/operation_deadline.rs|expired_deadline_rejects_an_available_file_lock|let_deadline=ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1))|1
-crates/gwt-core/src/operation_deadline.rs|fixed_operation_clock_controls_expiry_without_spending_wall_time|letstart=Instant::now()-Duration::from_secs(1)|1
-crates/gwt-core/src/operation_deadline.rs|nested_deadlines_keep_the_earliest_expiry|letouter_expiry=Instant::now()+Duration::from_secs(1)|1
 crates/gwt-core/src/process_console/spawn.rs|cleanup_future_is_abandoned_after_grace|letcompleted=tokio::time::timeout(Duration::from_secs(2),run_cleanup_with_grace(Duration::from_millis(20),std::future::pending()),).await.expect()|1
 crates/gwt-core/src/process_console/spawn.rs|deadline_cleanup_does_not_extend_the_absolute_hard_cap|assert!(started.elapsed()<Duration::from_millis(900),)|1
 crates/gwt-core/src/process_console/spawn.rs|deadline_cleanup_does_not_extend_the_absolute_hard_cap|tokio::time::timeout(crate::deadline_budget::HANG_GUARD,child.wait()).await.expect().expect()|1
@@ -574,7 +571,6 @@ crates/gwt/tests/index_resource_harness_test.rs|real_e5_all_scopes_build_and_sea
 crates/gwt/tests/index_resource_harness_test.rs|real_e5_all_scopes_build_and_search|assert!(posted_at.elapsed()<Duration::from_secs(60),)|1
 crates/gwt/tests/index_resource_harness_test.rs|real_e5_all_scopes_build_and_search|assert!(warm_ms<=5_000,)|1
 crates/gwt/tests/index_resource_harness_test.rs|real_warm_search_finishes_during_background_build_and_build_resumes|assert!(cold_query_ms<=30_000,)|1
-crates/gwt/tests/index_resource_harness_test.rs|real_warm_search_finishes_during_background_build_and_build_resumes|assert!(warm_search_ms<=5_000,)|1
 crates/gwt/tests/index_resource_harness_test.rs|real_warm_search_finishes_during_background_build_and_build_resumes|assert!(warming_started.elapsed()<Duration::from_secs(30),)|1
 crates/gwt/tests/index_search_batch_test.rs|concurrent_non_blocking_searches_coalesce_into_one_repair_admission|assert!(Instant::now()<deadline,)|1
 crates/gwt/tests/index_search_batch_test.rs|concurrent_non_blocking_searches_coalesce_into_one_repair_admission|letdeadline=Instant::now()+Duration::from_secs(15)|1

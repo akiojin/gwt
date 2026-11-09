@@ -3,7 +3,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-if (process.env.GWT_HEADED_E2E_REPORT) {
+// NODE_OPTIONS also reaches unrelated Node children. Only initialize for an
+// entry inside the running Playwright package; unknown boundaries supply no proof.
+const moduleRoot = process.env.GWT_HEADED_E2E_MODULE_ROOT;
+const entry = moduleRoot && process.argv[1] ? path.relative(moduleRoot, process.argv[1]) : undefined;
+if (process.env.GWT_HEADED_E2E_REPORT && entry && entry !== ".." &&
+    !entry.startsWith(`..${path.sep}`) && !path.isAbsolute(entry)) {
   // Recent Playwright assigns TEST_WORKER_INDEX after Node preloads execute.
   const append = value => {
     if (process.env.TEST_WORKER_INDEX === undefined) return;

@@ -1340,8 +1340,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         send({ kind: "frontend_ready" });
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
-        recoveryCenterController?.reconnect();
         let replayedReleaseNotesId = null;
+        let replayedRecoveryCenterId = null;
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1356,7 +1356,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
+          if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
         }
+        recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
@@ -2445,8 +2447,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
-      // Live state uses the host census enriched by the window catalog;
-      // MISSION tracks completion across the project's agent panes.
+      // Live state uses the host census enriched by the window catalog.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
         appendRenderKeyPart(parts, "running");
@@ -2462,10 +2463,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         appendRenderKeyPart(parts, counts?.waiting ?? null);
         appendRenderKeyPart(parts, "error");
         appendRenderKeyPart(parts, counts?.error ?? null);
-        appendRenderKeyPart(parts, "done");
-        appendRenderKeyPart(parts, counts?.done ?? null);
-        appendRenderKeyPart(parts, "agents");
-        appendRenderKeyPart(parts, counts?.agents ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
@@ -2554,8 +2551,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // now it drives the WAITING strip cell instead.
           waiting: 0,
           error: 0,
-          done: 0,
-          agents: 0,
         };
         // The same host census supplies Agents and Works membership. Catalog
         // state enriches that proof; a historical Work never creates an agent.
@@ -2563,12 +2558,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        // MISSION tracks completion of project panes after their children exit.
-        for (const data of windows) {
-          if (!presetSupportsWaitingStatus(data.preset)) continue;
-          counts.agents += 1;
-          if (mapAgentTelemetryState(catalog.runtimeStates[data.id] ?? data.status) === "done") counts.done += 1;
-        }
         let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);

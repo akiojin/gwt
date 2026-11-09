@@ -1,0 +1,30 @@
+{
+  "issue": 5561,
+  "theme": "dark",
+  "passed": false,
+  "failure": {
+    "message": "locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('.op-rail__surface[data-surface=\"works\"]')\u001b[22m\n\u001b[2m    - locator resolved to <button type=\"button\" aria-pressed=\"true\" data-surface=\"works\" class=\"op-rail__item op-rail__surface\" title=\"Works: live agent output and native terminals\" aria-description=\"Works: live agent output and native terminals\" data-issue-explanation=\"Works: live agent output and native terminals\">…</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is visible, enabled and stable\u001b[22m\n\u001b[2m      - scrolling into view if needed\u001b[22m\n\u001b[2m      - done scrolling\u001b[22m\n\u001b[2m      - <div id=\"wizard-modal\" class=\"modal-backdrop open\">…</div> intercepts pointer events\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m    - waiting 20ms\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is visible, enabled and stable\u001b[22m\n\u001b[2m      - scrolling into view if needed\u001b[22m\n\u001b[2m      - done scrolling\u001b[22m\n\u001b[2m      - <div id=\"wizard-modal\" class=\"modal-backdrop open\">…</div> intercepts pointer events\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m      - waiting 100ms\u001b[22m\n\u001b[2m    55 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m       - element is visible, enabled and stable\u001b[22m\n\u001b[2m       - scrolling into view if needed\u001b[22m\n\u001b[2m       - done scrolling\u001b[22m\n\u001b[2m       - <div id=\"wizard-modal\" class=\"modal-backdrop open\">…</div> intercepts pointer events\u001b[22m\n\u001b[2m     - retrying click action\u001b[22m\n\u001b[2m       - waiting 500ms\u001b[22m\n",
+    "stack": "locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('.op-rail__surface[data-surface=\"works\"]')\u001b[22m\n\u001b[2m    - locator resolved to <button type=\"button\" aria-pressed=\"true\" data-surface=\"works\" class=\"op-rail__item op-rail__surface\" title=\"Works: live agent output and native terminals\" aria-description=\"Works: live agent output and native terminals\" data-issue-explanation=\"Works: live agent output and native terminals\">…</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is visible, enabled and stable\u001b[22m\n\u001b[2m      - scrolling into view if needed\u001b[22m\n\u001b[2m      - done scrolling\u001b[22m\n\u001b[2m      - <div id=\"wizard-modal\" class=\"modal-backdrop open\">…</div> intercepts pointer events\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m    - waiting 20ms\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is visible, enabled and stable\u001b[22m\n\u001b[2m      - scrolling into view if needed\u001b[22m\n\u001b[2m      - done scrolling\u001b[22m\n\u001b[2m      - <div id=\"wizard-modal\" class=\"modal-backdrop open\">…</div> intercepts pointer events\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m      - waiting 100ms\u001b[22m\n\u001b[2m    55 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m       - element is visible, enabled and stable\u001b[22m\n\u001b[2m       - scrolling into view if needed\u001b[22m\n\u001b[2m       - done scrolling\u001b[22m\n\u001b[2m       - <div id=\"wizard-modal\" class=\"modal-backdrop open\">…</div> intercepts pointer events\u001b[22m\n\u001b[2m     - retrying click action\u001b[22m\n\u001b[2m       - waiting 500ms\u001b[22m\n\n    at launch (E:\\gwt\\work\\issue-5561\\crates\\gwt\\playwright\\tests\\runtime-memory-budget-live.spec.ts:324:65)\n    at E:\\gwt\\work\\issue-5561\\crates\\gwt\\playwright\\tests\\runtime-memory-budget-live.spec.ts:70:20"
+  },
+  "gui_pid": 39600,
+  "checkout_sha": "227da2ae9a18d52921865cdc084a1a8835a5de77",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "checkout_binary": "E:\\gwt\\work\\issue-5561\\target\\debug\\gwt.exe",
+  "checkout_branch": "work/issue-5561",
+  "source_worktree_count": 720,
+  "isolated_home": "C:\\Users\\<redacted>\\AppData\\Local\\Temp\\gwt-runtime-memory-bfb63fcb-8b24-4942-9da3-84ccbab4a64d",
+  "started_at": "2026-11-09T03:32:35.998Z",
+  "ended_at": "2026-11-09T03:33:15.143Z",
+  "observation_started_at": null,
+  "requested_duration_seconds": 60,
+  "budget_bytes": 1500000000,
+  "pane_ids": [],
+  "workload": "12 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
+  "limitations": "12 deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "fail",
+  "initial_producers": [],
+  "final_producers": [],
+  "rss_samples": [],
+  "browser_errors": []
+}

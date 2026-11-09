@@ -156,6 +156,8 @@ test("open requests a fresh projection and defaults to Pending plus Conflicted a
   const { controller, sent, document } = fixture();
   controller.open();
   assert.deepEqual(sent, [{ kind: "load_recovery_center", request_id: "load-1" }]);
+  controller.reconnect("load-1");
+  assert.equal(sent.length, 1, "the actual replay owns the fresh backend handles without another read");
   assert.match(document.querySelector("#recovery-center-modal .modal-body").textContent, /Loading/);
   ready(controller);
 

@@ -105,8 +105,9 @@ test("telemetry mapping projects runtime states to status strip states", () => {
   assert.equal(mapAgentTelemetryState("idle"), "idle");
   // FR-039 (安心): waiting is its own LOUD telemetry state, not quiet idle.
   assert.equal(mapAgentTelemetryState("waiting"), "waiting");
-  assert.equal(mapAgentTelemetryState("stopped"), "done");
-  assert.equal(mapAgentTelemetryState("exited"), "done");
+  assert.equal(mapAgentTelemetryState("stopped"), "stopped");
+  assert.equal(mapAgentTelemetryState("exited"), "stopped");
+  assert.equal(mapAgentTelemetryState("interrupted"), "interrupted");
   assert.equal(mapAgentTelemetryState("error"), "error");
   assert.equal(mapAgentTelemetryState("future-state"), "idle");
 });

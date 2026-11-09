@@ -10276,12 +10276,117 @@ mod scan_failure_contract_tests {
     use super::test_monitor_with_prefs;
 
     #[test]
+    fn settings_failure_does_not_revoke_an_independent_scan_commit() {
+        use gwt_core::operation_deadline::{
+            ScopedNamedLockContentionObserver, ScopedOperationClock,
+        };
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _budget = super::pin_prefs_hang_guard();
+        let now = std::time::Instant::now();
+        let _clock = ScopedOperationClock::set(now);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let prefs_path =
+            gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let initial = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let machine_path = crate::machine_agent_settings::path();
+        let marker = machine_path.with_extension("parent-sync-fail-once");
+        let _fault = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &machine_path,
+        );
+        std::fs::write(&marker, "fail settings write").unwrap();
+        assert!(matches!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                super::AcceptedIssueMonitorControl::new(
+                    super::IssueMonitorControl::MaxActiveAgents(Some(2)),
+                ),
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure
+        ));
+        assert!(monitor
+            .status_view()
+            .last_error
+            .unwrap()
+            .contains("parent sync failure"));
+
+        // Both a settings write failure and an unavailable settings lock are
+        // independent of an already migrated project's scan snapshot.
+        std::fs::write(&marker, "settings must not be written by scan commit").unwrap();
+        let _settings_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+            &machine_path.with_extension("lock"),
+            "test machine settings holder",
+        )
+        .unwrap();
+        let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let expire_settings_budget = || {
+            let expired_clock = expired_clock.clone();
+            move || {
+                *expired_clock.borrow_mut() = Some(ScopedOperationClock::set(
+                    now + gwt_core::deadline_budget::HANG_GUARD * 2,
+                ));
+            }
+        };
+        let settings_lock_path = machine_path.with_extension("lock");
+        let _control_contention =
+            ScopedNamedLockContentionObserver::set(&settings_lock_path, expire_settings_budget());
+        assert!(matches!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                super::AcceptedIssueMonitorControl::new(
+                    super::IssueMonitorControl::MaxActiveAgents(Some(3)),
+                ),
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure
+        ));
+        let status = serde_json::to_value(monitor.status_view()).unwrap();
+        assert!(status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("settings lock deadline"));
+        expired_clock.borrow_mut().take();
+        let _scan_contention =
+            ScopedNamedLockContentionObserver::set(&settings_lock_path, expire_settings_budget());
+        let mut scanned = monitor.clone();
+        crate::scan_issue_monitor_candidates(&mut scanned, &[], "2026-11-09T00:00:00Z");
+        let epoch = monitor.effect_authority_epoch();
+        assert!(super::commit_issue_monitor_scan_if_current(
+            project.path(),
+            &prefs_path,
+            &mut monitor,
+            scanned,
+            epoch,
+        ));
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .last_scan_at
+                .as_deref(),
+            Some("2026-11-09T00:00:00Z")
+        );
+        assert!(
+            marker.exists(),
+            "scan commit did not write machine settings"
+        );
+    }
+
+    #[test]
     #[allow(clippy::await_holding_lock)]
     fn unchanged_failed_control_retries_preserve_the_scan_revision() {
         use std::sync::{atomic::AtomicBool, atomic::AtomicUsize, atomic::Ordering, Arc, Mutex};
 
         use gwt_core::daemon::{DaemonFrame, RuntimeScope, RuntimeTarget};
-        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        use gwt_core::test_support::ScopedGwtHome;
 
         let _env = crate::env_test_lock()
             .lock()
@@ -10300,12 +10405,6 @@ mod scan_failure_contract_tests {
             },
         )
         .unwrap();
-        let machine_path = crate::machine_agent_settings::path();
-        let marker = machine_path.with_extension("parent-sync-fail-once");
-        let _failure = ScopedEnvVar::set(
-            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
-            &machine_path,
-        );
         let inject = Arc::new(AtomicBool::new(false));
         let failures = Arc::new(AtomicUsize::new(0));
         let revisions = Arc::new(Mutex::new(Vec::new()));
@@ -10335,12 +10434,8 @@ mod scan_failure_contract_tests {
                     })),
                     hold_effects: true,
                     state_observer: Some(Arc::new({
-                        let (hub, baseline, inject, marker) = (
-                            hub.clone(),
-                            baseline.clone(),
-                            inject.clone(),
-                            marker.clone(),
-                        );
+                        let (hub, baseline, inject) =
+                            (hub.clone(), baseline.clone(), inject.clone());
                         let failures = failures.clone();
                         move |monitor| {
                             if hub.issue_monitor_status().is_some_and(|status| {
@@ -10349,17 +10444,14 @@ mod scan_failure_contract_tests {
                                 baseline.notify_one();
                             }
                             if inject.load(Ordering::Acquire)
-                                && !marker.exists()
                                 && monitor.status_view().last_error.as_deref().is_some_and(
                                     |error| {
-                                        error.contains(
-                                            "injected machine agent settings parent sync failure",
-                                        )
+                                        error.contains("prefs-lock stage")
+                                            && error.contains("deadline expired")
                                     },
                                 )
                             {
                                 failures.fetch_add(1, Ordering::Relaxed);
-                                std::fs::write(&marker, b"fail the next control retry").unwrap();
                             }
                         }
                     })),
@@ -10380,8 +10472,15 @@ mod scan_failure_contract_tests {
             // test-hygiene: allow-wall-clock-deadline Bound actual worker startup and retry observations, not their relative scheduling.
             let observed = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 baseline.notified().await;
+                let _retry_budget = super::ScopedIssueMonitorPrefsTimeout::set(
+                    std::time::Duration::from_millis(1000),
+                );
+                let _prefs_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+                    &prefs_path.with_extension("lock"),
+                    "test project prefs holder",
+                )
+                .unwrap();
                 inject.store(true, Ordering::Release);
-                std::fs::write(&marker, b"fail the first control attempt").unwrap();
                 let receipt = hub
                     .enqueue_issue_monitor_control(DaemonFrame::Event {
                         channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
@@ -10399,9 +10498,8 @@ mod scan_failure_contract_tests {
             })
             .await;
             inject.store(false, Ordering::Release);
-            let _ = std::fs::remove_file(&marker);
             shutdown.request();
-            // test-hygiene: allow-wall-clock-deadline Drain the real worker after releasing its failure marker before asserting the regression.
+            // test-hygiene: allow-wall-clock-deadline Drain the real worker after releasing the prefs lock before asserting the regression.
             let joined = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, worker).await;
             (observed, joined)
         });

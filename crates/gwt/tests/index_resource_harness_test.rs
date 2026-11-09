@@ -866,6 +866,7 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
         "cold query exceeded 30s: {cold_query_ms}ms"
     );
     assert!(
+        // test-hygiene: allow-wall-clock-deadline This ignored real-model probe measures actual lease plus search responsiveness.
         warm_search_ms <= 5_000,
         "warm lease plus search exceeded 5s: {warm_search_ms}ms"
     );

@@ -23,9 +23,37 @@ pub fn handle_with_input(
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
-    let normalized = normalize_provider_payload(provider, native_event, input)?;
-    let payload = serde_json::to_string(&normalized.payload)?;
-    event_dispatcher::handle_with_input(&normalized.event, &payload, worktree_root, current_session)
+    dispatch_observed(
+        provider,
+        native_event,
+        input,
+        worktree_root,
+        current_session,
+    )
+    .0
+}
+
+pub(crate) fn dispatch_observed(
+    provider: &str,
+    native_event: &str,
+    input: &str,
+    worktree_root: &Path,
+    current_session: Option<&str>,
+) -> (
+    Result<HookOutput, HookError>,
+    Option<super::runtime_state::HookCompletionContext>,
+) {
+    match normalize_provider_payload(provider, native_event, input).and_then(|normalized| {
+        Ok((
+            normalized.event,
+            serde_json::to_string(&normalized.payload)?,
+        ))
+    }) {
+        Ok((event, payload)) => {
+            event_dispatcher::dispatch_observed(&event, &payload, worktree_root, current_session)
+        }
+        Err(error) => (Err(error), None),
+    }
 }
 
 pub fn normalize_provider_payload(

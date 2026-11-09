@@ -1397,6 +1397,23 @@ pub(crate) fn handle_runtime_state_prepared(
         return Ok(None);
     }
     let session = runtime_state::handle_with_input_prepared(event, input)?;
+    emit_runtime_state_notice(event, input, session.clone());
+    Ok(session)
+}
+
+pub(crate) fn handle_runtime_state_owned(
+    event: &str,
+    input: &str,
+    completion: Option<&runtime_state::HookCompletionContext>,
+) -> Result<Option<Session>, HookError> {
+    let session = runtime_state::handle_with_input_owned(event, input, completion)?;
+    if completion.is_some_and(runtime_state::HookCompletionContext::runtime_was_published) {
+        emit_runtime_state_notice(event, input, session.clone());
+    }
+    Ok(session)
+}
+
+fn emit_runtime_state_notice(event: &str, input: &str, session: Option<Session>) {
     // Hook-live is a best-effort notification after the authoritative runtime
     // state write. A missing GUI must not consume half of the aggregate
     // UserPromptSubmit budget before the Board and obligation handlers run.
@@ -1413,7 +1430,7 @@ pub(crate) fn handle_runtime_state_prepared(
             Some(event),
             runtime_state::status_for_event(event).map(str::to_string),
             None,
-            session.clone(),
+            session,
             parse_hook_event_best_effort(input),
         ),
     );
@@ -1423,7 +1440,30 @@ pub(crate) fn handle_runtime_state_prepared(
         live_started.elapsed(),
         "ok",
     );
-    Ok(session)
+}
+
+pub(crate) fn handle_blocked_stop_runtime_state_owned(
+    input: &str,
+    completion: Option<&runtime_state::HookCompletionContext>,
+) -> Result<(), HookError> {
+    let Some(completion) = completion else {
+        return Ok(());
+    };
+    let Some(session) = completion.finish_stop(true)? else {
+        return Ok(());
+    };
+    emit_live_event_fail_open(
+        Some("Stop"),
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some("Stop"),
+            Some("Running".into()),
+            Some("blocked-stop".into()),
+            Some(session),
+            parse_hook_event_best_effort(input),
+        ),
+    );
+    Ok(())
 }
 
 pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {

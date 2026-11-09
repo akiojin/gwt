@@ -737,6 +737,64 @@ mod tests {
     }
 
     #[test]
+    fn deferred_resume_waits_for_disk_recovery_even_with_free_slots() {
+        use gwt_core::index_coordinator::VerificationDiskBudget;
+
+        let repo = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(runtime.path(), 3).unwrap();
+        let key = TargetKey::verification("resume-disk", "waiter");
+        let attempt = begin_for_caller(
+            repo.path(),
+            "mine",
+            &authority(),
+            &key,
+            &["heavy-first".to_string(), "heavy-second".to_string()],
+            "token",
+        )
+        .unwrap();
+        attempt
+            .returned(Some("verify: deferred"), &coordinator)
+            .unwrap();
+        assert_eq!(coordinator.heavy_pool_status().unwrap().available, 3);
+
+        let mut budget = VerificationDiskBudget {
+            volume: "test-volume".to_string(),
+            path: repo.path().to_path_buf(),
+            bytes: 0,
+            floor_bytes: u64::MAX,
+        };
+        assert!(super::super::admission_resume::poll_with_disk_budgets(
+            repo.path(),
+            attempt.id(),
+            "token",
+            "mine",
+            &coordinator,
+            |command| {
+                let mut command_budget = budget.clone();
+                if command == "heavy-first" {
+                    command_budget.floor_bytes = 0;
+                }
+                Ok(vec![command_budget])
+            },
+            |_| panic!("disk-blocked attempt must not be notified"),
+        )
+        .unwrap());
+
+        budget.floor_bytes = 0;
+        assert!(!super::super::admission_resume::poll_with_disk_budgets(
+            repo.path(),
+            attempt.id(),
+            "token",
+            "mine",
+            &coordinator,
+            |_| Ok(vec![budget.clone()]),
+            |_| Ok(true),
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn caller_cancel_releases_only_its_attempt_and_retains_interruption() {
         let repo = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();

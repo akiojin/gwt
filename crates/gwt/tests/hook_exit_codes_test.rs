@@ -491,6 +491,8 @@ fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
 
+    let session_path = sessions_dir.join("session-corrupt.toml");
+    let session_before = std::fs::read(&session_path).unwrap();
     let output = event_dispatcher::handle_with_input(
         "UserPromptSubmit",
         r#"{"session_id":"agent-123"}"#,
@@ -500,10 +502,11 @@ fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
     .expect("corrupt session TOML must not make UserPromptSubmit exit 1");
 
     assert_eq!(output, HookOutput::Silent);
-    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
-    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
-    assert_eq!(runtime_state.status, "Running");
-    assert_eq!(runtime_state.source_event, "UserPromptSubmit");
+    assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+    assert!(
+        !runtime_path.exists(),
+        "unknown source must not create a sidecar"
+    );
 }
 
 #[test]
@@ -521,15 +524,18 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
 
+    let session_path = sessions_dir.join("session-corrupt.toml");
+    let session_before = std::fs::read(&session_path).unwrap();
     let output =
         event_dispatcher::handle_with_input("Stop", r#"{}"#, tmp.path(), Some("session-corrupt"))
             .expect("corrupt session TOML must not make Stop completed-stop exit 1");
 
     assert_eq!(output, HookOutput::Silent);
-    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
-    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
-    assert_eq!(runtime_state.status, "Idle");
-    assert_eq!(runtime_state.source_event, "Stop");
+    assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+    assert!(
+        !runtime_path.exists(),
+        "unknown source must not create a sidecar"
+    );
 }
 
 // SPEC #3245 AC-1/AC-4 (T-107): the lane mechanism is gone — a leftover

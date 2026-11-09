@@ -344,7 +344,7 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Issue #6362 Status Strip counts live census separately from catalog mission progress", () => {
+test("Issue #3340 AS-03: Status Strip counts live census without catalog completion totals", () => {
   let activity = { count: 2, agents: [
     { window_id: "agent", session_id: "current" },
     { window_id: "pm", session_id: "manager", is_pm: true },
@@ -376,8 +376,8 @@ test("Issue #6362 Status Strip counts live census separately from catalog missio
   recompute();
   assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
   assert.equal(counts.waiting, 1);
-  assert.equal(counts.agents, 3, "MISSION includes the project's agent panes without requiring a census");
-  assert.equal(counts.done, 1, "runtime state overrides catalog status for completed panes");
+  assert.equal(Object.hasOwn(counts, "agents"), false);
+  assert.equal(Object.hasOwn(counts, "done"), false);
   const [implementation, pm] = activity.agents;
   activity = { count: 1, agents: [pm] }; runtimeStates.pm = "running"; recompute();
   assert.equal(counts.running, 1, "a PM-only census still contributes to runtime telemetry");
@@ -388,16 +388,10 @@ test("Issue #6362 Status Strip counts live census separately from catalog missio
   assert.equal(counts.running, 1, "an implementation child resuming work returns to RUNNING");
   activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
   assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
-  assert.equal(counts.agents, 0, "another project's catalog cannot supply MISSION progress");
-  assert.equal(counts.done, 0);
   activity = { count: 0, agents: [] }; recompute();
   assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
-  assert.equal(counts.agents, 3, "retiring a live child does not erase MISSION panes");
-  assert.equal(counts.done, 1);
   activity = { count: null, agents: [] }; recompute();
   assert.equal(counts.running, "—", "unknown is never a measured zero");
-  assert.equal(counts.agents, 3, "an unavailable census preserves MISSION progress");
-  assert.equal(counts.done, 1);
   activeWorks = []; recompute();
   assert.equal(Object.hasOwn(counts, "branches"), false, "catalog refresh preserves independent branch inventory");
 });
@@ -3076,6 +3070,7 @@ test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-dr
 });
 
 test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // SPEC-3015 moved the runtime→Living Telemetry mapper from app.js to
   // window-runtime-state.js. CSS only styles `[data-agent-state]` for
   // declared telemetry states — any drift (e.g. emitting "warn" or
@@ -3098,13 +3093,14 @@ test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", ()
   }
   // FR-039 / SPEC-2356 follow-up: the telemetry vocabulary mirrors runtime
   // states for user-facing consistency. STARTING aggregates into RUNNING.
-  const allowed = new Set(["running", "idle", "waiting", "error", "done"]);
+  const allowed = new Set(["running", "idle", "waiting", "error", "stopped", "interrupted"]);
   for (const state of returnedStates) {
     assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
   }
   // And every design state must be reachable, not just allowed.
   for (const required of allowed) {
     assert.ok(returnedStates.has(required), `Living Telemetry state never emitted: ${required}`);
+    assert.ok(cssBlockContaining(css, `[data-agent-state="${required}"]`));
   }
 });
 
@@ -3424,7 +3420,13 @@ test("terminal overlay surfaces are opaque and copyable, not translucent glass (
 
 test("agent-state telemetry never makes readable workspace windows translucent (SPEC-2356 FR-033)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  for (const state of ["idle", "not_started"]) {
+  const worksCss = readFileSync(resolve(here, "../styles/works-agents.css"), "utf8");
+  for (const [state, token] of [["stopped", "--color-state-idle"], ["interrupted", "--color-state-blocked"]]) {
+    assert.ok(cssBlockContaining(worksCss, `.work-row[data-state="${state}"] .work-state`).includes(`var(${token})`));
+  }
+  assert.doesNotMatch(css, /\[data-agent-state="done"\]/);
+  assert.match(cssBlockContaining(css, '.workspace-overview-lifecycle[data-lifecycle="done"]'), /var\(--color-state-done\)/);
+  for (const state of ["idle", "not_started", "stopped", "interrupted"]) {
     const selector = `.workspace-window[data-agent-state="${state}"]`;
     const block = cssBlockContaining(css, selector);
     assert.match(
@@ -3434,7 +3436,7 @@ test("agent-state telemetry never makes readable workspace windows translucent (
     );
   }
 
-  for (const state of ["idle", "not_started"]) {
+  for (const state of ["idle", "not_started", "stopped", "interrupted"]) {
     const block = cssBlockContaining(css, `[data-agent-state="${state}"]`);
     assert.doesNotMatch(
       block,

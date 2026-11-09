@@ -955,6 +955,31 @@ fn run_monitor_status<E: CliEnv>(
     output["config_token"] = serde_json::json!(prefs.config_token());
     output["saved_config"] = prefs.config_observation();
     attach_monitor_admission_diagnostics(&mut output, &status, &prefs);
+    match monitor_launch_admission_hold(Some(&project_root), &prefs) {
+        Ok(Some(hold)) => {
+            if prefs.enabled {
+                output["stall_reason"] =
+                    serde_json::json!(crate::IssueMonitorStallReason::UpdateDrain);
+                for (index, row) in status.inbox.iter().enumerate() {
+                    if row.state == crate::MonitorInboxState::Queued {
+                        let prior = output["inbox"][index]["exclusion_reason"]
+                            .as_str()
+                            .unwrap_or_default();
+                        let detail = hold["detail"].as_str().unwrap_or("update_drain");
+                        output["inbox"][index]["exclusion_reason"] = if prior.is_empty() {
+                            detail.to_string()
+                        } else {
+                            format!("{prior}; {detail}")
+                        }
+                        .into();
+                    }
+                }
+            }
+            output["host_update_drain"] = hold;
+        }
+        Ok(None) => {}
+        Err(error) => output["host_update_drain_error"] = error.to_string().into(),
+    }
     // Keep released, unsettled launches observable without reading every queued
     // owner's ledger or changing Monitor/ECR state during a status read.
     let execution_generations = status
@@ -997,7 +1022,7 @@ fn run_monitor_status<E: CliEnv>(
         output["execution_generations"] = serde_json::to_value(execution_generations)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     }
-    if let Some(mut drain) = status.update_drain.clone() {
+    if let Some(mut drain) = prefs.effective_update_drain().cloned() {
         let wait = gwt_core::update::load_update_wait_observation(&project_root).filter(|wait| {
             wait.version == drain.version
                 && matches!((
@@ -1030,7 +1055,11 @@ fn run_monitor_status<E: CliEnv>(
                 format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
             } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
         });
-        output["update_drain"] = serde_json::to_value(drain).expect("update drain serializes");
+        let drain = serde_json::to_value(drain).expect("update drain serializes");
+        output["update_drain"] = drain.clone();
+        if let Some(gui) = output["gui_status"].as_object_mut() {
+            gui.insert("update_drain".into(), drain);
+        }
     }
     let mut effective_queue = prefs
         .terminal_queues
@@ -2514,10 +2543,11 @@ fn run_monitor_launch_now<E: CliEnv>(
     // Issue #5062 AC-4: an update drain holds every new launch, this one
     // included, so name it and its release instead of answering as if the
     // Issue will start.
-    let (admission_hold, admission_error) = match monitor_launch_admission_hold(&prefs) {
-        Ok(hold) => (hold, None),
-        Err(error) => (None, Some(error.to_string())),
-    };
+    let (admission_hold, admission_error) =
+        match monitor_launch_admission_hold(Some(&project_root), &prefs) {
+            Ok(hold) => (hold, None),
+            Err(error) => (None, Some(error.to_string())),
+        };
     let publication = monitor_status_publication(&project_root);
     let projection = publication.as_ref().and_then(|status| {
         serde_json::from_value::<crate::IssueMonitorAgentStatus>(status.clone()).ok()
@@ -2537,12 +2567,14 @@ fn run_monitor_launch_now<E: CliEnv>(
     {
         admission_exclusions.push("no_launch_profile".to_string());
     }
-    if admission_hold.is_some()
-        && !admission_exclusions
-            .iter()
-            .any(|reason| reason.contains("update_drain"))
-    {
-        admission_exclusions.push("update_drain".to_string());
+    if let Some(hold) = &admission_hold {
+        admission_exclusions.retain(|reason| reason != "update_drain");
+        admission_exclusions.push(
+            hold["detail"]
+                .as_str()
+                .unwrap_or("update_drain")
+                .to_string(),
+        );
     }
     if !github_backoff.is_empty() {
         admission_exclusions.push("github_refusal_window".to_string());
@@ -2625,6 +2657,7 @@ fn monitor_admission_exclusions(
     number: u64,
 ) -> Vec<String> {
     let row = status.inbox.iter().find(|row| row.issue_number == number);
+    let has_update_drain = prefs.effective_update_drain().is_some();
     let terminal_member = !status.label_excluded_issues.contains(&number)
         && prefs
             .terminal_queues
@@ -2635,9 +2668,10 @@ fn monitor_admission_exclusions(
         .into_iter()
         .flat_map(|reason| reason.split("; "))
         .filter(|reason| {
-            !terminal_member
-                || !(reason.starts_with("not_in_terminal_queue:")
-                    || *reason == "not selected in this terminal queue")
+            !reason.starts_with("update_drain")
+                && (!terminal_member
+                    || !(reason.starts_with("not_in_terminal_queue:")
+                        || *reason == "not selected in this terminal queue"))
         })
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -2682,7 +2716,7 @@ fn monitor_admission_exclusions(
     {
         add("max_active_saturated");
     }
-    if status.update_drain.is_some() {
+    if has_update_drain {
         add("update_drain");
     }
     if status.quota_hold.is_some() {
@@ -2705,6 +2739,43 @@ fn attach_monitor_admission_diagnostics(
     status: &crate::IssueMonitorAgentStatus,
     prefs: &crate::IssueMonitorPrefs,
 ) {
+    if let Some(drain) = prefs.effective_update_drain() {
+        let drain = serde_json::to_value(drain).expect("update drain serializes");
+        output["update_drain"] = drain.clone();
+        output["update_drain_release"] = crate::UPDATE_DRAIN_RELEASE_OPERATION.into();
+        if let Some(gui) = output["gui_status"].as_object_mut() {
+            gui.insert("update_drain".into(), drain);
+            gui.insert(
+                "update_drain_release".into(),
+                crate::UPDATE_DRAIN_RELEASE_OPERATION.into(),
+            );
+        }
+    } else {
+        if let Some(output) = output.as_object_mut() {
+            output.remove("update_drain");
+            output.remove("update_drain_release");
+            if let Some(gui) = output
+                .get_mut("gui_status")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                gui.remove("update_drain");
+                gui.remove("update_drain_release");
+                if gui.get("state").and_then(serde_json::Value::as_str) == Some("update_drain") {
+                    gui.insert(
+                        "state".into(),
+                        if prefs.enabled { "unknown" } else { "disabled" }.into(),
+                    );
+                }
+            }
+        }
+        if status.stall_reason == Some(crate::IssueMonitorStallReason::UpdateDrain) {
+            output["stall_reason"] = serde_json::json!(if prefs.enabled {
+                crate::IssueMonitorStallReason::Unknown
+            } else {
+                crate::IssueMonitorStallReason::Disabled
+            });
+        }
+    }
     // Also explain older daemon publications that predate row diagnostics.
     for (index, row) in status.inbox.iter().enumerate() {
         if row.state == crate::MonitorInboxState::Queued
@@ -2725,9 +2796,10 @@ fn attach_monitor_admission_diagnostics(
 /// GUI-only fallback has no durable host-wide authority projection; the GUI
 /// checks all its open projects before creating the actual window.
 fn monitor_launch_admission_hold(
+    project_root: Option<&std::path::Path>,
     prefs: &crate::IssueMonitorPrefs,
 ) -> Result<Option<serde_json::Value>, SpecOpsError> {
-    let mut drain = prefs.update_drain.clone();
+    let mut drain = prefs.effective_update_drain().cloned();
     let mut project_state_path = None;
     if drain.is_none() {
         let entries = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
@@ -2744,10 +2816,9 @@ fn monitor_launch_admission_hold(
                 continue;
             }
             let path = entry.path().join("project-state/issue-monitor.json");
-            let Some(candidate) = crate::load_issue_monitor_prefs(&path)
-                .map_err(io_as_api_error)?
-                .update_drain
-            else {
+            let candidate_prefs =
+                crate::load_issue_monitor_prefs(&path).map_err(io_as_api_error)?;
+            let Some(candidate) = candidate_prefs.effective_update_drain().cloned() else {
                 continue;
             };
             let crate::IssueMonitorAuthorityFenceState::Active(fence) =
@@ -2768,12 +2839,26 @@ fn monitor_launch_admission_hold(
             }
         }
     }
+    let holder = if let Some(path) = &project_state_path {
+        project_root.and_then(|root| {
+            crate::project_runtime::installation::owner_host_project_roots(root)
+                .ok()
+                .and_then(|roots| {
+                    roots
+                        .into_iter()
+                        .find(|root| crate::issue_monitor_prefs_path_for_repo_path(root) == *path)
+                })
+        })
+    } else {
+        project_root.map(std::path::Path::to_path_buf)
+    };
     Ok(drain.as_ref().map(|drain| {
-        serde_json::json!({
+        let mut hold = serde_json::json!({
             "reason": "update_drain",
             "drain_reason": drain.reason,
             "version": drain.version,
             "since": drain.since,
+            "project_root": holder,
             "project_state_path": project_state_path,
             "release_scope": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
                 "host"
@@ -2783,7 +2868,20 @@ fn monitor_launch_admission_hold(
             "release": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
                 format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
             } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
-        })
+        });
+        hold["detail"] = format!(
+            "update_drain: v{} in {} since {} (release: {})",
+            drain.version,
+            holder
+                .as_deref()
+                .or(project_state_path.as_deref())
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "current project".into()),
+            drain.since,
+            hold["release"].as_str().unwrap_or_default()
+        )
+        .into();
+        hold
     }))
 }
 
@@ -4721,6 +4819,42 @@ fn run_monitor_config_set<E: CliEnv>(
         caller_is_resident_pm,
     )
     .map_err(io_as_api_error)?;
+    // Bind the clear to the captured configuration, so a newly raised drain
+    // cannot be cleared while we defer the older captured version.
+    let clear_snapshot = if matches!(
+        update_drain,
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(false))
+    ) {
+        Some(
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                &project_root,
+            ))
+            .map_err(io_as_api_error)?,
+        )
+    } else {
+        None
+    };
+    let clear_guard = clear_snapshot
+        .as_ref()
+        .map(crate::IssueMonitorPrefs::config_token);
+    if let Some(snapshot) = &clear_snapshot {
+        crate::issue_monitor::check_expected_issue_monitor_config_token(
+            snapshot,
+            expected_config_token,
+        )
+        .map_err(io_as_api_error)?;
+    }
+    let expected_config_token = expected_config_token.or(clear_guard.as_deref());
+    let defer_version = clear_snapshot.as_ref().and_then(|prefs| {
+        prefs
+            .effective_update_drain()
+            .filter(|drain| {
+                prefs.enabled
+                    && drain.reason == crate::IssueMonitorUpdateDrainReason::Auto
+                    && drain.automatic.unwrap_or(prefs.autonomous_mode)
+            })
+            .map(|drain| drain.version.clone())
+    });
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
     // before publishing so the daemon never has to reject a control it
     // cannot explain back to the caller.
@@ -4737,6 +4871,40 @@ fn run_monitor_config_set<E: CliEnv>(
         }
     }
 
+    // Keep the captured raw hold available if the manifest cannot be saved.
+    // A later local CAS failure is a partial success: only this version's
+    // host-wide automatic holds have been released, and replacements stay intact.
+    let deferred_version = if let Some(version) = defer_version {
+        if let Some(pending) = gwt_core::update::load_pending_update_manifest().filter(|pending| {
+            pending.version == version
+                && !pending.auto_apply_deferred
+                && gwt_core::update::pending_version_is_newer(
+                    &pending.version,
+                    env!("CARGO_PKG_VERSION"),
+                )
+        }) {
+            gwt_core::update::defer_pending_update(&pending.version).map_err(|error| {
+                io_as_api_error(io::Error::other(format!(
+                    "Host update v{} could not be deferred; this request did not save Issue Monitor configuration: {error}",
+                    pending.version,
+                )))
+            })?;
+            Some(pending.version)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let local_save_error = |error: io::Error| {
+        io_as_api_error(if let Some(version) = &deferred_version {
+            io::Error::other(format!(
+                "Host update v{version} deferred; local configuration save result is unconfirmed. Re-read issue.monitor.status before retrying: {error}"
+            ))
+        } else {
+            error
+        })
+    };
     let mut config = serde_json::json!({
         "allowed_labels": allowed_labels,
         "enabled": enabled,
@@ -4765,7 +4933,7 @@ fn run_monitor_config_set<E: CliEnv>(
     let publication = publish_monitor_config_set(&project_root, payload);
     if let Err(error) = publication {
         if !error.allows_local_fallback() {
-            return Err(io_as_api_error(io::Error::other(error.to_string())));
+            return Err(local_save_error(io::Error::other(error.to_string())));
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         let control_id = uuid::Uuid::new_v4().to_string();
@@ -4796,18 +4964,18 @@ fn run_monitor_config_set<E: CliEnv>(
         })
         .map_err(|error| {
             if shared_write_started && error.to_string() != crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR {
-                io_as_api_error(io::Error::other(format!(
+                local_save_error(io::Error::other(format!(
                     "shared Max active save outcome is uncertain (control {control_id}); machine policy may be committed while project configuration is not. Re-read issue.monitor.status before retrying: {error}"
                 )))
             } else {
-                io_as_api_error(error)
+                local_save_error(error)
             }
         })?;
     }
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
     ))
-    .map_err(io_as_api_error)?;
+    .map_err(local_save_error)?;
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     monitor.refresh_agent_capacity(&project_root);
@@ -10435,6 +10603,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("llmlb"));
+        assert_eq!(status["gui_status"]["update_drain"], status["update_drain"]);
         assert!(status["update_drain_evaluation"]["release"]
             .as_str()
             .unwrap()
@@ -10490,6 +10659,343 @@ mod tests {
         assert_eq!(
             result["admission_hold"]["release"],
             "release.update.defer {\"version\":\"9.110.0\"}"
+        );
+    }
+
+    fn issue_6899_stage_update(root: &std::path::Path) {
+        let payload = root.join("staged-gwt");
+        std::fs::write(&payload, b"staged payload").unwrap();
+        gwt_core::update::persist_pending_update_manifest(
+            &gwt_core::update::PendingUpdateManifest {
+                version: "99.0.0".into(),
+                asset_url: "https://example.invalid/update".into(),
+                payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+                downloaded_at: "2026-11-08T18:38:00Z".into(),
+                origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+                auto_apply_deferred: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_6899_disabled_automatic_update_drain_does_not_hold_host_launches() {
+        use crate::project_runtime::installation::prepare_host_update_drain_launch_hold;
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let repo = tmp.path().join("disabled");
+        std::fs::create_dir(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let (_, _lease) = crate::establish_issue_monitor_authority_fence(
+            &path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let mut prefs = crate::IssueMonitorPrefs {
+            enabled: false,
+            autonomous_mode: true,
+            update_drain: Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: "2026-11-08T18:38:00Z".into(),
+                reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(true),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            prepare_host_update_drain_launch_hold(std::slice::from_ref(&repo))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            monitor_launch_admission_hold(None, &crate::IssueMonitorPrefs::default())
+                .unwrap()
+                .is_none()
+        );
+        prefs.enabled = true;
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            prepare_host_update_drain_launch_hold(std::slice::from_ref(&repo))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            monitor_launch_admission_hold(None, &crate::IssueMonitorPrefs::default())
+                .unwrap()
+                .is_some()
+        );
+        prefs.enabled = false;
+        prefs.update_drain.as_mut().unwrap().automatic = Some(false);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            prepare_host_update_drain_launch_hold(&[repo])
+                .unwrap()
+                .is_some(),
+            "a manual Update click retains its hold"
+        );
+    }
+
+    #[test]
+    fn issue_6899_config_clear_releases_automatic_update_drain_across_projects() {
+        use crate::project_runtime::installation::prepare_host_update_drain_launch_hold;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let repo = tmp.path().join("current");
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let other_path = crate::issue_monitor_prefs_path_for_repo_path(&other);
+        let (_, _lease) = crate::establish_issue_monitor_authority_fence(
+            &other_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            update_drain: Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: "2026-11-08T18:38:00Z".into(),
+                reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(true),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        crate::save_issue_monitor_prefs(&other_path, &prefs).unwrap();
+        let other_before = std::fs::read(&other_path).unwrap();
+        let mut out = String::new();
+        let env = crate::cli::TestEnv::new(repo);
+        let clear = |out: &mut String| {
+            run_monitor_config_set(
+                &env,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                out,
+            )
+        };
+        let before = std::fs::read(&path).unwrap();
+        let token = prefs.config_token();
+        let manifest_lock =
+            gwt_core::update::pending_update_manifest_lock(&gwt_core::update::pending_update_dir())
+                .unwrap();
+        assert!(clear(&mut out).is_err());
+        assert!(out.is_empty());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a failed host defer must preserve the captured retry intent"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .config_token(),
+            token
+        );
+        drop(manifest_lock);
+        clear(&mut out).unwrap();
+        assert!(
+            gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
+        assert!(
+            prepare_host_update_drain_launch_hold(std::slice::from_ref(&other))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            monitor_launch_admission_hold(None, &crate::IssueMonitorPrefs::default())
+                .unwrap()
+                .is_none()
+        );
+        let other_prefs = crate::load_issue_monitor_prefs(&other_path).unwrap();
+        assert!(
+            crate::IssueMonitorState::with_prefs(Default::default(), other_prefs)
+                .update_drain()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(&other_path).unwrap(),
+            other_before,
+            "no foreign project write"
+        );
+        let mut manual = prefs.clone();
+        manual.update_drain.as_mut().unwrap().reason = crate::IssueMonitorUpdateDrainReason::Manual;
+        assert!(
+            monitor_launch_admission_hold(None, &manual)
+                .unwrap()
+                .is_some(),
+            "manual hold survives automatic defer"
+        );
+        crate::save_issue_monitor_prefs(&other_path, &manual).unwrap();
+        let manual_hold = prepare_host_update_drain_launch_hold(&[other])
+            .unwrap()
+            .unwrap();
+        assert!(manual_hold.contains(crate::UPDATE_DRAIN_RELEASE_OPERATION));
+        let mut newer = gwt_core::update::load_pending_update_manifest().unwrap();
+        newer.version = "100.0.0".into();
+        newer.auto_apply_deferred = false;
+        gwt_core::update::persist_pending_update_manifest(&newer).unwrap();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        out.clear();
+        clear(&mut out).unwrap();
+        assert!(
+            !gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred,
+            "clearing an older drain must not defer a newly staged version"
+        );
+        issue_6899_stage_update(tmp.path());
+        for release_kind in ["inactive", "absent", "manual"] {
+            gwt_core::update::resume_pending_update("99.0.0").unwrap();
+            let mut unrelated = prefs.clone();
+            match release_kind {
+                "inactive" => unrelated.enabled = false,
+                "absent" => unrelated.update_drain = None,
+                _ => unrelated.update_drain.as_mut().unwrap().automatic = Some(false),
+            }
+            crate::save_issue_monitor_prefs(&path, &unrelated).unwrap();
+            out.clear();
+            clear(&mut out).unwrap();
+            assert!(
+                !gwt_core::update::load_pending_update_manifest()
+                    .unwrap()
+                    .auto_apply_deferred,
+                "clearing an {release_kind} hold must not defer an unrelated host update"
+            );
+        }
+
+        gwt_core::update::resume_pending_update("99.0.0").unwrap();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let _fault = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &path,
+        );
+        std::fs::write(path.with_extension("parent-sync-fail-once"), "fail").unwrap();
+        out.clear();
+        let partial = clear(&mut out).unwrap_err().to_string();
+        assert!(
+            partial.contains("Host update v99.0.0 deferred"),
+            "{partial}"
+        );
+        assert!(partial.contains("local configuration save"), "{partial}");
+        assert!(
+            gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
+    }
+
+    #[test]
+    fn issue_6899_host_update_drain_status_names_holder_and_since() {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let repo = tmp.path().join("current");
+        let other = tmp.path().join("holder");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&other);
+        let (_, _lease) = crate::establish_issue_monitor_authority_fence(
+            &path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let scope =
+            RuntimeScope::new("holder", "host", other.clone(), RuntimeTarget::Host).unwrap();
+        persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &DaemonEndpoint::new(
+                scope,
+                std::process::id(),
+                "test".into(),
+                "test".into(),
+                "test".into(),
+            ),
+        )
+        .unwrap();
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                update_drain: Some(crate::IssueMonitorUpdateDrain {
+                    version: "99.0.0".into(),
+                    since: "2026-11-08T18:38:00Z".into(),
+                    reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    automatic: Some(true),
+                    blocking: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let detail = crate::project_runtime::installation::prepare_host_update_drain_launch_hold(
+            std::slice::from_ref(&other),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(detail.contains("2026-11-08T18:38:00Z"), "{detail}");
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(status["stall_reason"], "update_drain");
+        assert_eq!(
+            status["host_update_drain"]["project_root"],
+            serde_json::json!(dunce::canonicalize(&other).unwrap())
+        );
+        assert_eq!(status["host_update_drain"]["version"], "99.0.0");
+        assert_eq!(status["host_update_drain"]["since"], "2026-11-08T18:38:00Z");
+        out.clear();
+        assert_eq!(
+            run_monitor_launch_now(&env, None, None, None, 5061, &mut out).unwrap(),
+            1
+        );
+        let launch: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let exclusion = launch["admission_exclusions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|reason| reason.contains("update_drain"))
+            .unwrap();
+        assert!(
+            exclusion.contains("holder")
+                && exclusion.contains("99.0.0")
+                && exclusion.contains("2026-11-08T18:38:00Z"),
+            "{exclusion}"
         );
     }
 
@@ -10554,6 +11060,66 @@ mod tests {
     }
 
     #[test]
+    fn issue_6899_deferred_update_drain_removes_stale_daemon_exclusions() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            Default::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        monitor.set_update_drain_with_origin(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "99.0.0",
+            "2026-11-08T18:38:00Z",
+            Some(true),
+        );
+        let prefs = monitor.prefs();
+        let mut published = monitor.agent_status();
+        published.stall_reason = Some(crate::IssueMonitorStallReason::UpdateDrain);
+        published.gui_status.as_mut().unwrap().state = "update_drain".into();
+        published.inbox = vec![mismatch_row(42, crate::MonitorInboxState::Queued, None)];
+        published.inbox[0].exclusion_reason =
+            Some("update_drain: old version 99.0.0; independent_hold".into());
+        let mut replacement = prefs.clone();
+        replacement.update_drain.as_mut().unwrap().version = "100.0.0".into();
+        let mut replaced_output = serde_json::to_value(&published).unwrap();
+        attach_monitor_admission_diagnostics(&mut replaced_output, &published, &replacement);
+        assert_eq!(replaced_output["update_drain"]["version"], "100.0.0");
+        assert_eq!(
+            replaced_output["gui_status"]["update_drain"],
+            replaced_output["update_drain"]
+        );
+        assert!(!replaced_output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap()
+            .contains("99.0.0"));
+        gwt_core::update::defer_pending_update("99.0.0").unwrap();
+        let mut output = serde_json::to_value(&published).unwrap();
+        attach_monitor_admission_diagnostics(&mut output, &published, &prefs);
+        assert!(!output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("update_drain"));
+        assert!(output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap()
+            .contains("independent_hold"));
+        assert!(output["update_drain"].is_null());
+        assert!(output["gui_status"]["update_drain"].is_null());
+        assert!(output["gui_status"]["update_drain_release"].is_null());
+        assert_ne!(output["gui_status"]["state"], "update_drain");
+        assert_ne!(output["stall_reason"], "update_drain");
+        assert!(monitor_admission_exclusions(&published, &prefs, 42)
+            .iter()
+            .all(|reason| !reason.contains("update_drain")));
+    }
+
+    #[test]
     fn issue_5062_launch_now_uses_live_host_authority_and_manual_recovery() {
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -10574,12 +11140,21 @@ mod tests {
         );
         crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
         let prefs = crate::IssueMonitorPrefs::default();
-        let hold = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        let hold = monitor_launch_admission_hold(None, &prefs)
+            .unwrap()
+            .unwrap();
         assert_eq!(hold["version"], "9.110.0");
         assert_eq!(
             hold["release"],
             "release.update.defer {\"version\":\"9.110.0\"}"
         );
+        std::fs::write(gwt_core::paths::gwt_session_state_path(), "{").unwrap();
+        let known = monitor_launch_admission_hold(Some(&other_repo), &prefs)
+            .expect("optional holder-root lookup must not erase the known hold")
+            .unwrap();
+        assert_eq!(known["version"], "9.110.0");
+        assert_eq!(known["project_state_path"], serde_json::json!(path));
+        std::fs::remove_file(gwt_core::paths::gwt_session_state_path()).unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
@@ -10599,22 +11174,28 @@ mod tests {
             "9.110.0",
             "2026-10-05T17:00:24Z",
         );
-        let hold = monitor_launch_admission_hold(&monitor.prefs())
+        let hold = monitor_launch_admission_hold(None, &monitor.prefs())
             .unwrap()
             .unwrap();
         assert_eq!(hold["release"], crate::UPDATE_DRAIN_RELEASE_OPERATION);
         crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
-        let host_manual = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        let host_manual = monitor_launch_admission_hold(None, &prefs)
+            .unwrap()
+            .unwrap();
         assert_eq!(host_manual["release_scope"], "drain_owner_project");
         assert_eq!(host_manual["project_state_path"], serde_json::json!(path));
         drop(lease);
         assert!(
-            monitor_launch_admission_hold(&prefs).unwrap().is_none(),
+            monitor_launch_admission_hold(None, &prefs)
+                .unwrap()
+                .is_none(),
             "a stale same-PID fence cannot hold admission"
         );
         let authority_path = path.with_extension("authority.lock");
         std::fs::remove_file(&authority_path).unwrap();
-        assert!(monitor_launch_admission_hold(&prefs).unwrap().is_none());
+        assert!(monitor_launch_admission_hold(None, &prefs)
+            .unwrap()
+            .is_none());
         assert!(
             !authority_path.exists(),
             "an admission probe must not create a daemon authority lock"
@@ -14339,6 +14920,7 @@ mod tests {
     fn issue_monitor_config_set_guard_rejects_stale_fallback_without_saving() {
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
@@ -14363,7 +14945,7 @@ mod tests {
             super::super::json_envelope::parse_operation(
                 "issue.monitor.config.set",
                 &serde_json::json!({
-                    "max_active": 3, "allowed_labels": ["backend"],
+                    "max_active": 3, "allowed_labels": ["backend"], "update_drain": false,
                     "expected_config_token": "unobserved-config"
                 }),
             )
@@ -14380,6 +14962,11 @@ mod tests {
         );
         assert!(out.is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
         let machine_before = std::fs::read(crate::machine_agent_settings::path()).unwrap();
         let observed = crate::load_issue_monitor_prefs(&path)
             .unwrap()

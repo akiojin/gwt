@@ -1468,6 +1468,14 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    /// Admission ignores inactive automatic drains and the staged version's
+    /// host-wide defer. Saved configuration remains available for diagnostics.
+    pub(crate) fn effective_update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
+        self.update_drain
+            .as_ref()
+            .filter(|drain| drain.is_effective(self.enabled, self.autonomous_mode))
+    }
+
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
@@ -3684,6 +3692,17 @@ pub struct IssueMonitorUpdateDrain {
     /// sees the panes); the persisted prefs copy stays empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking: Vec<crate::update_drain::UpdateBlocker>,
+}
+
+impl IssueMonitorUpdateDrain {
+    fn is_effective(&self, enabled: bool, autonomous_mode: bool) -> bool {
+        self.reason != IssueMonitorUpdateDrainReason::Auto
+            || !self.automatic.unwrap_or(autonomous_mode)
+            || (enabled
+                && !gwt_core::update::load_pending_update_manifest().is_some_and(|pending| {
+                    pending.version == self.version && pending.auto_apply_deferred
+                }))
+    }
 }
 
 /// Issue #3906 AC-3: how a `config_set` control asks for the drain.
@@ -14793,7 +14812,7 @@ impl IssueMonitorState {
     }
 
     fn launch_admission_hold_at(&self, now: &str) -> Option<IssueMonitorStallReason> {
-        if self.update_drain.is_some() {
+        if self.update_drain().is_some() {
             Some(IssueMonitorStallReason::UpdateDrain)
         } else if self.saved_profile_provider_is_held_at(now) {
             Some(IssueMonitorStallReason::QuotaHold)
@@ -14838,9 +14857,11 @@ impl IssueMonitorState {
         None
     }
 
-    /// Issue #4037 AC-1: the update drain, if raised.
+    /// The admission-effective drain. Saved configuration is retained in prefs.
     pub fn update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
-        self.update_drain.as_ref()
+        self.update_drain
+            .as_ref()
+            .filter(|drain| drain.is_effective(self.config.enabled, self.autonomous_mode))
     }
 
     /// Issue #4037 AC-1 / AC-3: raise the update drain. Only admission changes;
@@ -14863,7 +14884,7 @@ impl IssueMonitorState {
         now: &str,
         automatic: Option<bool>,
     ) {
-        if self.update_drain.is_some() {
+        if self.update_drain().is_some() {
             return;
         }
         self.update_drain = Some(IssueMonitorUpdateDrain {
@@ -15047,6 +15068,7 @@ impl IssueMonitorState {
         quota_hold: Option<IssueMonitorProviderQuotaHold>,
     ) -> IssueMonitorStatusView {
         let last_error = self.selected_status_error().map(|(message, _)| message);
+        let update_drain = self.update_drain();
         // Issue #5321 AC-3: Issue failures remain diagnostic history, while
         // only a current monitor fault makes the whole monitor read as Error.
         let has_current_error = self.scan_recovery_error.is_some()
@@ -15103,7 +15125,7 @@ impl IssueMonitorState {
                 "auth_required".to_string()
             } else if quota_hold.is_some() {
                 "quota_hold".to_string()
-            } else if self.update_drain.is_some() {
+            } else if update_drain.is_some() {
                 "update_drain".to_string()
             } else if self.active_count() > 0 {
                 if self
@@ -15152,11 +15174,8 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             quota_hold,
             github_budget: None,
-            update_drain: self.update_drain.clone(),
-            update_drain_release: self
-                .update_drain
-                .as_ref()
-                .map(|_| UPDATE_DRAIN_RELEASE_OPERATION.to_string()),
+            update_drain: update_drain.cloned(),
+            update_drain_release: update_drain.map(|_| UPDATE_DRAIN_RELEASE_OPERATION.to_string()),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
             effective_launch_profile: self.effective_launch_profile_at(now),
             provider_quota_holds: self.active_provider_quota_holds_at(now),
@@ -31865,6 +31884,39 @@ mod tests {
             serde_json::from_str(r#"{"enabled":true,"max_active_agents":2,"priority_order":[]}"#)
                 .expect("pre-#4037 prefs load");
         assert!(legacy.update_drain.is_none());
+
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        crate::update_settings::set(Some(true)).unwrap();
+        let paused = IssueMonitorPrefs {
+            autonomous_mode: true,
+            update_drain: Some(IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: now.into(),
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(true),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let mut restored = test_monitor_with_prefs(Default::default(), paused.clone());
+        restored.set_allowed_labels(vec!["backend".into()]);
+        assert_eq!(
+            restored.prefs().update_drain,
+            paused.update_drain,
+            "unrelated settings must preserve the disabled monitor's raw drain"
+        );
+        assert!(restored.update_drain().is_none());
+        assert!(restored.status_view_at(now).update_drain.is_none());
+        let mut observer = test_monitor(Default::default());
+        observer.rebase_daemon_driver_prefs(&restored.prefs());
+        assert_eq!(observer.prefs().update_drain, paused.update_drain);
+        assert!(observer.update_drain().is_none());
+        observer.set_enabled(true);
+        assert_eq!(
+            observer.update_drain(),
+            paused.update_drain.as_ref(),
+            "re-enabling restores admission without recreating the saved drain"
+        );
     }
 
     /// Issue #4037 AC-2: while the drain is raised, no launch is handed out
@@ -50193,7 +50245,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let now = "2026-10-05T19:10:00Z";
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
         monitor.set_update_drain_with_origin(
             IssueMonitorUpdateDrainReason::Auto,
             "9.110.0",
@@ -50244,6 +50299,50 @@ mod tests {
         assert!(
             legacy_manual.update_drain().is_some(),
             "a legacy manual-click drain honors its project's explicit auto-apply OFF"
+        );
+
+        let payload = temp.path().join("staged-gwt");
+        fs::write(&payload, b"staged payload").unwrap();
+        gwt_core::update::persist_pending_update_manifest(
+            &gwt_core::update::PendingUpdateManifest {
+                version: "9.110.0".into(),
+                asset_url: "https://example.invalid/update".into(),
+                payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+                downloaded_at: now.into(),
+                origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+                auto_apply_deferred: true,
+            },
+        )
+        .unwrap();
+        let manual_prefs = legacy_manual.prefs();
+        assert!(
+            manual_prefs.effective_update_drain().is_some(),
+            "Apply after agents finish raises a manual drain before resuming its deferred manifest"
+        );
+        let mut scheduled = test_monitor_with_prefs(Default::default(), manual_prefs.clone());
+        scheduled.rebase_daemon_driver_prefs(&manual_prefs);
+        assert!(scheduled.update_drain().is_some());
+        assert!(scheduled.status_view_at(now).update_drain.is_some());
+        let mut automatic = manual_prefs;
+        automatic.enabled = true;
+        automatic.update_drain.as_mut().unwrap().automatic = Some(true);
+        crate::update_settings::set(Some(true)).unwrap();
+        let mut resumed = test_monitor_with_prefs(Default::default(), automatic.clone());
+        assert_eq!(resumed.prefs().update_drain, automatic.update_drain);
+        assert!(
+            resumed.update_drain().is_none(),
+            "automatic defer still releases admission"
+        );
+        resumed.set_update_drain_with_origin(
+            IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            now,
+            Some(false),
+        );
+        assert_eq!(
+            resumed.update_drain().and_then(|drain| drain.automatic),
+            Some(false),
+            "an explicit manual schedule replaces a deferred automatic hold"
         );
 
         monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.110.0", now);

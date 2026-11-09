@@ -2200,11 +2200,7 @@ pub fn prepare_host_update_drain_launch_hold(
     project_roots: &[PathBuf],
 ) -> Result<Option<String>, String> {
     let pending = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
-        !manifest.auto_apply_deferred
-            && gwt_core::update::pending_version_is_newer(
-                &manifest.version,
-                env!("CARGO_PKG_VERSION"),
-            )
+        gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
     });
     let mut hold = None;
     for project_root in project_roots {
@@ -2212,17 +2208,30 @@ pub fn prepare_host_update_drain_launch_hold(
             &crate::issue_monitor_prefs_path_for_repo_path(project_root),
         )
         .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
-        if let Some(drain) = prefs.update_drain.filter(|drain| {
+        if let Some(drain) = prefs.effective_update_drain().filter(|drain| {
             pending
                 .as_ref()
                 .is_some_and(|manifest| manifest.version == drain.version)
         }) {
             hold.get_or_insert_with(|| {
+                let release = if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                    format!(
+                        "release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                        drain.version
+                    )
+                } else {
+                    format!(
+                        "{} in {}",
+                        crate::UPDATE_DRAIN_RELEASE_OPERATION,
+                        project_root.display()
+                    )
+                };
                 format!(
-                    "Host update_drain for v{} in {} holds new agent launches; release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                    "Host update_drain for v{} in {} since {} holds new agent launches; {}",
                     drain.version,
                     project_root.display(),
-                    drain.version,
+                    drain.since,
+                    release,
                 )
             });
         }

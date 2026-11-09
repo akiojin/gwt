@@ -1488,8 +1488,8 @@ mod tests {
             .unwrap();
         let entry = std::fs::read_dir(temp.path())
             .unwrap()
-            .next()
-            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path() == path)
             .unwrap();
         let before_cold = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
         let first = cached_runtime_entry(&entry, &path).unwrap();

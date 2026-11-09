@@ -908,6 +908,7 @@ mod tests {
         let file = File::create(directory.path().join("lock")).expect("lock file");
         // This deadline is already expired on the host clock. Only the
         // explicitly advanced operation clock may decide the test's outcome.
+        // test-hygiene: allow-wall-clock-deadline A host-expired deadline proves the injected clock overrides real time.
         let start = Instant::now() - Duration::from_secs(1);
         let expiry = start + Duration::from_millis(250);
         let _clock = ScopedOperationClock::set(start);
@@ -1008,7 +1009,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("lock");
         let file = File::create(&path).expect("lock file");
-        let _deadline = ScopedOperationDeadline::enter(Instant::now() - Duration::from_millis(1));
+        let expiry = Instant::now();
+        let _clock = ScopedOperationClock::set(expiry);
+        let _deadline = ScopedOperationDeadline::enter(expiry);
 
         let error = lock_exclusive(&file).expect_err("expired deadline must reject lock");
 
@@ -1017,7 +1020,9 @@ mod tests {
 
     #[test]
     fn nested_deadlines_keep_the_earliest_expiry() {
-        let outer_expiry = Instant::now() + Duration::from_secs(1);
+        let start = Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        let outer_expiry = start + Duration::from_secs(1);
         let _outer = ScopedOperationDeadline::enter(outer_expiry);
         let _inner = ScopedOperationDeadline::enter(outer_expiry + Duration::from_secs(1));
 

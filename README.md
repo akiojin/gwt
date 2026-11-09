@@ -2068,6 +2068,16 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
+The PM window opens **Tasks**, a read-only preview of saved request tasks. It
+shows unfinished work first, including parent relationships, assignees, waiting
+reasons, next actions, and pending PM reassessment. **Include completed** also
+shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows the total and any requests awaiting classification. Long summaries are
+shortened; the saved tasks remain complete. A read failure retains the last
+confirmed list with a warning. Task editing, automatic intake, and history import
+are not available in this preview. **Reports** and **Execution log** remain
+available from the same toolbar.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
@@ -2584,6 +2594,9 @@ the target and temporary volumes above the configured build-artifact GC floor;
 `verification.disk_budget_bytes` overrides the measured per-run byte budget.
 The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
 volume, based on measured target and temporary growth plus 20% headroom.
+If a volume cannot fit its reservation plus the GC floor even when empty,
+`verify.run` refuses immediately and reports its path, reserve, floor, total, and
+free bytes. Move the affected Cargo target or `TMPDIR` to a larger filesystem.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 

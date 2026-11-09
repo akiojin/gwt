@@ -9,7 +9,10 @@ use std::{
 
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{
-    coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
+    coordination::{
+        load_entries_since, post_entry, post_entry_deterministic, AuthorKind,
+        BoardDeterministicOutcome, BoardEntry, BoardEntryKind,
+    },
     paths::gwt_cache_dir,
 };
 use gwt_github::{Cache, IssueNumber};
@@ -70,7 +73,7 @@ fn sync_coordination_for_session_with_paths(
     cache_root: &Path,
     linkage_store_path: Option<&Path>,
 ) -> Result<(), HookError> {
-    let Some(entry) =
+    let Some(mut entry) =
         board_entry_for_event_with_paths(session, event, cache_root, linkage_store_path)?
     else {
         return Ok(());
@@ -99,7 +102,34 @@ fn sync_coordination_for_session_with_paths(
         return Ok(());
     }
 
-    post_entry(&session.worktree_path, entry).map_err(coordination_as_hook_error)?;
+    if entry.state.as_deref() == Some("started") {
+        // Provider compaction can replay SessionStart within the same gwt
+        // Session. Recognize pre-upgrade random-id starts in archived history
+        // as well as new deterministic starts, without another sidecar.
+        if load_entries_since(&session.worktree_path, session.created_at)
+            .map_err(coordination_as_hook_error)?
+            .iter()
+            .any(|prior| {
+                prior.origin_session_id.as_deref() == Some(session.id.as_str())
+                    && prior.state.as_deref() == Some("started")
+            })
+        {
+            return Ok(());
+        }
+        entry.id = format!("hook-session-start:{}", session.id);
+        // The deterministic append arbitrates concurrent first starts. The
+        // first payload wins even if Issue metadata changes between replays.
+        if let BoardDeterministicOutcome::Appended(outcome) =
+            post_entry_deterministic(&session.worktree_path, entry)
+                .map_err(coordination_as_hook_error)?
+        {
+            outcome
+                .into_snapshot()
+                .map_err(coordination_as_hook_error)?;
+        }
+    } else {
+        post_entry(&session.worktree_path, entry).map_err(coordination_as_hook_error)?;
+    }
     Ok(())
 }
 
@@ -423,6 +453,51 @@ mod tests {
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
         assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
         assert!(entry.origin_session_id.is_some());
+    }
+
+    #[test]
+    fn session_start_is_once_per_session_after_repeated_provider_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "work/issue-6906", AgentId::Codex);
+        session.linked_issue_number = Some(6906);
+
+        // A pre-upgrade start has a random Board id. It still counts as this
+        // Session's start when compaction replays SessionStart after upgrade.
+        let original =
+            board_entry_for_event_with_paths(&session, "SessionStart", &cache_root, None)
+                .unwrap()
+                .unwrap();
+        post_entry(dir.path(), original).unwrap();
+        sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
+            .unwrap();
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+
+        let mut next = Session::new(dir.path(), "work/issue-6906", AgentId::Codex);
+        next.linked_issue_number = Some(6906);
+        sync_coordination_for_session_with_paths(&next, "SessionStart", &cache_root, None).unwrap();
+        sync_coordination_for_session_with_paths(&next, "Stop", &cache_root, None).unwrap();
+        sync_coordination_for_session_with_paths(&next, "UserPromptSubmit", &cache_root, None)
+            .unwrap();
+        sync_coordination_for_session_with_paths(&next, "SessionStart", &cache_root, None).unwrap();
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 3, "one start per Session and one Stop");
+        assert_eq!(
+            entries[0].origin_session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(
+            entries[1].origin_session_id.as_deref(),
+            Some(next.id.as_str())
+        );
+        assert_eq!(entries[2].state.as_deref(), Some("ready"));
+        for entry in entries {
+            assert!(!entry.body.contains("# Project Manager"));
+            assert!(!entry.body.contains("# Active user instructions"));
+            assert!(!entry.body.contains("Unread peer PM messages"));
+            assert!(!entry.body.contains("Resident PM worktree"));
+        }
     }
 
     #[test]
