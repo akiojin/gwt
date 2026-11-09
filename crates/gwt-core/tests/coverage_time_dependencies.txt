@@ -78,7 +78,6 @@ crates/gwt-docker/src/detect.rs|resolved_runtime_times_out_a_stuck_known_basenam
 crates/gwt-git/src/worktree.rs|run_command_with_timeout_does_not_wait_for_lingering_descendant_pipes|assert!(elapsed<Duration::from_secs(LINGERING_DESCENDANT_SECS),)|1
 crates/gwt-git/src/worktree.rs|run_command_with_timeout_kills_descendants_when_job_is_unavailable|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt-git/src/worktree.rs|run_command_with_timeout_kills_descendants_when_job_is_unavailable|whilewindows_process_alive(pid)&&Instant::now()<deadline|1
-crates/gwt-git/src/worktree.rs|worktree_listing_honors_the_active_operation_deadline|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1),)|1
 crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expiry_and_caps_connect_time|letexpired=ResolutionDeadline::at(Instant::now()-Duration::from_millis(1),Duration::from_secs(3),)|1
 crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expiry_and_caps_connect_time|letexpires_at=Instant::now()+Duration::from_secs(10)|1
 crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline|letdeadline=ResolutionDeadline::at(std::time::Instant::now()-Duration::from_millis(1),Duration::from_secs(1),)|1
