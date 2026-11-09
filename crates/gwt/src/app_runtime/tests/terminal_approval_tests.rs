@@ -1158,6 +1158,16 @@ fn app_runtime_approval_wait_overlay_enters_once_and_restores_hook_state() {
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Running)
     );
+
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Interrupted);
+    runtime.handle_runtime_approval_wait_state(&window_id, true);
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Interrupted),
+        "an old approval overlay must not hide an interrupted process"
+    );
 }
 
 #[test]

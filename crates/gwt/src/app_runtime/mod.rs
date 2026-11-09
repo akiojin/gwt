@@ -13770,7 +13770,9 @@ impl AppRuntime {
                 && gwt::window_state::uses_agent_hook_state(preset)
                 && !matches!(
                     base,
-                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    WindowProcessStatus::Stopped
+                        | WindowProcessStatus::Error
+                        | WindowProcessStatus::Interrupted
                 )
             {
                 WindowProcessStatus::Waiting
