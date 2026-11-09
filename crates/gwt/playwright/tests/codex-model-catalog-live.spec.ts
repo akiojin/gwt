@@ -53,7 +53,8 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
     expect(await model.locator("option").evaluateAll(options => options
       .filter(option => (option as HTMLOptionElement).value !== "retired-codex-model")
       .map(option => ({ value: (option as HTMLOptionElement).value, label: option.textContent })))).toEqual(expected);
-    await notice.scrollIntoViewIfNeeded();
+    // Status updates can replace the row while Playwright waits for stability.
+    await notice.evaluate(node => node.scrollIntoView({ block: "center" }));
     await info.attach(`codex-retired-${theme}`, { body: await page.screenshot({ path: info.outputPath(`codex-retired-${theme}.png`), fullPage: true }), contentType: "image/png" });
     await model.selectOption(expected[0].value);
     await expect(notice).toBeHidden();
@@ -83,7 +84,7 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
     await expect(picker).toHaveValue(retired);
     await expect(picker.locator("option:checked")).toContainText("unavailable");
     await expect(picker.locator("option:checked")).toBeDisabled();
-    await picker.scrollIntoViewIfNeeded();
+    await picker.evaluate(node => node.scrollIntoView({ block: "center" }));
     await info.attach(`codex-picker-${theme}`, { body: await page.screenshot({ path: info.outputPath(`codex-picker-${theme}.png`), fullPage: true }), contentType: "image/png" });
     await picker.selectOption(expected[0].value);
     await expect(picker).toHaveValue(expected[0].value);
