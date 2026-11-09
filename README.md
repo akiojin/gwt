@@ -2107,6 +2107,9 @@ and references. **Copy** includes both. Unchanged observations create no new car
 including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
+Decision reports show two to four numbered choices with the recommendation and
+its reason. Use **Execution log** to reply with a choice number or your own answer;
+**Copy** includes the numbered choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected

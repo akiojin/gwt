@@ -125,8 +125,8 @@ impl ReportSummary {
             short_line(value)?;
         }
         if let Some(decision) = &self.decision {
-            if !(2..=3).contains(&decision.options.len()) {
-                return invalid("decision needs 2..3 options");
+            if !(2..=4).contains(&decision.options.len()) {
+                return invalid("decision needs 2..4 options");
             }
             for value in [
                 &decision.question,
