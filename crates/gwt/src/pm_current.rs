@@ -494,14 +494,30 @@ mod tests {
             }),
         });
         let (failed, _) = reader
-            .poll_with(task_input.clone(), Some(&recovered), now, || changed)
+            .poll_with(task_input.clone(), Some(&recovered), now, || {
+                changed.clone()
+            })
             .unwrap();
+        assert!(reader
+            .poll_with(task_input.clone(), Some(&failed), now, || panic!(
+                "viewers share the task retry deadline"
+            ))
+            .is_none());
+        assert!(reader
+            .poll_with(
+                task_input.clone(),
+                Some(&failed),
+                now + chrono::Duration::seconds(5),
+                || changed,
+            )
+            .is_none());
+        let retry_at = now + chrono::Duration::seconds(10);
         let (recovered, _) = reader
-            .poll_with(task_input.clone(), Some(&failed), now, || data)
-            .expect("task reads retry without a stamp change or Reports deadline");
+            .poll_with(task_input.clone(), Some(&failed), retry_at, || data)
+            .expect("task reads recover on the shared retry deadline without a stamp change");
         assert_eq!(recovered.revision, failed.revision + 1);
         assert!(reader
-            .poll_with(task_input, Some(&recovered), now, || panic!(
+            .poll_with(task_input, Some(&recovered), retry_at, || panic!(
                 "the acknowledged task recovery stays silent"
             ))
             .is_none());
