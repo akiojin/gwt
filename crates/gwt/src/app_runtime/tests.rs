@@ -1989,6 +1989,7 @@ fn sample_runtime_with_events(
         next_project_incarnation += 1;
     }
     let mut runtime = AppRuntime {
+        mobile_host: Default::default(),
         test_project_owners: HashMap::new(),
         _runtime_namespace_gc: None,
         tabs,
