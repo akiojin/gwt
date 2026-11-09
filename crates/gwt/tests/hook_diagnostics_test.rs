@@ -68,7 +68,14 @@ fn user_prompt_submit_profile_is_content_free_and_uses_exact_allowlist() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("valid profile json"))
         .collect();
-    let handler_keys = BTreeSet::from(["duration_ms", "event", "handler", "occurred_at", "status"]);
+    let handler_keys = BTreeSet::from([
+        "duration_ms",
+        "event",
+        "handler",
+        "occurred_at",
+        "remaining_budget_ms",
+        "status",
+    ]);
     let total_keys = BTreeSet::from([
         "additional_context_bytes",
         "duration_ms",
@@ -90,6 +97,9 @@ fn user_prompt_submit_profile_is_content_free_and_uses_exact_allowlist() {
                 .is_some_and(|v| v <= 2));
         } else {
             assert_eq!(record_keys(record), handler_keys);
+            assert!(record["remaining_budget_ms"]
+                .as_f64()
+                .is_some_and(|remaining| remaining >= 0.0));
         }
     }
 }
@@ -110,6 +120,58 @@ fn record_keys(record: &Value) -> BTreeSet<&str> {
 }
 
 #[test]
+fn pm_prompt_profile_records_receipt_failure_as_error() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let _session = ScopedEnvVar::set("GWT_SESSION_ID", "pm-profile-session");
+    let _runtime = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let profile = home.path().join("hook-profile.jsonl");
+    let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile);
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(home.path());
+    std::fs::create_dir_all(&worktree).unwrap();
+    let store = worktree.parent().unwrap().parent().unwrap();
+    gwt::pm_registry::save_pm_prefs(
+        &store.join("project-state/pm.json"),
+        &gwt::pm_registry::PmPrefs {
+            registration: Some(gwt::pm_registry::PmRegistration {
+                session_id: "pm-profile-session".into(),
+                agent_id: "codex".into(),
+                worktree_path: worktree.display().to_string(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // A file in place of the receipt directory causes a real, immediate I/O failure.
+    std::fs::write(store.join("project-state/pm-reporting"), b"blocked").unwrap();
+
+    let result = gwt::cli::hook::event_dispatcher::handle_with_input(
+        "UserPromptSubmit",
+        "{}",
+        &worktree,
+        Some("pm-profile-session"),
+    );
+    assert!(matches!(result, Err(gwt::cli::hook::HookError::Io(_))));
+    let records: Vec<Value> = std::fs::read_to_string(profile)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let reporting = records
+        .iter()
+        .find(|record| record["handler"] == "pm-reporting-prompt")
+        .expect("PM reporting phase must be recorded even when its receipt fails");
+    assert_eq!(reporting["status"], "error");
+}
+
+#[test]
 fn hook_event_writes_opt_in_handler_timing_without_stdout_noise() {
     let _env_lock = env_test_lock()
         .lock()
@@ -120,6 +182,8 @@ fn hook_event_writes_opt_in_handler_timing_without_stdout_noise() {
     let _gwt_session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+    let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+    let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
 
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.stdin = serde_json::json!({
@@ -164,7 +228,14 @@ fn hook_event_writes_opt_in_handler_timing_without_stdout_noise() {
             .all(|record| record["duration_ms"].as_f64().is_some()),
         "every timing record must include duration_ms, got: {records:?}"
     );
-    let handler_keys = BTreeSet::from(["duration_ms", "event", "handler", "occurred_at", "status"]);
+    let handler_keys = BTreeSet::from([
+        "duration_ms",
+        "event",
+        "handler",
+        "occurred_at",
+        "remaining_budget_ms",
+        "status",
+    ]);
     for record in records
         .iter()
         .filter(|record| record["handler"] != "event-total")
