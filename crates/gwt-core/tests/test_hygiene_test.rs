@@ -814,6 +814,10 @@ fn coverage_inventory_rejects_a_new_deadline_in_each_regression_test() {
             "assert_fresh_monitor_startup_failures_stop",
         ),
         (
+            "crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs",
+            "issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidate",
+        ),
+        (
             "crates/gwt/src/app_runtime/tests/pane_control_tests.rs",
             "agent_pane_close_bypasses_a_contended_pane_lock",
         ),
