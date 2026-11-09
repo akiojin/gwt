@@ -3070,6 +3070,7 @@ test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-dr
 });
 
 test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // SPEC-3015 moved the runtime→Living Telemetry mapper from app.js to
   // window-runtime-state.js. CSS only styles `[data-agent-state]` for
   // declared telemetry states — any drift (e.g. emitting "warn" or
@@ -3092,13 +3093,14 @@ test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", ()
   }
   // FR-039 / SPEC-2356 follow-up: the telemetry vocabulary mirrors runtime
   // states for user-facing consistency. STARTING aggregates into RUNNING.
-  const allowed = new Set(["running", "idle", "waiting", "error", "done"]);
+  const allowed = new Set(["running", "idle", "waiting", "error", "stopped", "interrupted"]);
   for (const state of returnedStates) {
     assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
   }
   // And every design state must be reachable, not just allowed.
   for (const required of allowed) {
     assert.ok(returnedStates.has(required), `Living Telemetry state never emitted: ${required}`);
+    assert.ok(cssBlockContaining(css, `[data-agent-state="${required}"]`));
   }
 });
 
@@ -3418,7 +3420,13 @@ test("terminal overlay surfaces are opaque and copyable, not translucent glass (
 
 test("agent-state telemetry never makes readable workspace windows translucent (SPEC-2356 FR-033)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  for (const state of ["idle", "not_started"]) {
+  const worksCss = readFileSync(resolve(here, "../styles/works-agents.css"), "utf8");
+  for (const [state, token] of [["stopped", "--color-state-idle"], ["interrupted", "--color-state-blocked"]]) {
+    assert.ok(cssBlockContaining(worksCss, `.work-row[data-state="${state}"] .work-state`).includes(`var(${token})`));
+  }
+  assert.doesNotMatch(css, /\[data-agent-state="done"\]/);
+  assert.match(cssBlockContaining(css, '.workspace-overview-lifecycle[data-lifecycle="done"]'), /var\(--color-state-done\)/);
+  for (const state of ["idle", "not_started", "stopped", "interrupted"]) {
     const selector = `.workspace-window[data-agent-state="${state}"]`;
     const block = cssBlockContaining(css, selector);
     assert.match(
@@ -3428,7 +3436,7 @@ test("agent-state telemetry never makes readable workspace windows translucent (
     );
   }
 
-  for (const state of ["idle", "not_started"]) {
+  for (const state of ["idle", "not_started", "stopped", "interrupted"]) {
     const block = cssBlockContaining(css, `[data-agent-state="${state}"]`);
     assert.doesNotMatch(
       block,

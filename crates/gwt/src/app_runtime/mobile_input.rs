@@ -79,6 +79,9 @@ impl AppRuntime {
         after_ready: impl FnOnce(&ProjectRuntimeClient, &OwnerMobileInputReady) + Send + 'static,
     ) -> Result<impl FnOnce() -> InputResult + Send + 'static, AuthorizationError> {
         use sha2::{Digest, Sha256};
+        if !request.belongs_to_host(self.mobile_host.authorization()) {
+            return Err(AuthorizationError::WrongHost);
+        }
         // Keep shared HTTP connection drivers active while this blocking
         // worker waits on authorization or another native control operation.
         let executor = match &self.blocking_tasks {
@@ -629,14 +632,37 @@ mod tests {
             None,
         );
         app.blocking_tasks = BlockingTaskSpawner::queued().0;
-        let mut auth = MobileAuthorization::default();
-        auth.enable();
-        let auth = Arc::new(std::sync::RwLock::new(auth));
+        let auth = app.mobile_host.authorization().clone();
+        auth.write().unwrap().enable();
         let (connection, device) = paired_connection(&auth, &project);
         let clients = ClientHub::default();
         clients.register_scoped(
             "phone".into(),
             crate::app_runtime::ClientScope::Project(project.clone()),
+        );
+        let mut foreign = MobileAuthorization::default();
+        foreign.enable();
+        let foreign = Arc::new(RwLock::new(foreign));
+        let (foreign_connection, _) = paired_connection(&foreign, &project);
+        assert_eq!(
+            app.mobile_input_task(
+                Arc::new(MobileInputRequest::new(
+                    foreign_connection,
+                    "phone".into(),
+                    project.clone(),
+                    0,
+                    window_id.clone(),
+                    "foreign-host\n".into(),
+                )),
+                clients.clone(),
+                || panic!("a foreign Host must be rejected before reading the clock"),
+            )
+            .err()
+            .map(|error| error.to_string()),
+            Some(
+                "mobile input belongs to a different Host; reconnect through the current Host"
+                    .into()
+            ),
         );
         let request = |seq, data: &str| {
             Arc::new(MobileInputRequest::new(
@@ -1097,7 +1123,9 @@ mod tests {
             .project_key_for_window(&agent_window)
             .unwrap()
             .clone();
-        let (agent_connection, _) = paired_connection(&auth, &agent_project);
+        let agent_auth = agent_app.mobile_host.authorization().clone();
+        agent_auth.write().unwrap().enable();
+        let (agent_connection, _) = paired_connection(&agent_auth, &agent_project);
         let agent_clients = ClientHub::default();
         agent_clients.register_scoped(
             "agent-phone".into(),
