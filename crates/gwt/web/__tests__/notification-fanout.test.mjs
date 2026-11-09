@@ -186,12 +186,13 @@ test("Issue #6932 groups repeated Monitor failures and suppresses continued/stab
     ${initialization}
     return event => { ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')} };
   `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic);
-  const failure = { kind: "issue_monitor_toast", level: "error", message: "issue monitor scan failed at open-pr-readback stage: GitHub connection failed" };
-  for (let i = 0; i < 5; i++) { clock = new Date(clock.getTime() + 60_000); receive(failure); }
+  const failure = { kind: "issue_monitor_toast", level: "error", message: "issue monitor scan failed at open-pr-readback stage: GitHub connection failed after 30s" };
+  for (let i = 0; i < 5; i++) { clock = new Date(clock.getTime() + 60_000); receive({ ...failure, message: failure.message.replace("30s", `${30 + i}s`) }); }
   assert.equal(center.count(), 1);
   const row = document.querySelector(".notification-center__item");
   assert.equal(row.querySelector(".notification-center__count").textContent, "×5");
   assert.equal(row.querySelector("time").dateTime, clock.toISOString());
+  assert.match(row.textContent, /GitHub connection failed after 34s/, "grouping preserves the latest diagnostic text");
   for (const disposition of ["stale_readback", "previous_candidates"]) {
     receive({ ...failure, message: `scan continued: candidate-load failed (continued_with_${disposition}): offline` });
   }
