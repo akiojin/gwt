@@ -567,7 +567,7 @@ test.describe("Surface rail", () => {
     };
     for (const [name, pattern] of [
       ["Autonomous", /human approval/i], ["Monitoring", /queued issues/i],
-      ["Auto-refill", /queue/i], ["Refill limit", /0.*disable/i], ["Allowed labels", /matching issues/i],
+      ["Auto-refill", /queue/i], ["Refill limit", /on with 0.*default limit of 3/i], ["Allowed labels", /matching issues/i],
     ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
     await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
     const pm = settings.locator('[data-settings-panel="project-manager"]');

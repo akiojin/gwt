@@ -77,7 +77,7 @@ export function createPmWindowModel() {
         if (version?.epoch === event.version.epoch && version.revision === event.version.revision) return state;
         const taskOverview = event.current?.request_tasks;
         const taskError = taskOverview?.state === 'error' ? taskOverview.message
-          : (!taskOverview ? event.error || null : null);
+          : (!taskOverview ? event.error || 'Request tasks are unavailable. Reload this page to try again.' : null);
         next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
           requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
           requestTasksError: taskError,
@@ -259,7 +259,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       ? `${visible.length} of ${overview.total} recorded tasks shown${overview.total > rows.length ? ' (preview limited to 50; unfinished first)' : ''}. ${pending} request${pending === 1 ? '' : 's'} await classification.${!visible.length ? ' No unfinished tasks in this preview.' : ''}`
       : overview?.state === 'absent' ? 'No request tasks have been recorded yet.' : 'Loading request tasks…';
     const noticeText = error
-      ? `Task data could not be refreshed.${overview ? ' Showing the last confirmed list.' : ''} ${error} Reopen Tasks after the store is recovered.`
+      ? `Task data could not be refreshed.${overview ? ` Showing the last confirmed list. Last confirmed summary (stale): ${summary}` : ''} ${error} Reopen Tasks after the store is recovered.`
       : summary;
     if (tasksNotice.textContent !== noticeText) tasksNotice.textContent = noticeText;
   }

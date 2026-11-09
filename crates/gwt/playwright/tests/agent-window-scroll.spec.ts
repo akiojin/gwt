@@ -62,6 +62,53 @@ test.describe("Agent window scrollback lifecycle", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  test("stopped and interrupted scrolling stays local while keyboard input remains enabled", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    const box = await agentTile(page, id).boundingBox();
+    expect(box).not.toBeNull();
+    // Position before enabling mouse tracking: pointer motion remains input.
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    const wheel = async () => {
+      await page.mouse.wheel(0, -96);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    };
+
+    for (const state of ["stopped", "interrupted"]) {
+      await emitTerminalText(page, id, "\x1b[?1049h\x1b[?1003l\x1b[?1006l\x1b[HRetained terminal\r\n");
+      await emitBackendEvent(page, { kind: "window_state", window_id: id, state });
+      await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveAttribute("data-agent-state", state);
+      await expect.poll(() => terminalScrollMetrics(page, id)).toMatchObject({ baseY: 0, hidden: false });
+      const before = await terminalInputs(page, id);
+      await wheel();
+      expect(await terminalInputs(page, id), `${state} wheel must not send fallback keys`).toEqual(before);
+      await emitTerminalText(page, id, `\x1b[?1003h\x1b[?1006h${state} tracking ready\r\n`);
+      await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-1")))
+        .toContain(`${state} tracking ready`);
+      await wheel();
+      expect(await terminalInputs(page, id), `${state} wheel must not send mouse reports`).toEqual(before);
+
+      await emitTerminalText(page, id, "\x1b[?1003l\x1b[?1006l\x1b[?1049l" + numberedLines(state, 150));
+      await waitForScrollableTerminal(page, id);
+      await expectWheelMovesScrollback(page, id, true);
+      const input = agentTile(page, id).locator(".xterm-helper-textarea");
+      await input.focus();
+      const beforeTyping = (await terminalInputs(page, id)).length;
+      await page.keyboard.type("x");
+      await expect.poll(async () => (await terminalInputs(page, id)).slice(beforeTyping)).toContain("x");
+      await page.screenshot({ path: info.outputPath(`scroll-${state}.png`) });
+    }
+
+    await emitTerminalText(page, id, "\x1b[?1049h\x1b[HRunning terminal\r\n");
+    await emitBackendEvent(page, { kind: "window_state", window_id: id, state: "running" });
+    await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveAttribute("data-agent-state", "running");
+    await expect.poll(() => terminalScrollMetrics(page, id)).toMatchObject({ baseY: 0 });
+    const before = (await terminalInputs(page, id)).length;
+    await wheel();
+    await expect.poll(async () => (await terminalInputs(page, id)).slice(before)).toContain("\x1b[5~");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("surfaces runtime error detail without covering the terminal with an overlay", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
 

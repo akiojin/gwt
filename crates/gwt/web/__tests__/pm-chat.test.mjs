@@ -83,10 +83,17 @@ test('Tasks is the default PM view and preserves the unfinished filter and stabl
 
 test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
   const { root, model, update } = fixture({ tasksDefault: true });
-  update([], null, { request_tasks: taskOverview([trackedTask('known')]) });
+  update();
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /unavailable/i);
+  update([], null, { request_tasks: { ...taskOverview([trackedTask('known')], 7), total: 83 } });
   const before = model.readPmWindowState().windows.pm.requestTasks;
   assert.equal(before?.state, 'ready');
   assert.ok(Object.isFrozen(before));
+  update();
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks, before);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /last confirmed list.*unavailable/is);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent,
+    /Last confirmed summary \(stale\): 1 of 83 recorded tasks shown \(preview limited to 50; unfinished first\)\. 7 requests await classification\./);
   update([], null, { request_tasks: { state: 'error', message: 'Unreadable task store' } });
   assert.equal(model.readPmWindowState().windows.pm.requestTasks, before);
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 1);

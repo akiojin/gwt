@@ -53,7 +53,7 @@ function appendStatusDetail(body, detail) {
 /**
  * Source-tagged notification inputs. Runtime states come from WindowProcessStatus;
  * NeedsHuman comes only from the Monitor's typed transition, never Waiting/text.
- * @typedef {{source: "runtime", state: "stopped" | "error", windowData?: object,
+ * @typedef {{source: "runtime", state: "stopped" | "interrupted" | "error", windowData?: object,
  * projectTab?: object} | {source: "monitor", state: "needs_human", issueNumber: number}} NotificationTransition
  */
 export function notificationForTransition(input) {
@@ -67,10 +67,34 @@ export function notificationForTransition(input) {
   if (input.state === "stopped") {
     return { kind: "agent_stopped", title: "Agent stopped", body: `${agentName} stopped in ${projectName}.` };
   }
+  if (input.state === "interrupted") {
+    return { kind: "agent_interrupted", title: "Agent interrupted", body: `${agentName} was interrupted in ${projectName}.` };
+  }
   if (input.state === "error") {
     return { kind: "agent_error", title: "Agent error", body: `${agentName} hit an error in ${projectName}.` };
   }
   return null;
+}
+
+// Issue #6932: presentation identity only; the raw diagnostic ledger is unchanged.
+export function monitorDiagnostic({ message, kind, stage, issue_number } = {}) {
+  const raw = typeof message === "string" ? message.trim() : "";
+  if (!raw) return null;
+  const continuations = [...raw.matchAll(/\(continued_with_([\w]+)\)/g)];
+  if (raw.startsWith("scan continued:") && !raw.includes("launch_suppressed") && continuations.length
+    && continuations.every(([, value]) => ["stale_readback", "previous_candidates"].includes(value))) return null;
+  const stalled = raw.startsWith("Issue Monitor scan stalled");
+  const normalized = raw
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g, "<time>")
+    .replace(/\b\d+(?:\.\d+)?(?:ms|s)\b/g, "<duration>")
+    .replace(/\s+/g, " ");
+  const identity = stalled
+    ? normalized.replace(/ for <duration> \(poll interval <duration>\)/, "").replace(/; last scan at <time>/, "")
+    : normalized;
+  const phase = (!stalled && stage) || raw.match(/scan failed at ([\w-]+) stage:/)?.[1] || "monitor";
+  const source = stalled ? "scan_stall" : kind || (phase === "monitor" ? "monitor" : "scan_failure");
+  return { key: `issue-monitor:${JSON.stringify([source, phase, identity, issue_number || null])}`,
+    message: stalled ? identity : raw, stalled };
 }
 
 // The server owns runtime timing, attention suppression, and recipient election.
@@ -86,7 +110,7 @@ export function createAgentCompletionNotifier({
 
   function handleIntent(notice) {
     if (!notice || typeof notice.transition_id !== "string" || !notice.transition_id.trim()
-      || !["stopped", "error", "needs_human"].includes(notice.category)
+      || !["stopped", "interrupted", "error", "needs_human"].includes(notice.category)
       || seenTransitions.has(notice.transition_id)) return null;
     seenTransitions.add(notice.transition_id);
     if (getDesktopNotificationPermission() !== "granted") return null;

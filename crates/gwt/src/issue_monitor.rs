@@ -18672,7 +18672,7 @@ impl IssueMonitorState {
 
     pub fn set_terminal_queue_auto_refill(&mut self, enabled: bool, limit: usize) {
         self.terminal_queue_auto_refill = enabled;
-        self.terminal_queue_auto_refill_limit = limit;
+        self.terminal_queue_auto_refill_limit = if enabled && limit == 0 { 3 } else { limit };
     }
 
     fn retire_completed_terminal_queue(&mut self) {

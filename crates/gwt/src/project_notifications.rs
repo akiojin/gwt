@@ -27,6 +27,7 @@ pub enum NotificationPermission {
 #[serde(rename_all = "snake_case")]
 pub enum NotificationCategory {
     Stopped,
+    Interrupted,
     Error,
     NeedsHuman,
 }
@@ -127,6 +128,10 @@ impl NotificationIntent {
                 "gwt — Agent stopped",
                 "An agent stopped after running for at least five minutes.",
             ),
+            NotificationCategory::Interrupted => (
+                "gwt — Agent interrupted",
+                "An agent was interrupted after running for at least five minutes.",
+            ),
             NotificationCategory::Error => (
                 "gwt — Agent error",
                 "An agent stopped with an error after running for at least five minutes.",
@@ -222,6 +227,7 @@ impl NotificationCoordinator {
         let category = if qualified {
             match status {
                 WindowProcessStatus::Stopped => Some(NotificationCategory::Stopped),
+                WindowProcessStatus::Interrupted => Some(NotificationCategory::Interrupted),
                 WindowProcessStatus::Error => Some(NotificationCategory::Error),
                 _ => None,
             }
@@ -376,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn running_five_minutes_qualifies_stopped_and_error_once() {
+    fn running_five_minutes_qualifies_stopped_error_and_interrupted_once() {
         let (mut coordinator, key, now) = setup();
         coordinator.observe_runtime(&key, 1, "short", 1, WindowProcessStatus::Running, now);
         coordinator.observe_runtime(
@@ -423,11 +429,32 @@ mod tests {
             WindowProcessStatus::Error,
             now + Duration::from_secs(300),
         );
+        for (window, seconds) in [("short-interrupted", 299), ("interrupted", 300)] {
+            coordinator.observe_runtime(&key, 1, window, 1, WindowProcessStatus::Running, now);
+            for elapsed in [seconds, seconds + 1] {
+                coordinator.observe_runtime(
+                    &key,
+                    1,
+                    window,
+                    1,
+                    WindowProcessStatus::Interrupted,
+                    now + Duration::from_secs(elapsed),
+                );
+            }
+        }
         let intents = coordinator.drain_intents();
-        assert_eq!(intents.len(), 2);
+        assert_eq!(intents.len(), 3);
         assert_eq!(intents[0].category, NotificationCategory::Stopped);
         assert_eq!(intents[1].category, NotificationCategory::Error);
         assert_ne!(intents[0].transition_id, intents[1].transition_id);
+        let wire = serde_json::to_value(&intents[2]).unwrap();
+        assert_eq!(wire["category"], "interrupted");
+        assert_eq!(wire["window_id"], "interrupted");
+        assert_eq!(wire["title"], "gwt — Agent interrupted");
+        assert_eq!(
+            wire["body"],
+            "An agent was interrupted after running for at least five minutes."
+        );
     }
 
     #[test]

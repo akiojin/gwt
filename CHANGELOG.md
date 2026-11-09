@@ -1,6 +1,74 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.156.0] - 2026-11-09
+
+### Bug Fixes
+
+- **gui:** Remove misleading mission completion counter
+- **verification:** 不可能なディスク予約を待機前に拒否する
+- **update:** Release inactive automatic host drains
+- **runtime:** Retain exit state against delayed running events
+- **hooks:** PM 文脈を session に隔離し開始通知を一度にする
+- **update:** Preserve drain state and scope cancellation
+- **verify:** Show disk admission blockers in lease status
+- **hooks:** 現在のhook本人だけに完了観測を結び付ける
+- **verify:** Playwright 計測を実 worker の起動範囲に限定する
+- **update:** Preserve manual holds across deferred cleanup
+- **update:** Withdraw obsolete scheduled update notices
+- **update:** Finish MSI client enumeration before re-entry
+- **gui:** Separate runtime termination from work completion
+- **test:** Respect elapsed alias binding lifetimes
+- **runtime:** Preserve final diagnostics and revalidated handoffs
+- **verification:** Gate resume notice on disk admission
+- **ui:** Recovery Center の未送信 read を再接続で一度だけ送信する
+- **pm:** Recover task reads without discarding the list
+- **pm:** Bound task retries and retain stale summary
+- **monitor:** Isolate scan commits from unchanged machine settings
+- **notifications:** Notify sustained agent interruption
+- **test:** Scope interruption notification history assertions
+- **gui:** Recover unsent pane commands after owner resynchronization
+- **mobile:** Revoke input authority before GUI shutdown
+
+### Documentation
+
+- **perf:** 保存境界の RED と GREEN 証跡を保持
+
+### Features
+
+- **mobile:** Bind input authority to the owning host
+- **pm:** 保存済みの依頼タスクを既定の一覧で表示する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 6899 pull request delivery
+- **work:** Record issue 6899 follow-up PR
+- **work:** PR #6910 の配送記録を保存する
+- **work:** Record issue 6899 final PR
+- **work:** Issue 5876 の receipt 承継精算を記録
+- **work:** Record issue 5876 reliability observations
+- **work:** Record mobile host authority delivery
+- **work:** Recovery Center の配送 PR を関連付ける
+- **work:** Record recovery center delivery continuation
+- **work:** Reconcile native request delivery evidence
+- **work:** Record issue-6476 work events
+- **work:** Reconcile Reports schema dependencies
+- **work:** Link SAFE-T3 audit pull request
+
+### Performance
+
+- **memory:** 保存済み Work source map を解放
+- **gui:** Keep startup admission and hook health reads off the event loop
+
+### Testing
+
+- **update:** Mark host-release fixture as automatic
+- **hooks:** Align guarded helper and runtime cache fixtures
+- **memory:** 現行の Agent 登録と hook 検査で計測する
+- **runtime:** Make Work profile timing deterministic
+- **runtime:** Handoff fixture を再検証後の owner RPC に同期する
+- **core:** 操作時計テストの期限を明示して壁時計依存を除く
+
 ## [9.155.2] - 2026-11-08
 
 ### Bug Fixes

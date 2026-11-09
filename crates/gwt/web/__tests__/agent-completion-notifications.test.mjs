@@ -31,9 +31,12 @@ test("server intents deliver once by transition ID without runtime or reconnect 
   assert.equal(notifier.handleIntent({ ...stopped }), null);
   const error = intent({ transition_id: "runtime-one:2", category: "error", title: "Agent error", body: "Stop-block hit an error" });
   assert.deepEqual(notifier.handleIntent(error), error);
-  const human = intent({ transition_id: "runtime-one:3", category: "needs_human", window_id: null, title: "Needs human" });
+  const interrupted = intent({ transition_id: "runtime-one:3", category: "interrupted", title: "Agent interrupted", body: "Fixture agent was interrupted in Repo One." });
+  assert.deepEqual(notifier.handleIntent(interrupted), interrupted);
+  assert.equal(notifier.handleIntent({ ...interrupted }), null);
+  const human = intent({ transition_id: "runtime-one:4", category: "needs_human", window_id: null, title: "Needs human" });
   assert.deepEqual(notifier.handleIntent(human), human);
-  assert.deepEqual(desktop, [stopped, error, human]);
+  assert.deepEqual(desktop, [stopped, error, interrupted, human]);
 });
 
 test("desktop-only intents never prompt or publish an in-app toast when permission is not granted", () => {
@@ -297,8 +300,11 @@ test("typed inputs retain source authority and never infer NeedsHuman from Waiti
   assert.doesNotMatch(notice.title, /complete|finish/i);
 });
 
-test("Stopped desktop copy stays factual without claiming work finished", () => {
-  const notice = notifications.notificationForTransition({source: "runtime", state: "stopped"});
-  assert.equal(notice.title, "Agent stopped");
-  assert.doesNotMatch(notice.title, /finish|complete/i);
+test("Stopped and Interrupted desktop copy stays factual without claiming work finished", () => {
+  for (const state of ["stopped", "interrupted"]) {
+    const notice = notifications.notificationForTransition({source: "runtime", state});
+    assert.equal(notice.kind, `agent_${state}`);
+    assert.equal(notice.title, `Agent ${state}`);
+    assert.doesNotMatch(notice.title + notice.body, /finish|complete/i);
+  }
 });
