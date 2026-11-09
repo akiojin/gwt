@@ -246,13 +246,8 @@ impl CatalogDiff {
             && self.missing_saved_models.is_empty()
     }
 
-    fn report_body(&self, cache_used: bool, effective: &[CodexModelRow]) -> String {
+    fn report_body(&self, effective: &[CodexModelRow]) -> String {
         let mut body = String::from("# Codex model list changed\n\n");
-        if !cache_used {
-            body.push_str(
-                "Codex's models cache was not readable; compared against the bundled snapshot.\n\n",
-            );
-        }
         if !self.added.is_empty() {
             body.push_str(&format!(
                 "- Added by Codex (not in gwt's bundled snapshot): {}\n",
@@ -386,14 +381,13 @@ pub fn run_weekly_check(
         return Ok(WeeklyCheckOutcome::NotDue);
     }
     let cache = models_cache_path().and_then(|path| rows_from_cache_file(&path));
-    let cache_used = cache.is_some();
     let snapshot = snapshot_rows();
     let effective = cache.unwrap_or_else(|| snapshot.clone());
     let diff = diff_catalog(&effective, &snapshot, saved_models);
     let outcome = if diff.is_empty() {
         WeeklyCheckOutcome::NoDiff
     } else {
-        let body = diff.report_body(cache_used, &effective);
+        let body = diff.report_body(&effective);
         // The durable report itself is the deduplication record, even after a
         // crash between posting it and saving the last-check timestamp.
         if gwt_core::pm_report::load_reports(repo_path)?
@@ -676,7 +670,8 @@ mod tests {
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let _guard = test_override::set(temp.path().join("missing-cache"));
+        let cache = temp.path().join("models_cache.json");
+        let _guard = test_override::set(cache.clone());
         let now = Utc::now();
         let saved = ["retired-model".to_string()];
         assert_eq!(
@@ -687,6 +682,19 @@ mod tests {
         assert_eq!(
             run_weekly_check(&repo, &saved, now).unwrap(),
             WeeklyCheckOutcome::AlreadyReported
+        );
+        assert_eq!(gwt_core::pm_report::load_reports(&repo).unwrap().len(), 1);
+
+        let snapshot: Vec<_> = SNAPSHOT
+            .iter()
+            .enumerate()
+            .map(|(priority, row)| (row.0, row.1, "list", priority as i64))
+            .collect();
+        std::fs::write(&cache, cache_json(&snapshot)).unwrap();
+        assert_eq!(
+            run_weekly_check(&repo, &saved, now + Duration::days(7)).unwrap(),
+            WeeklyCheckOutcome::AlreadyReported,
+            "cache recovery alone must not repeat the same model/profile difference"
         );
         assert_eq!(gwt_core::pm_report::load_reports(&repo).unwrap().len(), 1);
     }
