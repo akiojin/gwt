@@ -3047,6 +3047,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
+          isRuntimeStopped: () => {
+            const windowData = workspaceWindowById(windowId);
+            return isAgentWindowPreset(windowData?.preset)
+              && ["stopped", "interrupted"].includes(runtimeStateForWindow(windowData));
+          },
           sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
