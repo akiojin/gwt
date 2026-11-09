@@ -283,6 +283,17 @@ impl ProjectOwnerHarness {
         })
         .await
         .map_err(|error| error.to_string())??;
+        if with_monitor {
+            // test-hygiene: allow-wall-clock-deadline Bound the real fixture startup barrier; observe its initial scan before routing.
+            tokio::time::timeout(
+                gwt_core::deadline_budget::HANG_GUARD,
+                fixture.wait_monitor_idle(),
+            )
+            .await
+            .map_err(|_| {
+                "fixture Monitor startup did not complete its initial scan".to_string()
+            })??;
+        }
         fixture.client = super::client::ProjectRuntimeClient::from_current_project(
             &root,
             &gwt_core::paths::gwt_home(),

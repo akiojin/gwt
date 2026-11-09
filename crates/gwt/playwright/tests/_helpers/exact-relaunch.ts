@@ -120,6 +120,12 @@ const actorLog = path.join(process.env.HOME, 'switch-actor.jsonl');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const actorEvent = (stage, extra = {}) => fs.appendFileSync(actorLog, JSON.stringify({stage,
   pid:process.pid,gwt_session_id:process.env.GWT_SESSION_ID,provider_session_id:native,cwd:process.cwd(),...extra})+'\n');
+const observedRuntime = () => {
+  const bytes = fs.readFileSync(process.env.GWT_SESSION_RUNTIME_PATH);
+  const runtime = JSON.parse(bytes);
+  return {runtime_status:runtime.status,current_hook_event:runtime.current_hook_event ?? null,
+    runtime_sha256:require('node:crypto').createHash('sha256').update(bytes).digest('hex')};
+};
 const sourceEnvelope = (operation, params = {}) => {
   const result = cp.spawnSync(process.env.GWT_BIN_PATH, [], {cwd:sourceDirectory,env:process.env,
     encoding:'utf8',timeout:60000,input:JSON.stringify({schema_version:1,operation,params})});
@@ -142,6 +148,7 @@ const git = (...gitArgs) => {
   return result.stdout.trim();
 };
 const nativeHook = (event, prompt) => {
+  startupEvent('native_hook_begin',{event});
   const hooks = JSON.parse(fs.readFileSync(path.join(sourceDirectory,'.codex','hooks.json'),'utf8'));
   const input = JSON.stringify({session_id:native,hook_event_name:event,cwd:sourceDirectory,
     transcript_path:rollout,prompt,stop_hook_active:false});
@@ -149,11 +156,14 @@ const nativeHook = (event, prompt) => {
     if (hook.type !== 'command') continue;
     const result = cp.spawnSync('/bin/sh',['-c',hook.command],{cwd:sourceDirectory,env:process.env,
       input,encoding:'utf8',timeout:60000});
+    actorEvent('native_hook_result',{event,exit_status:result.status,signal:result.signal,
+      session_lease_contended:/Session lease is held by another gwt operation/.test(result.stderr ?? '')});
     if (result.status !== 0 || /"decision"\s*:\s*"block"/.test(result.stdout)) {
       throw new Error('Native hook refused: '+event);
     }
   }
   actorEvent('native_hook',{event});
+  startupEvent('native_hook_returned',{event});
 };
 const observe = async (read, description) => {
   const deadline = Date.now()+60000;
@@ -165,7 +175,9 @@ const observe = async (read, description) => {
   throw new Error('Source observation timed out: '+description);
 };
 const actorReady = (async () => {
+  startupEvent('execution_status_begin');
   const owner = sourceOperation('execution.status').owner_number;
+  startupEvent('execution_status_returned');
   nativeHook('UserPromptSubmit',args.at(-1));
   if (owner === switching.sourceIssueNumber && !fs.existsSync(path.join(sourceDirectory,'source-in-progress.txt'))) {
     fs.writeFileSync(path.join(sourceDirectory,'source-in-progress.txt'),'Unfinished source implementation awaiting its next step.\n');
@@ -174,6 +186,10 @@ const actorReady = (async () => {
   }
   sourceOperation('issue.monitor.wait',{number:owner,reason:'Awaiting fixture operator',resume_condition:'Operator requests checkpoint or resumes current work'});
   nativeHook('Stop');
+  const normal = observedRuntime();
+  actorEvent('normal_n1',normal);
+  if (normal.current_hook_event?.event !== 'Stop' || normal.current_hook_event?.outcome !== 'normal')
+    throw new Error('Genuine initial Stop did not establish current Normal observation');
   let treeChild;
   if (switching.positive && owner === switching.sourceIssueNumber) {
     fs.mkdirSync(idleDirectory,{recursive:true});
@@ -191,7 +207,9 @@ const checkpoint = async line => {
   if (!operation || checkpointed.has(operation)) return;
   checkpointed.add(operation);
   process.chdir(sourceDirectory);
+  actorEvent('checkpoint_before_prompt',{operation,...observedRuntime()});
   nativeHook('UserPromptSubmit',line);
+  actorEvent('checkpoint_activity',{operation,...observedRuntime()});
   const intent = sourceOperation('issue.monitor.switch.read').intents.find(value=>value.operation_id===operation);
   if (!intent || intent.stage !== 'checkpointing') {
     sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,clear:true});
@@ -220,9 +238,18 @@ const checkpoint = async line => {
   sourceOperation('issue.monitor.switch.ack',{operation_id:operation,head,work_id:work.id,board_entry_id:entry.id});
   actorEvent('checkpoint_acked',{operation,head,work_id:work.id,board_entry_id:entry.id});
   sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,reason:'Saved checkpoint awaits switch',resume_condition:'Switch cancelled or saved work resumed'});
+  if (switching.positive) {
+    actorEvent('awaiting_normal_n2',{operation,...observedRuntime()});
+    await observe(()=> {
+      const release = path.join(process.env.HOME,'normal-n2-'+operation+'.json');
+      return fs.existsSync(release) && JSON.parse(fs.readFileSync(release,'utf8')).operation === operation;
+    },'genuine checkpoint Stop release');
+  }
   // Record cwd before Stop publishes Idle: the Host may then exit this actor.
   actorEvent('checkpoint_idle',{operation});
+  actorEvent('normal_n2_started',{operation});
   nativeHook('Stop');
+  actorEvent('normal_n2_hook_returned',{operation});
 };
 ` : "";
 
@@ -302,6 +329,9 @@ const terminalActorFailure = error => {
 ` : "";
   // The fake provider owns only native conversation metadata. In particular,
   // its native conversation UUID is independent from GWT_SESSION_ID.
+  const startupRecorder = setup.switching
+    ? `const startupEvent = (stage, extra = {}) => fs.appendFileSync(${JSON.stringify(join(home, "switch-startup.jsonl"))}, JSON.stringify({stage,pid:process.pid,gwt_session_id:process.env.GWT_SESSION_ID,home_matches_fixture:process.env.HOME===${JSON.stringify(home)},codex_home_matches_fixture:process.env.CODEX_HOME===${JSON.stringify(join(home, ".codex"))},...extra})+'\\n');`
+    : "const startupEvent = () => {};";
   const provider = `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
@@ -339,18 +369,23 @@ fs.appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({pid:process.pid,ar
 // Like the real provider, report the native conversation to gwt through the
 // SessionStart hooks materialized in the worktree; this is how gwt learns the
 // exact resume handle (it never derives it from rollout files).
+${startupRecorder}
+startupEvent('session_start_begin');
 try {
   const hooks = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.codex', 'hooks.json'), 'utf8'));
   const input = JSON.stringify({session_id:native,hook_event_name:'SessionStart',source:resumed ? 'resume' : 'startup',cwd:process.cwd(),transcript_path:rollout,model:option('--model')});
   for (const group of hooks.hooks?.SessionStart ?? []) for (const hook of group.hooks ?? []) {
     if (hook.type !== 'command') continue;
     const windows = process.platform === 'win32';
+    startupEvent('session_start_hook_begin');
     const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh',
       windows ? ['/d','/s','/c',hook.command] : ['-c',hook.command],
       {input, stdio:['pipe','ignore','inherit'], timeout:60000, windowsHide:true, windowsVerbatimArguments:windows});
+    startupEvent('session_start_hook_returned',{exit_status:result.status,signal:result.signal,error_code:result.error?.code ?? null});
     if (result.error || result.status !== 0) throw new Error('SessionStart hook failed: ' + (result.error?.message || result.status));
   }
-} catch (error) { console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); }
+} catch (error) { startupEvent('session_start_failed'); console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); }
+startupEvent('session_start_returned');
 ${switchActor}
 ${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);

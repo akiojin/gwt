@@ -3034,11 +3034,36 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         "completion is emitted by the worker callback: {events:#?}"
     );
     drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    // A legitimate prefs refresh can add a preparation callback before the
+    // exact live holder's physical submit is scheduled.
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            prefs.priority_order.push(9001);
+            Ok(())
+        },
+    )
+    .expect("change unrelated queue priority before handoff revalidation");
     fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ));
+        .handle_issue_monitor_launch_prepared(prepared);
+    // Drive only preparation/revalidation callbacks. Once materialization is
+    // scheduled, leave the physical owner RPC queued for the assertions below.
+    while !matches!(
+        fixture
+            .runtime
+            .issue_monitor_launch_deliveries
+            .get(&delivery_id),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { .. })
+    ) {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
     // Both the outer facts callback and the nested answer adapter emit their
     // own verified telemetry job; only the remaining task is the owner RPC.
     run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);

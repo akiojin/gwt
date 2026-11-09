@@ -884,7 +884,7 @@ fn admit_prepared_update(
             false,
             app.release_update_auto_apply_events(
                 &manifest.version,
-                app_runtime::UpdateAutoApplyRelease::Cancelled,
+                app_runtime::UpdateAutoApplyRelease::Deferred,
             ),
         );
     }
@@ -923,7 +923,7 @@ fn admit_prepared_update(
         let release = match gwt_core::update::load_pending_update_manifest() {
             Some(current) if current.version == manifest.version => current
                 .auto_apply_deferred
-                .then_some(app_runtime::UpdateAutoApplyRelease::Cancelled),
+                .then_some(app_runtime::UpdateAutoApplyRelease::Deferred),
             _ => Some(app_runtime::UpdateAutoApplyRelease::PayloadMissing),
         };
         if let Some(release) = release {
@@ -4846,6 +4846,7 @@ mod tests {
             next_project_incarnation += 1;
         }
         let mut runtime = AppRuntime {
+            mobile_host: Default::default(),
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: None,
             issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
@@ -5356,14 +5357,16 @@ mod tests {
         gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
+        let (admitted, events) = super::admit_prepared_update(
+            &mut runtime,
+            &manifest,
+            &mut admission,
+            crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+        );
+        assert!(!admitted);
         assert!(
-            !super::admit_prepared_update(
-                &mut runtime,
-                &manifest,
-                &mut admission,
-                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
-            )
-            .0
+            events.is_empty(),
+            "no automatic hold needs another cancellation"
         );
         assert!(!runtime.agent_maintenance.app_update_committing);
 
@@ -5702,14 +5705,16 @@ mod tests {
         let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
         let mut admission = crate::update_front_door::UpdateApplyAdmission::default();
         assert!(admission.begin_resolution());
+        let (admitted, events) = super::admit_prepared_update(
+            &mut runtime,
+            &queued_manifest,
+            &mut admission,
+            crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
+        );
+        assert!(!admitted);
         assert!(
-            !super::admit_prepared_update(
-                &mut runtime,
-                &queued_manifest,
-                &mut admission,
-                crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID,
-            )
-            .0
+            events.is_empty(),
+            "no drain or planner needs another cancellation"
         );
         assert!(!runtime.agent_maintenance.app_update_committing);
         assert_eq!(
@@ -11883,7 +11888,7 @@ fn main() -> std::io::Result<()> {
                         update_apply_admission.failed();
                         clients.dispatch(app.release_update_auto_apply_events(
                             &version,
-                            app_runtime::UpdateAutoApplyRelease::Cancelled,
+                            app_runtime::UpdateAutoApplyRelease::Deferred,
                         ));
                     }
                     Some(manifest) if manifest.version == version => {

@@ -777,3 +777,69 @@ from the exited original process. Writer-budget exhaustion remains a separate
 failure: `lock_contention=not_observed` does not prove machine-lock contention.
 No installed runtime was replaced or restarted. Parent AC-1/2/3, LF6 and
 installed-runtime, Mac, fleet and whole-GUI CPU/RSS acceptance remain unproven.
+
+### Scan-retry correction delivery reconciliation (2026-11-09 JST)
+
+[PR #6875](https://github.com/akiojin/gwt/pull/6875) merged on
+2026-11-08 at 15:14:58 UTC. A fresh fetch confirmed that `origin/develop`
+at `ee864546d9cad0a21ad464abe361a42b2d5deba6` contains both the producing
+head `542846554e1e1973ae147d5a7bd9fdb5c30bb5d0` and that merge commit.
+Its canonical pre-PR record `vrr-09409a1cc02b4a3fa14f10c35ad6945e`
+passed eight commands and 50 selected tests. This is the producer's historical
+verification, not a fresh run by the reconciliation session.
+
+The initial head's Linux fleet fixture failures were resolved by integrating
+the already-delivered `d6009d7ee` fixture correction. The integrated head's
+coverage shard logs recorded both execution-protection and claim-protection
+cases passing. All 13 currently required checks succeeded at that head;
+branch protection remained `strict=false`.
+
+The [coverage aggregation log](https://github.com/akiojin/gwt/actions/runs/42490898770/job/128768125389)
+checks out that exact producing head and validates the six-shard inventory
+(12,712 executed, 42 ignored) before aggregation. With outer shell exclusions,
+gwt-core + gwt covered **416,103/450,958 lines = 92.27%**, threshold 90%;
+other domain crates covered **65,864/70,925 lines = 92.86%**, threshold 80%.
+The initial unaggregated coverage failure remains a test failure, not a
+coverage threshold miss. Local workspace coverage was not measured.
+
+Only T-5390-SR4 and T-5390-SR4a are reconciled with this delivery. No new
+runtime measurement or product correction is included. Parent AC-1/2/3,
+LF6's original timeout cause, installed runtime, Mac and real-fleet CPU/RSS
+acceptance remain open. The parent Issue stays open.
+
+### Legacy delivery tasks and parent prerequisites (2026-11-09 JST)
+
+Nine earlier task checkboxes remained open beside their later completed
+delivery records. Independent read-only review and fresh Git ancestry checks
+confirmed the following producing heads and merges in `origin/develop`:
+
+| Delivery | Producing head | Merge | Legacy tasks reconciled |
+| --- | --- | --- | --- |
+| [PR #6677](https://github.com/akiojin/gwt/pull/6677) | `a9e9397f9d12` | `16f1ddf51d5b` | PF1, PF3, PF3a, PF3b, PF4a |
+| [PR #6700](https://github.com/akiojin/gwt/pull/6700) | `e87a2296bba3` | `5839e35f8c45` | PF2, UR3, UR4, UI-DELIVERY |
+| [PR #6705](https://github.com/akiojin/gwt/pull/6705) | `69cbc2d27d1c` | `1ff0b4a215c0` | Final UI correction |
+
+The [finite update-cost comparison](independent-update-cost.md),
+[backend delivery boundary](backend-delivery.md) and
+[UI recovery record](ui-resume-20261103.md) preserve the original scope.
+The final UI delivery record retains canonical
+`vrr-3a7dd8cb821643bc96a4d29a890ff210`, seven passing commands and actual
+headed dark/light results of three cases each with zero console/page errors.
+These are historical producer results, not fresh measurements in this session.
+Only the nine checkboxes change; all other task text and old failed records stay.
+
+The parent spec now declares the currently open prerequisites using the existing
+`Blocked-by` relationship: [Issue #5082](https://github.com/akiojin/gwt/issues/5082),
+[Issue #5447](https://github.com/akiojin/gwt/issues/5447),
+[Issue #5542](https://github.com/akiojin/gwt/issues/5542),
+[Issue #5561](https://github.com/akiojin/gwt/issues/5561),
+[Issue #6301](https://github.com/akiojin/gwt/issues/6301) and
+[Issue #6877](https://github.com/akiojin/gwt/issues/6877).
+Each owner's saved dependency section had no outgoing edge at this read.
+Implementation and measurement remain with those owners. This records their
+ordering requirement; it does not identify which old task caused a launch.
+
+Parent AC-1/2/3, LF6, EO/RPC composite tasks and the Mac, installed-runtime,
+real-fleet and whole-GUI CPU/RSS criteria remain unchecked. A closed child alone
+does not establish its unchecked measurements. No product/test source or
+current-runtime measurement is added by this reconciliation.

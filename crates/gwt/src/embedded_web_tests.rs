@@ -40,6 +40,24 @@ fn window_runtime_state_js() -> &'static str {
     root_js_module_source("/window-runtime-state.js")
 }
 
+#[test]
+fn embedded_web_status_strip_has_no_runtime_completion_indicator() {
+    for source in [
+        index_html(),
+        styles_components_css(),
+        root_js_module_source("/operator-shell.js"),
+    ] {
+        assert!(!source.contains("op-strip-mission"));
+        assert!(!source.contains("op-status-strip__cell--mission"));
+        assert!(!source.contains("op-status-strip__cell--complete"));
+    }
+    assert!(!app_js().contains("counts.done"));
+    assert!(!app_js().contains("counts?.done"));
+    assert!(index_html().contains("id=\"op-briefing\""));
+    assert!(index_html().contains("id=\"op-strip-branches\""));
+    assert!(static_asset_text("/styles/tokens.css").contains("--color-state-done"));
+}
+
 /// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
 /// app.js.
 fn project_index_search_surface_js() -> &'static str {
@@ -601,7 +619,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         )
         .expect("valid regex");
     let streaming_write = regex::Regex::new(
-            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.terminal\.write\(text,\s*onWritten\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.outputWrites\+\+;\s*try\s*\{\s*runtime\.terminal\.write\(text,\s*\(\)\s*=>\s*\{\s*runtime\.outputWrites--;\s*onWritten\(\);\s*\}\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
         )
         .expect("valid regex");
     // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
@@ -1651,7 +1669,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*let replayedReleaseNotesId = null;\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*\}"#,
     )
     .expect("valid regex");
 

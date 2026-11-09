@@ -170,6 +170,28 @@ test("unreadable and unsupported traces use actual worker proof with a diagnosti
   assert.match(unreadable.diagnostics.join("\n"), /trace unavailable.*SyntaxError/);
 });
 
+test("unrelated Node helpers do not resolve Playwright or write worker proof", () => {
+  const moduleRoot = path.join(os.tmpdir(), "gwt-node-modules", "playwright");
+  const workerEntry = path.join(moduleRoot, "lib", "common", "process.js");
+  const runtime = fs.readFileSync(path.join(__dirname, "headed_e2e_runtime.cjs"), "utf8");
+  for (const [entry, root] of [
+    [undefined, moduleRoot],
+    [path.join(`${moduleRoot}-helper`, "writer.js"), moduleRoot],
+    [workerEntry, undefined],
+  ]) {
+    const calls = [];
+    const load = name => name === "node:fs" ? { appendFileSync: () => calls.push("worker proof") } : require(name);
+    load.resolve = name => { calls.push(name); throw new Error("unrelated helper"); };
+    vm.runInNewContext(runtime, {
+      require: load, process: { argv: entry ? ["node", entry] : ["node"], cwd: () => os.tmpdir(), env: {
+        TEST_WORKER_INDEX: "3", GWT_HEADED_E2E_REPORT: "unused-report.json",
+        GWT_HEADED_E2E_MODULE_ROOT: root,
+      } },
+    });
+    assert.deepEqual(calls, [], `unexpected worker initialization for ${entry || "inline Node"}`);
+  }
+});
+
 test("worker measurement binds successful real pages to test, retry, and worker", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-headed-worker-"));
   try {
@@ -182,8 +204,8 @@ test("worker measurement binds successful real pages to test, retry, and worker"
       : name === "playwright/test" ? { test: { info: () => info } } : require(name);
     load.resolve = name => name;
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, "headed_e2e_runtime.cjs"), "utf8"), {
-      require: load, process: { argv: [], cwd: () => temporary, env: {
-        TEST_WORKER_INDEX: "3", GWT_HEADED_E2E_REPORT: reportPath,
+      require: load, process: { argv: ["node", path.join(temporary, "lib", "common", "process.js")], cwd: () => temporary, env: {
+        TEST_WORKER_INDEX: "3", GWT_HEADED_E2E_REPORT: reportPath, GWT_HEADED_E2E_MODULE_ROOT: temporary,
       } },
     });
     const launched = await chromium.launch();
