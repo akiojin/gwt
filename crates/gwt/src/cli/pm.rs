@@ -1120,6 +1120,12 @@ fn request_tasks(
     Ok(code)
 }
 
+fn native_request_source_id(provider: &str, conversation: &str, message: &str) -> String {
+    let identity = serde_json::to_vec(&(provider, conversation, message))
+        .expect("native identity is a serializable string tuple");
+    format!("native:{}", gwt_core::pm_authorization::digest(&identity))
+}
+
 /// Native selection never consumes a hook observation or accepts authored text.
 fn native_request_tasks(
     actor: &str,
@@ -1178,6 +1184,7 @@ fn native_request_tasks(
                 value["turns"] = json!(turns
                     .iter()
                     .map(|message| json!({"id":message.id,
+                    "source_id":native_request_source_id(provider, conversation_id, &message.id),
                     "prompt_sha256":gwt_core::pm_authorization::digest(message.text.as_bytes())}))
                     .collect::<Vec<_>>());
                 return Ok(value);
@@ -1223,15 +1230,8 @@ fn native_request_tasks(
         // Native provenance is tracking data, never instruction authority.
         let native_session = serde_json::to_string(&(provider, conversation_id))
             .map_err(|error| TaskError::Invalid(error.to_string()))?;
-        let source_id = format!(
-            "native:{}",
-            gwt_core::pm_authorization::digest(
-                &serde_json::to_vec(&(provider, conversation_id, &message.id))
-                    .map_err(|error| TaskError::Invalid(error.to_string()))?
-            )
-        );
         let source = IntakeSource {
-            id: source_id,
+            id: native_request_source_id(provider, conversation_id, &message.id),
             project_key: record
                 .project_dir
                 .file_name()
@@ -1259,8 +1259,9 @@ fn native_request_tasks(
         )?;
         value["receipt"] = json!(receipt);
     } else {
-        value["turn"] =
-            json!({"id":message.id,"original":message.text,"prompt_sha256":prompt_sha256});
+        value["turn"] = json!({"id":message.id,"original":message.text,
+            "source_id":native_request_source_id(provider, conversation_id, &message.id),
+            "prompt_sha256":prompt_sha256});
     }
     Ok(value)
 }
@@ -1649,11 +1650,23 @@ mod tests {
             assert_eq!(inventory.0, 0, "{}", inventory.1);
             assert_eq!(inventory.1["window_only"], true);
             assert_eq!(inventory.1["turns"].as_array().unwrap().len(), 1);
+            let source_id = match agent {
+                gwt_agent::AgentId::ClaudeCode => {
+                    "native:f5dd6da48b7819357b1a658eed4454de0bc5d0650dd5ca914281de8e26b71a9a"
+                }
+                _ => "native:63ede7afca5f6ef9c1da6f9aee0ccd6aafe23536e2e9836236d0cc780ccae9d2",
+            };
+            assert_eq!(inventory.1["turns"][0]["source_id"], source_id);
             let selector = json!({"kind":"native_turn","provider":agent.command(),
                 "conversation_id":"native-conversation","id":"native-1"});
             let detail = read(selector.clone());
             assert_eq!(detail.0, 0, "{}", detail.1);
             assert_eq!(detail.1["turn"]["original"], original);
+            assert_eq!(detail.1["turn"]["source_id"], source_id);
+            let source_selector = json!({"kind":"source","id":source_id});
+            let missing = read(source_selector.clone());
+            assert_eq!(missing.1["error"]["code"], "missing_source");
+            assert_eq!(missing.1["current_revision"], 0);
             let request = json!({"operation_id":"capture-1","expected_revision":0,"reason":"Unclassified native request",
                 "provider":agent.command(),"conversation_id":"native-conversation","id":"native-1",
                 "prompt_sha256":detail.1["turn"]["prompt_sha256"]});
@@ -1673,6 +1686,8 @@ mod tests {
             let first = capture(request.clone());
             assert_eq!(first.0, 0, "{}", first.1);
             let source = first.1["receipt"]["source_id"].as_str().unwrap().to_owned();
+            assert_eq!(source, source_id);
+            assert_eq!(read(source_selector.clone()).1["pending"], true);
             let saved = fs::read(&state_path).unwrap();
             assert_eq!(capture(request.clone()), first);
             assert_eq!(fs::read(&state_path).unwrap(), saved);
@@ -1684,6 +1699,11 @@ mod tests {
             assert_eq!(fs::read(&state_path).unwrap(), saved);
             rows.push(row("native-2"));
             write(&rows);
+            let inventory = read(json!({"kind":"native_turns"}));
+            assert_ne!(
+                inventory.1["turns"][0]["source_id"],
+                inventory.1["turns"][1]["source_id"]
+            );
             assert_eq!(capture(second).0, 0);
             let classified = invoke(
                 &repo,
@@ -1694,6 +1714,8 @@ mod tests {
             assert_eq!(classified.0, 0, "{}", classified.1);
             register("pm-b");
             let _resumed = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+            assert_eq!(read(selector.clone()).1["turn"]["source_id"], source_id);
+            assert_eq!(read(source_selector).1["pending"], false);
             assert_eq!(capture(request.clone()), first);
             let mut again = request.clone();
             again["operation_id"] = json!("capture-again");
@@ -1708,6 +1730,20 @@ mod tests {
             assert!(state.tasks.is_empty());
             assert_eq!(state.sources[&source].original, original);
             let saved = fs::read(&state_path).unwrap();
+            fs::write(&state_path, "broken task store").unwrap();
+            let inventory = read(json!({"kind":"native_turns"}));
+            assert_eq!(inventory.0, 0, "{}", inventory.1);
+            assert_eq!(inventory.1["turns"][0]["source_id"], source_id);
+            assert_eq!(read(selector.clone()).1["turn"]["source_id"], source_id);
+            assert_eq!(
+                fs::read_to_string(&state_path).unwrap(),
+                "broken task store"
+            );
+            assert_eq!(
+                read(json!({"kind":"source","id":source_id})).1["error"]["code"],
+                "unreadable_store"
+            );
+            fs::write(&state_path, &saved).unwrap();
             for caller in ["pm-a", "foreign-agent"] {
                 let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, caller);
                 assert_eq!(read(selector.clone()).0, 1);

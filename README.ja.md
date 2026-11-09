@@ -1099,11 +1099,18 @@ actor になるため、旧 operation の再実行は競合になります。現
 
 選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
 `selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
-対象 turn の ID・`prompt_sha256` を原文なしで返します。`window_only:true` と `detail`
+対象 turn の ID・`prompt_sha256`・サーバー計算の `source_id` を原文なしで返します。
+`window_only:true` と `detail`
 が示すのは件数・容量を制限した会話の範囲であり、履歴全件や永続 cursor ではありません。
 `selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
-で原文を 1 件取得します。両 native selector は Task 追跡の読取不能とは独立して
-利用できます。選択した turn を未分類の pending source として保存するには、
+で原文と同じ `source_id` を 1 件取得します。
+両 native selector は Task 追跡の読取不能とは独立して
+利用できます。まず `selector:{kind:"source",id:"<source_id>"}` で既保存の source と
+pending 状態を読み、native identity と本文 hash を照合してから、再受付せず分類や
+既存 Task を確認します。ID 自体は保存済みの証明でも権限でもありません。
+`missing_source` だけが返却 revision 時点での未保存を示します。読取不能・別 project・
+権限拒否は未受付とみなさず degraded として保持します。
+未保存の turn を未分類の pending source として保存するには、
 `pm.request_tasks.capture` に `operation_id`・現在の `expected_revision`・`reason` と、
 `provider`・`conversation_id`・`id`・`prompt_sha256` を指定します。原文・source・actor は
 サーバーが確定し、caller による原文・source・actor・authority の指定は拒否します。
