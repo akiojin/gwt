@@ -32,9 +32,10 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — hover over USAGE for account limits, including Claude's
-  Fable weekly limit and enabled Usage credits with utilization, used/limit,
-  and currency. Enable Claude account usage in Settings → Usage & Limits.
+- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
+  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
+  account limits, reset times, and enabled Usage credits with utilization,
+  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
 
 ## Install
 
