@@ -739,8 +739,13 @@ machine 上限を Auto に戻すには **Agent limit** の隣の **Auto** ボタ
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
-**Settings → Issues execution settings** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
-大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
+**Settings → Issues execution settings** の **Allowed labels** では、GitHub のラベル名と色を見ながら
+チェックボックスで複数選択できます。保存済みリストのいずれかに一致する Issue が対象になります。
+ラベル一覧はキャッシュされ、**Refresh labels** で再取得できます。取得に失敗するとエラーを表示し、
+保存済みの選択は保持します。GitHub 側で削除・改名された選択済みラベルには **Unavailable on GitHub**
+と表示され、チェックを外せます。Kanban カードは色付きラベルを最大3件と、残りの件数を `+N` で表示します。
+チップや件数にカーソルを合わせると、ラベルの正式名を確認できます。
+照合では大文字・小文字と前後の空白を区別しません。空のリストは全ラベルを許可し、従来の対象条件を
 維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
 自動化からは
 `issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。

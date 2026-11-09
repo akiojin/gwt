@@ -1,7 +1,7 @@
 import { isContainedPlacement } from "./agent-kanban-surface.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
-import { renderUiContent } from "./ui-content.js";
+import { renderUiContent, createRepositoryLabelChip } from "./ui-content.js";
 import { monitorDiagnostic } from "./agent-completion-notifications.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
@@ -793,6 +793,7 @@ export function renderIssueWindowHeader(doc, model, onAction = () => {}) {
 
 export function createKnowledgeKanbanSurface({
   send,
+  currentProjectRoot = () => undefined,
   // Semantic search must never use the reconnect queue. This dependency
   // performs one atomic OPEN check + socket.send and reports whether the
   // frame was written; a false result is owned by the retry lifecycle.
@@ -1057,6 +1058,36 @@ export function createKnowledgeKanbanSurface({
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
       // is re-broadcast constantly; only a new diagnosis or failed scan counts) and
       // remember which of the two sources changed last for the summary line.
+      const repositoryLabelsModel = createUiStateStore({}, { scheduleFrame });
+      let repositoryLabelCatalogs = new Map();
+      let repositoryLabelsVersion = 0;
+      function applyRepositoryLabels(event) {
+        if (!event.loaded) return;
+        repositoryLabelsModel.update(state => {
+          const key = event.project_root;
+          if (JSON.stringify(state[key]) === JSON.stringify(event.labels)) return state;
+          return { ...state, [key]: event.labels || [] };
+        });
+      }
+      repositoryLabelsModel.subscribeFrame(state => state, catalogs => {
+        repositoryLabelCatalogs = new Map(Object.entries(catalogs).map(([root, labels]) =>
+          [root, new Map(labels.map(label => [label.name, label.color]))]));
+        repositoryLabelsVersion++;
+        renderAllKnowledgeBridgeWindows();
+      });
+      function renderIssueLabels(entry) {
+        const labels = createNode("div", "issue-card-labels");
+        const names = entry.labels || [];
+        for (const name of names.slice(0, 3)) {
+          labels.appendChild(createRepositoryLabelChip(document, name, repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)));
+        }
+        if (names.length > 3) {
+          const overflow = createNode("span", "issue-card-label-overflow", `+${names.length - 3}`);
+          overflow.title = names.slice(3).join(", ");
+          labels.appendChild(overflow);
+        }
+        return labels;
+      }
       let ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
       let reportedIssueMonitorError = "";
       let issueMonitorErrorSequence = 0;
@@ -3487,7 +3518,7 @@ export function createKnowledgeKanbanSurface({
             version: entry => {
               const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
               const faces = issueRowFaces(windowId, entry, work);
-              return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
+              return JSON.stringify([repositoryLabelsVersion, { ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
                 agentActivityModel?.read().byIssue[entry.number],
@@ -3796,6 +3827,8 @@ export function createKnowledgeKanbanSurface({
           createNode("div", "kanban-card-title", entry.title),
         );
 
+        const labelChips = renderIssueLabels(entry);
+        if (labelChips.childElementCount) card.appendChild(labelChips);
         const meta = createNode("div", "kanban-card-meta");
         if (isPlain) {
           meta.appendChild(
@@ -5038,10 +5071,7 @@ export function createKnowledgeKanbanSurface({
         const titleWrap = createNode("div", "");
         titleWrap.appendChild(createNode("div", "knowledge-row-number", `#${entry.number}`));
         titleWrap.appendChild(createNode("div", "knowledge-row-title", entry.title || `Issue #${entry.number}`));
-        const labels = createNode("div", "issue-card-labels");
-        for (const label of entry.labels || []) {
-          labels.appendChild(createNode("span", "issue-card-label", label === "gwt-spec" ? "spec" : label));
-        }
+        const labels = renderIssueLabels(entry);
         if (Number.isFinite(entry.queue_position) && entry.queued_by) {
           const source = createNode("span", "issue-card-provenance",
             entry.queued_by === "operator" ? "You" : entry.queued_by === "auto-refill" ? "Auto" : entry.queued_by);
@@ -5292,7 +5322,7 @@ export function createKnowledgeKanbanSurface({
           const body = column.querySelector("[data-role='body']");
           if (body) reconcileKnowledgeList(body, items, {
             scrollRoot: body, virtualize: visibleEntries.length > 200,
-            version: entry => JSON.stringify([entry, state.pendingPhaseUpdates?.has(entry.number)]),
+            version: entry => JSON.stringify([repositoryLabelsVersion, entry, state.pendingPhaseUpdates?.has(entry.number)]),
             update: (card, entry) => {
               card.classList.toggle("is-selected", state.selectedNumber === entry.number);
               if (state.selectedNumber === entry.number) {
@@ -5334,6 +5364,7 @@ export function createKnowledgeKanbanSurface({
       function mountKnowledgeWindow(windowData, body) {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           if (knowledgeKind !== "issue" && knowledgeKind !== "spec") return;
+          send({ kind: "get_repository_labels", refresh: false });
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
           // Backlog / Draft / Planning / Implementation / Review / Done.
           // The columns are hard-coded so the source carries every
@@ -6114,6 +6145,7 @@ export function createKnowledgeKanbanSurface({
         applyKnowledgeReceiveEvent,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
+        applyRepositoryLabels,
         applyIssueMonitorInbox,
         applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,

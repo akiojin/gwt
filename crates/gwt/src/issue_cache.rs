@@ -35,6 +35,101 @@ const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
 const ISSUE_CACHE_REFRESH_LIMIT: &str = "1000";
 pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// Repository-wide label metadata shared by Settings and Kanban cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryLabel {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Default)]
+pub struct RepositoryLabelsSnapshot {
+    pub labels: Vec<RepositoryLabel>,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+// Recheck the file after entering the worker lane so concurrent first opens
+// share the persisted catalog instead of duplicating the remote read.
+static REPOSITORY_LABELS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn load_repository_labels(repo_path: &Path, refresh: bool) -> RepositoryLabelsSnapshot {
+    let Some(cache_root) = issue_cache_root_for_repo_path(repo_path) else {
+        return RepositoryLabelsSnapshot {
+            error: Some("Repository labels require a GitHub repository.".into()),
+            ..Default::default()
+        };
+    };
+    load_repository_labels_with(&cache_root, refresh, |path| {
+        run_gh_issue_command(
+            repo_path,
+            &["api", path, "--include"],
+            "gh api repository labels",
+        )
+    })
+}
+
+fn valid_repository_labels(labels: &[RepositoryLabel]) -> bool {
+    labels.iter().all(|label| {
+        !label.name.trim().is_empty()
+            && label.color.len() == 6
+            && label.color.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn load_repository_labels_with(
+    cache_root: &Path,
+    refresh: bool,
+    fetch: impl FnMut(&str) -> Result<String, String>,
+) -> RepositoryLabelsSnapshot {
+    let _guard = REPOSITORY_LABELS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = cache_root.join("repository-labels.json");
+    let cached = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<RepositoryLabel>>(&bytes).ok())
+        .filter(|labels| valid_repository_labels(labels));
+    if !refresh {
+        if let Some(labels) = cached.as_ref() {
+            return RepositoryLabelsSnapshot {
+                labels: labels.clone(),
+                loaded: true,
+                error: None,
+            };
+        }
+    }
+    let result = (|| {
+        let pages =
+            gwt_git::gh_rest::read_complete_pages_with("repos/{owner}/{repo}/labels", fetch)?;
+        let mut labels: Vec<RepositoryLabel> = serde_json::from_value(Value::Array(pages.rows))
+            .map_err(|error| format!("Invalid repository labels: {error}"))?;
+        if !valid_repository_labels(&labels) {
+            return Err("Invalid repository label name or color.".into());
+        }
+        labels.sort_by_cached_key(|label| label.name.to_lowercase());
+        fs::create_dir_all(cache_root).map_err(|error| error.to_string())?;
+        write_atomic(
+            &path,
+            &serde_json::to_vec(&labels).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("Cannot cache repository labels: {error}"))?;
+        Ok(labels)
+    })();
+    match result {
+        Ok(labels) => RepositoryLabelsSnapshot {
+            labels,
+            loaded: true,
+            error: None,
+        },
+        Err(error) => RepositoryLabelsSnapshot {
+            loaded: cached.is_some(),
+            labels: cached.unwrap_or_default(),
+            error: Some(error),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IssueCacheRefreshMeta {
     last_full_refresh: String,
@@ -1007,6 +1102,50 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn repository_labels_cache_reuses_complete_catalog_and_preserves_failed_refresh() {
+        let temp = tempdir().unwrap();
+        let mut calls = Vec::new();
+        let first = load_repository_labels_with(temp.path(), false, |path| {
+            calls.push(path.to_string());
+            Ok(if calls.len() == 1 {
+                "HTTP/2 200 OK\nLink: <https://api.github.com/repos/o/r/labels?page=2>; rel=\"next\"\n\n[{\"name\":\"bug\",\"color\":\"d73a4a\"}]".into()
+            } else {
+                "HTTP/2 200 OK\n\n[{\"name\":\"backend\",\"color\":\"123abc\"}]".into()
+            })
+        });
+        assert_eq!(calls.len(), 2, "all label pages must be collected");
+        assert!(first.loaded && first.error.is_none());
+        assert_eq!(first.labels.len(), 2);
+        let cached = load_repository_labels_with(temp.path(), false, |_| {
+            panic!("opening settings again must not refetch a cached catalog")
+        });
+        assert_eq!(cached.labels, first.labels);
+        let failed = load_repository_labels_with(temp.path(), true, |_| Err("offline".into()));
+        assert!(failed.loaded);
+        assert_eq!(failed.error.as_deref(), Some("offline"));
+        assert_eq!(failed.labels, first.labels);
+        let retained = load_repository_labels_with(temp.path(), false, |_| {
+            panic!("failed refresh must leave the persisted catalog intact")
+        });
+        assert_eq!(retained.labels, first.labels);
+    }
+
+    #[test]
+    fn repository_labels_distinguishes_empty_catalog_from_initial_failure() {
+        let temp = tempdir().unwrap();
+        let failed = load_repository_labels_with(temp.path(), false, |_| Err("offline".into()));
+        assert!(!failed.loaded);
+        assert!(failed.labels.is_empty());
+        let empty =
+            load_repository_labels_with(temp.path(), false, |_| Ok("HTTP/2 200 OK\n\n[]".into()));
+        assert!(empty.loaded && empty.labels.is_empty() && empty.error.is_none());
+        let cached = load_repository_labels_with(temp.path(), false, |_| {
+            panic!("a successfully loaded empty catalog is cached")
+        });
+        assert!(cached.loaded && cached.error.is_none());
+    }
 
     fn clear_gh_sandbox_markers() -> Vec<gwt_core::test_support::ScopedEnvVar> {
         [

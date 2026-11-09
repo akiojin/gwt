@@ -10,6 +10,88 @@ import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { withNativeHiddenPage } from "./_helpers/native-chromium";
 
+test("Issue #6211: repository label choices preserve selections and bound colored cards", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => {
+    if (message.type() === "error" || message.text().includes("[ws-dispatcher] receive threw")) errors.push(message.text());
+  });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await installIssueBridgeBackend(page, { theme, repositoryLabels: true });
+  await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const surface = page.locator(".surface-knowledge");
+  const row = surface.locator('.knowledge-row[data-issue-number="3096"]');
+  const chips = row.locator(".issue-card-label");
+  await expect(chips).toHaveCount(3);
+  await expect(chips.first()).toHaveText("bug");
+  await expect(chips.first()).toHaveCSS("border-color", "rgb(215, 58, 74)");
+  await expect(row.locator(".issue-card-label-overflow")).toHaveText("+2");
+  await expect(chips.nth(1)).toHaveAttribute("title", "a very long repository label that must not widen a card");
+  expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  const issues = settings.locator('[data-settings-panel="issues"]');
+  const choices = issues.getByRole("group", { name: "Allowed labels", exact: true });
+  await expect(choices).toBeVisible();
+  await expect(choices.locator('input[type="text"]')).toHaveCount(0);
+  await expect(choices.getByRole("checkbox", { name: "removed", exact: true })).toBeChecked();
+  await expect(choices).toContainText("Unavailable on GitHub");
+  const bug = choices.getByRole("checkbox", { name: "bug", exact: true });
+  const enhancement = choices.getByRole("checkbox", { name: "enhancement", exact: true });
+  await page.evaluate(() => { window.__holdRepositoryLabelWrites = true; });
+  await bug.click();
+  await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+    .filter(message => message.kind === "set_issue_monitor_allowed_labels").at(-1)?.allowed_labels))
+    .toEqual(["removed", "bug"]);
+  await expect(bug).toBeDisabled();
+  await expect(bug).not.toBeChecked();
+  // A stale status is not this write's acknowledgement. Drain two rendering
+  // frames after fixture dispatch, without wall-clock sleeps, before asserting.
+  await page.evaluate(async () => {
+    window.__replyRepositoryLabelSave("stale");
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  await expect(bug).toBeDisabled();
+  await expect(enhancement).toBeDisabled();
+  await page.evaluate(() => window.__replyRepositoryLabelSave("ack"));
+  await expect(bug).toBeEnabled();
+  await expect(bug).toBeChecked();
+  await expect(bug).toBeFocused();
+
+  await enhancement.click();
+  await expect(enhancement).toBeDisabled();
+  await page.evaluate(() => window.__replyRepositoryLabelSave("reject"));
+  await expect(enhancement).toBeEnabled();
+  await expect(enhancement).not.toBeChecked();
+  await expect(bug).toBeChecked();
+  await expect(enhancement).toBeFocused();
+  await page.evaluate(() => { window.__holdRepositoryLabelWrites = false; });
+  await enhancement.click();
+  await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+    .filter(message => message.kind === "set_issue_monitor_allowed_labels").at(-1)?.allowed_labels))
+    .toEqual(["removed", "bug", "enhancement"]);
+  await expect(enhancement).toBeEnabled();
+  await expect(enhancement).toBeChecked();
+  const refresh = issues.getByRole("button", { name: "Refresh repository labels", exact: true });
+  await choices.getByRole("checkbox", { name: "removed", exact: true }).click();
+  await expect(choices.getByRole("checkbox", { name: "removed", exact: true })).toHaveCount(0);
+  await expect(refresh).toBeFocused();
+  await refresh.click();
+  await expect(issues.getByRole("alert")).toHaveText("Label refresh unavailable");
+  await expect(refresh).toBeFocused();
+  await expect(bug).toBeChecked();
+  await expect(enhancement).toBeChecked();
+  expect(await page.evaluate(() => window.__knowledgeLoadMessages
+    .filter(message => message.kind === "get_repository_labels" && message.refresh === true))).toHaveLength(1);
+  await page.mouse.move(5, 5);
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await page.screenshot({ path: info.outputPath(`repository-labels-${theme}.png`) });
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async ({ page }, info) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -1786,14 +1868,18 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
     test(`${surface.label}: click preview settles under the p95 budget while every detail reply lags`, async ({
       page,
     }, testInfo) => {
-      await installEmbeddedRoutes(page);
+      const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+      if (!base) await installEmbeddedRoutes(page);
       await installKnowledgeSelectionBackend(page, {
         ...surface,
         theme: testInfo.project.name.includes("light") ? "light" : "dark",
       });
 
-      await page.goto(APP_URL);
+      await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
       await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      const firstRow = page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`);
+      await expect(firstRow.locator(".issue-card-label")).toHaveCount(3);
+      await expect(firstRow.locator(".issue-card-label-overflow")).toHaveText("+2");
       // Reach the 500-entry virtual list through the same visible action as an
       // operator before measuring selection, just as rowFor scrolls beforehand.
       await page.locator('.surface-knowledge [data-action="show-backlog"]').click();
@@ -2229,7 +2315,7 @@ async function installKnowledgeSelectionBackend(
           title: `Cached work item ${number}`,
           state: "open",
           meta: `Fixture row ${index + 1}`,
-          labels: index % 2 === 0 ? ["bug"] : ["gwt-spec"],
+          labels: [index % 2 === 0 ? "bug" : "gwt-spec", "long repository label for card width", "enhancement", "documentation", "help wanted"],
           linked_branch_count: index % 3,
           match_score: 100 - (index % 40),
           phase: null,
@@ -2428,6 +2514,12 @@ async function installKnowledgeSelectionBackend(
               fixture.workspaceSent = true;
               this.emit(workspaceState);
             }
+            return;
+          }
+          if (message.kind === "get_repository_labels") {
+            this.emit({ kind: "repository_labels", project_root: "/fixture", loaded: true, error: null,
+              labels: [{ name: "bug", color: "d73a4a" }, { name: "gwt-spec", color: "0075ca" },
+                { name: "long repository label for card width", color: "008672" }, { name: "enhancement", color: "a2eeef" }] });
             return;
           }
           if (message.kind === "load_knowledge_bridge") {
@@ -2776,6 +2868,7 @@ async function installIssueBridgeBackend(
     // fleet that has been running nothing. Opt-in so the existing row-count
     // assertions keep describing the fixture they were written for.
     blackedOutFleet = false,
+    repositoryLabels = false,
   } = {},
 ) {
   await page.addInitScript(
@@ -2789,6 +2882,7 @@ async function installIssueBridgeBackend(
       theme: selectedTheme,
       triggerAutoRefreshOnce: shouldTriggerAutoRefreshOnce,
       blackedOutFleet: shouldBlackOutFleet,
+      repositoryLabels: shouldUseRepositoryLabels,
     }) => {
       window.__knowledgeLoadMessages = [];
       window.__issueCacheRevision = "revision-1";
@@ -2932,6 +3026,15 @@ async function installIssueBridgeBackend(
         });
       }
 
+      const repositoryLabels = [
+        { name: "bug", color: "d73a4a" },
+        { name: "a very long repository label that must not widen a card", color: "0075ca" },
+        { name: "enhancement", color: "a2eeef" },
+        { name: "documentation", color: "0075ca" },
+        { name: "help wanted", color: "008672" },
+      ];
+      let allowedLabels = shouldUseRepositoryLabels ? ["removed"] : [];
+      if (shouldUseRepositoryLabels) entries.find(entry => entry.number === 3096).labels = repositoryLabels.map(label => label.name);
       const workspaceState = {
         kind: "workspace_state",
         workspace: {
@@ -3035,6 +3138,25 @@ async function installIssueBridgeBackend(
             this.emit(workspaceState);
             return;
           }
+          if (message.kind === "get_repository_labels" && shouldUseRepositoryLabels) {
+            this.emit({ kind: "repository_labels", project_root: "/fixture", labels: repositoryLabels,
+              loaded: true, error: message.refresh ? "Label refresh unavailable" : null });
+            return;
+          }
+          if (message.kind === "set_issue_monitor_allowed_labels" && shouldUseRepositoryLabels) {
+            const pending = message;
+            window.__replyRepositoryLabelSave = outcome => {
+              if (outcome === "reject") {
+                this.emit({ kind: "issue_monitor_allowed_labels_write_failed", request_id: pending.request_id,
+                  outcome_unknown: false });
+                return;
+              }
+              if (outcome === "ack") allowedLabels = pending.allowed_labels;
+              this.send(JSON.stringify({ kind: "list_issue_monitor" }));
+            };
+            if (!window.__holdRepositoryLabelWrites) window.__replyRepositoryLabelSave("ack");
+            return;
+          }
           if (message.kind === "list_issue_monitor") {
             this.emit({
               kind: "issue_monitor_status",
@@ -3049,6 +3171,7 @@ async function installIssueBridgeBackend(
                     autonomous_mode: false,
                     launch_profile_source: "saved",
                     launch_profile_summary: "codex / host",
+                    allowed_labels: allowedLabels,
                     last_error:
                       "issue #3098: an execution generation already exists",
                     agent_blackout:
@@ -3064,6 +3187,7 @@ async function installIssueBridgeBackend(
                     autonomous_mode: false,
                     launch_profile_source: "saved",
                     launch_profile_summary: "codex / host",
+                    allowed_labels: allowedLabels,
                   },
             });
             return;
@@ -3184,6 +3308,7 @@ async function installIssueBridgeBackend(
       theme,
       triggerAutoRefreshOnce,
       blackedOutFleet,
+      repositoryLabels,
     },
   );
 }

@@ -794,8 +794,14 @@ and the shared `agent_capacity` measurement. Roster projects also report
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
-**Allowed labels** in Settings → Issues execution settings accepts a comma-separated list; an Issue needs any label in the saved list. Matching
-ignores case and surrounding whitespace. An empty list allows all labels and
+**Allowed labels** in Settings → Issues execution settings offers checkboxes for the
+repository's GitHub labels, with their colors. Select one or more; an Issue needs
+any label in the saved list. The label catalog is cached; **Refresh labels** fetches
+the current list. A failed refresh displays an error and keeps the saved selection.
+A selected label deleted or renamed on GitHub is marked **Unavailable on GitHub**
+and can be unchecked. Kanban cards show up to three colored label chips and a
+`+N` count for additional labels; hover over a chip or count to read the full names.
+Matching ignores case and surrounding whitespace. An empty list allows all labels and
 preserves the existing admission rules. Changes apply on the next scan without
 cancelling running agents. Automation can set the same list with `issue.monitor.config.set`
 and `{"allowed_labels":["agent:mac"]}`; `issue.monitor.status` reports

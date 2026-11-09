@@ -1689,12 +1689,17 @@ test("virtualized 500-row selection keeps mounted row identity and updates the r
       number: index + 1,
       title: `Issue ${index + 1}`,
       state: "open",
-      labels: index % 2 === 0 ? ["bug"] : ["gwt-spec"],
+      labels: index % 2 === 0 ? ["bug", "long label", "third", "fourth", "fifth"] : ["gwt-spec"],
       phase: "backlog",
     }));
     state.baseEntries = state.entries.slice();
     state.refreshEnabled = true;
+    surface.applyRepositoryLabels({ labels: [{ name: "bug", color: "d73a4a" }], loaded: true });
     surface.renderKnowledgeBridge("win-1");
+    const firstLabels = element.querySelector(".issue-card-labels");
+    assert.equal(firstLabels.querySelectorAll(".issue-card-label").length, 3);
+    assert.equal(firstLabels.querySelector(".issue-card-label-overflow").textContent, "+2");
+    assert.equal(firstLabels.querySelector(".issue-card-label").style.getPropertyValue("--github-label-color"), "#d73a4a");
 
     state.searching = true;
     surface.renderKnowledgeBridge("win-1");
