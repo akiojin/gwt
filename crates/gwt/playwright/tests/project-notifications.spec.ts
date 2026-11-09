@@ -40,12 +40,10 @@ test("live Project reports ephemeral capability and consumes Interrupted desktop
     await sendLiveGwtEvent(page, { kind: "frontend_ready" });
     const key = new URL(page.url()).pathname.split("/")[2];
     expect(key).toMatch(/^[a-f0-9]{16}$/);
-    // Preserve existing history, including independently updating capacity diagnostics.
-    // Desktop intents must not add another row.
+    // Desktop intents must not enter history; unrelated capacity diagnostics may
+    // arrive asynchronously while this test runs.
     await page.locator("#op-notifications-button").click();
     const history = page.locator("#notification-center .notification-center__item");
-    const historyTitles = history.locator(".notification-center__title");
-    const initialTitles = await historyTitles.allTextContents();
     const result = await page.evaluate((projectKey) => {
       const state = window as any;
       const emit = (id: string, key = projectKey, category = "needs_human") => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
@@ -76,8 +74,9 @@ test("live Project reports ephemeral capability and consumes Interrupted desktop
       interruptedBody: "An agent was interrupted after running for at least five minutes.",
       closed: true, focus: 1, requests: 0 });
     await expect.poll(() => sent.filter((event) => event.kind === "project_client_attention").at(-1)?.notification_permission).toBe("denied");
-    await expect(historyTitles).toHaveText(initialTitles);
-    await expect(page.locator(".toast-alerts__item").filter({ hasText: /Needs human|Agent interrupted/i })).toHaveCount(0);
+    const noticeText = /Needs human|Agent interrupted|A monitored issue needs human attention\.|An agent was interrupted after running for at least five minutes\./i;
+    await expect(history.filter({ hasText: noticeText })).toHaveCount(0);
+    await expect(page.locator(".toast-alerts__item").filter({ hasText: noticeText })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("live-project-notifications.png") });
     expect(errors).toEqual([]);
   });
