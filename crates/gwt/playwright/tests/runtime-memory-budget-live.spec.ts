@@ -3,6 +3,7 @@
  * inference, provider hooks and real implementation builds are not simulated.
  */
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -264,7 +265,11 @@ async function liveReceipts(sampler: ProcessSampler): Promise<Receipt[]> {
 
 async function assertOutput(surfaces: Surface[], timeout = 30_000): Promise<void> {
   for (const { page, id } of surfaces) {
-    await expect(page.locator(`.agent-tile[data-agent-id="${id}"]`)).toBeAttached();
+    const row = page.locator(`.work-row[data-window-id="${id}"]`);
+    await expect(row).toBeVisible();
+    const preview = row.locator(".terminal-text-preview");
+    await expect(preview).toHaveText(/\S/, { timeout });
+    expect((await preview.innerText()).trim().split("\n").length).toBeLessThanOrEqual(3);
     await expect.poll(() => page.evaluate(id => String((window as any).__gwtTerminalTestApi?.bufferText?.(id) || ""), id),
       { message: `PTY output from ${id}`, timeout }).toContain("GWT_MEMORY_TICK");
   }
@@ -280,6 +285,9 @@ async function wizardRequest(page: Page, detail: unknown, requireOpen = false): 
       const reply = (event: MessageEvent) => {
         let payload;
         try { payload = JSON.parse(String(event.data)); } catch { return; }
+        if (payload.kind === "launch_wizard_open_error") {
+          cleanup(); reject(new Error(payload.message || "wizard open refused")); return;
+        }
         if (payload.kind !== "launch_wizard_state" || (requireOpen && !payload.wizard) || (payload.wizard && (payload.wizard.is_hydrating
           || payload.wizard.runtime_resolution_pending || payload.wizard.launch_materialization_pending))) return;
         cleanup(); resolve(payload);
@@ -292,6 +300,24 @@ async function wizardRequest(page: Page, detail: unknown, requireOpen = false): 
 }
 
 async function launch(page: Page, branch: string): Promise<string> {
+  // A configured command tool also needs a registered fixed-tool member.
+  const rosterRequest = async (action: unknown, expectedRevision: number | null = null) => {
+    const requestId = randomUUID();
+    await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision, request_id: requestId });
+    const reply = await page.waitForFunction(requestId => {
+      const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.payload.request_id === requestId && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind));
+      return message?.payload || null;
+    }, requestId, { timeout: 30_000 }).then(handle => handle.jsonValue());
+    expect(reply.kind, reply.message ?? "workload roster reply").toBe("agent_roster");
+    expect(reply.roster.error, "workload member preparation").toBeFalsy();
+    return reply.roster;
+  };
+  let roster = await rosterRequest({ kind: "read" });
+  const available = () => roster.members.some((member: any) =>
+    member.agent_id === AGENT && member.enabled && !member.assignment);
+  if (!available()) roster = await rosterRequest({ kind: "add", agent_id: AGENT }, roster.revision);
+  expect(available(), "normally allocated command-tool member").toBe(true);
   const before: string[] = await page.evaluate(() => {
     const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
     return message?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows.map((pane: any) => pane.id)) || [];
@@ -317,6 +343,9 @@ async function launch(page: Page, branch: string): Promise<string> {
       .find((pane: any) => !before.includes(pane.id) && pane.agent_id === agent);
   }, { before, agent: AGENT }, { timeout: 90_000 }).then(handle => handle.jsonValue());
   expect(pane.status, "new Agent pane launch status").not.toBe("error");
-  await page.locator('.op-rail__surface[data-surface="agents"]').click();
+  await expect(page.locator("#wizard-modal")).toBeHidden();
+  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+    await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
   return pane.id;
 }

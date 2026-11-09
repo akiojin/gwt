@@ -2,11 +2,27 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { parseHTML } from "linkedom";
 import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
 import { createPmWindowModel } from "../pm-chat.js";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createAgentSwitchModel } from "../agent-activity-model.js";
+import { createReleaseNotesWindow } from "../release-notes-window.js";
+import { createRecoveryCenterController } from "../recovery-center-modal.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const boardSource = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
+  .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+const { createBoardLogsSurface } = await import(`data:text/javascript;base64,${Buffer.from(boardSource).toString("base64")}`);
+const profileSource = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8")
+  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(profileSource).toString("base64")}`);
+const indexSource = readFileSync(new URL("../project-index-search-surface.js", import.meta.url), "utf8")
+  .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+const { createProjectIndexSearchSurface } = await import(`data:text/javascript;base64,${Buffer.from(indexSource).toString("base64")}`);
+const knowledgeSource = readFileSync(new URL("../knowledge-kanban-surface.js", import.meta.url), "utf8")
+  .replace(/from "([/.][^"]+)"/g, (_, path) => `from "${new URL(path.replace(/^\//, ""), new URL("../", import.meta.url)).href}"`);
+const { createKnowledgeKanbanSurface } = await import(`data:text/javascript;base64,${Buffer.from(knowledgeSource).toString("base64")}`);
 function functionSource(name) {
   const start = source.indexOf(`      function ${name}(`);
   assert.notEqual(start, -1);
@@ -27,11 +43,16 @@ function fixture({ routeProjectKey = null } = {}) {
   const context = vm.createContext({
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0, socketInputHandoff: null,
+    startupAutoResumeReadySent: false, startupFrames: [], startupTimers: [],
+    requestAnimationFrame(callback) { context.startupFrames.push(callback); return context.startupFrames.length; },
+    cancelAnimationFrame() {},
+    setTimeout(callback) { context.startupTimers.push(callback); return context.startupTimers.length; },
     reconnectCallbacks: [], connectionStates: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, attentionReportCount: 0,
     agentCompletionNotifier: { reset() {} },
-    closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
+    closeProjectController: { connectionLost() { context.closeResetCount += 1; }, reconnect() {} },
+    projectViewReadiness: { connectionLost() {} }, projectExecutionPolicy: { connectionLost() {}, applyStatus() {} },
     projectPageMetadata: { resetConnection() {}, reportAttention() { context.attentionReportCount += 1; } },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
     activeWorkspace: () => ({ windows: [{ id: "pane-a" }] }),
@@ -41,7 +62,12 @@ function fixture({ routeProjectKey = null } = {}) {
     resyncKnowledge: (ids) => context.resyncCalls.push(["knowledge", ...ids]),
     resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
     resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
-    resyncSettings: () => context.resyncCalls.push(["settings"]),
+    resyncSettings: () => {
+      context.resyncCalls.push(["settings"]);
+      context.send({ kind: "get_system_settings" });
+      context.resyncHookDoctor();
+    },
+    hookDoctorResyncs: 0, resyncHookDoctor: () => { context.hookDoctorResyncs++; },
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
@@ -78,7 +104,14 @@ function fixture({ routeProjectKey = null } = {}) {
     received: [], receive(event) { context.received.push(event); },
     uiTraceWiring: { isTracing: () => false }, traceUi() {},
   });
-  for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult"]) {
+  let releaseRequestSequence = 0;
+  context.releaseNotesWindow = createReleaseNotesWindow({
+    document: parseHTML("<html><body></body></html>").document,
+    send: message => context.send(message),
+    generateId: () => `release-${++releaseRequestSequence}`,
+    scheduleFrame: callback => { callback(); return () => {}; },
+  });
+  for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult", "sendStartupAutoResumeReady"]) {
     vm.runInContext(functionSource(name), context);
   }
   for (const name of ["mergeProjectCatalog", "receiveHubState", "showProjectRouteNotFound"]) {
@@ -118,17 +151,17 @@ test("offline input is discarded while queued control messages retain project sc
   select("0123456789abcdef");
   context.send({ kind: "terminal_input", id: "pane-a", data: "a" });
   context.send({ kind: "pane_send_input", session_id: "pane-a", text: "a" });
-  context.send({ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } });
+  context.send({ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 });
   select("fedcba9876543210");
   context.send({ kind: "terminal_input", id: "pane-b", data: "b" });
-  context.send({ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } });
+  context.send({ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 });
   assert.equal(context.droppedInputs, 3, "every discarded input is surfaced immediately");
   assert.equal(sockets.length, 3);
   sockets[2].open();
-  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } }]);
+  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 }, { kind: "get_system_settings" }]);
   select("0123456789abcdef");
   sockets[3].open();
-  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } }]);
+  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 }, { kind: "get_system_settings" }]);
 });
 
 test("Hub socket refuses pane input before project scope is known", () => {
@@ -157,7 +190,7 @@ test("retained Hub processes catalog and navigation without duplicating global e
   assert.deepEqual(context.received.map((event) => event.kind), ["hub_state", "update_state"]);
   context.send({ kind: "reopen_recent_project", path: "/project-b" });
   assert.equal(sockets[0].sent.at(-1).path, "/project-b");
-  assert.equal(sockets[1].sent.length, 1);
+  assert.equal(sockets[1].sent.length, 2);
   select(projectB.project_key);
   assert.equal(sockets[0].readyState, 1);
   assert.equal(sockets[1].readyState, 3);
@@ -187,51 +220,339 @@ test("route-bound Project tab connects its scope from the URL before any catalog
   assert.equal(new URL(sockets[0].url).search, "");
   assert.equal(new URL(sockets[1].url).searchParams.get("repo_hash"), projectB.project_key);
   sockets[1].open();
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }], "full sync is requested on the scoped socket");
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "full sync is requested on the scoped socket");
   context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
   assert.equal(context.activeProjectTab().id, projectB.id, "the catalog entry for the route becomes active");
   assert.equal(sockets.length, 2, "catalog updates never rebind the scope");
 });
 
-test("route-bound Project tab reconnects to the same Project only", () => {
+test("route-bound Project tab reconnects to the same Project only", t => {
+  const { document } = parseHTML('<html><body><div data-id="index"><div id="index-body"></div></div></body></html>');
+  const previous = { document: globalThis.document, CSS: globalThis.CSS };
+  globalThis.document = document;
+  globalThis.CSS = { escape: value => value };
+  const selectPrototype = document.defaultView.HTMLSelectElement.prototype;
+  const previousValue = Object.getOwnPropertyDescriptor(selectPrototype, "value");
+  Object.defineProperty(selectPrototype, "value", { configurable: true,
+    get() { return this.getAttribute("value") || ""; }, set(value) { this.setAttribute("value", value); } });
+  t.after(() => { Object.assign(globalThis, previous); Object.defineProperty(selectPrototype, "value", previousValue); });
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.activeWorkspace = () => ({ windows: [{ id: "board" }, { id: "logs" }, { id: "profile" }, { id: "index" }] });
+  const surface = createBoardLogsSurface({
+    send: event => context.send(event), windowMap: new Map(),
+    activeWorkspace: context.activeWorkspace, activeProjectTab: () => null,
+    projectWindowContextById: () => null, getActiveWorkProjection: () => null,
+  });
+  context.resyncBoardLogs = ids => {
+    context.resyncCalls.push(["board-logs", ...ids]);
+    surface.resyncBoardLogs(ids);
+  };
+  const profile = createProfileWindowSurface({
+    send: event => context.send(event), windowMap: new Map([["profile", {}]]),
+  });
+  context.resyncProfile = ids => {
+    context.resyncCalls.push(["profile", ...ids]);
+    profile.resyncProfile(ids);
+  };
+  const frames = new Set();
+  const index = createProjectIndexSearchSurface({
+    send: event => context.send(event), activeProjectTab: () => ({ project_root: "/repo" }),
+    makeEl: (tag, options = {}) => {
+      const node = document.createElement(tag);
+      node.className = options.className || "";
+      if (options.text) node.textContent = options.text;
+      for (const [key, value] of Object.entries(options.attrs || {})) node.setAttribute(key, value);
+      Object.assign(node.dataset, options.dataset);
+      return node;
+    },
+    clearChildren: node => node.replaceChildren(), requestFullIndexStatusRefresh() {},
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
+  context.resyncProjectIndexSearch = ids => {
+    context.resyncCalls.push(["index", ...ids]);
+    index.resyncProjectIndexSearch(ids);
+  };
+  t.after(() => index.disposeIndexSearchWindow("index"));
   context.connectSocket();
   sockets[1].open();
+  index.mountProjectIndexSurface(document.getElementById("index-body"), { id: "index" });
+  const searchState = index.indexSearchStateMap.get("index");
+  searchState.matchMode = "all_terms";
+  searchState.selectedScopes = new Set(["memory"]);
+  const query = document.querySelector(".index-search-input");
+  query.value = "retained query";
+  query.dispatchEvent(new document.defaultView.Event("input"));
+  document.querySelector(".index-search-box").dispatchEvent(new document.defaultView.Event("submit"));
+  const oldSearch = sockets[1].sent.findLast(message => message.kind === "search_project_index");
+  assert.equal(oldSearch.match_mode, "all_terms");
+  assert.deepEqual(oldSearch.scopes, ["memory"]);
+  assert.equal(context.hookDoctorResyncs, 1, "ordinary project connect recovers Hook Doctor requests");
+  const board = surface.ensureBoardState("board");
+  board.composerBody = "Unsent draft";
+  board.pendingSubmit = { body: "Submitted draft", parentId: null, existingEntryIds: new Set() };
+  const logs = surface.ensureLogState("logs");
+  logs.scope = "global";
+  logs.query = "retained filter";
+  const foreign = surface.ensureBoardState("foreign-project");
+  foreign.loading = true;
+  surface.requestBoard("board");
+  surface.requestLogs("logs");
+  const draft = profile.ensureProfileState("profile");
+  draft.draft = { name: "Unsent Profile draft" };
+  draft.saveInFlight = true;
+  draft.saveTimer = 17;
+  profile.requestProfile("profile");
+  profile.requestProfile("foreign-profile");
+  context.releaseNotesWindow.openAbout("9.38.0");
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
-  context.connectSocket();
+  context.reconnectCallbacks.at(-1)();
   assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
+  assert.equal(context.hookDoctorResyncs, 2, "ordinary close/reopen recovers pending Hook Doctor reads");
+  const replacementSearches = sockets.at(-1).sent.filter(message => message.kind === "search_project_index");
+  assert.equal(replacementSearches.length, 1, "ordinary reconnect reissues the interrupted Index search exactly once");
+  const replacementSearch = replacementSearches[0];
+  assert.ok(replacementSearch.request_id > oldSearch.request_id);
+  assert.deepEqual({ ...replacementSearch, request_id: oldSearch.request_id }, oldSearch);
+  index.handleProjectIndexSearchResults({ id: "index", request_id: oldSearch.request_id, results: [{ title: "Stale" }] });
+  assert.equal(index.indexSearchStateMap.get("index").inFlightRequestId, replacementSearch.request_id);
+  index.handleProjectIndexSearchResults({ id: "index", request_id: replacementSearch.request_id, results: [{ title: "Recovered" }] });
+  for (const callback of [...frames]) { frames.delete(callback); callback(); }
+  assert.equal(document.querySelector(".index-search-input"), query);
+  assert.equal(query.value, "retained query");
+  assert.match(document.querySelector(".index-result-list").textContent, /Recovered/);
+  assert.equal(document.querySelector(".index-search-layout").getAttribute("aria-busy"), "false");
+  assert.deepEqual(sockets.at(-1).sent.filter(message => message.kind !== "search_project_index"), [
+    { kind: "frontend_ready" }, { kind: "get_system_settings" },
+    { kind: "load_board", id: "board", all: false },
+    { kind: "load_logs", id: "logs", scope: "global" },
+    { kind: "load_profile", id: "profile" },
+    { kind: "open_release_notes", id: "release-2", focus_version: "9.38.0" },
+  ], "ordinary reconnect recovers interrupted reads without replaying the pending post");
+  context.releaseNotesWindow.handlePayload({ id: "release-2", focus_version: "9.38.0",
+    entries: [{ version: "9.38.0", sections: [] }] });
+  assert.equal(context.releaseNotesWindow.isOpen(), true);
+  assert.equal(context.releaseNotesWindow._state.mode, "about");
+  assert.deepEqual(context.resyncCalls, [
+    ["settings"],
+    ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
+    ["settings"],
+    ["board-logs", "board", "logs", "profile", "index"], ["profile", "board", "logs", "profile", "index"], ["index", "board", "logs", "profile", "index"],
+  ],
+    "ordinary reconnect must recover Settings reads as well as window snapshots");
+  assert.equal(draft.draft.name, "Unsent Profile draft");
+  assert.equal(draft.saveInFlight, true);
+  assert.equal(draft.saveTimer, 17);
+  const count = sockets.at(-1).sent.length;
+  profile.requestProfile("profile");
+  profile.requestProfile("foreign-profile");
+  assert.equal(sockets.at(-1).sent.length, count, "pending own read is deduplicated and foreign read stays fenced");
+  profile.applyProfileReceiveEvent({ kind: "profile_snapshot", id: "profile", snapshot: {} });
+  profile.requestProfile("profile");
+  assert.equal(sockets.at(-1).sent.length, count + 1, "snapshot clears the lost Profile loading state");
+  assert.deepEqual(sockets.at(-1).sent.at(-1), { kind: "load_profile", id: "profile" });
+  assert.equal(board.resetToLatest, true);
+  assert.equal(board.composerBody, "Unsent draft");
+  assert.equal(board.pendingSubmit.body, "Submitted draft");
+  assert.equal(board.pendingSubmit.recovering, true);
+  assert.equal(logs.query, "retained filter");
+  assert.equal(foreign.loading, true, "another project's interrupted read stays fenced");
+  surface.applyBoardLogsReceiveEvent({ kind: "board_entries", id: "board", entries: [], has_more_before: false });
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs", entries: [], scope: "global" });
+  assert.equal(board.loading, false);
+  assert.equal(logs.loading, false);
   assert.equal(context.attentionReportCount, 2);
+});
+
+test("ordinary socket reconnect recovers only Knowledge reads sent before disconnect", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const windows = [{ id: "knowledge", preset: "issue" }, { id: "offline", preset: "issue" }, { id: "closing", preset: "issue" }];
+  context.activeWorkspace = () => ({ windows });
+  const knowledge = createKnowledgeKanbanSurface({
+    send: event => context.send(event), windowMap: new Map(),
+    workspaceWindowById: id => windows.find(window => window.id === id),
+    getWorkspaceWindows: () => windows, scheduleFrame: run => { run(); return () => {}; },
+  });
+  t.after(() => { for (const id of ["knowledge", "offline", "closing", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
+  Object.assign(context, {
+    handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
+    knowledgeBridgeStateMap: knowledge.knowledgeBridgeStateMap,
+    resyncKnowledge: knowledge.resyncKnowledge,
+    clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
+    handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
+  });
+  context.connectionOverlay.setConnected = () => {};
+  context.document.getElementById = () => null;
+  vm.runInContext(functionSource("setConnectionState"), context);
+  context.connectSocket();
+  sockets[1].open();
+  knowledge.requestKnowledgeBridge("knowledge", "issue");
+  const oldRead = sockets[1].sent.find(message => message.kind === "load_knowledge_bridge");
+  const foreign = knowledge.ensureKnowledgeBridgeState("foreign", "issue");
+  foreign.loading = true;
+  foreign.loadQueued = true;
+  sockets[1].readyState = 2; // CLOSING, before the close callback reports offline
+  knowledge.requestKnowledgeBridge("closing", "issue");
+  const closingRead = context.pendingMessages.find(entry => entry.message.id === "closing").message;
+  sockets[1].close();
+  knowledge.requestKnowledgeBridge("offline", "issue");
+  const queuedRead = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  t.mock.timers.tick(5000);
+  t.mock.timers.tick(56000);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, true,
+    "an offline unsent read retains its owner beyond the response timeout");
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("closing").loading, true,
+    "a CLOSING unsent read also retains its owner until replay");
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  knowledge.requestKnowledgeBridge("closing", "issue", true);
+  assert.equal(context.pendingMessages.length, 2, "Refresh is coalesced into each existing unsent owner");
+  context.reconnectCallbacks.at(-1)(); // reports offline for a second time
+  sockets.at(-1).open();
+  const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
+  assert.equal(reads.filter(message => message.id === "knowledge").length, 1,
+    "normal close/timer/open replaces the interrupted read");
+  assert.ok(reads.find(message => message.id === "knowledge").request_id > oldRead.request_id);
+  assert.deepEqual(reads.filter(message => message.id === "offline"), [queuedRead],
+    "offline first read is flushed once, without a replacement");
+  assert.deepEqual(reads.filter(message => message.id === "closing"), [closingRead],
+    "a CLOSING socket queues the initial read before its close callback, without a replacement");
+  assert.equal(reads.some(message => message.id === "foreign"), false);
+  assert.equal(foreign.loading, true);
+  assert.equal(foreign.loadQueued, true, "another project's queue has not been flushed");
+  for (const read of reads.filter(message => message.id !== "closing")) knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id,
+    request_id: read.request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  const refresh = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline" && message.refresh);
+  assert.equal(refresh.length, 1, "coalesced Refresh starts once after the queued read completes");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: refresh[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("knowledge").loading, false);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, false);
+  sockets.at(-1).close();
+  context.reconnectCallbacks.at(-1)();
+  sockets.at(-1).open();
+  const recovered = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "closing");
+  assert.equal(recovered.length, 1, "the flushed queued read now needs one replacement if its reply is lost");
+  assert.ok(recovered[0].request_id > closingRead.request_id);
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "closing",
+    request_id: recovered[0].request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("closing").loading, false);
+  knowledge.requestKnowledgeBridge("knowledge", "issue");
+  context.connectSocket(true);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "knowledge").length, 1,
+    "forced recovery leaves replacement ownership with the existing full resync");
+  for (const read of sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge")) {
+    knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id, request_id: read.request_id,
+      knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  }
+  sockets.at(-1).close();
+  knowledge.requestKnowledgeBridge("offline", "issue");
+  const forcedQueued = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  const offline = knowledge.knowledgeBridgeStateMap.get("offline");
+  offline.selectedNumber = 50160001;
+  offline.selectionGeneration += 1;
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  const phase = { kind: "update_knowledge_bridge_phase", id: "offline", request_id: 999,
+    issue_number: 50160001, target_phase: "implementation" };
+  context.send(phase);
+  context.send({ kind: "load_knowledge_bridge", id: "foreign", request_id: 998, knowledge_kind: "issue", refresh: false });
+  context.connectSocket(true);
+  sockets.at(-1).open();
+  const forcedReads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline");
+  assert.equal(forcedReads.length, 1, "forced recovery replaces an unsent read instead of replaying it as well");
+  assert.ok(forcedReads[0].request_id > forcedQueued.request_id);
+  assert.equal(forcedReads[0].selected_number, 50160001, "the replacement uses the latest selection");
+  assert.equal(forcedReads[0].refresh, true, "the unsent owner's coalesced Refresh intent survives replacement");
+  const phaseIndex = sockets.at(-1).sent.findIndex(message => message.kind === phase.kind && message.request_id === phase.request_id);
+  assert.notEqual(phaseIndex, -1, "the queued write is retained");
+  assert.ok(phaseIndex < sockets.at(-1).sent.indexOf(forcedReads[0]),
+    "full recovery still reads after queued writes");
+  assert.equal(sockets.at(-1).sent.filter(message => message.id === "foreign").length, 1,
+    "a read outside the current workspace is not silently discarded");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: forcedQueued.request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(offline.loading, true, "the superseded request cannot settle the replacement");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: forcedReads[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(offline.loading, false);
 });
 
 test("receive recovery requests pane and open surface snapshots only on the owning socket", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  let recoverySequence = 0;
+  const { document } = parseHTML(readFileSync(new URL("../index.html", import.meta.url), "utf8"));
+  context.recoveryCenterController = createRecoveryCenterController({
+    document,
+    modalEl: document.getElementById("recovery-center-modal"),
+    dialogEl: document.querySelector("#recovery-center-modal > .modal-shell"),
+    send: message => context.send(message),
+    createRequestId: () => `recovery-${++recoverySequence}`,
+  });
   context.connectSocket();
+  context.releaseNotesWindow.open("9.38.0");
+  context.recoveryCenterController.open();
   sockets[1].open();
+  assert.equal(sockets[1].sent.filter(message => message.kind === "open_release_notes").length, 1,
+    "an offline-first Release Notes request uses the existing queue once");
+  assert.deepEqual(sockets[1].sent.filter(message => message.kind === "load_recovery_center"),
+    [{ kind: "load_recovery_center", request_id: "recovery-1" }],
+    "a queued Recovery Center read must remain the final backend generation and handle owner");
+  context.resyncCalls.length = 0;
   const old = context.dispatcherOptions.at(-1);
-  let recoveryLoads = 0;
-  context.recoveryCenterController = { reconnect() { recoveryLoads++; } };
   assert.equal(typeof old.onResync, "function", "overflow must have a snapshot recovery callback");
   old.onResync("overflow");
   assert.equal(sockets.length, 3, "overflow also fences the native receive backlog");
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" },
+    { kind: "open_release_notes", id: "release-1", focus_version: "9.38.0" },
+    { kind: "load_recovery_center", request_id: "recovery-1" }, { kind: "get_system_settings" }]);
   sockets.at(-1).open();
   assert.equal(sockets[1].readyState, 3, "the input handoff ends when recovery opens");
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" },
+    { kind: "load_recovery_center", request_id: "recovery-2" }, { kind: "get_system_settings" },
+    { kind: "open_release_notes", id: "release-2", focus_version: "9.38.0" }]);
+  context.releaseNotesWindow.handlePayload({ id: "release-2", entries: [] });
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
     ["profile", "pane-a"],
     ["index", "pane-a"], ["settings"],
   ]);
-  assert.equal(recoveryLoads, 1, "a lost Recovery Center read is reissued");
+  context.dispatcherOptions.at(-1).onResync("visible");
+  context.recoveryCenterController.open();
+  context.pendingMessages.push({ projectKey: projectB.project_key,
+    message: { kind: "load_recovery_center", request_id: "foreign-recovery" } });
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent.filter(message => message.kind === "load_recovery_center"),
+    [{ kind: "load_recovery_center", request_id: "recovery-3" }],
+    "forced recovery also adopts only the read actually replayed on its own project");
+  assert.equal(context.pendingMessages.length, 1, "foreign queued reads stay fenced");
   sockets.at(-1).close();
   context.connectSocket();
   sockets.at(-1).open();
   old.onResync("visible");
-  assert.equal(sockets.at(-1).sent.length, 1, "a stale dispatcher cannot resync a replacement socket");
+  assert.equal(sockets.at(-1).sent.length, 3, "a stale dispatcher cannot resync a replacement socket");
+  assert.deepEqual(sockets.at(-1).sent.filter(message => message.kind === "load_recovery_center"),
+    [{ kind: "load_recovery_center", request_id: "recovery-4" }],
+    "a sent read whose reply was lost still gets one fresh request owner");
+});
+
+test("a terminal receive failure replaces the owning connection and fences its old dispatcher", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const old = context.dispatcherOptions.at(-1);
+  old.onResync("receive-error");
+  assert.equal(sockets.length, 3, "the native backlog cannot follow the failed terminal packet");
+  sockets[2].open();
+  assert.equal(sockets[1].readyState, 3);
+  assert.deepEqual(sockets[2].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  const count = context.received.length;
+  old.receive({ kind: "terminal_output", data_base64: "stale" });
+  old.onResync("receive-error");
+  assert.equal(context.received.length, count);
+  assert.equal(sockets.length, 3);
 });
 
 test("native foreground recovery does not require an observed hidden event", () => {
@@ -244,6 +565,7 @@ test("native foreground recovery does not require an observed hidden event", () 
   const handlerSource = source.split('document.addEventListener("visibilitychange", ')[1].split("\n      });")[0] + "\n}";
   const context = {
     document,
+    projectViewReadiness: { visible() {} },
     socketReceiveDispatcher: { resume() { resumes++; } },
     socketProjectKey: projectA.project_key,
     connectSocket: force => reconnects.push(force),
@@ -299,6 +621,7 @@ test("foreground recovery replaces the native backlog without replaying mutation
   context.connectSocket();
   const oldSocket = sockets[1];
   oldSocket.open();
+  context.resyncCalls.length = 0;
   const oldDispatcher = context.dispatcherOptions.at(-1);
   context.send({ kind: "post_board_entry", id: "pane-a", body: "draft" });
   const sentBeforeResume = oldSocket.sent.length;
@@ -329,7 +652,7 @@ test("foreground recovery replaces the native backlog without replaying mutation
   replacement.open();
   assert.equal(oldSocket.readyState, 3, "release the old transport after the replacement opens");
   assert.equal(context.droppedInputs, 0);
-  assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }], "one full sync and no mutation replay");
+  assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "one full sync and no mutation replay");
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
     ["profile", "pane-a"], ["index", "pane-a"], ["settings"],
@@ -352,7 +675,7 @@ test("recovery input handoff closes on a project switch and never crosses scopes
   assert.equal(context.send({ kind: "terminal_input", id: "pane-b", data: "x" }), "unavailable");
   assert.equal(old.sent.length, before, "the former project must never receive the new project's input");
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 
@@ -369,7 +692,7 @@ test("Reports history survives disconnect while the Project reconnects", () => {
   context.connectSocket();
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 test("project not found stops every reconnect for the route", () => {
@@ -399,9 +722,9 @@ test("a queued startup notification ignores a route that became missing", () => 
   for (const missing of [false, true]) {
     const queued = [], sent = [];
     const context = vm.createContext({
-      startupAutoResumeReadySent: false, routeProjectMissing: false,
+      startupAutoResumeReadySent: false, routeProjectMissing: false, socketReceiveDispatcherGeneration: 1,
+      setTimeout() {}, clearTimeout() {}, cancelAnimationFrame() {},
       requestAnimationFrame(callback) { queued.push(callback); },
-      visibleBounds() { assert.equal(context.routeProjectMissing, false); return { width: 800, height: 600 }; },
       send(message) { sent.push(message); },
     });
     vm.runInContext(functionSource('sendStartupAutoResumeReady'), context);
@@ -411,6 +734,40 @@ test("a queued startup notification ignores a route that became missing", () => 
     assert.equal(sent.length, missing ? 0 : 1);
     if (!missing) assert.equal(sent[0].kind, 'startup_auto_resume_ready');
   }
+});
+
+test("canvas readiness is sent once on each connection after backend restarts", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket(); sockets[0].open(); sockets[1].open();
+  for (let restart = 0; restart <= 3; restart++) {
+    const connection = sockets.at(-1);
+    const framesBefore = context.startupFrames.length;
+    context.sendStartupAutoResumeReady();
+    context.sendStartupAutoResumeReady();
+    assert.equal(context.startupFrames.length, framesBefore + 1, "each connection needs a fresh readiness callback");
+    context.startupFrames.at(-1)();
+    assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1,
+      `connection ${restart} must release its backend's startup gate exactly once`);
+    if (restart < 3) {
+      connection.close(); context.connectSocket(); sockets.at(-1).open();
+    }
+  }
+});
+
+test("canvas readiness survives suspended frames and discards old connection callbacks", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket(); sockets[0].open(); sockets[1].open();
+  context.sendStartupAutoResumeReady();
+  assert.equal(context.startupTimers.length, 1, "a background tab needs a timer fallback");
+  const oldFrame = context.startupFrames.at(-1), oldTimer = context.startupTimers.at(-1);
+  sockets[1].close(); context.connectSocket(); sockets.at(-1).open();
+  context.sendStartupAutoResumeReady();
+  const connection = sockets.at(-1);
+  oldTimer(); oldFrame();
+  assert.deepEqual(connection.sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "old callbacks cannot release a new backend");
+  context.startupTimers.at(-1)(); // No animation frame runs in the background.
+  context.startupFrames.at(-1)(); // Foregrounding later must not send twice.
+  assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1);
 });
 
 test("a missing route ignores late receive work", () => {
@@ -458,5 +815,65 @@ test("offline acknowledgement is ephemeral and never replays against a fresh con
   assert.equal(context.pendingMessages.length, 0, "stale attention must never replay after reconnect");
   context.connectSocket();
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+});
+
+
+test("switch mutations never queue or replay, and a closed-socket race retains an unknown operation", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const switching = createAgentSwitchModel(projectA.project_key);
+  Object.assign(context, switching);
+  vm.runInContext(functionSource("requestAgentSwitch"), context);
+  context.connectSocket(); sockets[1].open(); sockets[1].close();
+  const action = { kind: "request", operation_id: "operation-one", member_id: "member", expected_roster_revision: 3, target_issue_number: 42 };
+  context.requestAgentSwitch(action);
+  assert.equal(context.pendingMessages.length, 0, "an offline switch must not execute on the next Host");
+  assert.deepEqual(switching.model.read().pending, action);
+  assert.equal(switching.model.read().disconnected, true);
+  assert.equal(context.send({ kind: "agent_switch", action: { kind: "cancel", operation_id: action.operation_id } }), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket(); sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
+  sockets.at(-1).send = () => { throw new Error("connection closed during send"); };
+  assert.doesNotThrow(() => assert.equal(context.send({ kind: "agent_switch", action }), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0);
+});
+
+
+test("Hook Doctor repair uses only the current live socket and never queues a replay", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const repair = { kind: "get_hook_doctor", request_id: 1, repair: true };
+  assert.equal(context.send(repair), "sent");
+  assert.deepEqual(sockets[1].sent.at(-1), repair, "a live explicit repair is allowed");
+  sockets[1].close();
+  assert.equal(context.send(repair), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket();
+  sockets.at(-1).open();
+  assert.ok(sockets.at(-1).sent.every(message => message.kind !== "get_hook_doctor" || message.repair !== true));
+  context.socketProjectKey = projectB.project_key;
+  assert.equal(context.send(repair), "unavailable", "repair cannot use another project's socket");
+  context.socketProjectKey = projectA.project_key;
+  sockets.at(-1).send = () => { throw new Error("connection closed during repair send"); };
+  assert.doesNotThrow(() => assert.equal(context.send(repair), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0, "a failed send is never retried after reconnect");
+});
+
+test("first project connection reads saved Works settings without a Settings host", () => {
+  const { sockets, select } = fixture();
+  select("0123456789abcdef"); sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "get_system_settings").length, 1);
+});
+
+
+test("close choices and view receipts belong to their exact live connection and never queue", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key }); context.connectSocket();
+  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready']) {
+    assert.equal(context.send({ kind }), 'unavailable');
+  }
+  assert.deepEqual(context.pendingMessages, []);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready/.test(event.kind)), false);
 });

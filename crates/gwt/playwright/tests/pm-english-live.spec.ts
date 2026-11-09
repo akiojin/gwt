@@ -27,6 +27,7 @@ test.describe('English application UI', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
 
       const pm = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      await pm.getByRole('button', { name: 'Reports', exact: true }).click();
       await expect(pm.getByRole('log', { name: 'PM reports', exact: true })).toBeVisible({ timeout: 30_000 });
       await expect(pm.getByRole('button', { name: 'Reports', exact: true })).toBeVisible();
       await expect(pm.getByRole('button', { name: 'Execution log', exact: true })).toBeVisible();
@@ -47,9 +48,9 @@ test.describe('English application UI', () => {
 
       await page.locator('[data-surface="issues"]').click();
       const settings = page.locator('.workspace-window[data-preset="settings"]');
-      const issues = settings.locator('[data-settings-panel="issues"]');
-      await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute('aria-selected', 'true');
-      await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+      const issues = page.locator('.workspace-window[data-preset="issue"]');
+      await expect(issues.locator('.settings-root')).toHaveCount(0);
+      await expect(issues).toHaveCount(1);
       await expect(issues.locator('.issue-bridge-root')).toBeVisible();
       await expect(issues.getByRole('group', { name: 'Issue view mode', exact: true })).toBeVisible();
       await expect(issues.getByRole('button', { name: 'Refresh cached work items', exact: true })).toBeVisible();
@@ -63,8 +64,10 @@ test.describe('English application UI', () => {
 
       await issues.getByRole('button', { name: 'Issues settings', exact: true }).click();
       const issuesSettings = settings.locator('[data-settings-panel="issues"]');
+      await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute('aria-selected', 'true');
       await expect(issuesSettings).toBeVisible();
-      await expect(issuesSettings.getByLabel('Max active', { exact: true })).toBeVisible();
+      await expect(issuesSettings.getByLabel('Max active', { exact: true })).toHaveCount(0);
+      await expect(issuesSettings.getByLabel('Autonomous', { exact: true })).toBeVisible();
       await expect(issuesSettings.getByLabel('Allowed labels', { exact: true })).toBeVisible();
       expect(await issuesSettings.innerText()).not.toMatch(CJK);
       await settings.locator('[data-settings-tab="system"]').click();

@@ -7,7 +7,7 @@ import { dirname, resolve } from "node:path";
 import {
   isAgentKanbanEligible,
   isAgentKanbanPlacement,
-  isOffCanvasPlacement,
+  isContainedPlacement,
   windowsForAgentKanbanLane,
 } from "../agent-kanban-surface.js";
 
@@ -32,7 +32,7 @@ function issuePreviewWindow(overrides = {}) {
 test("issue_preview windows are excluded from canvas rendering", () => {
   const windowData = issuePreviewWindow();
 
-  assert.equal(isOffCanvasPlacement(windowData), true);
+  assert.equal(isContainedPlacement(windowData), true);
   assert.equal(
     isAgentKanbanPlacement(windowData),
     false,
@@ -54,22 +54,22 @@ test("issue_preview does not leak into Agent Kanban lane membership", () => {
 });
 
 test("canvas and agent_kanban placements keep their previous off-canvas answers", () => {
-  assert.equal(isOffCanvasPlacement({ id: "a", preset: "agent" }), false);
-  assert.equal(isOffCanvasPlacement({ id: "a", preset: "agent", placement: {} }), false);
+  assert.equal(isContainedPlacement({ id: "a", preset: "agent" }), false);
+  assert.equal(isContainedPlacement({ id: "a", preset: "agent", placement: {} }), false);
   assert.equal(
-    isOffCanvasPlacement({ id: "a", preset: "agent", placement: { kind: "canvas" } }),
+    isContainedPlacement({ id: "a", preset: "agent", placement: { kind: "canvas" } }),
     false,
   );
   assert.equal(
-    isOffCanvasPlacement({
+    isContainedPlacement({
       id: "a",
       preset: "agent",
       placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0 },
     }),
     true,
   );
-  assert.equal(isOffCanvasPlacement(undefined), false);
-  assert.equal(isOffCanvasPlacement(null), false);
+  assert.equal(isContainedPlacement(undefined), false);
+  assert.equal(isContainedPlacement(null), false);
 });
 
 // SPEC-3671 T-010: the predicate is the single place that enumerates off-canvas kinds.
@@ -78,10 +78,10 @@ test("off-canvas kinds are enumerated in exactly one predicate", () => {
   assert.equal(
     occurrences.length,
     1,
-    "issue_preview must be named once, inside isOffCanvasPlacement()",
+    "issue_preview must be named once, inside isContainedPlacement()",
   );
   const predicate = surfaceSource.slice(
-    surfaceSource.indexOf("export function isOffCanvasPlacement"),
+    surfaceSource.indexOf("export function isContainedPlacement"),
   );
   assert.match(predicate.slice(0, 400), /"issue_preview"/);
 });

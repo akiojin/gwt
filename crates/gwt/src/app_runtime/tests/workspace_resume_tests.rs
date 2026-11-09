@@ -10,9 +10,36 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         .split_once("pub(super) fn queue_startup_auto_resume_sessions")
         .expect("bootstrap boundary")
         .0;
-    let durable_recovery = bootstrap
-        .find("self.reconcile_durable_fresh_execution_launches()")
-        .expect("durable recovery");
+    let owner = include_str!("../../project_runtime/owner.rs");
+    let owner_start = owner
+        .split_once("pub(crate) fn start(")
+        .expect("owner startup")
+        .1
+        .split_once("fn run(")
+        .expect("owner dispatch boundary")
+        .0;
+    let durable_recovery = owner_start
+        .find("super::startup::reconcile_durable_launches")
+        .expect("owner durable recovery");
+    let admission = owner_start
+        .find("state.run(receiver)")
+        .expect("owner admission loop");
+    assert!(
+        durable_recovery < admission,
+        "actual owner recovery must precede restore and Monitor command admission"
+    );
+    let readonly_selection = source
+        .split_once("fn load_recovery_session(")
+        .expect("GUI source read")
+        .1;
+    assert!(
+        readonly_selection.contains("durable_launch_recovery_exists"),
+        "GUI must not select a source still owned by launch recovery"
+    );
+    assert!(
+        !readonly_selection.contains("update_session_if_changed"),
+        "GUI selection cannot mutate Session lifecycle before owner admission"
+    );
     let restore_selection = bootstrap
         .find("self.queue_startup_auto_resume_sessions")
         .expect("restore selection");
@@ -22,7 +49,6 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
     let pm_queue = bootstrap
         .find("self.pending_startup_pm_tabs")
         .expect("PM queue");
-    assert!(durable_recovery < restore_selection);
     assert!(restore_selection < generation_reaper);
     assert!(generation_reaper < pm_queue);
 
@@ -68,7 +94,7 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
     let mut persisted = empty_workspace_state();
     let mut agent_window =
         sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
-    agent_window.agent_id = Some("claude".to_string());
+    agent_window.agent_id = Some("fixture".to_string());
     agent_window.session_id = Some("session-open-resume".to_string());
     persisted.windows.push(agent_window);
     persisted.next_z_index = 2;
@@ -77,20 +103,23 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         title: "Open Resume".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-open"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&runtime.sessions_dir).unwrap();
 
     // The backing session drifted to `Stopped` via idle timeout but was
     // never explicitly closed; it must still be restored (Issue #2942).
     let mut session = gwt_agent::Session::new(
         &worktree,
         "work/open-project-resume",
-        gwt_agent::AgentId::ClaudeCode,
+        gwt_agent::AgentId::Custom("fixture".into()),
     );
     session.id = "session-open-resume".to_string();
+    session.project_state_root = Some(repo.clone());
     session.agent_session_id = Some("native-open-resume".to_string());
     session.restore_window_on_startup = true;
     session.record_hook_event("Stop");
@@ -100,11 +129,32 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         .save(&runtime.sessions_dir)
         .expect("save resumable session");
 
-    let events = runtime.restore_open_project_windows("tab-open");
-
+    let (command, args) = long_running_test_command();
+    persist_owner_fixture_agent(command, args);
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let owner = executor.block_on(production_owner_fixture(&worktree));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut events = runtime.restore_open_project_windows("tab-open");
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    assert!(runtime
+        .pending_auto_resume_sources
+        .values()
+        .any(|source| source == "session-open-resume"));
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+        AppEventProxy::Stub(events) => events,
+        _ => unreachable!(),
+    });
+    assert!(
+        completion.result.is_ok(),
+        "actual restore: {:?}",
+        completion.result.as_ref().err()
+    );
+    events.extend(runtime.handle_remote_owner_launch_complete(completion));
     assert!(
         !events.is_empty(),
-        "Open Project restore should spawn the resumable agent window"
+        "actual restore completion must publish the live window"
     );
     let agent_windows = runtime
         .tab("tab-open")
@@ -119,15 +169,20 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         agent_windows, 1,
         "the paused placeholder should be replaced by one live agent window"
     );
-    assert_eq!(
-        runtime.pending_auto_resume_sources.len(),
-        1,
-        "the source session must be tracked so it is retired on launch complete"
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "the actual completed restore retires its pending source"
     );
-    assert!(runtime
-        .pending_auto_resume_sources
-        .values()
-        .any(|source| source == "session-open-resume"));
+    let window_id = combined_window_id("tab-open", "agent-1");
+    let projection = &runtime.runtimes[&window_id];
+    let pane = executor
+        .block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+        .expect("actual restored owner runtime");
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
+    assert!(pane.pty.tree_exit_confirmed());
+    drop(runtime);
+    executor.block_on(owner.shutdown());
 }
 
 // SPEC-1921 Phase 65 (T335): restored Agent-family windows with exact
@@ -192,7 +247,7 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
         title: "Family Restore".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -233,12 +288,7 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -282,6 +332,15 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    run_git(
+        &repo,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unlanded missing native fixture",
+        ],
+    );
     let worktree = temp.path().join("worktrees").join("no-exact-id");
     run_git(
         &repo,
@@ -309,17 +368,20 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
         title: "No Exact Id".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-noid"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&runtime.sessions_dir).unwrap();
 
     // The Codex placeholder session id is structurally unusable for exact
     // resume, so this session has no exact provider id.
     let mut session =
         gwt_agent::Session::new(&worktree, "work/no-exact-id", gwt_agent::AgentId::Codex);
     session.id = "session-no-exact-id".to_string();
+    session.project_state_root = Some(repo.clone());
     session.agent_session_id = Some("agent-session".to_string());
     session.restore_window_on_startup = true;
     session.record_hook_event("Stop");
@@ -329,13 +391,26 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
         .expect("save session without exact id");
 
     runtime.seed_restored_window_details();
-    runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let owner = executor.block_on(production_owner_fixture(&worktree));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    drain_startup_auto_resume(&mut runtime);
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+        AppEventProxy::Stub(events) => events,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        completion
+            .restore_refusal
+            .as_ref()
+            .map(|refusal| refusal.code.as_str()),
+        Some("no_resume_session")
     );
+    runtime.handle_remote_owner_launch_complete(completion);
+    executor.block_on(owner.shutdown());
 
     let windows = runtime.tabs[0].workspace.persisted().windows.clone();
     assert_eq!(windows.len(), 1, "no fallback window may be spawned");
@@ -411,7 +486,7 @@ fn app_runtime_startup_auto_resume_candidate_skips_generic_paused_detail() {
         title: "Candidate Detail".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -451,7 +526,7 @@ fn app_runtime_startup_auto_resume_candidate_skips_generic_paused_detail() {
 }
 
 #[test]
-fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
+fn app_runtime_startup_auto_resume_restores_each_eligible_session() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -465,14 +540,14 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         &repo,
         &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
     );
-    let worktree = temp.path().join("worktrees").join("centered-stack");
+    let worktree = temp.path().join("worktrees").join("restore-all");
     run_git(
         &repo,
         &[
             "worktree",
             "add",
             "-b",
-            "work/centered-stack",
+            "work/restore-all",
             worktree.to_str().expect("worktree path"),
         ],
     );
@@ -484,9 +559,13 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         &[],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
-    for (index, native_session_id) in ["native-stack-one", "native-stack-two", "native-stack-three"]
-        .into_iter()
-        .enumerate()
+    for (index, native_session_id) in [
+        "native-restore-one",
+        "native-restore-two",
+        "native-restore-three",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let worktree = temp.path().join("worktrees").join(native_session_id);
         let branch = format!("work/{native_session_id}");
@@ -495,7 +574,7 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
             &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
         );
         let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
-        session.id = format!("session-centered-stack-{index}");
+        session.id = format!("session-restore-all-{index}");
         session.agent_session_id = Some(native_session_id.to_string());
         session.restore_window_on_startup = true;
         session.record_hook_event("Stop");
@@ -508,33 +587,28 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
-    let geometries = runtime.tabs[0]
+    let agents = runtime.tabs[0]
         .workspace
         .persisted()
         .windows
         .iter()
         .filter(|window| window.preset == WindowPreset::Agent)
-        .map(|window| window.geometry.clone())
         .collect::<Vec<_>>();
-    assert_eq!(geometries.len(), 3);
     assert_eq!(
-        geometries
+        agents.len(),
+        3,
+        "every eligible Session must restore a pane"
+    );
+    assert_eq!(
+        agents
             .iter()
-            .map(|geometry| (geometry.x, geometry.y, geometry.width, geometry.height))
-            .collect::<Vec<_>>(),
-        vec![
-            (32.0, 26.0, 1280.0, 800.0),
-            (60.0, 50.0, 1280.0, 800.0),
-            (88.0, 74.0, 1280.0, 800.0),
-        ],
-        "restored agent windows should form a stack centered in the startup canvas"
+            .map(|window| &window.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "restored panes must keep distinct identities"
     );
 }
 
@@ -592,12 +666,7 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let resumed_sources = runtime
         .pending_auto_resume_sources
@@ -724,6 +793,7 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
     let mut session = gwt_agent::Session::new(&worktree, "work/legacy", gwt_agent::AgentId::Codex);
     session.id = "session-legacy-startup".to_string();
+    session.project_state_root = Some(worktree.clone());
     session.schema_version = 2;
     session.status = gwt_agent::AgentStatus::Running;
     session.last_hook_event = None;
@@ -738,6 +808,15 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
     )
     .expect("write malformed session");
 
+    let source = fs::read(runtime.sessions_dir.join("session-legacy-startup.toml")).unwrap();
+    let selected = runtime.load_recovery_sessions();
+    assert_eq!(selected.len(), 1, "malformed Session must remain isolated");
+    assert_eq!(selected[0].schema_version, 2, "GUI selection is read-only");
+    assert_eq!(
+        fs::read(runtime.sessions_dir.join("session-legacy-startup.toml")).unwrap(),
+        source,
+    );
+    gwt::project_runtime::startup::reconcile_durable_launches(&worktree, &runtime.sessions_dir);
     let loaded = runtime.load_recovery_sessions();
 
     assert_eq!(loaded.len(), 1, "malformed Session must remain isolated");
@@ -854,7 +933,7 @@ fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_res
     persisted.windows.push(placeholder);
     persisted.next_z_index = 2;
     let mut tab = sample_project_tab("tab-repo", "Repo", worktree.clone(), ProjectKind::Git, &[]);
-    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -870,6 +949,7 @@ fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_res
         let mut session =
             gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
+        session.project_state_root = Some(worktree.clone());
         session.record_hook_event("UserPromptSubmit");
         session.status = gwt_agent::AgentStatus::Running;
         session.save(&runtime.sessions_dir).expect("save session");
@@ -891,13 +971,10 @@ fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_res
     assert_eq!(
         loaded,
         vec![
-            (
-                "session-fresh".to_string(),
-                gwt_agent::AgentStatus::Interrupted
-            ),
+            ("session-fresh".to_string(), gwt_agent::AgentStatus::Running),
             (
                 "session-placeholder".to_string(),
-                gwt_agent::AgentStatus::Interrupted
+                gwt_agent::AgentStatus::Running
             ),
         ]
     );
@@ -919,8 +996,23 @@ fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_res
     }
     assert_eq!(
         gwt_agent::Session::load(&stale_path).expect("stale").status,
+        gwt_agent::AgentStatus::Running,
+        "deferred GUI reads cannot write Session lifecycle",
+    );
+    gwt::project_runtime::startup::reconcile_durable_launches(&worktree, &runtime.sessions_dir);
+    for session_id in ["session-fresh", "session-placeholder"] {
+        assert_eq!(
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+                .unwrap()
+                .status,
+            gwt_agent::AgentStatus::Interrupted,
+            "owner startup applies the same lifecycle judgment to selected candidates",
+        );
+    }
+    assert_eq!(
+        gwt_agent::Session::load(&stale_path).expect("stale").status,
         gwt_agent::AgentStatus::Interrupted,
-        "the deferred sweep must apply the same Interrupted judgement"
+        "owner startup must apply the same Interrupted judgment to deferred candidates"
     );
 
     // Issue #4038: an update-resumed project bypasses the freshness gate, so
@@ -1077,12 +1169,7 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
         .expect("save legacy open session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let resumed_sources = runtime
         .pending_auto_resume_sources
@@ -1100,73 +1187,34 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
 fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    init_git_clone_with_origin(&worktree);
-    run_git(
-        &worktree,
-        &["commit", "--allow-empty", "-m", "unlanded close fixture"],
-    );
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some(tab_id));
-    let mut session =
-        gwt_agent::Session::new(&worktree, "work/restore-flag", gwt_agent::AgentId::Codex);
-    session.id = "session-close-clears-restore".to_string();
-    session.restore_window_on_startup = true;
-    session
-        .save(&runtime.sessions_dir)
-        .expect("save active session");
+    let (mut runtime, pane, window_id) = owner_browser_input_fixture(temp.path());
+    let source = pane.session.as_ref().unwrap();
+    let session_path = runtime.sessions_dir.join(format!("{}.toml", source.id));
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     assert!(runtime
         .launch_wizard_cache
-        .session_by_id(&session.id)
+        .session_by_id(&source.id)
         .is_some());
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: session.id.clone(),
-            agent_id: "codex".to_string(),
-            branch_name: "work/restore-flag".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
 
-    // A normal hook can fill in the native conversation after cache creation.
-    session.agent_session_id = Some("native-close-clears-restore".to_string());
-    session.record_hook_event("Stop");
-    session.record_completed_stop();
-    session
-        .save(&runtime.sessions_dir)
-        .expect("save hook update");
-    runtime.close_window_events(&window_id);
-    let finalizer = finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("close finalizer");
-    finalizer();
-
-    let loaded = gwt_agent::Session::load(
-        &runtime
-            .sessions_dir
-            .join("session-close-clears-restore.toml"),
+    // Persist the provider's late native identity through the canonical hook
+    // writer after the GUI cache was created, then close the actual owner tree.
+    let session = gwt_agent::persist_session_hook_metadata_with_wait(
+        &runtime.sessions_dir,
+        &source.id,
+        "Stop",
+        Some("native-close-clears-restore"),
+        source.project_state_root.as_deref(),
+        Duration::from_secs(2),
     )
-    .expect("load session");
+    .expect("persist hook update");
+    gwt_agent::persist_session_completed_stop(&runtime.sessions_dir, &source.id)
+        .expect("persist completed Stop");
+    let session = gwt_agent::Session::load(&session_path).unwrap_or(session);
+    runtime.close_window_events(&window_id);
+    drain_browser_owner_input(&mut runtime);
+    assert!(pane.pty.tree_exit_confirmed());
+
+    let loaded = gwt_agent::Session::load(&session_path).expect("load exact closed Session");
     assert!(!loaded.restore_window_on_startup);
     assert_eq!(loaded.agent_session_id, session.agent_session_id);
     assert_eq!(loaded.last_hook_event_at, session.last_hook_event_at);
@@ -1175,15 +1223,26 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
         .expect("persist late Stop hook");
     gwt_agent::persist_session_completed_stop(&runtime.sessions_dir, &session.id)
         .expect("persist late completed Stop");
-    // Model a restart from disk. An unclosed peer remains restore-eligible.
-    let mut open = session.clone();
-    open.id = "session-unclosed-peer".to_string();
-    open.agent_session_id = Some("native-unclosed-peer".to_string());
+    let mut open = gwt_agent::Session::new(
+        &session.worktree_path,
+        &session.branch,
+        session.agent_id.clone(),
+    );
+    open.id = "session-unclosed-peer".into();
+    open.project_state_root = session.project_state_root.clone();
+    open.agent_session_id = Some("native-unclosed-peer".into());
+    open.restore_window_on_startup = true;
+    open.record_hook_event("Stop");
+    open.record_completed_stop();
     open.save(&runtime.sessions_dir)
         .expect("save unclosed peer");
+    let root = runtime.tabs[0].project_root.clone();
     drop(runtime);
-    let tab = sample_project_tab(tab_id, "Repo", worktree, ProjectKind::Git, &[]);
-    let mut restarted = sample_runtime(temp.path(), vec![tab], Some(tab_id));
+    let tab = sample_project_tab("tab-1", "Repo", root, ProjectKind::Git, &[]);
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    restarted.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let restore_root = restarted.tabs[0].project_root.clone();
+    let peer_admission = restarted.restore_admission(&open, &restore_root, None);
     restarted.queue_startup_auto_resume_sessions(&HashSet::new());
     assert_eq!(
         restarted
@@ -1191,7 +1250,9 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
             .iter()
             .map(|pending| pending.session.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["session-unclosed-peer"]
+        vec!["session-unclosed-peer"],
+        "unclosed peer: candidate={}, admission={peer_admission:?}",
+        open.exact_auto_resume_candidate()
     );
 }
 
@@ -1238,12 +1299,7 @@ fn app_runtime_bootstrap_auto_resumes_same_repo_worktree_session_from_restored_p
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.tabs.len(),
@@ -1301,12 +1357,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_without_lifecycle() 
         .expect("save stale session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -1359,12 +1410,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_with_placeholder_res
         .expect("save placeholder session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -1416,12 +1462,7 @@ fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert!(
             runtime.tabs.is_empty(),
@@ -1497,12 +1538,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
@@ -1915,8 +1951,7 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
                 pr_state: Some("MERGED".to_string()),
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work");
     }
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -2213,8 +2248,7 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work");
     }
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -2310,8 +2344,7 @@ fn active_work_projection_resumability_follows_published_branch_refs() {
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work");
     }
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);

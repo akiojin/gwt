@@ -391,13 +391,16 @@ export function createNotificationCenter({
       }
       renderErrorCount(item, existing.count);
     } else {
-      item = record({ kind, level, title: notice.title, message: notice.message, onActivate: notice.onActivate });
+      item = record({ kind, level, title: notice.title, message: notice.message,
+        onActivate: key && typeof notice.onActivate === "function"
+          ? () => surfaceRows.get(key)?.onActivate?.() : notice.onActivate });
       if (!item) return null;
       if (key) {
         item.dataset.errorKey = key;
         surfaceRows.set(key, { item, count: 1 });
       }
     }
+    if (key) surfaceRows.get(key).onActivate = notice.onActivate;
     item.dataset.resolved = "false";
     let details = item.querySelector(".notification-center__details");
     if (notice.details) {
@@ -442,6 +445,18 @@ export function createNotificationCenter({
     }
     existing.item.dataset.resolved = "true";
     unread.delete(existing.item);
+    notifyUnread();
+    return true;
+  }
+
+  /** Remove a keyed notice when its attention target has recovered or closed. */
+  function removeNotice(key) {
+    const existing = key == null ? null : liveSurfaceRow(String(key));
+    if (!existing) return false;
+    existing.item.remove();
+    surfaceRows.delete(String(key));
+    unread.delete(existing.item);
+    syncEmptyState();
     notifyUnread();
     return true;
   }
@@ -539,6 +554,7 @@ export function createNotificationCenter({
     recordSurfaceNotice,
     recordError,
     resolveError,
+    removeNotice,
     open,
     close,
     toggle,

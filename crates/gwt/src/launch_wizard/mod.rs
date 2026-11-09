@@ -5,7 +5,9 @@ use std::{
 
 use crate::BranchListEntry;
 
+pub mod codex_models;
 mod launch_request;
+mod memory_cache;
 mod options;
 mod profiles;
 mod quick_start;
@@ -15,6 +17,8 @@ mod test_support;
 mod view_model;
 
 use options::*;
+
+pub use memory_cache::LaunchWizardMemoryCache;
 
 pub use options::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,
@@ -372,6 +376,7 @@ pub struct LaunchWizardIssueMonitorPoolView {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardIssueMonitorPoolSetView {
+    pub agent_member_id: Option<String>,
     pub agent_id: String,
     /// Read-only rows for a set the form is not editing.
     pub summary: Vec<LaunchWizardSummaryView>,
@@ -411,6 +416,8 @@ pub struct LaunchWizardView {
     pub launch_target_options: Vec<LaunchWizardOptionView>,
     pub selected_launch_target: String,
     pub agent_options: Vec<LaunchWizardOptionView>,
+    pub agent_member_options: Vec<LaunchWizardOptionView>,
+    pub selected_agent_member_id: Option<String>,
     pub selected_agent_id: String,
     pub model_options: Vec<LaunchWizardOptionView>,
     pub selected_model: String,
@@ -629,7 +636,7 @@ struct AgentLaunchDraft {
     codex_fast_mode: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShellLaunchConfig {
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
@@ -1110,6 +1117,9 @@ pub enum LaunchWizardAction {
     },
     SetAgent {
         agent_id: String,
+    },
+    SetAgentMember {
+        agent_member_id: String,
     },
     SetModel {
         model: String,

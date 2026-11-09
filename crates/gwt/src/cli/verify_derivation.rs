@@ -802,6 +802,19 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
         _ => None,
     }
     };
+    // The HOME sentinel runs after failed tests too. Recognize only its exact
+    // command and status condition; unrelated conditional steps stay refused.
+    let home_guard_condition = |step: &Value| {
+        match step["name"].as_str() {
+        Some("Snapshot real HOME project stores")
+            if step["run"].as_str() == Some("python scripts/ci_home_guard.py snapshot \"${{ runner.temp }}/ci-home-projects-before.json\"") =>
+                Some("${{ hashFiles('scripts/ci_home_guard.py') != '' }}"),
+        Some("Check tests left real HOME project stores unchanged")
+            if step["run"].as_str() == Some("python scripts/ci_home_guard.py check \"${{ runner.temp }}/ci-home-projects-before.json\"") =>
+                Some("${{ !cancelled() && steps.home-guard.outcome == 'success' }}"),
+        _ => None,
+    }
+    };
     for (job, is_coverage) in [
         (&test["jobs"]["test"], false),
         (rust_gate, false),
@@ -823,7 +836,9 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
                         .all(|s| {
                             s.get("continue-on-error").is_none()
                                 && s.get("if").is_none_or(|_| {
-                                    (is_coverage
+                                    home_guard_condition(s).is_some_and(|condition| {
+                                        s["if"].as_str() == Some(condition)
+                                    }) || (is_coverage
                                         && coverage_condition(s).is_some_and(|condition| {
                                             s["if"].as_str() == Some(condition)
                                         }))
@@ -1243,6 +1258,35 @@ mod tests {
                 validate_pre_pr_ci(dir.path(), &required).is_err(),
                 "incomplete transport must not permit delegation: {before}"
             );
+        }
+    }
+
+    #[test]
+    fn pre_pr_home_guard_conditions_and_commands_remain_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = [
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
+        assert!(validate_pre_pr_ci(dir.path(), &required).is_ok());
+        let path = ".github/workflows/coverage.yml";
+        let original = std::fs::read_to_string(dir.path().join(path)).unwrap();
+        for (before, after) in [
+            (
+                "steps.home-guard.outcome == 'success'",
+                "steps.home-guard.outcome == 'failure'",
+            ),
+            (
+                "python scripts/ci_home_guard.py check",
+                "echo skip-home-check",
+            ),
+        ] {
+            let changed = original.replace(before, after);
+            assert_ne!(changed, original);
+            write(dir.path(), path, &changed);
+            assert!(validate_pre_pr_ci(dir.path(), &required).is_err());
         }
     }
 

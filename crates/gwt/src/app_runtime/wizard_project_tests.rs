@@ -51,7 +51,6 @@ fn project_wizards_keep_independent_open_sessions() {
         &context_a,
         None,
         gwt::LaunchWizardAction::Cancel,
-        None,
     );
     assert!(runtime.launch_wizard_for(&context_a).is_none());
     assert_eq!(

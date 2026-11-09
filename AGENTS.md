@@ -175,7 +175,7 @@
 - **すべての PR に `auto-merge` を有効にする。** CI が緑になった時点で着地させる。配信の可否は CI の必須チェック（一覧は下の「Merge queue」節）が判定する。
 - この裁定により、**配信可否の唯一のゲートは CI になる。** 「未完了だから Draft に留める」という緩衝は無くなるので、**PR のスコープを最初から単独で配信可能な大きさに切ること**が以前より重要になる。大きすぎる変更は 1 本の PR に詰めず分割する。
 - 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。残件がある場合は PR 本文に後続タスクとして明記し、**Draft に倒すのではなく follow-up Issue を立てる。**
-- PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了を確認する。**これは Ready 化の条件ではなく PR 作成の条件になった。**
+- PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS` と PR 本文 checklist 完了を確認する。`User Verification Result` は任意の記録欄で、オーナーが明示的に確認を求めた場合のみ必須とする。**これは Ready 化の条件ではなく PR 作成の条件になった。**
 - **検証が通らない変更は PR を作らない。** Draft という逃げ道が無くなったため、「とりあえず Draft で出して CI を見る」ことはできない。ローカルで検証してから PR を作る。
 - **起動経路は実行記録から判定する（Issue #4217 FR-002）。** `execution.status` の `launch_route` が `autonomous` なら自動実行、`manual` または不明なら手動起動として扱う。`GWT_AUTONOMOUS_EXECUTION` は legacy シグナルであり、**設定されていることは autonomous の証拠になるが、設定されていないことは manual の証拠にならない**。この env は「プロジェクトが unattended mode を opt-in したか」でのみ書かれるため、Issue Monitor 起動でも未設定になり、実際に 2 窓が「手動起動」と誤判定して視覚検証待ちで停止した（#3777 / #3697）。
 - **自動実行（`launch_route: autonomous`）では、実装・自動検証・Ready PR Gate を満たしたら Ready PR を作成し、既存の CI 自動マージまで完結させる（Issue #4326）。** ユーザーへ視覚確認を依頼せず、UI surface の有無にかかわらず `User Verification Result: n/a (autonomous)` を記録する。agent 自身の確認を人間の `confirmed` と偽ってはならない。
@@ -183,7 +183,7 @@
 - **自動実行では、人間の視覚確認の不在を理由に `execution.blocked` を打ってはならない。** 自動テスト・実 headed E2E・CI の失敗、既知 blocker、他の Ready Gate 未達は解消してから進む。`execution.blocked` は一時停止ではなく terminal であるため、一時的な検証待ちにも使用しない。
 - GUI / フロントエンド変更では、`browser-check` による checkout + fresh HOME の隔離起動を使い、実 Chromium の headed E2E で dark / light 両テーマ、console / page error ゼロ、変更した機能の挙動を検証する。`verify.run` の `params.headed_e2e_commands` に `params.commands` 内の Playwright コマンドを完全一致で指定する。gwtd が `--headed` と組込 reporter を付加し、両テーマの実測 PASS 件数を記録する。script 経由の場合は追加の Playwright 引数を転送できること。
 - 自動実行の UI Ready Gate は、同じ fresh 検証記録にある実測 headed PASS 証跡も必須とする。`Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` は **`User Verification Result` とは別の行に**記録し、自己申告の pass のみを証跡としない。console / page error と機能 assertion は E2E 自体で確認する。
-- Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
+- Gate を満たさない場合は PR を作成せず、原因を解消して再検証する。Draft への退避は禁止する。既存 Draft は PM が `pr.ready` で Ready 化でき、別 session 所有という理由だけで検証記録を拒否しない。対象 head の CI・レビュー・UI の実測証跡は維持する。
 
 ### Merge queue と post-merge CI（develop の着地経路、Issue #5169）
 
@@ -293,15 +293,13 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 
 ### PR 作成ルール（必須）
 
-> 🚨 **手動起動（ユーザーが自分で始めた作業）では、エージェントは、ユーザーの視覚検証結果が `confirmed` になる前に PR を `create` / `update` してはならない。自動実行（autonomous launch）では、以下の「自動実行時の扱い」に従い視覚検証を要求しない。**
+**人間の UI 確認は既定の配信ゲートにしない（Issue #4326、2026-10-23 オーナー裁定）。** 手動起動でも `User Verification Result` は任意の記録欄とし、オーナーが明示的に確認を求めた場合のみ、その確認を完了してから PR を作成・更新する。
 
-- 手動起動では `gwt-verify --mode pre-pr` の **`User Verification Result`** が `confirmed` または `n/a`（UI 影響が無い変更で視覚検証不要な場合に限る）のいずれかになるまで PR 作成・更新を行わない。`pending` / 未確認のまま JSON operations `pr.create` / `pr.edit` を呼ばない。
-- **自動実行時の扱い（ユーザー裁定 2026-09-14、Issue #4326）:** `execution.status` の `launch_route` が `autonomous` なら、ユーザーへ視覚確認を依頼せず、URL も出さない。`User Verification Result: n/a (autonomous)` と独立した `Agent Visual Check` を記録し、上記 Ready PR Gate の fresh 自動検証と UI 時の実測 headed 証跡が PASS したら、Ready PR 作成から CI 自動マージまで進める。旧 deferred 本文も同じ証跡で Ready にできる。自動実行で質問ツールを呼ぶと owner Issue が needs_human で park されるため、視覚確認待ちで実行を止めない。この扱いは起動経路による事実であり、`skipped(<reason>)` や `confirmed` へ書き換えない。
-- （手動起動時）ユーザーが視覚検証できない状態（例: Open Project picker のクリックがブロックされている、splash から進めない、サーバーが起動しない 等）に遭遇した場合、エージェントの独断で `skipped(<reason>)` に倒さない。**まずブロッカーの根本原因を特定して解消し、ユーザーが実際に視覚確認できる状態を再現してから verification を依頼する**。
-- `skipped(<reason>)` を許容するのは、ユーザーが `AskUserQuestion` 等で明示的に "Skip — proceed to PR" を選択した場合のみ。エージェントが「自動テスト全 PASS だから skip 妥当」と判断して skip するのは禁止。
-- 「進めて」「OK」等の承認指示は、**既に verification 結果を持つ作業**を完了まで進める指示であり、verification 自体の skip 承認ではない。verification 動線がブロックされている時に「進めて」と言われた場合は、ブロッカー解消の作業を進める指示として解釈する。
-- 万が一誤って PR を作成してしまった場合、即座に PR タイトルへ `[DO NOT MERGE — user verification pending]` を付与し、ブロック comment を投稿してマージを物理的に阻止する。verification が `confirmed` になってからタイトルを戻す。
-- 視覚検証の動線がブロックされている場合、ブロッカーそのものが作業対象になる。`skipped` に倒して PR を作るのは、ブロッカーを解消しないまま完了を主張することと同じ。
+- 配信ゲートは fresh な自動検証と必須 CI、UI 変更時の実 headed E2E とする。`Agent Visual Check: pass` と dark / light 両テーマの実測 PASS、console / page error ゼロ、変更した機能の assertion を確認する。人間の未確認を理由に Draft を作成・維持しない。
+- **自動実行時の扱い:** `execution.status` の `launch_route` が `autonomous` なら、ユーザーへ視覚確認を依頼せず、URL も出さない。`User Verification Result: n/a (autonomous)` と独立した `Agent Visual Check` を記録し、自動検証と他の Ready PR Gate 条件を満たしたら Ready PR 作成から CI 自動マージまで進める。agent 自身の確認を人間の `confirmed` と偽らない。
+- 旧 `pending` / `deferred` の記載だけではオーナーによる確認要求と判定しない。既存の `deferred (autonomous execution)` 本文は書き換えずに扱える。別 session の既存 Draft は PM が対象 head の検証・CI を確認して `pr.ready` で復旧する。
+- オーナーが明示的に視覚確認を求めた場合は、その要求に対応する結果を記録する。確認用の起動や画面操作が壊れていれば原因を解消し、ユーザーが確認できる状態を作る。明示要求を agent の独断で `skipped(<reason>)` に倒さない。
+- ユーザーから実際の不具合や拒否理由が示された場合は内容を保存して修正し、再検証する。結果欄が任意であることを、既知の不具合や失敗テストを放置する理由にしない。
 
 ### コミットメッセージポリシー
 

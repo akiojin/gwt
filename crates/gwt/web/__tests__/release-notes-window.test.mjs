@@ -7,18 +7,20 @@ import { createReleaseNotesWindow } from "../release-notes-window.js";
 
 function makeFixture({ entries = sampleEntries(), focusVersion = null,
   scheduleFrame = callback => { callback(); return () => {}; },
+  sendReceipt,
 } = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><button id="trigger">Version</button></body></html>',
   );
   const sent = [];
-  const send = (msg) => sent.push(msg);
+  const send = (msg) => { sent.push(msg); return sendReceipt; };
+  let requestSequence = 0;
   const downloadingCalls = [];
   const beginUpdateDownloading = (version) => downloadingCalls.push(version);
   const controller = createReleaseNotesWindow({
     document,
     send,
-    generateId: () => "rn-test-1",
+    generateId: () => `rn-test-${++requestSequence}`,
     beginUpdateDownloading,
     scheduleFrame,
   });
@@ -78,19 +80,63 @@ function sampleEntries() {
   ];
 }
 
-test("open() sends open_release_notes with id and focus_version", () => {
-  const { controller, sent } = makeFixture();
+test("open() sends open_release_notes with id and focus_version", t => {
+  const { document, controller, sent, entries } = makeFixture();
+  Object.defineProperty(document, "activeElement", { configurable: true, writable: true,
+    value: document.getElementById("trigger") });
   controller.open("9.37.0");
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "open_release_notes");
   assert.equal(sent[0].id, "rn-test-1");
   assert.equal(sent[0].focus_version, "9.37.0");
+  const focusReturn = controller._state.focusReturn;
+  document.activeElement = document.body;
+  controller.reconnect();
+  assert.deepEqual(sent[1], { kind: "open_release_notes", id: "rn-test-2", focus_version: "9.37.0" });
+  controller.handlePayload({ id: "rn-test-1", entries });
+  controller.handleError("old error", "rn-test-1");
+  assert.equal(controller.isOpen(), false, "old responses cannot settle the replacement read");
+  controller.handlePayload({ id: "rn-test-2", entries });
+  assert.equal(controller.selectedVersion(), "9.37.0");
+  assert.equal(controller._state.focusReturn, focusReturn);
+  controller.reconnect();
+  assert.equal(sent.length, 2, "completed reads never retry");
+  controller.openAbout("9.38.0");
+  controller.reconnect();
+  controller.handlePayload({ id: "rn-test-4", entries });
+  assert.equal(controller._state.root.getAttribute("aria-label"), "About GWT");
+  controller.open();
+  controller.close();
+  controller.reconnect();
+  controller.handlePayload({ id: "rn-test-5", entries });
+  controller.handleError("cancelled error", "rn-test-5");
+  assert.equal(sent.length, 5);
+  assert.equal(controller.isOpen(), false, "late responses cannot reopen a cancelled read");
+  t.mock.method(Date, "now", () => 42);
+  const defaultIds = [];
+  const defaults = createReleaseNotesWindow({ document, send: message => defaultIds.push(message.id),
+    scheduleFrame: callback => { callback(); return () => {}; } });
+  defaults.open();
+  defaults.reconnect();
+  assert.notEqual(defaultIds[0], defaultIds[1], "replacement IDs must differ within the same millisecond");
+  defaults.handlePayload({ id: defaultIds[0], entries });
+  assert.equal(defaults.isOpen(), false);
 });
 
 test("open() with null focus_version sends null, not undefined", () => {
-  const { controller, sent } = makeFixture();
+  const { controller, sent } = makeFixture({ sendReceipt: "queued" });
   controller.open(null);
   assert.equal(sent[0].focus_version, null);
+  controller.reconnect();
+  controller.reconnect("another-request");
+  assert.equal(sent.length, 1, "only a matching queue replay can promote this read");
+  controller.reconnect("rn-test-1");
+  assert.equal(sent.length, 1, "the existing queue sends an offline-first read once");
+  controller.reconnect();
+  assert.equal(sent.length, 2, "a later disconnect replaces the now-sent read");
+  controller.handleError("current error", "rn-test-2");
+  controller.reconnect();
+  assert.equal(sent.length, 2, "a received error completes the read");
 });
 
 test("openAbout() requests release notes and renders About GWT chrome", () => {

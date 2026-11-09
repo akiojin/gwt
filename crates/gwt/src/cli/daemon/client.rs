@@ -26,6 +26,7 @@
 
 use gwt_core::daemon::{
     validate_handshake, DaemonEndpoint, IpcHandshakeRequest, IpcHandshakeResponse,
+    DAEMON_PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -44,6 +45,12 @@ impl DaemonClient {
     /// Connect to the daemon at `endpoint.bind` and complete the
     /// handshake. The returned client is ready for [`Self::send_frame`].
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self, String> {
+        if endpoint.protocol_version != DAEMON_PROTOCOL_VERSION {
+            return Err(format!(
+                "incompatible daemon protocol: actual={}, expected={DAEMON_PROTOCOL_VERSION}; use a compatible gwtd build before retrying",
+                endpoint.protocol_version
+            ));
+        }
         let stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(|err| {
@@ -61,7 +68,7 @@ impl DaemonClient {
         let mut reader = BufReader::new(read_half);
 
         let request = IpcHandshakeRequest {
-            protocol_version: endpoint.protocol_version,
+            protocol_version: DAEMON_PROTOCOL_VERSION,
             auth_token: endpoint.auth_token.clone(),
             scope: endpoint.scope.clone(),
         };
@@ -166,6 +173,28 @@ mod tests {
             token.to_string(),
             "test-daemon".to_string(),
         )
+    }
+
+    #[tokio::test]
+    async fn issue_4193_client_rejects_incompatible_endpoints_before_connecting() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut endpoint = sample_endpoint(
+            sample_scope(&temp),
+            &temp.path().join("absent.sock"),
+            "token",
+        );
+        for actual in [DAEMON_PROTOCOL_VERSION - 1, DAEMON_PROTOCOL_VERSION + 1] {
+            endpoint.protocol_version = actual;
+            let error = DaemonClient::connect(&endpoint)
+                .await
+                .err()
+                .expect("incompatible endpoints must be rejected before connecting");
+            assert!(error.contains(&format!("actual={actual}")), "{error}");
+            assert!(
+                error.contains(&format!("expected={DAEMON_PROTOCOL_VERSION}")),
+                "{error}"
+            );
+        }
     }
 
     #[tokio::test]

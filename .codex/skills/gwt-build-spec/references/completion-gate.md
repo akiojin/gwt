@@ -41,9 +41,9 @@ evidence bundle. The sub-skill is project-agnostic: it autodetects the host
 project's test runners from manifests (Cargo.toml / package.json /
 pyproject.toml / go.mod / ProjectSettings / *.sln / etc.), runs the
 appropriate unit / integration / E2E / visual tests for each changed
-surface, emits a Test Inventory naming the executed tests, and hands off
-to the user with a 4-step 導線 + Check Items before finalizing the
-report. The matrix is determined by what actually changed and the
+surface, emits a Test Inventory naming the executed tests, and provides a
+4-step 導線 + Check Items only when the owner explicitly requests a human
+handoff before finalizing the report. The matrix is determined by what actually changed and the
 runners the project ships, not by a hard-coded cargo / pnpm / Playwright
 recipe. Project-local AGENTS.md / README instructions always take
 precedence over the generic matrix.
@@ -52,17 +52,18 @@ The gate **fails** when any of:
 
 - `gwt-verify` returns `Overall: FAIL`
 - `failed: tooling-missing` is recorded
-- `User Verification Result` is `pending` (handoff never completed) or
-  `rejected(<reason>)` (user declined). The user's reason is preserved
-  in the evidence bundle; route the failure for repair per the
-  failure-handling section below. Neither `n/a (autonomous)` nor
-  `deferred (autonomous execution)` is `pending`: an unattended gwt Issue
-  Monitor launch records `n/a (autonomous)` and waives the human handoff.
-  UI work requires `Agent Visual Check: pass` and measured passing headed
-  Chromium dark/light results in the same fresh `verify.run` record, selected
-  with `params.headed_e2e_commands`. The legacy deferred value on existing
-  autonomous PRs remains compatible without rewriting the body or obtaining
-  human confirmation. Manual verification stays unchanged.
+- an explicitly requested human handoff is still `pending`
+- `User Verification Result` records an actual `rejected(<reason>)`; preserve
+  the reason and repair the known blocker
+
+User Verification Result is optional unless the owner explicitly requests
+human confirmation. Missing, pending, or legacy deferred fields alone do not
+establish that request. An unattended Issue Monitor launch records
+`n/a (autonomous)`. UI work requires `Agent Visual Check: pass` and measured
+passing headed Chromium dark/light results in the same fresh `verify.run`
+record, selected with `params.headed_e2e_commands`. The legacy
+`deferred (autonomous execution)` value remains compatible without rewriting
+an existing autonomous PR body or obtaining human confirmation.
 
 After verification and all other Ready Gate conditions pass, autonomous work
 continues through a Ready PR and the existing CI auto-merge path until merged.

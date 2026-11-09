@@ -78,6 +78,7 @@ root_js_modules! {
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-confirm-modal.js" => "createCloseProjectController",
+    "project-execution-policy-model.js" => "createProjectExecutionPolicyModel",
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
@@ -88,6 +89,7 @@ root_js_modules! {
     "project-clone-modal.js" => "renderProjectCloneModal",
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
+    "agent-activity-model.js" => "createAgentActivityModel",
     "issue-other-surface.js" => "createIssueOtherSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
@@ -103,6 +105,7 @@ root_js_modules! {
     "recovery-center-modal.js" => "createRecoveryCenterController",
     // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
     "index-settings-panel.js" => "renderIndexSettingsPanel",
+    "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
@@ -201,7 +204,7 @@ root_js_modules! {
     "profile-window-surface.js" => "createProfileWindowSurface",
     // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
     // (project tabs + close-tab confirm, recent projects + open-project
-    // menu, picker/onboarding, window list dropdown, maximized viewport
+    // menu, picker/onboarding, maximized viewport
     // sync, clone/migration modal glue) extracted from app.js.
     "project-shell-surface.js" => "createProjectShellSurface",
     // Issue #4777 T-1 — the rail picks Issues / Agents / Board / Settings and
@@ -210,11 +213,8 @@ root_js_modules! {
     "surface-rail.js" => "installSurfaceRail",
     "split-surfaces.js" => "createSplitSurfaces",
     "agents-surface.js" => "createAgentsSurface",
+    "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",
-    // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
-    // cross-tab open-window set by owning project tab so the list matches the
-    // badge and supports cross-tab focus.
-    "window-list-model.js" => "groupProjectWindowList",
 }
 
 /// Embedded payload of a [`StaticAsset`].
@@ -315,6 +315,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: CSS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/styles/components.css")),
+    },
+    StaticAsset {
+        route: "/styles/works-agents.css",
+        content_type: CSS_CONTENT_TYPE,
+        cache_control: Some(MUTABLE_CACHE_CONTROL),
+        body: AssetBody::Text(include_str!("../web/styles/works-agents.css")),
     },
     // Issue #2694 Phase D — extracted from the formerly-inline index.html
     // <style> block (~91KB) so initial HTML parse stays fast.

@@ -7498,9 +7498,9 @@ mod tests {
             &coordination_root,
             &[CoordinationEvent::MessageAppended { entry }],
         );
-        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
-        );
+        let now = std::time::Instant::now();
+        let _clock = crate::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(now);
 
         let error = load_prompt_reminder(
             dir.path(),

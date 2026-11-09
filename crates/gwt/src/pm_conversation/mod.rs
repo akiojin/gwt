@@ -548,7 +548,7 @@ fn scan_records(
 pub(crate) fn internal_prompt(text: &str) -> bool {
     use crate::pm_registry::{
         PM_AGENT_IDLE_WAKE_PREFIX, PM_CYCLE_REPORTING_CLAUSE, PM_ESCALATION_PROMPT_PREFIX,
-        PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_STEERING_WAKE_CLAUSE,
+        PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_PERIODIC_WAKE_INSTRUCTION, PM_STEERING_WAKE_CLAUSE,
     };
     let text = text.trim();
     // Provider task completion is delivered as a user-role message, but is
@@ -601,7 +601,8 @@ pub(crate) fn internal_prompt(text: &str) -> bool {
         return true;
     }
     if let Some(body) = text.strip_suffix(&suffix) {
-        if body == "[gwt] Scheduled supervision tick: reconcile now — read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close)." { return true; }
+        // Keep the exact historical form readable without broadening human matching.
+        if body == PM_PERIODIC_WAKE_INSTRUCTION || body == "[gwt] Scheduled supervision tick: reconcile now — read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close)." { return true; }
         if let Some(reasons) = body.strip_prefix("[gwt] Monitor activity while the PM was idle (")
             .and_then(|body| body.strip_suffix("). Reconcile now: fresh `issue.monitor.status`, triage new items, inventory PRs with `pr.list` (stale/SUPERSEDED/owner-closed rows: digest, never auto-close).")) {
             return !reasons.is_empty() && !reasons.contains(['\r', '\n']);

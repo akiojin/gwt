@@ -32,6 +32,9 @@ pub struct AcceptanceCriteria {
     /// the block (Issue #3930 AC-5) unless the block already carries explicit
     /// ids, in which case only those count.
     pub ids: Vec<String>,
+    /// Accepted criterion text paired with its stable id. Checkbox state is
+    /// excluded so completion updates do not appear as criteria drift.
+    pub criterion_texts: Vec<(String, String)>,
     /// True only when a well-formed acceptance-criteria block with at least one
     /// criterion is present. Absence / malformation ⇒ `false` ⇒ the Issue is
     /// ineligible for autonomous resolution (routes to `NeedsHuman`).
@@ -41,8 +44,8 @@ pub struct AcceptanceCriteria {
     pub visual_surface: bool,
     /// Criterion ids whose checklist box is not `[x]` (Issue #3917 AC-2).
     /// Unnumbered unchecked items in an explicitly numbered block retain their text.
-    /// Kept beside `ids` on purpose: [`AcceptanceSnapshot`] compares the id
-    /// set only, so ticking a box is completion evidence, never drift.
+    /// Kept separate from criterion identity: ticking a box is completion
+    /// evidence, never drift in [`AcceptanceSnapshot`].
     pub unchecked: Vec<String>,
     /// `Some` exactly when `machine_checkable` is false: what is missing.
     pub defect: Option<AcceptanceDefect>,
@@ -74,11 +77,11 @@ impl AcceptanceCriteria {
     }
 
     /// Capture the launch-time snapshot used to detect post-launch drift
-    /// (SPEC #3200 T-018 / FR-014). Only the stable id set and the
-    /// visual-surface flag are retained — these are the gate-relevant facts.
+    /// (SPEC #3200 T-018 / FR-014). Criterion identity excludes checkbox state.
     pub fn snapshot(&self) -> AcceptanceSnapshot {
         AcceptanceSnapshot {
             ids: self.ids.clone(),
+            criterion_texts: Some(self.criterion_texts.clone()),
             visual_surface: self.visual_surface,
         }
     }
@@ -92,14 +95,18 @@ impl AcceptanceCriteria {
 pub struct AcceptanceSnapshot {
     /// Stable criterion ids present at launch.
     pub ids: Vec<String>,
+    /// Criterion text paired with each stable id at launch. Older persisted
+    /// snapshots lack text and must be refreshed before they can match.
+    #[serde(default)]
+    pub criterion_texts: Option<Vec<(String, String)>>,
     /// Whether any criterion targeted a visual surface at launch.
     pub visual_surface: bool,
 }
 
 impl AcceptanceSnapshot {
     /// Fail-closed equality: the current criteria match the snapshot iff they
-    /// carry the exact same id set (order-independent) AND the same
-    /// visual-surface flag. Any divergence ⇒ `false` ⇒ the gate must not pass.
+    /// carry the same ids and text (order-independent), with a known text
+    /// snapshot and the same visual-surface flag. Checkbox state is ignored.
     pub fn matches(&self, current: &AcceptanceCriteria) -> bool {
         if self.visual_surface != current.visual_surface {
             return false;
@@ -109,6 +116,15 @@ impl AcceptanceSnapshot {
         }
         let mut want = self.ids.clone();
         let mut have = current.ids.clone();
+        want.sort();
+        have.sort();
+        if want != have {
+            return false;
+        }
+        let Some(mut want) = self.criterion_texts.clone() else {
+            return false;
+        };
+        let mut have = current.criterion_texts.clone();
         want.sort();
         have.sort();
         want == have
@@ -247,6 +263,10 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
             })
         })
         .collect();
+    let criterion_texts = accepted
+        .iter()
+        .map(|(id, _, text)| (id.clone(), text.trim().to_string()))
+        .collect();
     let ids: Vec<String> = accepted.into_iter().map(|(id, _, _)| id).collect();
     let defect = if !ids.is_empty() {
         None
@@ -259,6 +279,7 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     AcceptanceCriteria {
         machine_checkable: !ids.is_empty(),
         ids,
+        criterion_texts,
         visual_surface,
         unchecked,
         defect,
@@ -765,6 +786,13 @@ mod tests {
         let body = "## Acceptance Criteria\n- [ ] AC-1: x\n- [ ] AC-2: y (visual)\n";
         let snapshot = classify_acceptance_criteria(body).snapshot();
         assert_eq!(snapshot.ids, vec!["AC-1", "AC-2"]);
+        assert_eq!(
+            snapshot.criterion_texts,
+            Some(vec![
+                ("AC-1".to_string(), "x".to_string()),
+                ("AC-2".to_string(), "y (visual)".to_string()),
+            ])
+        );
         assert!(snapshot.visual_surface);
     }
 
@@ -774,6 +802,10 @@ mod tests {
         let snapshot = classify_acceptance_criteria(body).snapshot();
         // Re-classifying the same body yields criteria the snapshot accepts.
         assert!(snapshot.matches(&classify_acceptance_criteria(body)));
+        assert!(
+            snapshot.matches(&classify_acceptance_criteria(&body.replace("[ ]", "[x]"))),
+            "checking criteria must not change their identity"
+        );
     }
 
     #[test]
@@ -790,6 +822,9 @@ mod tests {
         let removed =
             classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-9: different\n");
         assert!(!at_launch.matches(&removed), "changed id must not match");
+        let edited =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: different\n");
+        assert!(!at_launch.matches(&edited), "changed text must not match");
         let visual =
             classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x (visual)\n");
         assert!(
@@ -808,6 +843,22 @@ mod tests {
         let b =
             classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-2: y\n- [ ] AC-1: x\n");
         assert!(a.matches(&b), "id set equality is order-independent");
+    }
+
+    #[test]
+    fn legacy_snapshot_requires_fresh_criteria() {
+        let current = classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x\n");
+        let legacy: AcceptanceSnapshot =
+            serde_json::from_str(r#"{"ids":["AC-1"],"visual_surface":false}"#).unwrap();
+        assert!(
+            !legacy.matches(&current),
+            "unknown legacy text must not authorize matching current criteria"
+        );
+
+        let fresh = current.snapshot();
+        let roundtrip: AcceptanceSnapshot =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert!(roundtrip.matches(&current), "a fresh snapshot must recover");
     }
 
     mod gate {

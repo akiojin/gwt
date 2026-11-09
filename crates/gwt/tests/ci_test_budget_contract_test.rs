@@ -22,6 +22,35 @@ use std::path::PathBuf;
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 
 #[test]
+fn macos_socket_targets_compile_before_the_execution_budget() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/build.yml")).unwrap();
+    let steps = workflow["jobs"]["check-macos"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let execution = steps
+        .iter()
+        .position(|step| step["run"] == "bash scripts/test-short-socket-fixtures.sh")
+        .unwrap();
+    assert_eq!(steps[execution]["timeout-minutes"].as_u64(), Some(15));
+    let preparation = steps[..execution]
+        .iter()
+        .find(|step| step["name"] == "Check macOS compilation")
+        .unwrap();
+    assert!(preparation["if"].is_null() && preparation["continue-on-error"].is_null());
+    let commands = preparation["run"].as_str().unwrap();
+    for command in [
+        "cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
+        "cargo test -p gwt --lib --test runtime_tests --no-run",
+    ] {
+        assert!(
+            commands.lines().any(|line| line.trim() == command),
+            "prepare every socket fixture target before the execution budget: {command}"
+        );
+    }
+}
+
+#[test]
 fn real_model_step_only_runs_index_runner_ignored_tests() {
     let workflow = read(TEST_WORKFLOW);
     let steps = named_steps(&workflow);
@@ -37,6 +66,56 @@ fn real_model_step_only_runs_index_runner_ignored_tests() {
         command, "cargo test -p gwt-core --test index_runner_spawn -- --ignored",
         "Do not run watcher_native or baseline regeneration in the model job"
     );
+}
+
+#[test]
+fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
+    let workflow = read(TEST_WORKFLOW);
+    let steps = named_steps(&workflow);
+    let (_, body) = steps
+        .iter()
+        .find(|(name, _)| name == "Bootstrap gwt runtime assets")
+        .expect("real model bootstrap must exist");
+    let cpu_install = body
+        .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
+        .expect("CPU runner must select CPU torch instead of downloading the CUDA stack");
+    let runtime_install = body
+        .find(
+            "pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt",
+        )
+        .expect("keep shared runtime requirements without caching disposable wheels");
+    assert!(cpu_install < runtime_install);
+    assert!(body.contains("pip check"));
+
+    // Cargo tests reject the runner's real HOME and resolve content-addressed assets.
+    assert!(body.contains("mktemp -d /tmp/gwt-e5-home.XXXXXX"));
+    for asset in ["chroma_index_runner.py", "project_index_requirements.txt"] {
+        assert!(body.contains(&format!("sha256sum crates/gwt-core/runtime/{asset}")));
+    }
+    assert!(body.contains("cut -c1-16"));
+    assert!(body.contains("runners/chroma_index_runner-${runner_hash}.py"));
+    assert!(body.contains("venvs/chroma-venv-${requirements_hash}"));
+    assert!(body.contains("cp crates/gwt-core/runtime/index_path_policy.json"));
+
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let job = &workflow["jobs"]["test-index-e2e"];
+    assert_eq!(job["name"], "Test (e5 e2e, optional)");
+    let run = job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Run ignored e2e tests with real e5 model")
+        .unwrap();
+    assert_eq!(run["timeout-minutes"].as_u64(), Some(30));
+    for key in ["HOME", "USERPROFILE"] {
+        assert_eq!(run["env"][key], "${{ steps.runtime.outputs.home }}");
+    }
+    assert_eq!(run["env"]["GWT_INDEX_FAKE_EMBEDDING"], "0");
+    for key in ["CARGO_HOME", "RUSTUP_HOME", "HF_HOME"] {
+        assert!(run["env"][key]
+            .as_str()
+            .is_some_and(|value| value.starts_with("${{ steps.runtime.outputs.")));
+    }
 }
 
 const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";
@@ -377,6 +456,15 @@ fn nightly_windows_index_e2e_runs_real_scopes_and_background_contention() {
         let run = job.find(&command).unwrap_or_else(|| panic!("missing {test}"));
         assert!(build < run, "compile before running {test}");
     }
+    let steps = named_steps(job);
+    let (_, benchmark) = steps
+        .iter()
+        .find(|(name, _)| name == "Measure alternating scope searches with real E5")
+        .expect("Windows must run the existing alternating-scope 2s benchmark");
+    assert!(benchmark.contains("GWT_INDEX_REAL_SEARCH_BENCHMARK: \"1\""));
+    assert!(benchmark.contains("HF_HUB_CACHE: ${{ env.HF_HOME }}/hub"));
+    assert!(benchmark.contains("working-directory: crates/gwt-core/runtime"));
+    assert!(benchmark.contains("run: python -m unittest discover -s tests -p test_search_multi_contract.py -k test_cli_searches_reuse_worker_and_reopen_published_store -v"));
     let reporter = job_body(&nightly, "  report-nightly-failure:");
     let needs = reporter
         .lines()
@@ -530,18 +618,64 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         let exact_run = exact["run"].as_str().unwrap();
         assert!(exact_run.contains("\"$@\" | tee \"$RUNNER_TEMP/t453-exact.log\""));
         assert!(exact_run.contains("grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;'"));
+        let expected_exact_cases = if lib { 7 } else { 8 };
         assert_eq!(
             exact_run
                 .matches("exact node scripts/ci-windows-tests.mjs")
                 .count(),
-            7
+            expected_exact_cases
         );
         assert_eq!(
             exact_run
                 .matches(" -- --exact --test-threads=1 --nocapture")
                 .count(),
-            7
+            expected_exact_cases
         );
+        if lib {
+            let feedback = &steps[build + 2];
+            assert_eq!(
+                feedback["name"].as_str(),
+                Some("Run Windows feedback ownership and bootstrap contracts"),
+                "the exact-head library slice must execute the new feedback tests"
+            );
+            assert_eq!(feedback["shell"].as_str(), Some("bash"));
+            assert!(feedback["if"].is_null());
+            assert!(feedback["continue-on-error"].is_null());
+            let feedback_run = feedback["run"].as_str().unwrap();
+            assert!(feedback_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\""));
+            assert!(feedback_run.contains("grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/feedback-ownership.log\""));
+            assert_eq!(
+                steps[build + 3]["name"].as_str(),
+                Some("Run native fleet orphan process handle contracts"),
+                "feedback must run after T453 exact cases and before fleet regressions"
+            );
+            let fleet = steps
+                .iter()
+                .find(|step| {
+                    step["name"].as_str()
+                        == Some("Run native fleet orphan process handle contracts")
+                })
+                .expect("Windows must execute both fleet process handle contracts");
+            assert!(
+                fleet["run"]
+                    .as_str()
+                    .unwrap()
+                    .contains("grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;'"),
+                "the native handle filter must not pass with zero matches"
+            );
+            let issuer = &steps[build + 4];
+            assert_eq!(
+                issuer["name"].as_str(),
+                Some("Run Windows diagnostic issuer contracts")
+            );
+            assert_eq!(issuer["shell"].as_str(), Some("bash"));
+            assert_eq!(issuer["timeout-minutes"].as_u64(), Some(5));
+            assert!(issuer["if"].is_null());
+            assert!(issuer["continue-on-error"].is_null());
+            let issuer_run = issuer["run"].as_str().unwrap();
+            assert!(issuer_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/diagnostic-issuer.log\""));
+            assert!(issuer_run.contains("grep -Fq 'test result: ok. 7 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/diagnostic-issuer.log\""));
+        }
         for (index, step) in steps.iter().enumerate() {
             if step["uses"].as_str() == Some("Swatinem/rust-cache@v2") {
                 assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
@@ -631,6 +765,9 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     // Issue #5565 split the original 49 default filters across both hosts.
     // Issue #5560 adds the FIFO regression; warm keeps its separate filter above.
     let mut expected_filters = vec![
+        "gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\"",
+        "gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture",
+        "gwt lib gwt cli::actions::diagnostic::tests:: -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/diagnostic-issuer.log\"",
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
         "gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1",
@@ -646,6 +783,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1",
         "gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1",
         "gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1",
+        "gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1",
         "gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1",
         "gwt-terminal test pty_start_gate_test -- --test-threads=1",
         "gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1",
@@ -653,6 +791,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1",
         "gwt bin gwt app_runtime_local_driver_ -- --test-threads=1",
         "gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1",
+        "gwt bin gwt app_runtime::tests::issue_monitor_handoff_tests::issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor -- --exact --test-threads=1",
         "gwt lib gwt local_fallback_lease -- --test-threads=1",
         "gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1",
         "gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
@@ -695,8 +834,9 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test hook_contracts hook_health_test::managed_hook_health_understands_all_provider_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
+        "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 64);
+    assert_eq!(expected_filters.len(), 70);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);
@@ -765,6 +905,76 @@ fn nightly_determinism_failures_have_an_explicit_notification_target() {
         nightly.contains("issues: write"),
         "the failure reporter needs the permission it uses"
     );
+}
+
+#[test]
+fn nightly_auto_feedback_auth_probe_is_read_only_and_token_scoped() {
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(NIGHTLY_WORKFLOW)).unwrap();
+    let job = &workflow["jobs"]["test-windows-default-parallel"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let build_at = steps
+        .iter()
+        .position(|s| s["id"] == "auto_feedback_auth_probe_build")
+        .expect("token-free probe build must exist");
+    let probe_at = steps
+        .iter()
+        .position(|s| s["id"] == "auto_feedback_auth_probe")
+        .expect("dedicated read-only probe must exist");
+    let loop_at = steps
+        .iter()
+        .position(|s| s["name"] == "Prove default-parallel Rust suites are stable")
+        .unwrap();
+    assert!(build_at < probe_at && probe_at < loop_at);
+    let build = &steps[build_at];
+    let probe = &steps[probe_at];
+    for step in [build, probe] {
+        let condition = step["if"].as_str().unwrap();
+        assert!(condition.contains("github.event_name == 'schedule'"));
+        assert!(condition.contains("github.repository == 'akiojin/gwt'"));
+        assert_eq!(step["continue-on-error"].as_bool(), Some(true));
+    }
+    assert!(probe["if"]
+        .as_str()
+        .unwrap()
+        .contains("steps.auto_feedback_auth_probe_build.outcome == 'success'"));
+    assert_eq!(
+        build["run"].as_str(),
+        Some("cargo build -p gwt-github --example auto_feedback_auth_probe")
+    );
+    assert_eq!(build["timeout-minutes"].as_u64(), Some(15));
+    assert_eq!(probe["timeout-minutes"].as_u64(), Some(2));
+    for scope in [&workflow, job] {
+        assert!(scope["env"]["GH_TOKEN"].is_null());
+        assert!(scope["env"]["GITHUB_TOKEN"].is_null());
+    }
+    for (index, step) in steps
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != probe_at)
+    {
+        assert!(
+            step["env"]["GH_TOKEN"].is_null(),
+            "step {index} inherits the probe token"
+        );
+        assert!(
+            step["env"]["GITHUB_TOKEN"].is_null(),
+            "step {index} inherits the probe token"
+        );
+    }
+    assert_eq!(probe["env"].as_mapping().unwrap().len(), 1);
+    assert_eq!(
+        probe["env"]["GH_TOKEN"].as_str(),
+        Some("${{ github.token }}")
+    );
+    let run = probe["run"].as_str().unwrap();
+    assert!(run.contains(r".\target\debug\examples\auto_feedback_auth_probe.exe"));
+    assert!(
+        run.contains("2>$null") && run.contains("$LASTEXITCODE") && run.contains("-ceq 'true'")
+    );
+    assert!(
+        run.contains("$env:HOME = $probeHome") && run.contains("$env:USERPROFILE = $probeHome")
+    );
+    assert!(!run.contains("cargo ") && !run.contains("GITHUB_ENV"));
 }
 
 /// Issue #4134 AC-2: four matrix shards each paid a 279s cold build to run

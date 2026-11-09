@@ -1,5 +1,327 @@
 use super::*;
 
+fn board_notice_owner_fixture(
+    temp: &tempfile::TempDir,
+    agent_id: &str,
+) -> (
+    PathBuf,
+    AppRuntime,
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    use gwt::project_runtime::events::OwnerCommand;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "other-window",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let target = "tab-1::other-window";
+    let owner = project_owner_fixture(&mut runtime, target);
+    configure_owner_fixture_start_gate(&owner);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(if agent_id == "codex" {
+        gwt_agent::AgentId::Codex
+    } else {
+        gwt_agent::AgentId::Custom(agent_id.into())
+    })
+    .working_dir(&repo)
+    .build();
+    config.suppress_execution_control = true;
+    let (command, args) = if agent_id == "codex" {
+        let runner = write_fake_agent_command(temp.path(), "codex");
+        write_executable_test_file(
+            &runner,
+            if cfg!(windows) {
+                "@echo off\r\nif \"%1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\npowershell -NoProfile -Command \"while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }\"\r\n"
+            } else {
+                "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; printf 'GWT_BOARD_FIXTURE_READY\\n'; exec cat\n"
+            },
+        );
+        (runner.display().to_string(), Vec::new())
+    } else if cfg!(windows) {
+        (
+            "powershell".into(),
+            [
+                "-NoProfile",
+                "-Command",
+                "while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        )
+    } else {
+        (
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                "stty -echo -icanon -isig; printf 'GWT_BOARD_FIXTURE_READY\\n'; exec cat".into(),
+            ],
+        )
+    };
+    config.command = command;
+    config.args = args;
+    let id = owner.pane_id(target);
+    let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
+        id: id.clone(),
+        operation_id: format!("board-fixture-{agent_id}"),
+        tab_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+        config: Box::new(config),
+        metadata: Box::default(),
+        cols: 512,
+        rows: 24,
+    }))
+    .expect("actual Board target Session and physical runtime");
+    let incarnation = receipt["incarnation"].as_u64().unwrap();
+    let probe = owner_fixture_block_on(owner.probe(&id, incarnation)).unwrap();
+    let session = probe.session.as_ref().unwrap();
+    #[cfg(unix)]
+    {
+        // test-hygiene: allow-wall-clock-deadline Bounds real fixture TTY initialization; the output marker establishes readiness.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if probe
+                .pane
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("GWT_BOARD_FIXTURE_READY")
+            {
+                break;
+            }
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Bounds the same actual TTY initialization, not a scheduling assertion.
+                Instant::now() < deadline,
+                "the Board fixture must initialize its TTY before reporting Idle"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let mut idle = runtime_hook_state_for_event("idle", "Stop", &session.id);
+    idle.project_root = Some(repo.display().to_string());
+    idle.branch = Some(session.branch.clone());
+    idle.occurred_at = chrono::Utc::now().to_rfc3339();
+    owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(idle));
+    owner_fixture_block_on(owner.command(OwnerCommand::Health)).unwrap();
+    let snapshot = serde_json::from_value(
+        owner_fixture_block_on(owner.command(OwnerCommand::Snapshot { id, incarnation })).unwrap(),
+    )
+    .unwrap();
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime.install_remote_owner_projection(
+        &context,
+        target,
+        owner.client(),
+        snapshot,
+        Some(session.clone()),
+    );
+    let (queued, _) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = queued;
+    (repo, runtime, owner, probe)
+}
+
+/// Issue #4359 AC-3/AC-4: a persisted decision wakes only its explicitly
+/// mentioned idle Session, through the same durable acknowledgement log as PM
+/// delivery. The notification carries a Board pointer, never the post's body.
+#[test]
+fn issue_4359_board_decision_notifies_mentioned_idle_session_once_with_shared_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for agent_id in ["codex", "opencode"] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, owner, probe) = board_notice_owner_fixture(&temp, agent_id);
+        let target_session = probe.session.as_ref().unwrap().id.clone();
+        let canonical_target = probe.id.clone();
+        assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_ok());
+        let pane = probe.pane.clone();
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            unreachable!()
+        };
+        let tasks = tasks.clone();
+        #[cfg(windows)]
+        probe
+            .pty
+            .write_input(b"\x1b[1;1R")
+            .expect("ConPTY cursor reply");
+
+        let mut env = gwt::cli::TestEnv::new(repo.clone());
+        assert_eq!(
+            gwt::cli::dispatch_json_input(
+                &mut env,
+                "gwtd",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "board.post",
+                    "params": {
+                        "kind": "decision",
+                        "body": "untrusted decision body must stay on the Board",
+                        "mentions": [format!("session:{target_session}")],
+                        "broadcast": true,
+                    },
+                })
+                .to_string(),
+            ),
+            0,
+            "board.post must persist the decision before its notification",
+        );
+        let decision = gwt::board_provider::load_snapshot(&repo)
+            .expect("load posted decision")
+            .board
+            .entries
+            .into_iter()
+            .find(|entry| entry.kind == BoardEntryKind::Decision)
+            .expect("board.post saved its decision");
+        let (refreshed, views) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            Default::default(),
+        );
+        runtime.apply_board_projection_refresh(refreshed);
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+
+        // test-hygiene: allow-wall-clock-deadline Bound the real OS PTY read; only observed notification bytes prove delivery.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (prompt, operation_id, body_sha256) = loop {
+            let plain = pane
+                .lock()
+                .expect("actual owner parser")
+                .screen()
+                .contents();
+            // test-hygiene: allow-wall-clock-deadline Bounds real owner PTY notification delivery, not a scheduling assertion.
+            assert!(
+                Instant::now() < deadline, // test-hygiene: allow-wall-clock-deadline Bounds real owner PTY notification delivery, not a scheduling assertion.
+                "a mentioned idle Session must receive its Board notification: {plain}"
+            );
+            if let Some((prompt, (operation_id, body_sha256))) = plain.lines().find_map(|line| {
+                gwt::pm_registry::parse_protected_pm_delivery_prompt(line)
+                    .map(|identity| (line.to_string(), identity))
+            }) {
+                break (prompt, operation_id, body_sha256);
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
+        assert!(prompt.contains("board.show"), "{prompt}");
+        assert!(prompt.contains(&decision.id[..8]), "{prompt}");
+        assert!(!prompt.contains(&decision.body), "{prompt}");
+        assert!(!prompt.contains(['\r', '\n']), "{prompt}");
+        let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        let prepared =
+            gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                .expect("read shared receipt log")
+                .expect("notification must prepare its receipt before writing");
+        assert_eq!(prepared.target_window_id, canonical_target);
+        assert_eq!(prepared.target_session_id, target_session);
+        assert_eq!(prepared.body_sha256, body_sha256);
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &target_session);
+            gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+                &repo,
+                &serde_json::json!({"prompt": prompt}).to_string(),
+            );
+        }
+        assert_eq!(
+            gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        );
+        let receipt_count = gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .unwrap()
+            .len();
+        let (duplicate, _) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        runtime.apply_board_projection_refresh(duplicate);
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+        assert_eq!(
+            gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+                .unwrap()
+                .len(),
+            receipt_count,
+            "a repeated watcher event must not create another delivery",
+        );
+    }
+}
+
+#[test]
+fn issue_4359_board_notification_excludes_unmentioned_posts_status_and_busy_sessions() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, owner, probe) = board_notice_owner_fixture(&temp, "codex");
+    let target_session = probe.session.as_ref().unwrap().id.clone();
+    assert!(probe.writer.is_some());
+    let mut views = Default::default();
+    for (kind, mentioned, status) in [
+        (BoardEntryKind::Decision, false, WindowProcessStatus::Idle),
+        (BoardEntryKind::Status, true, WindowProcessStatus::Idle),
+        (BoardEntryKind::Decision, true, WindowProcessStatus::Running),
+    ] {
+        let mut hook = runtime_hook_state_for_event(
+            if status == WindowProcessStatus::Idle {
+                "idle"
+            } else {
+                "running"
+            },
+            "TestStatus",
+            &target_session,
+        );
+        hook.project_root = Some(repo.display().to_string());
+        owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(hook));
+        owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
+            .unwrap();
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            kind,
+            "ordinary Board post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        if mentioned {
+            entry.mentions = vec![BoardMention::new(
+                BoardMentionTargetKind::Session,
+                target_session.clone(),
+            )];
+        }
+        post_entry(&repo, entry).expect("persist excluded post");
+        let (refreshed, retained) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        views = retained;
+        runtime.apply_board_projection_refresh(refreshed);
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            panic!("notification fixture must queue its workers");
+        };
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+    }
+    assert!(gwt::pm_registry::load_pm_delivery_receipts(
+        &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+    )
+    .unwrap()
+    .is_empty());
+}
+
 #[test]
 fn board_refresh_sends_only_changed_entries_and_suppresses_duplicate_notifications() {
     let temp = tempdir().unwrap();
@@ -449,14 +771,8 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let board_raw_id = tab
-        .workspace
-        .add_window(WindowPreset::Board, canvas_bounds())
-        .id;
-    let agent_raw_id = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds())
-        .id;
+    let board_raw_id = tab.workspace.add_window(WindowPreset::Board).id;
+    let agent_raw_id = tab.workspace.add_window(WindowPreset::Agent).id;
     let board_window_id = combined_window_id("tab-1", &board_raw_id);
     let agent_window_id = combined_window_id("tab-1", &agent_raw_id);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -480,7 +796,6 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
         FrontendEvent::OpenBoardOriginAgent {
             id: board_window_id,
             origin_session_id: "session-origin".to_string(),
-            bounds: Some(canvas_bounds()),
         },
     );
 
@@ -494,7 +809,7 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            event: BackendEvent::WindowCanvasState { .. },
+            event: BackendEvent::WorkspaceState { .. },
             ..
         }
     )));
@@ -599,7 +914,6 @@ fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
         FrontendEvent::OpenBoardOriginAgent {
             id: board_window_id.clone(),
             origin_session_id: "missing-session".to_string(),
-            bounds: Some(canvas_bounds()),
         },
     );
 
@@ -682,7 +996,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
         title: "Repo".to_string(),
         project_root: repo,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -802,7 +1116,7 @@ fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::HoldExcluded);
+    let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::SourceExcluded);
     held.exclusion_reason = Some("Excluded by label: hold".to_string());
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.terminal_queue_push(&[42, 43], "operator", "2026-07-28T00:00:00Z");
@@ -861,7 +1175,7 @@ fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
             entry(44).exclusion_reason.as_deref(),
         ),
         (
-            Some(gwt::MonitorInboxState::HoldExcluded),
+            Some(gwt::MonitorInboxState::SourceExcluded),
             None,
             Some("Excluded by label: hold"),
         ),
@@ -916,7 +1230,7 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
         title: "Repo".to_string(),
         project_root: repo,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1035,8 +1349,7 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
 
     let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
@@ -1241,8 +1554,7 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
 
     let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
@@ -1385,8 +1697,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work event");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
     }
     let mut empty_agent_event = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
@@ -1407,7 +1718,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, empty_agent_event)
+    record_legacy_workspace_work_event_for_test(&repo, empty_agent_event)
         .expect("record empty agent work event");
 
     let immediate = runtime.load_knowledge_bridge_events(
@@ -1530,7 +1841,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, issue_event)
+    record_legacy_workspace_work_event_for_test(&repo, issue_event)
         .expect("record issue work event");
 
     let ambiguous_id = "legacy-ambiguous-branch-only";
@@ -1564,7 +1875,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        record_legacy_workspace_work_event_for_test(&repo, event)
             .expect("record ambiguous work event");
     }
 

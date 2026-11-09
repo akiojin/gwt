@@ -63,9 +63,13 @@ test.describe("Runtime output batching (live backend)", () => {
           const pane = message?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows).find((pane: any) => pane.id === id);
           return pane?.session_id === session && !["stopped", "error"].includes(pane.status);
         }, { id, session: launched.session_id }), { message: "same live Agent Session remains in the workspace", timeout: 30_000 }).toBe(true);
-        await surfacePage.locator('.op-rail__surface[data-surface="agents"]').click();
-        await expect(surfacePage.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + id + '"] .xterm-rows'))
+        await surfacePage.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await surfacePage.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+          await surfacePage.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+        await expect(surfacePage.locator('.work-row[data-window-id="' + id + '"] .terminal-text-preview'))
           .toBeVisible({ timeout: 30_000 });
+        await expect(surfacePage.locator('.work-row[data-window-id="' + id + '"] .terminal-text-preview'))
+          .toContainText("GWT5379_READY " + index);
         await expect.poll(() => surfacePage.evaluate(id => String((window as any).__gwtTerminalTestApi?.bufferText?.(id) || ""), id),
           { timeout: 60_000 }).toContain("GWT5379_READY " + index);
         await installOutputProbe(surfacePage, id, index);
@@ -135,9 +139,10 @@ test.describe("Runtime output batching (live backend)", () => {
       if (startedAt) timing ??= await nativeTimings(fixture, startedAt, endedAt);
       if (!passed) await page.screenshot({ path: info.outputPath("runtime-output-failure.png") }).catch(() => undefined);
       const dom = await Promise.all(surfaces.map(async surface => ({ pane_id: surface.id,
-        agent_tiles: await surface.page.locator(".agents-surface:not(.agents-surface--preview) .agent-tile").evaluateAll(nodes => nodes.map(node => ({
-          id: (node as HTMLElement).dataset.agentId,
+        work_rows: await surface.page.locator(".work-row").evaluateAll(nodes => nodes.map(node => ({
+          id: (node as HTMLElement).dataset.windowId,
           terminal_rows: node.querySelectorAll(".xterm-rows").length,
+          preview_lines: node.querySelector(".terminal-text-preview")?.textContent?.trim().split("\n").length,
         }))).catch(() => []) })));
       const evidence = { issue: 5379, fixture, theme, passed, duration_seconds: seconds,
         full_acceptance_observation: seconds === 1800 && theme === "dark", started_at: startedAt, ended_at: endedAt,
@@ -150,7 +155,7 @@ test.describe("Runtime output batching (live backend)", () => {
       await writeFile(join(HOME, fixture.arm + "-" + theme + ".json"), body);
       await info.attach("runtime-output-evidence-" + theme, { body, contentType: "application/json" });
       for (const surface of surfaces) await sendLiveGwtEvent(surface.page, { kind: "close_window", id: surface.id }).catch(() => undefined);
-      for (const surface of surfaces) await expect(surface.page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + surface.id + '"]'))
+      for (const surface of surfaces) await expect(surface.page.locator('.work-row[data-window-id="' + surface.id + '"]'))
         .toHaveCount(0, { timeout: 60_000 });
       // Keep each theme's five output receipts; the next theme uses new PIDs.
       await rm(barrier, { force: true });

@@ -70,7 +70,7 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         (
             "pr.create",
             json!({ "draft": true }),
-            GovernanceEffect::Reversible,
+            GovernanceEffect::Protected,
         ),
         ("pr.create", json!({}), GovernanceEffect::Protected),
         (
@@ -84,7 +84,7 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
             GovernanceEffect::Protected,
         ),
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
-        ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        ("pr.draft", json!({}), GovernanceEffect::Protected),
         (
             "pr.close",
             json!({"number": 42}),

@@ -112,7 +112,7 @@ pub fn fetch_completion_pr_candidates_via_gh(
     let repo = github_remote_owner_and_repo(repo_path)
         .ok_or_else(|| io::Error::other("completion repository identity is unknown"))?;
     let slug = format!("{}/{}", repo.0, repo.1);
-    let fields = "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner";
+    let fields = "number,url,headRefName,headRefOid,baseRefName,headRepository,headRepositoryOwner";
     let args = if let Some(number) = number {
         vec![
             "pr".into(),
@@ -194,6 +194,11 @@ fn parse_completion_pr_candidates(
                 url: required("url")?,
                 head_ref_name: branch.to_string(),
                 head_sha: required("headRefOid")?,
+                base_ref_name: value
+                    .get("baseRefName")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             })
         })
         .collect()
@@ -1249,9 +1254,26 @@ pub fn reply_and_resolve_pr_review_threads_via_gh(
     repo: &str,
     number: u64,
     body: &str,
+    thread_id: Option<&str>,
 ) -> io::Result<usize> {
-    let unresolved: Vec<PrReviewThread> = fetch_pr_review_threads_via_gh(owner, repo, number)?
+    if serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| value.is_array()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "body must be plain text, not a JSON array; send one reply with thread_id per call",
+        ));
+    }
+    let threads = fetch_pr_review_threads_via_gh(owner, repo, number)?;
+    if let Some(id) = thread_id {
+        if !threads.iter().any(|thread| thread.id == id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("review thread {id} not found on PR #{number}"),
+            ));
+        }
+    }
+    let unresolved: Vec<PrReviewThread> = threads
         .into_iter()
+        .filter(|thread| thread_id.is_none_or(|id| thread.id == id))
         .filter(should_resolve_review_thread)
         .collect();
 

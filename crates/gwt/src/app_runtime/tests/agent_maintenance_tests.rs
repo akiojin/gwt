@@ -136,12 +136,11 @@ fn maintenance_reserves_admission_before_the_worker_and_refuses_agent_launches()
         .spawn_agent_window(
             "tab-1",
             gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build(),
-            canvas_bounds(),
             None,
         )
         .unwrap_err();
     assert!(error.contains("maintenance"));
-    let legacy = runtime.start_window("tab-1", "agent", WindowPreset::Codex, canvas_bounds());
+    let legacy = runtime.start_window("tab-1", "agent", WindowPreset::Codex);
     assert!(legacy.iter().any(|event| serde_json::to_value(&event.event)
         .unwrap()
         .to_string()
@@ -269,7 +268,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
     );
     let mut persisted = tab.workspace.persisted().clone();
     persisted.windows[0].is_pm = true;
-    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "pm");
     insert_test_pane_runtime(&mut runtime, &id);
@@ -280,7 +279,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
             "live {status:?} PM agent"
         );
     }
-    runtime.stop_window_runtime(&id);
+    close_test_owner_runtime(&mut runtime, &id);
     runtime
         .inflight_launches
         .insert("pending".into(), ("next-agent".into(), Instant::now()));
@@ -558,7 +557,7 @@ fn startup_disabled_or_pending_launch_does_not_schedule_updates() {
 }
 
 #[test]
-fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
+fn startup_surface_ready_preserves_pm_queue_until_maintenance_finishes() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window_at(
@@ -570,7 +569,9 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
     );
     tab.kind = ProjectKind::NonRepo;
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.deferred_issue_monitor_launches = Some(Vec::new());
     runtime.agent_maintenance.busy = true;
+    assert!(!runtime.issue_monitor_materializer_ready());
     runtime.pending_startup_pm_tabs.push("tab-1".into());
     runtime.pending_startup_auto_resume_sessions.push(
         super::super::PendingStartupAutoResumeSession {
@@ -583,13 +584,19 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
             workspace_resume_context: None,
         },
     );
-    let immediate = runtime.handle_frontend_event(
-        "canvas".into(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+    assert!(runtime.startup_auto_resume_ready_events().is_empty());
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "bootstrap and accepted-view drains must also wait for maintenance"
     );
+    let immediate =
+        runtime.handle_frontend_event("canvas".into(), FrontendEvent::StartupAutoResumeReady {});
     assert!(immediate.is_empty());
+    assert!(
+        !runtime.issue_monitor_materializer_ready(),
+        "canvas arrival cannot admit launches while maintenance defers the restore drain"
+    );
     assert_eq!(runtime.pending_startup_pm_tabs, ["tab-1"]);
     assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
     assert!(
@@ -601,20 +608,23 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
             .is_some(),
         "the paused restore placeholder must survive maintenance"
     );
-    assert!(runtime.agent_maintenance.deferred_startup_bounds.is_some());
-    runtime.handle_supported_agent_maintenance_complete(
-        super::super::agent_maintenance::AgentMaintenanceCompletion {
-            results: Vec::new(),
-            cache: None,
-            catalog: None,
-        },
-    );
+    assert!(runtime.agent_maintenance.deferred_startup_ready);
+    with_inline_startup_admission(&mut runtime, |runtime| {
+        runtime.handle_supported_agent_maintenance_complete(
+            super::super::agent_maintenance::AgentMaintenanceCompletion {
+                results: Vec::new(),
+                cache: None,
+                catalog: None,
+            },
+        )
+    });
+    assert!(runtime.issue_monitor_materializer_ready());
     assert!(runtime.pending_startup_pm_tabs.is_empty());
     assert!(
         runtime.pending_startup_auto_resume_sessions.is_empty(),
         "completion replays the deferred restore drain"
     );
-    assert!(runtime.agent_maintenance.deferred_startup_bounds.is_none());
+    assert!(!runtime.agent_maintenance.deferred_startup_ready);
 }
 
 #[test]

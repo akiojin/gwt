@@ -15,13 +15,10 @@
 //! thread, backoff schedule, or restart bookkeeping: calling it on the existing
 //! Issue Monitor tick both starts the daemon and replaces one that died.
 //!
-//! Issue #3526 settled the Windows residency model on the same shape: the
-//! daemon is a user-session child of the GUI (named-pipe transport), not a
-//! Windows Service — a service could not create agent panes anyway and
-//! would not share the per-user `~/.gwt` state. Only the child's signal
-//! delivery differs: Unix sends `SIGTERM` so the serve loop unlinks its
-//! socket, Windows terminates the child and relies on the liveness-driven
-//! endpoint / authority-fence recovery that every crash already needs.
+//! GUI residency follows authenticated Rust subscriber leases in the daemon.
+//! This supervisor only launches, authenticates incompatible-owner retirement,
+//! and reaps completed children. Closing one GUI never signals a live shared
+//! daemon; standalone starts remain resident without GUI presence.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -66,12 +63,18 @@ pub struct DaemonSpawnRequest {
 }
 
 /// Build the spawn request for one project's daemon.
-pub fn daemon_spawn_request(gwtd_path: &Path, project_root: &Path) -> DaemonSpawnRequest {
+pub fn daemon_spawn_request(
+    gwtd_path: &Path,
+    project_root: &Path,
+    startup_intent: gwt_core::daemon::DaemonStartIntent,
+) -> DaemonSpawnRequest {
     DaemonSpawnRequest {
         program: gwtd_path.to_path_buf(),
         current_dir: project_root.to_path_buf(),
-        stdin_envelope: "{\"schema_version\":1,\"operation\":\"daemon.start\",\"params\":{}}\n"
-            .to_string(),
+        stdin_envelope: format!(
+            "{}\n",
+            serde_json::json!({"schema_version":1,"operation":"daemon.start","params":{"startup_intent":startup_intent}})
+        ),
     }
 }
 
@@ -82,6 +85,7 @@ pub struct DaemonSpawnContext<'a> {
     /// child's diagnostic log, so a daemon that dies before publishing leaves
     /// its reason next to the slot an operator is already looking at.
     pub endpoint_path: &'a Path,
+    pub startup_intent: gwt_core::daemon::DaemonStartIntent,
 }
 
 type DaemonSpawner = Box<dyn Fn(&DaemonSpawnContext<'_>) -> std::io::Result<Child> + Send + Sync>;
@@ -121,11 +125,81 @@ pub struct DaemonEnsureInputs<'a> {
 ///
 /// Children are reaped lazily inside [`DaemonSupervisor::ensure_running`]
 /// rather than by a per-child waiter thread. That keeps the supervisor free of
-/// background threads. Owned children are stopped through their child handles;
-/// an external stale-version candidate must authenticate before it is signalled.
+/// background threads. Residency belongs to the daemon, not the GUI parent.
+/// An external incompatible candidate must authenticate before it is signalled.
+#[derive(Clone, Copy)]
+struct PendingReplacement {
+    startup_intent: gwt_core::daemon::DaemonStartIntent,
+    pid: u32,
+    started_at: u64,
+}
+struct SupervisedChild {
+    project_root: PathBuf,
+    child: Option<Child>,
+    replacement: Option<PendingReplacement>,
+}
+
+#[derive(Default)]
+struct OrphanObservations {
+    generation: String,
+    open_projects: HashSet<String>,
+    observations: HashMap<String, OrphanObservation>,
+    views: Vec<crate::protocol::OrphanDaemonView>,
+}
+
+#[derive(Clone)]
+struct OrphanObservation {
+    project_root: PathBuf,
+    endpoint_path: PathBuf,
+    endpoint: gwt_core::daemon::DaemonEndpoint,
+    health: OrphanHealth,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+struct ExactRetirement {
+    id: String,
+    incarnation: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct OrphanHealth {
+    #[serde(flatten)]
+    identity: crate::daemon_subscriber::ProjectOwnerIdentity,
+    project_key: String,
+    startup_intent: gwt_core::daemon::DaemonStartIntent,
+    gui_presence_count: usize,
+    #[serde(default)]
+    draining: bool,
+    #[serde(default)]
+    reconciliation_required: bool,
+    #[serde(default)]
+    reconciliation: Vec<ExactRetirement>,
+}
+
+impl OrphanHealth {
+    fn validate(&self, endpoint: &gwt_core::daemon::DaemonEndpoint) -> Result<(), String> {
+        if self.project_key != endpoint.scope.repo_hash
+            || self.identity.pid != endpoint.pid
+            || self.identity.host_instance_id.is_empty()
+            || self.identity.host_started_at == 0
+            || crate::process::host_process_start_time(endpoint.pid)
+                != Some(self.identity.host_started_at)
+        {
+            return Err("project daemon identity could not be verified".into());
+        }
+        Ok(())
+    }
+    fn retryable(&self) -> bool {
+        self.startup_intent == gwt_core::daemon::DaemonStartIntent::GuiManaged
+            && self.gui_presence_count == 0
+            && self.draining
+    }
+}
+
 pub struct DaemonSupervisor {
     spawn: DaemonSpawner,
-    children: Mutex<HashMap<PathBuf, Child>>,
+    children: Mutex<HashMap<PathBuf, SupervisedChild>>,
+    orphan_observations: Mutex<OrphanObservations>,
     ensure_attempts: AtomicUsize,
     in_flight: Mutex<HashSet<String>>,
     stopped: AtomicBool,
@@ -153,6 +227,7 @@ impl DaemonSupervisor {
         Self {
             spawn: Box::new(spawn_production_daemon),
             children: Mutex::new(HashMap::new()),
+            orphan_observations: Mutex::new(OrphanObservations::default()),
             ensure_attempts: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
@@ -167,6 +242,7 @@ impl DaemonSupervisor {
         Self {
             spawn: Box::new(spawn),
             children: Mutex::new(HashMap::new()),
+            orphan_observations: Mutex::new(OrphanObservations::default()),
             ensure_attempts: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
@@ -184,6 +260,7 @@ impl DaemonSupervisor {
                 ))
             }),
             children: Mutex::new(HashMap::new()),
+            orphan_observations: Mutex::new(OrphanObservations::default()),
             ensure_attempts: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
@@ -281,56 +358,86 @@ impl DaemonSupervisor {
             is_process_alive,
         )?;
 
+        let retirement = match &action {
+            DaemonBootstrapAction::RetireStaleVersion { endpoint } => Some(endpoint.clone()),
+            DaemonBootstrapAction::Reuse(endpoint)
+                if endpoint
+                    .project_transport_url
+                    .as_deref()
+                    .is_none_or(|url| url.trim().is_empty()) =>
+            {
+                Some(endpoint.clone())
+            }
+            _ => None,
+        };
+        if let Some(endpoint) = retirement {
+            let started_at = crate::process::host_process_start_time(endpoint.pid);
+            drop(children);
+            let (_probe_runtime, _connection) = authenticate_retirement_candidate(&endpoint)?;
+            let started_at = started_at
+                .filter(|started_at| {
+                    Some(*started_at) == crate::process::host_process_start_time(endpoint.pid)
+                })
+                .ok_or_else(|| "daemon retirement PID birth was not confirmed".to_string())?;
+            let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.stopped.load(Ordering::SeqCst) {
+                return Err("daemon supervisor shut down during retirement verification".into());
+            }
+            let current = crate::daemon_publisher::resolve_project_daemon_bootstrap(
+                &gwt_home,
+                &scope,
+                Some(expected_daemon_version),
+                is_process_alive,
+            )?;
+            if !matches!(current, DaemonBootstrapAction::RetireStaleVersion { endpoint: current } | DaemonBootstrapAction::Reuse(current) if current == endpoint)
+            {
+                return Err("daemon authority changed during retirement verification".into());
+            }
+            children
+                .entry(child_endpoint)
+                .or_insert(SupervisedChild {
+                    project_root: project_root.to_path_buf(),
+                    child: None,
+                    replacement: None,
+                })
+                .replacement = Some(PendingReplacement {
+                startup_intent: endpoint.startup_intent,
+                pid: endpoint.pid,
+                started_at,
+            });
+            tracing::warn!(pid = endpoint.pid, project_root = %project_root.display(), "retiring authenticated incompatible project daemon before replacement");
+            retire_stale_daemon(endpoint.pid);
+            return Ok(DaemonEnsureOutcome::RetiringStale { pid: endpoint.pid });
+        }
         match action {
             DaemonBootstrapAction::Reuse(endpoint) => {
                 Ok(DaemonEnsureOutcome::AlreadyRunning { pid: endpoint.pid })
             }
-            DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
-                // Never hold the child table while waiting for IPC. The GUI
-                // only enqueues this worker, and shutdown must be able to win.
-                drop(children);
-                let (_probe_runtime, _connection) = authenticate_retirement_candidate(&endpoint)?;
-                let _children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-                if self.stopped.load(Ordering::SeqCst) {
-                    return Err(
-                        "daemon supervisor shut down during retirement verification".to_string()
-                    );
-                }
-                let current = crate::daemon_publisher::resolve_project_daemon_bootstrap(
-                    &gwt_home,
-                    &scope,
-                    Some(expected_daemon_version),
-                    is_process_alive,
-                )?;
-                if !matches!(current, DaemonBootstrapAction::RetireStaleVersion { endpoint: current } if current == endpoint)
-                {
-                    return Err(
-                        "daemon authority changed during retirement verification".to_string()
-                    );
-                }
-                // Issue #4038 (AC-6): a daemon from a previous build survived
-                // the update (or was started by a hook while the old binary
-                // was still installed). Adopting it would serve stale logic
-                // for this project; retire it and let the next ensure tick
-                // spawn a version-matched replacement once its descriptor is
-                // unlinked.
-                tracing::warn!(
-                    pid = endpoint.pid,
-                    daemon_version = %endpoint.daemon_version,
-                    expected_daemon_version,
-                    project_root = %project_root.display(),
-                    "retiring a runtime daemon of another gwt version instead of reusing it"
-                );
-                retire_stale_daemon(endpoint.pid);
-                Ok(DaemonEnsureOutcome::RetiringStale { pid: endpoint.pid })
+            DaemonBootstrapAction::RetireStaleVersion { .. } => {
+                unreachable!("retirement handled above")
             }
             DaemonBootstrapAction::Spawn { .. } => {
                 if let Some(pid) = started_child_pid {
                     return Ok(DaemonEnsureOutcome::Starting { pid });
                 }
+                let replacement = children
+                    .get(&child_endpoint)
+                    .and_then(|slot| slot.replacement);
+                if let Some(previous) = replacement {
+                    if is_process_alive(previous.pid)
+                        && crate::process::host_process_start_time(previous.pid)
+                            == Some(previous.started_at)
+                    {
+                        return Ok(DaemonEnsureOutcome::RetiringStale { pid: previous.pid });
+                    }
+                }
+                let startup_intent = replacement
+                    .map(|previous| previous.startup_intent)
+                    .unwrap_or(gwt_core::daemon::DaemonStartIntent::GuiManaged);
                 let child = (self.spawn)(&DaemonSpawnContext {
                     project_root,
                     endpoint_path: &endpoint_path,
+                    startup_intent,
                 })
                 .map_err(|error| {
                     format!(
@@ -339,7 +446,15 @@ impl DaemonSupervisor {
                     )
                 })?;
                 let pid = child.id();
-                children.insert(endpoint_path, child);
+                children.remove(&child_endpoint);
+                children.insert(
+                    endpoint_path,
+                    SupervisedChild {
+                        project_root: project_root.to_path_buf(),
+                        child: Some(child),
+                        replacement: None,
+                    },
+                );
                 Ok(DaemonEnsureOutcome::Spawned { pid })
             }
         }
@@ -360,28 +475,326 @@ impl DaemonSupervisor {
         reap_finished_child(&mut children, &child_endpoint).is_some()
     }
 
-    /// Terminate every daemon this process started.
-    ///
-    /// The daemon is deliberately not left behind for the next launch: nothing
-    /// in the endpoint contract compares `daemon_version`, so a surviving
-    /// daemon from a previous build would be reused after an update. Stopping
-    /// the ones we own keeps exactly one, version-matched driver per project.
+    /// Synchronize the current GUI projection; reopening invalidates every observation token.
+    pub fn update_orphan_context(&self, generation: String, open_projects: HashSet<String>) {
+        let mut state = self
+            .orphan_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.generation != generation || state.open_projects != open_projects {
+            *state = OrphanObservations {
+                generation,
+                open_projects,
+                ..Default::default()
+            };
+        }
+    }
+
+    pub fn orphan_views(&self) -> Vec<crate::protocol::OrphanDaemonView> {
+        self.orphan_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .views
+            .clone()
+    }
+
+    /// Only already-known child slots and supplied Recent roots are inspected.
+    pub fn observe_orphans(&self, generation: &str, mut roots: Vec<PathBuf>) -> Result<(), String> {
+        let children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        let known = children
+            .iter()
+            .map(|(path, slot)| (slot.project_root.clone(), path.clone()))
+            .collect::<HashMap<_, _>>();
+        roots.extend(known.keys().cloned());
+        drop(children);
+        roots.sort();
+        roots.dedup();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let mut observations = HashMap::new();
+        let mut views = Vec::new();
+        let mut seen = HashSet::new();
+        for root in roots {
+            self.check_orphan_generation(generation, None)?;
+            let endpoint = crate::daemon_publisher::resolve_project_daemon_endpoint(&root)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    known
+                        .get(&root)
+                        .and_then(|path| read_orphan_endpoint(path).ok())
+                });
+            let Some(endpoint) = endpoint else {
+                continue;
+            };
+            if !seen.insert(endpoint.scope.repo_hash.clone())
+                || self
+                    .check_orphan_generation(generation, Some(&endpoint.scope.repo_hash))
+                    .is_err()
+            {
+                continue;
+            }
+            if !crate::process::is_process_alive(endpoint.pid) {
+                continue;
+            }
+            let endpoint_path = endpoint.scope.endpoint_path(&gwt_core::paths::gwt_home());
+            let inspected = runtime.block_on(inspect_orphan_health(&endpoint));
+            let title = root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| endpoint.scope.repo_hash.clone());
+            let inspection_failed = inspected.is_err();
+            let (detail, observation_token) = match inspected {
+                Ok(health) => {
+                    let detail = if health.startup_intent
+                        == gwt_core::daemon::DaemonStartIntent::Standalone
+                    {
+                        "Running as a standalone daemon"
+                    } else if health.gui_presence_count != 0 {
+                        "Another GUI is connected"
+                    } else if !health.draining {
+                        "Waiting for reconnection"
+                    } else if health.reconciliation_required {
+                        "Shutdown failed. Retry termination to recover this project."
+                    } else {
+                        "Shutting down"
+                    }
+                    .to_string();
+                    let token = if health.retryable() {
+                        let token = uuid::Uuid::new_v4().to_string();
+                        observations.insert(
+                            token.clone(),
+                            OrphanObservation {
+                                project_root: root.clone(),
+                                endpoint_path,
+                                endpoint: endpoint.clone(),
+                                health,
+                            },
+                        );
+                        Some(token)
+                    } else {
+                        None
+                    };
+                    (detail, token)
+                }
+                Err(_) => (
+                    "The project connection could not be verified. Termination cannot be retried safely.".into(),
+                    None,
+                ),
+            };
+            if inspection_failed || observation_token.is_some() {
+                report_orphan_fault(&root, &detail);
+            }
+            views.push(crate::protocol::OrphanDaemonView {
+                project_key: endpoint.scope.repo_hash,
+                title,
+                detail,
+                observation_token,
+            });
+        }
+        let mut state = self
+            .orphan_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.generation != generation {
+            return Err("This observation expired. Refresh and try again.".into());
+        }
+        state.observations = observations;
+        state.views = views;
+        Ok(())
+    }
+
+    fn check_orphan_generation(
+        &self,
+        generation: &str,
+        project_key: Option<&str>,
+    ) -> Result<(), String> {
+        let state = self
+            .orphan_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.generation != generation
+            || project_key.is_some_and(|key| state.open_projects.contains(key))
+        {
+            return Err("This observation expired. Refresh and try again.".into());
+        }
+        Ok(())
+    }
+
+    /// Tokens are consumed before network I/O, including every refusal/failure.
+    pub fn reap_orphan(&self, generation: &str, token: &str) -> Result<(), String> {
+        let observation = {
+            let mut state = self
+                .orphan_observations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let observation = state
+                .observations
+                .remove(token)
+                .ok_or("This observation expired. Refresh and try again.")?;
+            for view in &mut state.views {
+                if view.observation_token.as_deref() == Some(token) {
+                    view.observation_token = None;
+                }
+            }
+            observation
+        };
+        self.check_orphan_generation(generation, Some(&observation.endpoint.scope.repo_hash))?;
+        let result = self.retry_orphan(generation, &observation);
+        if let Err(error) = &result {
+            report_orphan_fault(&observation.project_root, error);
+        }
+        result
+    }
+
+    fn retry_orphan(
+        &self,
+        generation: &str,
+        observation: &OrphanObservation,
+    ) -> Result<(), String> {
+        self.check_orphan_generation(generation, Some(&observation.endpoint.scope.repo_hash))?;
+        let current = read_orphan_endpoint(&observation.endpoint_path)?;
+        if !same_orphan_endpoint(&current, &observation.endpoint) {
+            return Err("The project owner changed. Refresh and try again.".into());
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(async {
+            let health = inspect_orphan_health(&current).await?;
+            if !health.retryable()
+                || health.identity != observation.health.identity
+                || health.reconciliation != observation.health.reconciliation
+            {
+                return Err("The project state changed. Refresh and try again.".into());
+            }
+            self.check_orphan_generation(generation, Some(&current.scope.repo_hash))?;
+            if !same_orphan_endpoint(&read_orphan_endpoint(&observation.endpoint_path)?, &current) {
+                return Err("The project owner changed. Refresh and try again.".into());
+            }
+            let client = crate::project_runtime::client::ProjectRuntimeClient::new(&current)?;
+            for exact in health.reconciliation {
+                // A draining actor cannot admit new GUI leases or launches.
+                // Authenticate and prove the same owner immediately before every exact retry.
+                let latest = inspect_orphan_health(&current).await?;
+                if !latest.retryable()
+                    || latest.identity != observation.health.identity
+                    || !latest.reconciliation.contains(&exact)
+                    || !same_orphan_endpoint(
+                        &read_orphan_endpoint(&observation.endpoint_path)?,
+                        &current,
+                    )
+                {
+                    return Err("The project state changed. Refresh and try again.".into());
+                }
+                self.check_orphan_generation(generation, Some(&current.scope.repo_hash))?;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.command(crate::project_runtime::events::OwnerCommand::Close {
+                        id: exact.id,
+                        incarnation: exact.incarnation,
+                    }),
+                )
+                .await
+                .map_err(|_| "Termination retry timed out".to_string())??;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while crate::process::host_process_start_time(current.pid)
+                    == Some(health.identity.host_started_at)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .map_err(|_| "Shutdown is still in progress. Refresh and try again.".to_string())?;
+            Ok::<(), String>(())
+        })?;
+        self.reap_finished_children();
+        Ok(())
+    }
+
+    /// Stop GUI ensure work. Live daemon residency is governed by authenticated GUI leases.
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.reap_finished_children();
+    }
+
+    /// Fixture cleanup for exact captured children; never called by the GUI lifecycle.
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    #[doc(hidden)]
+    pub fn cleanup_test_children(&self) {
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-        for (endpoint_path, mut child) in children.drain() {
-            // SIGTERM lets the serve loop unlink its socket and endpoint file;
-            // `Child::kill` sends SIGKILL and would leave both behind.
-            terminate_gracefully(&mut child);
-            if let Err(error) = child.wait() {
-                tracing::warn!(
-                    %error,
-                    endpoint = %endpoint_path.display(),
-                    "failed to reap a runtime daemon during shutdown"
-                );
+        for (_, mut slot) in children.drain() {
+            if let Some(mut child) = slot.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
             }
         }
     }
+
+    /// Reap completed children even when the last project tab has closed.
+    pub fn reap_finished_children(&self) {
+        // GUI ticks must never wait behind a project's blocking ensure work.
+        let mut children = match self.children.try_lock() {
+            Ok(children) => children,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        let endpoints = children.keys().cloned().collect::<Vec<_>>();
+        for endpoint in endpoints {
+            reap_finished_child(&mut children, &endpoint);
+        }
+    }
+}
+
+fn read_orphan_endpoint(path: &Path) -> Result<gwt_core::daemon::DaemonEndpoint, String> {
+    serde_json::from_slice(
+        &std::fs::read(path)
+            .map_err(|_| "The project endpoint changed. Refresh and try again.".to_string())?,
+    )
+    .map_err(|_| "The project endpoint could not be verified".into())
+}
+
+fn same_orphan_endpoint(
+    left: &gwt_core::daemon::DaemonEndpoint,
+    right: &gwt_core::daemon::DaemonEndpoint,
+) -> bool {
+    left.scope == right.scope
+        && left.pid == right.pid
+        && left.bind == right.bind
+        && left.auth_token == right.auth_token
+        && left.project_transport_url == right.project_transport_url
+        && left.startup_intent == right.startup_intent
+}
+
+async fn inspect_orphan_health(
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<OrphanHealth, String> {
+    let client = crate::project_runtime::client::ProjectRuntimeClient::new(endpoint)?;
+    let value = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.command(crate::project_runtime::events::OwnerCommand::Health),
+    )
+    .await
+    .map_err(|_| "project daemon health timed out".to_string())??;
+    let health: OrphanHealth = serde_json::from_value(value)
+        .map_err(|_| "project daemon identity unavailable".to_string())?;
+    health.validate(endpoint)?;
+    Ok(health)
+}
+
+fn report_orphan_fault(project_root: &Path, detail: &str) {
+    crate::error_report::report_error_and_publish(
+        gwt_core::error_ledger::ErrorKind::DaemonFault,
+        detail.to_string(),
+        gwt_core::error_ledger::ErrorTarget {
+            project_root: Some(project_root.display().to_string()),
+            ..Default::default()
+        },
+    );
 }
 
 fn authenticate_retirement_candidate(
@@ -429,7 +842,10 @@ impl std::fmt::Debug for DaemonSupervisor {
 /// Endpoint slots retain the owner's real worktree, but their parent directory
 /// is already keyed by ProjectKey. Reuse a starting child across that project
 /// before it has published an authority fence or endpoint.
-fn child_endpoint_for_project(children: &HashMap<PathBuf, Child>, endpoint: &Path) -> PathBuf {
+fn child_endpoint_for_project(
+    children: &HashMap<PathBuf, SupervisedChild>,
+    endpoint: &Path,
+) -> PathBuf {
     children
         .keys()
         .find(|candidate| candidate.parent() == endpoint.parent())
@@ -440,10 +856,10 @@ fn child_endpoint_for_project(children: &HashMap<PathBuf, Child>, endpoint: &Pat
 /// Drop a finished child from the table and return the pid of the one that is
 /// still running, if any.
 fn reap_finished_child(
-    children: &mut HashMap<PathBuf, Child>,
+    children: &mut HashMap<PathBuf, SupervisedChild>,
     endpoint_path: &Path,
 ) -> Option<u32> {
-    let child = children.get_mut(endpoint_path)?;
+    let child = children.get_mut(endpoint_path)?.child.as_mut()?;
     let pid = child.id();
     match child.try_wait() {
         Ok(None) => Some(pid),
@@ -456,7 +872,14 @@ fn reap_finished_child(
                 reason = %last_daemon_stderr_line(endpoint_path).unwrap_or_default(),
                 "the runtime daemon exited; the next ensure pass will start a replacement"
             );
-            children.remove(endpoint_path);
+            if children
+                .get(endpoint_path)
+                .is_some_and(|slot| slot.replacement.is_some())
+            {
+                children.get_mut(endpoint_path).expect("known slot").child = None;
+            } else {
+                children.remove(endpoint_path);
+            }
             None
         }
         Err(error) => {
@@ -466,7 +889,14 @@ fn reap_finished_child(
                 endpoint = %endpoint_path.display(),
                 "could not read runtime daemon exit status; forgetting the child"
             );
-            children.remove(endpoint_path);
+            if children
+                .get(endpoint_path)
+                .is_some_and(|slot| slot.replacement.is_some())
+            {
+                children.get_mut(endpoint_path).expect("known slot").child = None;
+            } else {
+                children.remove(endpoint_path);
+            }
             None
         }
     }
@@ -487,13 +917,6 @@ fn last_daemon_stderr_line(endpoint_path: &Path) -> Option<String> {
         .rev()
         .find(|line| !line.trim().is_empty())
         .map(str::to_string)
-}
-
-#[cfg(unix)]
-fn terminate_gracefully(child: &mut Child) {
-    // The child has not been reaped yet (we still hold its handle), so the pid
-    // cannot have been recycled by another process.
-    terminate_pid_gracefully(child.id());
 }
 
 /// Issue #4038 (AC-6): SIGTERM a daemon named by a live endpoint descriptor so
@@ -517,16 +940,9 @@ fn terminate_pid_gracefully(pid: u32) {
 /// The endpoint descriptor and authority fence it leaves behind are exactly
 /// what a crashed daemon leaves, and both are reclaimed by the liveness
 /// probes in `resolve_bootstrap_action` and the fence recovery (Issue #3526).
-#[cfg(windows)]
-fn terminate_gracefully(child: &mut Child) {
-    if let Err(error) = child.kill() {
-        tracing::warn!(pid = child.id(), %error, "failed to terminate a runtime daemon");
-    }
-}
-
 /// Issue #4038 (AC-6): Windows counterpart for a stale-version daemon this
 /// GUI did not spawn (no `Child` handle). Terminated outright like
-/// [`terminate_gracefully`]; the descriptor and fence it leaves behind are
+/// a crashed daemon; the descriptor and fence it leaves behind are
 /// reclaimed by the same liveness-driven recovery a crashed daemon needs.
 #[cfg(windows)]
 fn terminate_pid_gracefully(pid: u32) {
@@ -562,7 +978,7 @@ fn spawn_production_daemon(context: &DaemonSpawnContext<'_>) -> std::io::Result<
             "no gwtd binary could be resolved; set GWT_BIN_PATH or install gwtd on PATH",
         )
     })?;
-    let request = daemon_spawn_request(&gwtd_path, context.project_root);
+    let request = daemon_spawn_request(&gwtd_path, context.project_root, context.startup_intent);
     let stderr_log_path = daemon_stderr_log_path(context.endpoint_path);
     if let Some(parent) = stderr_log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -620,8 +1036,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn orphan_observation_rejects_reuse_reopen_replacement_and_unproved_birth() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        use gwt_core::daemon::{DaemonEndpoint, DaemonStartIntent, RuntimeScope, RuntimeTarget};
+        let root = tempfile::tempdir().expect("root");
+        let endpoint = DaemonEndpoint::new(
+            RuntimeScope::new(
+                "project",
+                "worktree",
+                root.path().to_path_buf(),
+                RuntimeTarget::Host,
+            )
+            .expect("scope"),
+            std::process::id(),
+            "private-test".into(),
+            "never-browser".into(),
+            "test".into(),
+        );
+        let mut health = OrphanHealth {
+            identity: crate::daemon_subscriber::ProjectOwnerIdentity {
+                pid: endpoint.pid,
+                host_started_at: crate::process::host_process_start_time(endpoint.pid)
+                    .expect("physical birth proof"),
+                host_instance_id: "fixed-instance".into(),
+            },
+            project_key: endpoint.scope.repo_hash.clone(),
+            startup_intent: DaemonStartIntent::GuiManaged,
+            gui_presence_count: 0,
+            draining: true,
+            reconciliation_required: true,
+            reconciliation: vec![ExactRetirement {
+                id: "pane".into(),
+                incarnation: 7,
+            }],
+        };
+        health.validate(&endpoint).expect("physical identity");
+        assert!(health.retryable());
+        health.startup_intent = DaemonStartIntent::Standalone;
+        assert!(
+            !health.retryable(),
+            "explicit resident owners cannot be reaped"
+        );
+        health.startup_intent = DaemonStartIntent::GuiManaged;
+        health.identity.host_started_at += 1;
+        assert!(
+            health.validate(&endpoint).is_err(),
+            "unproved birth must fail closed"
+        );
+        health.identity.host_started_at -= 1;
+        let mut replacement = endpoint.clone();
+        replacement.auth_token = "replacement-secret".into();
+        assert!(!same_orphan_endpoint(&endpoint, &replacement));
+        let supervisor = DaemonSupervisor::disabled();
+        supervisor.update_orphan_context("generation-1".into(), HashSet::new());
+        let observation = OrphanObservation {
+            project_root: root.path().to_path_buf(),
+            endpoint_path: root.path().join("endpoint.json"),
+            endpoint,
+            health,
+        };
+        supervisor
+            .orphan_observations
+            .lock()
+            .expect("observations")
+            .observations
+            .insert("once".into(), observation.clone());
+        assert!(supervisor.reap_orphan("stale-generation", "once").is_err());
+        assert!(
+            !supervisor
+                .orphan_observations
+                .lock()
+                .expect("observations")
+                .observations
+                .contains_key("once"),
+            "a refused token is still consumed"
+        );
+        assert!(supervisor.reap_orphan("generation-1", "once").is_err());
+        supervisor
+            .orphan_observations
+            .lock()
+            .expect("observations")
+            .observations
+            .insert("reopened".into(), observation);
+        supervisor.update_orphan_context("generation-2".into(), HashSet::from(["project".into()]));
+        assert!(
+            supervisor.reap_orphan("generation-2", "reopened").is_err(),
+            "reopening invalidates old observations"
+        );
+    }
+
+    #[test]
     fn spawn_request_targets_the_project_it_serves() {
-        let request = daemon_spawn_request(Path::new("/usr/local/bin/gwtd"), Path::new("/repo"));
+        let request = daemon_spawn_request(
+            Path::new("/usr/local/bin/gwtd"),
+            Path::new("/repo"),
+            gwt_core::daemon::DaemonStartIntent::GuiManaged,
+        );
         assert_eq!(request.program, Path::new("/usr/local/bin/gwtd"));
         assert_eq!(request.current_dir, Path::new("/repo"));
         assert!(request.stdin_envelope.contains("\"daemon.start\""));
@@ -797,6 +1311,111 @@ mod tests {
             scope.endpoint_path(gwt_home.path()).exists(),
             "the live daemon unlinks its own descriptor on SIGTERM; the supervisor does not"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_version_legacy_retirement_preserves_standalone_and_waits_for_exit() {
+        use gwt_core::daemon::{
+            persist_endpoint, DaemonEndpoint, DaemonStartIntent, RuntimeScope, RuntimeTarget,
+        };
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let socket_path = home.path().join("legacy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.display().to_string(),
+            "secret".into(),
+            env!("CARGO_PKG_VERSION").into(),
+        );
+        persist_endpoint(&scope.endpoint_path(home.path()), &endpoint).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: gwt_core::daemon::IpcHandshakeRequest =
+                serde_json::from_str(&line).unwrap();
+            assert_eq!(request.auth_token, "secret");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                    protocol_version: request.protocol_version,
+                    daemon_version: env!("CARGO_PKG_VERSION").into(),
+                    accepted: true,
+                    rejection_reason: None
+                })
+                .unwrap()
+            )
+            .unwrap();
+            let mut tail = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut tail).unwrap();
+        });
+        let intents = Arc::new(Mutex::new(Vec::new()));
+        let spawned_intents = intents.clone();
+        let supervisor = DaemonSupervisor::with_spawner(move |context| {
+            spawned_intents.lock().unwrap().push(context.startup_intent);
+            gwt_core::process::resolved_command(gwt_core::process::ProcessPlanRequest::new("sleep"))
+                .map_err(std::io::Error::other)?
+                .arg("30")
+                .spawn()
+        });
+        let live = AtomicBool::new(true);
+        let observe = |_: u32| live.load(Ordering::SeqCst);
+        let retire = |_: u32| {
+            live.store(false, Ordering::SeqCst);
+        };
+        let first = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: home.path().into(),
+                    is_process_alive: &observe,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert!(matches!(first, DaemonEnsureOutcome::RetiringStale { .. }));
+        assert!(
+            intents.lock().unwrap().is_empty(),
+            "old owner must be authenticated and retired before spawning"
+        );
+        let second = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: home.path().into(),
+                    is_process_alive: &observe,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+            .unwrap();
+        assert!(matches!(second, DaemonEnsureOutcome::Spawned { .. }));
+        assert_eq!(
+            *intents.lock().unwrap(),
+            vec![DaemonStartIntent::Standalone]
+        );
+        supervisor.shutdown();
+        assert!(
+            supervisor.has_live_child_for(project.path(), home.path()),
+            "GUI shutdown cannot signal a live shared daemon"
+        );
+        supervisor.cleanup_test_children();
     }
 
     fn supervisor_source_between(start: &str, end: &str) -> &'static str {

@@ -9,7 +9,9 @@ description: "Use when a PM or implementation agent encounters a gwt bug, missin
 
 Report gwt problems from any project through the fixed `akiojin/gwt` feedback
 route. PM and implementation agents share it. Collect diagnostics automatically;
-only the actual gwt repository is exempt from the user's native approval.
+canonical Autonomous ON uses safe structured reporting without a dialog.
+Missing/false preferences keep Manual native consent and the actual-gwt exemption.
+Preference read/decode failure stores only safe withheld feedback; it never opens consent.
 
 ## Completion
 

@@ -47,7 +47,8 @@ const SOURCE_LIST: &str = "source-list:v1";
 
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
-const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v10-legacy-log-metadata-cache";
+const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str =
+    "source-context-v11-source-relative-event-containers";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -552,7 +553,30 @@ where
     phases.mark("state_load");
     let projection_requires_rebuild =
         match gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path) {
-            Ok(Some(_)) => false,
+            Ok(Some(_)) => {
+                let close_path = work_items_path.with_file_name("work-events-closed.jsonl");
+                match gwt_core::workspace_projection::workspace_close_projection_needs_rebuild(
+                    work_items_path,
+                    &close_path,
+                ) {
+                    Ok(false) => false,
+                    Ok(true) => {
+                        summary.load_error = Some(gwt_core::WorkspaceStateLoadError {
+                            path: work_items_path.with_extension("close-proofs.json"),
+                            kind: gwt_core::WorkspaceStateLoadErrorKind::Malformed,
+                            message:
+                                "close projection proof requires a complete Work event rebuild"
+                                    .into(),
+                        });
+                        true
+                    }
+                    Err(error) => {
+                        summary.load_error =
+                            Some(crate::workspace_state_load_error(project_root, error));
+                        return summary;
+                    }
+                }
+            }
             Ok(None) => true,
             Err(error) => {
                 let error = crate::workspace_state_load_error(project_root, error);
@@ -877,9 +901,10 @@ where
 
     if let Some(error) = summary.load_error.as_mut() {
         // Healthy projections can reflect intentional source deletion. A
-        // corrupt projection cannot prove what a missing or truncated source
-        // held, so retain its bytes unless every previously recorded source
-        // is still available unchanged. Newly discovered sources may be added.
+        // damaged projection or close proof cannot prove what a missing or
+        // truncated source held, so retain its bytes unless every previously
+        // recorded source is still available unchanged. Newly discovered
+        // sources may be added.
         let available = pending_sources
             .iter()
             .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
@@ -938,7 +963,7 @@ where
         rebuild_work_events_with_shared_loader(
             work_items_path,
             || {
-                // Only malformed recovery needs both generations for comparison.
+                // Projection/proof recovery needs both generations for comparison.
                 let expected_sources = summary.load_error.as_ref().map(|_| {
                     pending_sources
                         .iter()
@@ -990,6 +1015,7 @@ where
                 Ok(loaded)
             },
             close_path.as_deref(),
+            summary.load_error.is_some(),
         )
     } else {
         // A close writer can append successfully and fail to save Works while
@@ -1397,15 +1423,13 @@ fn worktree_event_sources(
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
     let mut sources = Vec::new();
     for entry in entries {
-        let container = entry.branch.clone().map(|branch| {
-            Arc::new(WorkspaceExecutionContainerRef {
-                branch: Some(branch),
-                worktree_path: Some(entry.path.clone()),
-                pr_number: None,
-                pr_url: None,
-                pr_state: None,
-            })
-        });
+        let container = Some(Arc::new(WorkspaceExecutionContainerRef {
+            branch: entry.branch.clone(),
+            worktree_path: Some(entry.path.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }));
         let legacy_path = entry.path.join(EVENTS_TREE_PATH);
         match std::fs::symlink_metadata(&legacy_path) {
             Ok(metadata) => sources.push(WorkEventsSource {
@@ -3655,6 +3679,122 @@ mod tests {
         assert!(result.load_error.is_some());
         assert_eq!(std::fs::read(&works).unwrap(), corrupt);
         assert_eq!(load_work_events_intake_state(&state), intake_before);
+    }
+
+    #[test]
+    fn missing_close_proof_rebuilds_current_intake_from_complete_history() {
+        use gwt_core::workspace_projection::{
+            load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
+            MAX_INLINE_WORK_EVENTS,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let events = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-11-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut shared = vec![WorkEvent::new(WorkEventKind::Start, "closed-work", start)];
+        for index in 0..=MAX_INLINE_WORK_EVENTS {
+            shared.push(WorkEvent::new(
+                WorkEventKind::Update,
+                "closed-work",
+                start + chrono::Duration::seconds(index as i64 + 2),
+            ));
+        }
+        let shared_bytes = shared
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        std::fs::write(&events, &shared_bytes).unwrap();
+        let works = temp.path().join("state/works.json");
+        let state = temp.path().join("state/work-events-intake.json");
+        let closes = temp.path().join("state/work-events-closed.jsonl");
+        std::fs::create_dir_all(closes.parent().unwrap()).unwrap();
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            "closed-work",
+            start + chrono::Duration::seconds(1),
+        );
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        let close_bytes = format!("{}\n", serde_json::to_string(&done).unwrap());
+        std::fs::write(&closes, &close_bytes).unwrap();
+        assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+        let current = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert!(current.work_items[0]
+            .events
+            .iter()
+            .all(|event| event.id != done.id));
+        assert!(!ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+
+        let proof = works.with_extension("close-proofs.json");
+        std::fs::remove_file(&proof).unwrap();
+        let works_before = std::fs::read(&works).unwrap();
+        let state_before = intake_state_files(&state);
+        // Missing known history is not permission to replace a valid Work.
+        let saved_events = temp.path().join("saved-events.jsonl");
+        std::fs::rename(&events, &saved_events).unwrap();
+        let refused = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(!refused.projection_rebuilt, "{refused:?}");
+        assert!(refused.load_error.is_some(), "{refused:?}");
+        assert_eq!(std::fs::read(&works).unwrap(), works_before);
+        assert_eq!(intake_state_files(&state), state_before);
+        assert!(!proof.exists());
+        std::fs::rename(&saved_events, &events).unwrap();
+
+        let repaired = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(repaired.projection_rebuilt, "{repaired:?}");
+        assert!(repaired.load_error.is_none(), "{repaired:?}");
+        let restored = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.work_items[0].status_category,
+            WorkspaceStatusCategory::Done
+        );
+        assert_eq!(restored.work_items[0].completed_at, Some(done.updated_at));
+        assert!(proof.is_file());
+        assert_eq!(std::fs::read_to_string(&events).unwrap(), shared_bytes);
+        assert_eq!(std::fs::read_to_string(&closes).unwrap(), close_bytes);
+        let no_op = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(!no_op.projection_rebuilt, "{no_op:?}");
+        assert_eq!(no_op.sources_ingested, 0);
+
+        // A proof lost after admission must not be replaced by either a
+        // partial incremental fold or a rebuild selected by source deletion.
+        for delete_source in [false, true] {
+            let works_before = std::fs::read(&works).unwrap();
+            let state_before = intake_state_files(&state);
+            if delete_source {
+                std::fs::rename(&events, &saved_events).unwrap();
+            } else {
+                write_shard(&repo, "pending-proof-event", "pending-work");
+            }
+            let raced =
+                ingest_project_work_events_paths_with_before_intake(&repo, &works, &state, || {
+                    std::fs::remove_file(&proof).unwrap()
+                });
+            assert_eq!(
+                raced.sources_ingested, 0,
+                "delete={delete_source}: {raced:?}"
+            );
+            assert_eq!(std::fs::read(&works).unwrap(), works_before);
+            assert_eq!(intake_state_files(&state), state_before);
+            assert!(!proof.exists());
+            if delete_source {
+                std::fs::rename(&saved_events, &events).unwrap();
+            }
+            let retry = ingest_project_work_events_paths(&repo, &works, &state);
+            assert!(retry.projection_rebuilt, "{retry:?}");
+            assert!(retry.load_error.is_none(), "{retry:?}");
+            assert_eq!(std::fs::read_to_string(&closes).unwrap(), close_bytes);
+        }
     }
 
     #[test]

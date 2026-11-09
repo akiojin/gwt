@@ -492,10 +492,8 @@ fn unchanged_gates(
             return Err(refused(reason));
         }
     }
-    if gwt_git::pr_status::body_defers_user_verification(&request.body) {
-        return Err(refused(
-            "human verification is still deferred; CI evidence does not settle that gate",
-        ));
+    if let Some(reason) = super::user_verification_rejection(&request.body) {
+        return Err(refused(reason));
     }
     if let Some(session_id) = &target_session {
         if let Some(reason) = crate::cli::action_obligation::open_obligation_refusal(
@@ -528,25 +526,164 @@ fn unchanged_gates(
                 "UI changes require fresh exact-head measured headed dark/light E2E evidence",
             ));
         }
-        let autonomous = crate::cli::execution_state::session_launch_route(Some(session_id))
-            == Some(gwt_agent::LaunchRoute::Autonomous);
-        if autonomous {
-            if !request.body.lines().any(|line| {
-                line.trim().trim_start_matches(['-', '*', ' ']) == "Agent Visual Check: pass"
-            }) {
-                return Err(refused(
-                    "autonomous UI delivery requires Agent Visual Check: pass",
-                ));
-            }
-        } else if gwt_git::pr_status::user_verification_result(&request.body).as_deref()
-            != Some("confirmed")
-        {
-            return Err(refused(
-                "manual UI delivery requires User Verification Result: confirmed",
-            ));
+        if !request.body.lines().any(|line| {
+            line.trim().trim_start_matches(['-', '*', ' ']) == "Agent Visual Check: pass"
+        }) {
+            return Err(refused("UI delivery requires Agent Visual Check: pass"));
         }
     }
     Ok(())
+}
+
+/// Ready is a metadata operation the registered PM may perform for a producer.
+/// Its evidence stays attached to the producing Session, never the PM's own
+/// worktree. CI and review policy continue to gate merging after promotion.
+pub(super) fn ready_by_pm<E: crate::cli::CliEnv>(
+    env: &mut E,
+    number: u64,
+    out: &mut String,
+) -> Option<i32> {
+    use crate::cli::verification_record as verification;
+    let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let pm_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    if !crate::pm_registry::registered_pm_worktree_authority(&worktree, &pm_session, &worktree) {
+        return None;
+    }
+    let result = (|| -> io::Result<gwt_git::PrStatus> {
+        let snapshot = env.fetch_completion_pr(number)?;
+        let fields = &snapshot.inventory;
+        if snapshot.state != gwt_git::pr_status::PrState::Open
+            || fields.number != number
+            || !fields.is_draft
+            || fields.is_cross_repository == Some(true)
+        {
+            return Err(refused(
+                "PM Ready requires an existing open Draft in this repository",
+            ));
+        }
+        let request = CiCreateRequest {
+            base: fields.base_ref_name.clone(),
+            head: fields.head_ref_name.clone(),
+            head_sha: snapshot.head_sha.clone(),
+            title: fields.title.clone(),
+            body: fields.body.clone(),
+            labels: Vec::new(),
+        };
+        let (target, producing_session, owner) = target_context(&worktree, &Actor::Pm, &request)?;
+        let producing_session =
+            producing_session.ok_or_else(|| refused("producing Session is unknown"))?;
+        let check_permissions = || -> io::Result<()> {
+            if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(&target)
+                .or_else(|| {
+                    owner.and_then(|owner| {
+                        crate::cli::permission_readiness::owner_settlement_refusal(&worktree, owner)
+                    })
+                })
+                .or_else(|| {
+                    crate::cli::action_obligation::open_obligation_refusal(
+                        &target,
+                        &producing_session,
+                        &[crate::cli::action_obligation::ObligationKind::Pr],
+                    )
+                })
+            {
+                return Err(refused(reason));
+            }
+            Ok(())
+        };
+        check_permissions()?;
+        for value in gwt_git::pr_status::user_verification_results(&request.body) {
+            if let Some(reason) =
+                verification::autonomous_confirmation_refusal(Some(&producing_session), value)
+            {
+                return Err(refused(reason));
+            }
+        }
+        let record = match super::ready_verification(&target, Some(&producing_session), &request.body, true)
+            .map_err(refused)?
+        {
+            Some(record) => record,
+            None => verification::load(&target)?.ok_or_else(|| refused("producing verification is missing; continue the owner and run verify.plan / verify.run"))?,
+        };
+        if record.owner_number != owner
+            || record.session_id != producing_session
+            || record.verified_head.as_deref() != Some(&request.head_sha)
+        {
+            return Err(refused(
+                "producing verification does not match the owner, Session and current PR head",
+            ));
+        }
+        let adjudications =
+            verification::evaluate_pr_ready_evidence(&target, &producing_session, owner)
+                .map_err(|status| refused(status.describe()))?;
+        if !record.quarantined_failures.is_empty() {
+            verification::validate_current_quarantine_references(env, &record, Some(number))
+                .map_err(refused)?;
+        }
+        let guard = super::VerificationMutationGuard {
+            session_id: producing_session.clone(),
+            owner_number: owner,
+            record_id: record.record_id.clone(),
+            run_hash: record.content_hash.clone(),
+            plan_hash: record.verification_plan_hash.clone(),
+            allow_ready_adjudication: true,
+            completion: None,
+        };
+        super::dispatch_pr_mutation(None, Some((&target, &guard)), || {
+            if !crate::pm_registry::registered_pm_worktree_authority(
+                &worktree,
+                &pm_session,
+                &worktree,
+            ) {
+                return Err(refused(
+                    "registered PM authority changed before Ready dispatch",
+                ));
+            }
+            check_permissions()?;
+            let fresh = env.fetch_completion_pr(number)?;
+            if fresh.state != snapshot.state
+                || !fresh.inventory.is_draft
+                || fresh.head_sha != request.head_sha
+                || fresh.inventory.base_ref_name != request.base
+                || fresh.inventory.head_ref_name != request.head
+                || fresh.inventory.body != request.body
+                || target_context(&worktree, &Actor::Pm, &request)?
+                    != (target.clone(), Some(producing_session.clone()), owner)
+            {
+                return Err(refused(
+                    "producing owner or PR head/body changed before Ready dispatch",
+                ));
+            }
+            if !adjudications.is_empty() {
+                env.comment_on_pr(
+                    number,
+                    &super::verification_adjudication_note(&adjudications),
+                )?;
+            }
+            if !crate::pm_registry::registered_pm_worktree_authority(
+                &worktree,
+                &pm_session,
+                &worktree,
+            ) {
+                return Err(refused(
+                    "registered PM authority changed before Ready dispatch",
+                ));
+            }
+            check_permissions()?;
+            env.mark_pr_ready(number)
+        })
+    })();
+    Some(match result {
+        Ok(pr) => {
+            out.push_str(&format!("marked pull request #{number} ready for review using its producing Session's verification\n"));
+            super::render_pr(out, &pr);
+            0
+        }
+        Err(error) => {
+            out.push_str(&format!("PM Ready refused: {error}\n"));
+            2
+        }
+    })
 }
 
 pub(super) fn run<E: crate::cli::CliEnv>(

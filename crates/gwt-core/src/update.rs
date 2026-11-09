@@ -14,14 +14,19 @@ use crate::process_executor::{
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+#[cfg(target_os = "windows")]
+mod windows_msi;
 
 pub fn is_ci() -> bool {
     std::env::var("CI")
@@ -82,6 +87,9 @@ pub enum UpdateState {
         message: String,
         /// When the failure was recorded.
         failed_at: DateTime<Utc>,
+        /// Server-directed retry deadline; absent for ordinary failures.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_at: Option<DateTime<Utc>>,
     },
 }
 
@@ -99,7 +107,7 @@ fn default_allow_elevation() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
@@ -398,6 +406,32 @@ pub fn clear_pending_update_manifest_if_unchanged_in(
         .map_err(|err| format!("Failed to remove pending manifest: {err}"))
 }
 
+/// A failed apply is terminal. Discard only its own staged release, keeping
+/// any replacement published by another window. Never delete arbitrary payload
+/// paths from the manifest; downloads live in the versioned managed directory.
+pub fn discard_failed_pending_update(version: &str) -> Result<(), String> {
+    let version =
+        parse_tag_version(version).ok_or_else(|| "Invalid failed update version".to_string())?;
+    let pending_dir = pending_update_dir();
+    let _lock = pending_update_manifest_lock(&pending_dir)?;
+    let manifest = fs::read(pending_dir.join("manifest.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PendingUpdateManifest>(&bytes).ok());
+    if manifest
+        .is_some_and(|manifest| parse_tag_version(&manifest.version) == Some(version.clone()))
+    {
+        fs::remove_file(pending_dir.join("manifest.json"))
+            .map_err(|err| format!("Failed to remove failed pending manifest: {err}"))?;
+    }
+    let directory = crate::paths::gwt_updates_dir().join(format!("v{version}"));
+    gwt_config::home::assert_test_path(&directory);
+    match fs::remove_dir_all(directory) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("Failed to remove failed staged update: {err}")),
+    }
+}
+
 /// Issue #4038 (AC-3): one project the GUI had open when the update apply
 /// began. `update_drain` records whether the Issue Monitor of that project
 /// was holding new launches (#4037) so the post-restart bootstrap can release
@@ -548,13 +582,35 @@ pub fn install_requires_elevation() -> bool {
         .is_some_and(|root| !dir_writable(&root))
 }
 
-/// Whether this payload needs administrator permissions at its actual target.
-/// Package installers always elevate. DMG updates swap the complete bundle,
-/// so both its parent and any existing bundle must be writable.
+/// Whether unattended apply must fall back to the manual update action.
 pub fn prepared_payload_requires_elevation(payload: &PreparedPayload, target_exe: &Path) -> bool {
-    match payload {
+    prepared_payload_automatic_apply_refusal(payload, target_exe).is_some()
+}
+
+/// The concrete reason a staged payload cannot be applied unattended.
+/// Unknown MSI metadata or installation scope fails closed, just like a target
+/// that requires administrator permissions. Manual apply remains available.
+pub fn prepared_payload_automatic_apply_refusal(
+    payload: &PreparedPayload,
+    target_exe: &Path,
+) -> Option<String> {
+    let requires_elevation = match payload {
         PreparedPayload::Installer {
-            kind: InstallerKind::MacPkg | InstallerKind::WindowsMsi,
+            kind: InstallerKind::WindowsMsi,
+            path,
+        } => {
+            #[cfg(target_os = "windows")]
+            return windows_msi::automatic_apply_refusal(path, target_exe).err();
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = path;
+                return Some(
+                    "Windows MSI installation scope cannot be verified on this platform".into(),
+                );
+            }
+        }
+        PreparedPayload::Installer {
+            kind: InstallerKind::MacPkg,
             ..
         } => true,
         PreparedPayload::Installer {
@@ -565,7 +621,8 @@ pub fn prepared_payload_requires_elevation(payload: &PreparedPayload, target_exe
         PreparedPayload::PortableBinary { .. } => {
             install_root_for(target_exe).is_none_or(|root| !dir_writable(&root))
         }
-    }
+    };
+    requires_elevation.then(|| "Administrator privileges required".into())
 }
 
 fn macos_bundle_requires_elevation(bundle: &Path) -> bool {
@@ -626,8 +683,8 @@ fn write_json_atomically<T: Serialize>(
 pub enum UpdateResumeOutcome {
     /// The running binary is `to_version`; the marker was removed.
     Applied,
-    /// The running binary is not `to_version` (#3807 no-op apply); the
-    /// marker stays with `attempt` incremented.
+    /// The running binary is not `to_version` (#3807 no-op apply).
+    /// The failed attempt is consumed; apply-result retains its diagnostic.
     VersionMismatch { observed_version: String },
 }
 
@@ -664,12 +721,24 @@ pub fn settle_update_resume_marker(
     current_version: &str,
     now: DateTime<Utc>,
 ) -> Option<UpdateResumeSettlement> {
-    settle_update_resume_marker_in(
+    let settlement = settle_update_resume_marker_in(
         &update_resume_dir(),
         &crate::paths::gwt_updates_dir(),
         current_version,
         now,
-    )
+    )?;
+    if matches!(
+        settlement.outcome,
+        UpdateResumeOutcome::VersionMismatch { .. }
+    ) {
+        if let Err(err) = discard_failed_pending_update(&settlement.marker.to_version) {
+            log_update_event(
+                "fail",
+                &[("stage", "discard_failed_pending"), ("reason", &err)],
+            );
+        }
+    }
+    Some(settlement)
 }
 
 /// Test-friendly variant of [`settle_update_resume_marker`].
@@ -721,13 +790,7 @@ pub fn settle_update_resume_marker_in(
             &[("stage", "record_apply_result"), ("reason", &err)],
         );
     }
-    let marker_write = if applied {
-        clear_update_resume_marker_in(resume_dir)
-    } else {
-        let mut retry = marker.clone();
-        retry.attempt = retry.attempt.saturating_add(1);
-        persist_update_resume_marker_in(resume_dir, &retry)
-    };
+    let marker_write = clear_update_resume_marker_in(resume_dir);
     if let Err(err) = marker_write {
         log_update_event(
             "fail",
@@ -973,6 +1036,119 @@ pub struct UpdateManager {
     cache_path: PathBuf,
     updates_dir: PathBuf,
     client: Client,
+    release_client: Client,
+}
+
+#[derive(Clone)]
+struct ReleaseFetchError {
+    message: String,
+    retry_at: Option<DateTime<Utc>>,
+}
+
+type ReleaseFlight = Arc<OnceLock<Result<GitHubRelease, ReleaseFetchError>>>;
+static LATEST_RELEASE_FLIGHTS: OnceLock<Mutex<HashMap<String, ReleaseFlight>>> = OnceLock::new();
+
+impl From<String> for ReleaseFetchError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retry_at: None,
+        }
+    }
+}
+
+// Resolve lazily, only for the canonical API. Never store secrets in a Debug type
+// or client default headers (the download client follows asset redirects).
+fn release_token_with(
+    mut env: impl FnMut(&str) -> Option<String>,
+    gh: impl FnOnce() -> Option<String>,
+) -> Option<HeaderValue> {
+    let token = ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .find_map(|key| env(key).filter(|value| !value.trim().is_empty()))
+        .or_else(gh)
+        .filter(|value| !value.trim().is_empty())?;
+    let mut header = HeaderValue::from_str(&format!("Bearer {}", token.trim())).ok()?;
+    header.set_sensitive(true);
+    Some(header)
+}
+
+fn release_token() -> Option<HeaderValue> {
+    release_token_with(
+        |key| std::env::var(key).ok(),
+        || {
+            use crate::process_console::{
+                global, spawn_logged_blocking_with_deadline, ProcessKind, SpawnOptions,
+            };
+            let output = spawn_logged_blocking_with_deadline(
+                &global(),
+                ProcessKind::Gh,
+                "gh",
+                &["auth", "token", "--hostname", "github.com"],
+                SpawnOptions::new("gh auth token --hostname github.com").forward_output(false),
+                std::time::Instant::now() + CONNECT_TIMEOUT,
+            )
+            .ok()?;
+            output.success().then_some(output.stdout)
+        },
+    )
+}
+
+fn release_http_failure(
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    body: &str,
+    now: DateTime<Utc>,
+) -> (&'static str, Option<DateTime<Utc>>) {
+    if status != reqwest::StatusCode::FORBIDDEN && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return ("http_error", None);
+    }
+    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
+    let primary = header("x-ratelimit-remaining") == Some("0");
+    let limited = primary
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || header("retry-after").is_some()
+        || crate::github_quota::is_rate_limit_stderr(body);
+    if !limited {
+        return ("forbidden", None);
+    }
+    let reset = primary
+        .then(|| {
+            header("x-ratelimit-reset")?
+                .parse::<i64>()
+                .ok()
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        })
+        .flatten();
+    let retry_after = header("retry-after").and_then(|value| {
+        value
+            .parse::<i64>()
+            .ok()
+            .filter(|seconds| *seconds >= 0)
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|delay| now.checked_add_signed(delay))
+            .or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()
+                    .map(|time| time.with_timezone(&Utc))
+            })
+    });
+    // Honour both lower bounds if GitHub supplies both headers.
+    let deadline = reset
+        .into_iter()
+        .chain(retry_after)
+        .max()
+        .filter(|deadline| *deadline > now)
+        .unwrap_or(now + chrono::Duration::seconds(60));
+    (
+        if primary {
+            "primary_rate_limit"
+        } else {
+            "secondary_rate_limit"
+        },
+        Some(deadline),
+    )
 }
 
 impl Default for UpdateManager {
@@ -1001,6 +1177,13 @@ impl UpdateManager {
             HeaderValue::from_static("application/vnd.github+json"),
         );
 
+        let release_client = Client::builder()
+            .default_headers(headers.clone())
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("valid release HTTP client configuration");
         let client = Client::builder()
             .default_headers(headers)
             .connect_timeout(CONNECT_TIMEOUT)
@@ -1027,6 +1210,7 @@ impl UpdateManager {
             cache_path,
             updates_dir,
             client,
+            release_client,
         }
     }
 
@@ -1053,6 +1237,23 @@ impl UpdateManager {
     }
 
     pub fn check_for_executable(&self, force: bool, current_exe: Option<&Path>) -> UpdateState {
+        self.check_for_executable_impl(force, current_exe, false)
+    }
+
+    /// Explicit user discovery bypasses cached outcomes and automatic retry
+    /// policy. It only discovers a candidate; staging still requires the
+    /// existing user-confirmed apply route.
+    pub fn check_manual_for_executable(&self, current_exe: Option<&Path>) -> UpdateState {
+        log_update_event("check_started", &[("source", "manual")]);
+        self.check_for_executable_impl(true, current_exe, true)
+    }
+
+    fn check_for_executable_impl(
+        &self,
+        force: bool,
+        current_exe: Option<&Path>,
+        allow_failed_release: bool,
+    ) -> UpdateState {
         let now = Utc::now();
         let cache = read_cache(&self.cache_path).ok();
 
@@ -1078,6 +1279,7 @@ impl UpdateManager {
                             release.tag_name
                         ),
                         failed_at: now,
+                        retry_at: None,
                     };
                 };
 
@@ -1111,7 +1313,9 @@ impl UpdateManager {
                 };
                 let _ = write_cache(&self.cache_path, &cache_file);
 
-                if latest_ver > self.current_version {
+                if latest_ver > self.current_version
+                    && (allow_failed_release || self.is_normal_update_candidate(&latest_ver))
+                {
                     UpdateState::Available {
                         current: self.current_version.to_string(),
                         latest: latest_ver.to_string(),
@@ -1132,8 +1336,9 @@ impl UpdateManager {
                     }
                 }
                 UpdateState::Failed {
-                    message: err,
+                    message: err.message,
                     failed_at: now,
+                    retry_at: err.retry_at,
                 }
             }
         }
@@ -1214,7 +1419,7 @@ impl UpdateManager {
         target_gwt: &Path,
         target_gwtd: &Path,
     ) -> Result<InstalledDockerLinuxBundle, String> {
-        let release = self.fetch_latest_release()?;
+        let release = self.fetch_latest_release().map_err(|error| error.message)?;
         let version = parse_tag_version(&release.tag_name)
             .ok_or_else(|| {
                 format!(
@@ -1519,14 +1724,36 @@ impl UpdateManager {
         &self.updates_dir
     }
 
-    fn fetch_latest_release(&self) -> Result<GitHubRelease, String> {
+    fn fetch_latest_release(&self) -> Result<GitHubRelease, ReleaseFetchError> {
         let url = format!(
             "{}/repos/{}/{}/releases/latest",
             self.api_base_url.trim_end_matches('/'),
             self.owner,
             self.repo
         );
-        self.fetch_release(&url, "latest release")
+        // Managers are created independently by startup/periodic and manual
+        // workers. Share only an active network lookup, never a completed
+        // outcome: a later explicit Check must make a fresh request.
+        let flights = LATEST_RELEASE_FLIGHTS.get_or_init(Mutex::default);
+        let flight = flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(url.clone())
+            .or_default()
+            .clone();
+        let result = flight
+            .get_or_init(|| self.fetch_release(&url, "latest release"))
+            .clone();
+        let mut flights = flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if flights
+            .get(&url)
+            .is_some_and(|active| Arc::ptr_eq(active, &flight))
+        {
+            flights.remove(&url);
+        }
+        result
     }
 
     /// SPEC #2780 v2 Amendment (FR-011): fetch a release by its tag name so the
@@ -1546,6 +1773,7 @@ impl UpdateManager {
             normalized
         );
         self.fetch_release(&url, &format!("release v{normalized}"))
+            .map_err(|error| error.message)
     }
 
     /// Fetch and parse release notes for a single GitHub Release tag.
@@ -1577,17 +1805,53 @@ impl UpdateManager {
             .and_then(|body| crate::release_notes::parse_release_body(&normalized, body)))
     }
 
-    fn fetch_release(&self, url: &str, label: &str) -> Result<GitHubRelease, String> {
+    fn release_request(
+        &self,
+        url: &str,
+        token: impl FnOnce() -> Option<HeaderValue>,
+    ) -> reqwest::blocking::RequestBuilder {
+        let request = self.release_client.get(url);
+        let canonical = reqwest::Url::parse(url).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("api.github.com")
+                && url.port_or_known_default() == Some(443)
+                && url.username().is_empty()
+                && url.password().is_none()
+        });
+        if canonical {
+            if let Some(token) = token() {
+                return request.header(AUTHORIZATION, token);
+            }
+        }
+        request
+    }
+
+    fn fetch_release(&self, url: &str, label: &str) -> Result<GitHubRelease, ReleaseFetchError> {
         let res = self
-            .client
-            .get(url)
+            .release_request(url, release_token)
             .send()
             .map_err(|e| format!("Failed to fetch {label}: {e}"))?;
         if !res.status().is_success() {
-            return Err(format!("Failed to fetch {label}: status {}", res.status()));
+            let status = res.status();
+            let headers = res.headers().clone();
+            let body = res.text().unwrap_or_default();
+            let (reason, retry_at) = release_http_failure(status, &headers, &body, Utc::now());
+            let retry = retry_at.map(|time| time.to_rfc3339()).unwrap_or_default();
+            log_update_event(
+                "release_request_failed",
+                &[
+                    ("status", status.as_str()),
+                    ("reason", reason),
+                    ("retry_at", &retry),
+                ],
+            );
+            return Err(ReleaseFetchError {
+                message: format!("Failed to fetch {label}: status {status} ({reason})"),
+                retry_at,
+            });
         }
         res.json::<GitHubRelease>()
-            .map_err(|e| format!("Failed to parse GitHub release JSON: {e}"))
+            .map_err(|e| format!("Failed to parse GitHub release JSON: {e}").into())
     }
 
     /// SPEC #2780 v2 Amendment (FR-012): build an [`UpdateState::Available`]
@@ -1655,6 +1919,14 @@ impl UpdateManager {
         })
     }
 
+    fn is_normal_update_candidate(&self, version: &Version) -> bool {
+        *version > self.current_version
+            && !load_update_apply_result_in(&self.updates_dir).is_some_and(|result| {
+                result.outcome == UpdateApplyOutcome::Failure
+                    && parse_tag_version(&result.to_version).as_ref() == Some(version)
+            })
+    }
+
     fn state_from_cache(&self, cache: &UpdateCacheFile, current_exe: Option<&Path>) -> UpdateState {
         let checked_at = cache.checked_at;
 
@@ -1669,7 +1941,7 @@ impl UpdateManager {
             };
         };
 
-        if latest_ver > self.current_version {
+        if self.is_normal_update_candidate(&latest_ver) {
             let release_url = cache.release_url.clone().unwrap_or_else(|| {
                 format!(
                     "https://github.com/{}/{}/releases/tag/v{}",
@@ -1773,18 +2045,19 @@ pub fn internal_run_installer_with_executor(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let restart = UpdateManager::read_restart_args_file_config(args_file)?;
-        if !restart.allow_elevation
-            && prepared_payload_requires_elevation(
-                &PreparedPayload::Installer {
-                    path: installer.to_path_buf(),
-                    kind: installer_kind,
-                },
-                target_exe,
-            )
-        {
-            return Err(
-                "Automatic update requires elevated permissions; apply it manually.".to_string(),
-            );
+        let automatic_refusal = prepared_payload_automatic_apply_refusal(
+            &PreparedPayload::Installer {
+                path: installer.to_path_buf(),
+                kind: installer_kind,
+            },
+            target_exe,
+        );
+        if !restart.allow_elevation {
+            if let Some(reason) = &automatic_refusal {
+                return Err(format!(
+                    "Automatic update requires elevated permissions or a verified per-user installation: {reason}; apply it manually."
+                ));
+            }
         }
         let restart_exe = match installer_kind {
             InstallerKind::MacDmg => {
@@ -1818,7 +2091,14 @@ pub fn internal_run_installer_with_executor(
             InstallerKind::WindowsMsi => {
                 #[cfg(target_os = "windows")]
                 {
-                    run_windows_msi_with_uac(installer, executor)?;
+                    // Recheck after the parent exits. Automatic apply must never
+                    // opt into UAC or the explicit legacy migration path.
+                    run_windows_msi_with_eligibility(
+                        installer,
+                        restart.allow_elevation,
+                        automatic_refusal.map_or(Ok(()), Err),
+                        executor,
+                    )?;
                     resolve_windows_restart_executable(target_exe)
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -1884,17 +2164,22 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("invalid path"))?;
     let tmp = parent.join(format!(
-        ".{}.tmp",
+        ".{}.{}.tmp",
         path.file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("update")
+            .unwrap_or("update"),
+        uuid::Uuid::new_v4()
     ));
     gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
-    fs::write(&tmp, bytes)?;
-    let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
-    fs::rename(&tmp, path)?;
-    Ok(())
+    let result = fs::write(&tmp, bytes).and_then(|()| {
+        let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
+        fs::rename(&tmp, path)
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn parse_tag_version(tag: &str) -> Option<Version> {
@@ -2645,6 +2930,38 @@ fn windows_msi_argument_list(installer: &Path) -> Vec<String> {
 }
 
 #[cfg(any(test, target_os = "windows"))]
+fn run_windows_msi_with_eligibility(
+    installer: &Path,
+    allow_elevation: bool,
+    eligibility: Result<(), String>,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
+    if let Err(reason) = eligibility {
+        return if allow_elevation {
+            run_windows_msi_with_uac(installer, executor)
+        } else {
+            Err(format!("{reason}; update stays staged for manual apply."))
+        };
+    }
+    let output = executor
+        .run(
+            ProcessRequest::new("msiexec.exe")
+                .arg("/i")
+                .arg(installer)
+                .args(["/quiet", "/norestart"])
+                .hide_window(true)
+                .mode(ExecutionMode::Status),
+        )
+        .map_err(|err| format!("Failed to run msiexec: {err}"))?;
+    // ERROR_SUCCESS_REBOOT_REQUIRED is a completed install. /norestart
+    // suppresses an OS reboot; the existing GWT restart/version check settles it.
+    if !output.success && output.code != Some(3010) {
+        return Err(format!("msiexec exited with {}", output.status_display));
+    }
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "windows"))]
 fn run_windows_msi_with_uac(
     installer: &Path,
     executor: &dyn ProcessExecutor,
@@ -3014,6 +3331,290 @@ mod tests {
 
         let state = mgr.check(true);
         assert!(matches!(state, UpdateState::Failed { .. }));
+    }
+
+    #[test]
+    fn manual_check_bypasses_fresh_cache_and_offers_failed_newer_release() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let base = serve_once(
+            "",
+            "200 OK",
+            "application/json",
+            br#"{"tag_name":"v99.0.0","html_url":"https://example.com/release","assets":[]}"#
+                .to_vec(),
+        );
+        let mgr = UpdateManager::new().with_api_base_url(base);
+        write_cache(
+            mgr.cache_path(),
+            &UpdateCacheFile {
+                checked_at: Utc::now(),
+                latest_version: Some("999.0.0".to_string()),
+                release_url: Some("https://example.com/cached".to_string()),
+                portable_asset_url: None,
+                installer_asset_url: None,
+                asset_url: None,
+            },
+        )
+        .unwrap();
+        persist_update_apply_result(&UpdateApplyResult {
+            outcome: UpdateApplyOutcome::Failure,
+            from_version: mgr.current_version.to_string(),
+            to_version: "99.0.0".to_string(),
+            observed_version: mgr.current_version.to_string(),
+            attempt: 1,
+            recorded_at: Utc::now().to_rfc3339(),
+            message: Some("version mismatch".to_string()),
+        })
+        .unwrap();
+
+        let state = mgr.check_manual_for_executable(None);
+        assert!(matches!(state, UpdateState::Available { latest, .. } if latest == "99.0.0"));
+        // The one-shot server is now closed. A later explicit check must
+        // surface its failure rather than reusing the finished flight/cache.
+        assert!(matches!(
+            mgr.check_manual_for_executable(None),
+            UpdateState::Failed { .. }
+        ));
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        assert!(
+            log.lines().any(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+                entry["stage"] == "check_started" && entry["source"] == "manual"
+            }),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn manual_check_never_offers_current_or_older_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        for latest in [env!("CARGO_PKG_VERSION"), "0.0.0"] {
+            let base = serve_once(
+                "",
+                "200 OK",
+                "application/json",
+                format!(r#"{{"tag_name":"v{latest}","html_url":"https://example.com/release","assets":[]}}"#)
+                    .into_bytes(),
+            );
+            let mgr = UpdateManager::new()
+                .with_api_base_url(base)
+                .with_cache_path(temp.path().join("update-check.json"));
+            assert!(matches!(
+                mgr.check_manual_for_executable(None),
+                UpdateState::UpToDate { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn manual_and_periodic_checks_share_an_in_flight_release_lookup() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let key = format!("{base}/repos/akiojin/gwt/releases/latest");
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (respond_tx, respond_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 2048];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            arrived_tx.send(()).unwrap();
+            respond_rx.recv().unwrap();
+            let body =
+                r#"{"tag_name":"v99.0.0","html_url":"https://example.com/release","assets":[]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let manager = UpdateManager::new().with_api_base_url(base);
+        persist_update_apply_result(&UpdateApplyResult {
+            outcome: UpdateApplyOutcome::Failure,
+            from_version: manager.current_version.to_string(),
+            to_version: "99.0.0".to_string(),
+            observed_version: manager.current_version.to_string(),
+            attempt: 1,
+            recorded_at: Utc::now().to_rfc3339(),
+            message: Some("version mismatch".to_string()),
+        })
+        .unwrap();
+        let periodic = manager.clone();
+        let periodic = thread::spawn(move || periodic.check_for_executable(true, None));
+        arrived_rx.recv().unwrap();
+        let manual = thread::spawn(move || manager.check_manual_for_executable(None));
+        // Hold the HTTP response until both callers joined this exact flight;
+        // observing ownership avoids a scheduler-dependent sleep/barrier race.
+        loop {
+            let joined = LATEST_RELEASE_FLIGHTS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|flight| std::sync::Arc::strong_count(flight) >= 3);
+            if joined {
+                break;
+            }
+            assert!(
+                !periodic.is_finished() && !manual.is_finished(),
+                "a check completed without joining the active lookup"
+            );
+            thread::yield_now();
+        }
+        respond_tx.send(()).unwrap();
+        let periodic = periodic.join().unwrap();
+        let manual = manual.join().unwrap();
+        server.join().unwrap();
+        assert!(matches!(&manual, UpdateState::Available { latest, .. } if latest == "99.0.0"));
+        assert!(matches!(periodic, UpdateState::UpToDate { .. }));
+        assert!(!LATEST_RELEASE_FLIGHTS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .contains_key(&key));
+    }
+
+    #[test]
+    fn issue_6001_release_failure_preserves_reset_and_logs_cause() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let reset = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        let base = serve_once(
+            "",
+            "403 Forbidden",
+            &format!(
+                "application/json\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: {}",
+                reset.timestamp()
+            ),
+            br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+        );
+        let state = UpdateManager::new().with_api_base_url(base).check(true);
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            value["retry_at"],
+            reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        assert!(log.contains("primary_rate_limit"), "{log}");
+
+        let base = serve_once(
+            "",
+            "403 Forbidden",
+            "application/json",
+            br#"{"message":"Resource not accessible"}"#.to_vec(),
+        );
+        let state = UpdateManager::new().with_api_base_url(base).check(true);
+        let value = serde_json::to_value(&state).unwrap();
+        assert!(value.get("retry_at").is_none());
+        assert!(fs::read_to_string(update_log_path())
+            .unwrap()
+            .contains("forbidden"));
+    }
+
+    #[test]
+    fn issue_6001_auth_selection_is_lazy_and_release_only() {
+        let token = release_token_with(
+            |key| {
+                Some(
+                    if key == "GH_TOKEN" {
+                        "gh-env"
+                    } else {
+                        "github-env"
+                    }
+                    .into(),
+                )
+            },
+            || panic!("env credentials must avoid a gh spawn"),
+        )
+        .unwrap();
+        assert_eq!(token, "Bearer gh-env");
+        assert!(token.is_sensitive());
+        let fallback = release_token_with(
+            |key| (key == "GITHUB_TOKEN").then(|| "github-env".into()),
+            || panic!("GITHUB_TOKEN must avoid a gh spawn"),
+        )
+        .unwrap();
+        assert_eq!(fallback, "Bearer github-env");
+        let gh = release_token_with(|_| Some("  ".into()), || Some("gh-store\n".into())).unwrap();
+        assert_eq!(gh, "Bearer gh-store");
+        assert!(release_token_with(|_| None, || None).is_none());
+        assert!(release_token_with(|_| None, || Some("\n".into())).is_none());
+
+        let mgr = UpdateManager::new();
+        let url = "https://api.github.com/repos/akiojin/gwt/releases/latest";
+        let request = mgr
+            .release_request(url, || Some(token.clone()))
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()[AUTHORIZATION], token);
+        for url in [
+            "http://127.0.0.1/releases/latest",
+            "https://example.com/releases/latest",
+            "http://api.github.com/releases/latest",
+        ] {
+            let request = mgr
+                .release_request(url, || {
+                    panic!("custom origins must not resolve credentials")
+                })
+                .build()
+                .unwrap();
+            assert!(!request.headers().contains_key(AUTHORIZATION));
+        }
+        assert!(!mgr
+            .client
+            .get(url)
+            .build()
+            .unwrap()
+            .headers()
+            .contains_key(AUTHORIZATION));
+        assert!(!format!("{request:?} {mgr:?}").contains("gh-env"));
+    }
+
+    #[test]
+    fn issue_6001_secondary_limit_uses_retry_after_without_waiting_for_core_reset() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("120"));
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("100"));
+        headers.insert(
+            "x-ratelimit-reset",
+            HeaderValue::from_str(&(now.timestamp() + 3600).to_string()).unwrap(),
+        );
+        assert_eq!(
+            release_http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers, "", now),
+            (
+                "secondary_rate_limit",
+                Some(now + chrono::Duration::seconds(120))
+            )
+        );
+        headers.remove("retry-after");
+        assert_eq!(
+            release_http_failure(
+                reqwest::StatusCode::FORBIDDEN,
+                &headers,
+                "You have exceeded a secondary rate limit",
+                now
+            ),
+            (
+                "secondary_rate_limit",
+                Some(now + chrono::Duration::seconds(60))
+            )
+        );
+    }
+
+    #[test]
+    fn issue_6001_release_requests_do_not_follow_redirects() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let base = serve_once(
+            "",
+            "302 Found",
+            "application/json\r\nLocation: http://127.0.0.1:9/secret",
+            Vec::new(),
+        );
+        let state = UpdateManager::new().with_api_base_url(base).check(true);
+        assert!(matches!(state, UpdateState::Failed { message, .. } if message.contains("302")));
     }
 
     #[test]
@@ -3709,6 +4310,66 @@ mod tests {
     }
 
     #[test]
+    fn automatic_windows_msi_uses_normal_permissions_without_migration() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("msiexec.exe", ProcessOutput::succeeded());
+        run_windows_msi_with_eligibility(Path::new("staged/gwt.msi"), false, Ok(()), &mock)
+            .unwrap();
+        let requests = mock.requests_for("msiexec.exe");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].args_lossy(),
+            ["/i", "staged/gwt.msi", "/quiet", "/norestart"]
+        );
+        assert!(mock.requests_for("powershell").is_empty());
+    }
+
+    #[test]
+    fn automatic_windows_msi_refuses_unknown_scope_without_starting_installer() {
+        let mock = MockProcessExecutor::new();
+        let err = run_windows_msi_with_eligibility(
+            Path::new("staged/gwt.msi"),
+            false,
+            Err("Windows MSI installation scope could not be verified".into()),
+            &mock,
+        )
+        .unwrap_err();
+        assert!(err.contains("scope could not be verified"));
+        assert_eq!(mock.request_count(), 0);
+    }
+
+    #[test]
+    fn automatic_windows_msi_preserves_success_requiring_reboot_and_reports_failure() {
+        let installer = Path::new("staged/gwt.msi");
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("msiexec.exe", ProcessOutput::failed(3010));
+        run_windows_msi_with_eligibility(installer, false, Ok(()), &mock).unwrap();
+        mock.push_program_response("msiexec.exe", ProcessOutput::failed(1603));
+        assert!(
+            run_windows_msi_with_eligibility(installer, false, Ok(()), &mock)
+                .unwrap_err()
+                .contains("1603")
+        );
+    }
+
+    #[test]
+    fn manual_windows_msi_retains_explicit_legacy_migration() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("powershell", ProcessOutput::succeeded());
+        run_windows_msi_with_eligibility(
+            Path::new("staged/gwt.msi"),
+            true,
+            Err("Legacy Program Files installation requires manual migration".into()),
+            &mock,
+        )
+        .unwrap();
+        let requests = mock.requests_for("powershell");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].args_lossy()[2].contains("-Verb RunAs"));
+        assert!(requests[0].args_lossy()[2].contains("GWT_ALLOW_LEGACY_MIGRATION=1"));
+    }
+
+    #[test]
     fn internal_apply_update_with_executor_replaces_binaries_and_restarts() {
         let temp = tempfile::tempdir().unwrap();
         let target_dir = temp.path().join("install");
@@ -4258,6 +4919,45 @@ mod tests {
         let _ = fs::set_permissions(&unreadable, restore_perms);
 
         assert_eq!(found.unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn cache_write_keeps_another_writers_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        let other_writer = temp.path().join(".update.json.tmp");
+        fs::write(&other_writer, b"another writer's payload").unwrap();
+        fs::write(&path, b"old cache").unwrap();
+        let value = serde_json::json!({ "latest_version": "99.0.0" });
+
+        write_json_atomic(&path, &value).unwrap();
+
+        assert_eq!(
+            fs::read(&other_writer).unwrap(),
+            b"another writer's payload"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn failed_cache_write_removes_its_temporary_file_and_preserves_the_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.json");
+        fs::create_dir(&path).unwrap();
+        let probe = temp.path().join("rename-probe");
+        fs::write(&probe, b"probe").unwrap();
+        let expected = fs::rename(&probe, &path).unwrap_err();
+        fs::remove_file(probe).unwrap();
+
+        let error =
+            write_json_atomic(&path, &serde_json::json!({ "version": "99.0.0" })).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), expected.raw_os_error());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -5207,6 +5907,7 @@ mod tests {
     #[test]
     fn fetch_release_by_tag_returns_error_for_404() {
         let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
         let base_url = serve_once(
             "/",
             "404 Not Found",
@@ -5496,10 +6197,9 @@ mod tests {
         );
     }
 
-    // Issue #4038 (AC-5): a version mismatch (#3807 no-op apply) records a
-    // failure, bumps `attempt`, and keeps the marker.
+    // Issue #6757: a failed attempt is terminal, with its diagnostic retained.
     #[test]
-    fn settle_update_resume_marker_records_failure_and_keeps_marker_on_mismatch() {
+    fn settle_update_resume_marker_records_failure_and_consumes_marker_on_mismatch() {
         let resume_dir = tempfile::tempdir().expect("resume dir");
         let updates_dir = tempfile::tempdir().expect("updates dir");
         persist_update_resume_marker_in(resume_dir.path(), &sample_resume_marker())
@@ -5515,9 +6215,7 @@ mod tests {
                 observed_version: "9.30.0".to_string()
             }
         );
-        let remaining = load_update_resume_marker_in(resume_dir.path()).expect("marker kept");
-        assert_eq!(remaining.attempt, 2, "each failed restart bumps attempt");
-        assert_eq!(remaining.to_version, "9.31.0");
+        assert!(load_update_resume_marker_in(resume_dir.path()).is_none());
         let result = load_update_apply_result_in(updates_dir.path()).expect("apply result");
         assert_eq!(result.outcome, UpdateApplyOutcome::Failure);
         assert_eq!(result.observed_version, "9.30.0");
@@ -5530,6 +6228,86 @@ mod tests {
                 .contains("9.31.0"),
             "failure message names the expected version: {result:?}"
         );
+    }
+
+    #[test]
+    fn issue_6757_mismatch_discards_pending_and_does_not_reoffer_failed_release() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let updates = crate::paths::gwt_updates_dir();
+        let payload = updates.join("v999.0.0").join("gwt");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "prepared").unwrap();
+        let manifest = PendingUpdateManifest {
+            version: "999.0.0".into(),
+            asset_url: "https://example.invalid/gwt.zip".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: payload.clone(),
+            },
+            downloaded_at: Utc::now().to_rfc3339(),
+            origin: PendingUpdateOrigin::Automatic,
+            auto_apply_deferred: false,
+        };
+        persist_pending_update_manifest(&manifest).unwrap();
+        let marker = UpdateResumeMarker {
+            to_version: manifest.version.clone(),
+            ..sample_resume_marker()
+        };
+        persist_update_resume_marker(&marker).unwrap();
+        let now = Utc::now();
+        let result = settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).unwrap();
+        assert!(matches!(
+            result.outcome,
+            UpdateResumeOutcome::VersionMismatch { .. }
+        ));
+        assert!(
+            !pending_update_manifest_path().exists(),
+            "failed pending must be removed"
+        );
+        assert!(!payload.exists(), "failed staged payload must be removed");
+        assert!(settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).is_none());
+        let manager = UpdateManager::new();
+        let cache = UpdateCacheFile {
+            checked_at: now,
+            latest_version: Some(manifest.version.clone()),
+            release_url: None,
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: Some(manifest.asset_url.clone()),
+        };
+        write_cache(manager.cache_path(), &cache).unwrap();
+        assert!(matches!(manager.check(false), UpdateState::UpToDate { .. }));
+        let newer = UpdateCacheFile {
+            latest_version: Some("999.0.1".into()),
+            ..cache
+        };
+        assert!(matches!(
+            manager.state_from_cache(&newer, None),
+            UpdateState::Available { .. }
+        ));
+
+        // Cleanup must consume a failed manifest even when the helper already
+        // moved its payload, and must preserve a different staged release.
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "prepared again").unwrap();
+        persist_pending_update_manifest(&manifest).unwrap();
+        fs::remove_file(&payload).unwrap();
+        discard_failed_pending_update(&manifest.version).unwrap();
+        assert!(!pending_update_manifest_path().exists());
+        let other_payload = updates.join("v999.0.1").join("gwt");
+        fs::create_dir_all(other_payload.parent().unwrap()).unwrap();
+        fs::write(&other_payload, "other release").unwrap();
+        let replacement = PendingUpdateManifest {
+            version: "999.0.1".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: other_payload.clone(),
+            },
+            ..manifest
+        };
+        persist_pending_update_manifest(&replacement).unwrap();
+        discard_failed_pending_update("999.0.0").unwrap();
+        assert_eq!(load_pending_update_manifest(), Some(replacement));
+        assert!(other_payload.exists());
     }
 
     // Issue #3906 AC-6: the elevation probe is a write test on the install

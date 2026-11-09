@@ -348,7 +348,6 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     );
     expect(messages).toHaveLength(1);
     expect(Object.keys(messages[0]).sort()).toEqual([
-      "bounds",
       "kind",
       "operation_id",
       "work_id",

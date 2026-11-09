@@ -1,0 +1,159 @@
+#Requires -Version 7.0
+[CmdletBinding(PositionalBinding = $false)]
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments)
+
+$ErrorActionPreference = 'Stop'
+$checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$gwt = Join-Path $checkout 'target/debug/gwt.exe'
+$gwtd = Join-Path $checkout 'target/debug/gwtd.exe'
+$checkHome = Join-Path $checkout ('target/issue-6678-home-' + [Guid]::NewGuid().ToString('N'))
+$version = [IO.File]::ReadAllText((Join-Path $checkout 'scripts/playwright-version.txt')).Trim()
+$deps = Join-Path $env:LOCALAPPDATA "Temp/gwt-playwright-win-$version"
+$cli = Join-Path $deps 'node_modules/@playwright/test/cli.js'
+$resolver = Join-Path $deps 'resolve-playwright.cjs'
+$gui = $null
+$anchor = $null
+$savedRunner = @{}
+$exitCode = 1
+
+function Invoke-SourceEnvelope([string]$Operation, [hashtable]$Parameters) {
+    $request = @{schema_version=1;operation=$Operation;params=$Parameters} | ConvertTo-Json -Depth 8 -Compress
+    $response = $request | & $gwtd | ConvertFrom-Json
+    if (!$response.ok) { throw "$Operation failed: $($response.output)" }
+    return $response
+}
+function Assert-Preflight($Doctor) {
+    $preflight = $Doctor.preflight
+    if ($preflight.schema_version -ne 1 -or $preflight.result -ne 'proceed' -or
+        $preflight.context -ne 'current' -or $preflight.normal_completion -ne 'normal' -or
+        $preflight.convergence -ne 'converged' -or @($preflight.reasons).Count) {
+        throw ('Managed-browser preflight failed: ' + ($preflight | ConvertTo-Json -Depth 8 -Compress))
+    }
+}
+
+Push-Location -LiteralPath $checkout
+try {
+    $pythonCommand = if ($IsWindows) { 'python' } else { 'python3' }
+    $pythonApp = Get-Command $pythonCommand -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (!$pythonApp) { throw "$pythonCommand must be on PATH for locked log seeding." }
+    & ($pythonApp.Source) -I -c "import importlib, os; importlib.import_module('msvcrt' if os.name == 'nt' else 'fcntl')"
+    if ($LASTEXITCODE -ne 0) { throw "$pythonCommand must provide the standard file-lock module for log seeding." }
+    $cargoArtifacts = & cargo build -p gwt --bin gwt --bin gwtd --target-dir (Join-Path $checkout 'target') --message-format=json
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed; checkout binaries are not fresh.' }
+    $executables = @{}
+    foreach ($line in $cargoArtifacts) {
+        $artifact = $line | ConvertFrom-Json
+        if ($artifact.reason -eq 'compiler-artifact' -and $artifact.target.kind -contains 'bin' -and $artifact.executable) {
+            $executables[$artifact.target.name] = [IO.Path]::GetFullPath($artifact.executable)
+        }
+    }
+    foreach ($expected in @($gwt, $gwtd)) {
+        $name = [IO.Path]::GetFileNameWithoutExtension($expected)
+        if (!$executables.ContainsKey($name) -or $executables[$name] -ne [IO.Path]::GetFullPath($expected)) {
+            throw "Fresh Cargo artifact for $name must be $expected; reported path: $($executables[$name])."
+        }
+    }
+    foreach ($file in @($gwt, $gwtd, $cli, $resolver)) {
+        if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required checkout binary or pinned Playwright dependency missing: $file" }
+    }
+    $doctor = (Invoke-SourceEnvelope 'hook.doctor' @{purpose='managed_browser'}).output | ConvertFrom-Json
+    Assert-Preflight $doctor
+    $hook = $doctor.managed_hook_bin
+    if (!$hook -or $hook -match '[/\\]target[/\\].*[/\\]gwtd(\.exe)?$') { throw 'Stable managed-hook fallback missing.' }
+    $repoHash = (Invoke-SourceEnvelope 'issue.monitor.status' @{}).project_store.hash
+    if ($repoHash -notmatch '^[0-9a-f]{16}$') { throw 'Canonical project_store.hash missing.' }
+    $state = Join-Path $checkHome ".gwt/projects/$repoHash/project-state"
+    [void](New-Item -ItemType Directory -Path $state, "$checkHome/.codex", "$checkHome/tmp" -Force)
+    [IO.File]::WriteAllText("$checkHome/.codex/config.toml", '')
+    [IO.File]::WriteAllText("$state/pm.json", '{"settings":{"auto_start":false}}')
+    [IO.File]::WriteAllText("$state/issue-monitor.json", '{"enabled":false,"max_active_agents":1,"priority_order":[]}')
+    [IO.File]::WriteAllText("$checkHome/.gwt/session.json", (@{
+        active_tab_id='log-budget-6678'; tabs=@(@{id='log-budget-6678';title='Log budget';project_root=$checkout;kind='git'});recent_projects=@()
+    } | ConvertTo-Json -Depth 8))
+    $runtime = Join-Path $env:USERPROFILE '.gwt/runtime'
+    if (Test-Path -LiteralPath $runtime -PathType Container) {
+        [void](New-Item -ItemType Junction -Path "$checkHome/.gwt/runtime" -Target $runtime)
+    }
+
+    $start = [Diagnostics.ProcessStartInfo]::new($gwt)
+    $start.WorkingDirectory = $checkout
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($key in @($start.Environment.Keys)) {
+        if ($key -match '^(GWT_|CODEX_|CLAUDE_|GH_TOKEN$|GITHUB_TOKEN$|OPENAI_API_KEY$|ANTHROPIC_API_KEY$)') { [void]$start.Environment.Remove($key) }
+    }
+    $start.Environment['HOME'] = $checkHome
+    $start.Environment['USERPROFILE'] = $checkHome
+    $start.Environment['CODEX_HOME'] = "$checkHome/.codex"
+    $start.Environment['TEMP'] = "$checkHome/tmp"
+    $start.Environment['TMP'] = "$checkHome/tmp"
+    $start.Environment['GWT_HOOK_BIN'] = $hook
+    $start.Environment['GWT_BROWSER_URL_FILE'] = "$checkHome/url.txt"
+    $start.Environment['GWT_DISABLE_BACKGROUND_INDEX'] = '1'
+    $start.Environment['RUST_LOG'] = 'info'
+    $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
+    $start.Environment['GH_PROMPT_DISABLED'] = '1'
+    $start.ArgumentList.Add('--no-tray')
+    $start.ArgumentList.Add('--no-open')
+    $gui = [Diagnostics.Process]::Start($start)
+    $stdout = $gui.StandardOutput.ReadToEndAsync()
+    $stderr = $gui.StandardError.ReadToEndAsync()
+    Write-Output "Owned checkout GUI PID: $($gui.Id); isolated HOME: $checkHome"
+    $sources = @('crates/gwt/src/app_runtime/pm.rs','crates/gwt/src/pm_registry.rs',
+        'crates/gwt-core/src/operation_deadline.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt-core/src/logging/housekeep.rs')
+    $fixture = @{issue=6678;checkout=$checkout;checkout_head=(& git rev-parse HEAD).Trim();isolated_home=$checkHome;
+        gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');binary=$gwt;
+        binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;
+        source_sha256=@($sources | ForEach-Object {@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $checkout $_) -Algorithm SHA256).Hash}});
+        scenario='isolated idle GUI; PM auto-start and Issue Monitor disabled';
+        limitation='This is a GUI log-volume observation, not the busy-owner Deferred-loop reproduction. The root regression is covered separately by the Rust test.';
+        baseline_source='Issue #6678 observed approximately 350 gwt.pm.refresh lines/second';baseline_lines_per_second=350}
+    [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 8))
+    $deadline = [DateTime]::UtcNow.AddSeconds(120)
+    $base = ''
+    do {
+        if ($gui.HasExited) { throw 'Owned GUI exited during startup.' }
+        if (Test-Path -LiteralPath "$checkHome/url.txt" -PathType Leaf) {
+            $candidate = [IO.File]::ReadAllText("$checkHome/url.txt").Trim()
+            try { if ((Invoke-WebRequest -Method Head -Uri $candidate -TimeoutSec 2).StatusCode -eq 200) { $base=$candidate; break } } catch {}
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (!$base) { throw 'Fresh checkout readiness timed out.' }
+    $anchor = [Net.WebSockets.ClientWebSocket]::new()
+    $anchor.Options.SetRequestHeader('Origin', $base.TrimEnd('/'))
+    $anchor.ConnectAsync([Uri](($base -replace '^http','ws') + 'ws'), [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
+    Assert-Preflight ((Invoke-SourceEnvelope 'hook.doctor' @{purpose='managed_browser';expected_hook_bin=$hook}).output | ConvertFrom-Json)
+    $runner = @{GWT_PLAYWRIGHT_BASE_URL=$base;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;GWT_PLAYWRIGHT_PROJECT_ROOT=$checkout;
+        GWT_PLAYWRIGHT_PROJECT_STATE=$state;GWT_PLAYWRIGHT_NODE_MODULES=(Join-Path $deps 'node_modules');
+        NODE_OPTIONS=('--require "' + $resolver.Replace('\','/') + '" ' + $env:NODE_OPTIONS)}
+    foreach ($key in $runner.Keys) {
+        $savedRunner[$key] = [Environment]::GetEnvironmentVariable($key)
+        [Environment]::SetEnvironmentVariable($key, $runner[$key])
+    }
+    & node $cli test pm-refresh-log-budget-live.spec.ts logs-scope-live.spec.ts --config crates/gwt/playwright/playwright.config.ts --workers=1 --retries=0 --headed --output "$checkHome/playwright" @PlaywrightArguments
+    $exitCode = $LASTEXITCODE
+} finally {
+    foreach ($key in $savedRunner.Keys) { [Environment]::SetEnvironmentVariable($key, $savedRunner[$key]) }
+    if ($anchor) { $anchor.Abort(); $anchor.Dispose() }
+    $stopped = $false
+    if ($gui) {
+        if (!$gui.HasExited) { $gui.Kill($true) }
+        $stopped = $gui.WaitForExit(10000)
+        if ($stopped) {
+            [IO.File]::WriteAllText("$checkHome/stdout.log", $stdout.GetAwaiter().GetResult())
+            [IO.File]::WriteAllText("$checkHome/stderr.log", $stderr.GetAwaiter().GetResult())
+        }
+        $gui.Dispose()
+    }
+    if (Test-Path -LiteralPath $checkHome) {
+        [IO.File]::WriteAllText("$checkHome/shutdown.json", (@{owned_gui_stopped=$stopped;test_exit_code=$exitCode;stopped_at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json))
+        Write-Output "Evidence: $checkHome"
+    }
+    Pop-Location
+    if ($gui -and !$stopped) { throw 'Owned GUI failed to stop.' }
+}
+exit $exitCode

@@ -261,7 +261,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12" => {
-            // PR node id lookup for pr.ready / pr.draft (read:org-free REST GET).
+            // PR node id lookup for the Ready transition (read:org-free REST GET).
             println!("{{\"number\":12,\"node_id\":\"PR_node_12\",\"draft\":true}}");
             return ExitCode::SUCCESS;
         }
@@ -468,6 +468,17 @@ pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
         Ok(result) => result,
         Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// Capture fake-gh calls without inheriting a managed Session. Both overrides
+/// stay inside `with_fake_gh`'s environment lock for the entire callback.
+pub fn with_fake_gh_capture<T>(mode: &str, test: impl FnOnce(&Path, &Path) -> T) -> T {
+    with_fake_gh(mode, |repo_path| {
+        let argv_file = repo_path.join("gh-argv");
+        let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+        let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        test(repo_path, &argv_file)
+    })
 }
 
 #[test]

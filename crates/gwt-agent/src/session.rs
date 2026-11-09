@@ -1,6 +1,7 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io,
     io::Write,
@@ -353,6 +354,9 @@ pub struct Session {
     /// Stable, gwt-assigned window name, distinct from the provider identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Project roster identity, preserved across provider conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_member_id: Option<String>,
     pub agent_session_id: Option<String>,
     /// Forward-only history of agent-tool conversation sessions (the Session
     /// level of Workspace → Work → Session). Appended by
@@ -485,6 +489,44 @@ pub struct PendingDiscussionResume {
     pub next_question: Option<String>,
 }
 
+/// Protocol outcome of a completed managed hook, independent of its exit code.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookCompletionOutcome {
+    Normal,
+    Blocked,
+}
+
+/// One internally correlated hook invocation, separate from completion history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CurrentHookEventObservation {
+    pub correlation_id: String,
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<HookCompletionOutcome>,
+}
+
+impl CurrentHookEventObservation {
+    pub fn pending(event: &str) -> Option<Self> {
+        hook_event_status(event)?;
+        Some(Self {
+            correlation_id: Uuid::new_v4().to_string(),
+            event: event.to_string(),
+            outcome: None,
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let Ok(id) = Uuid::parse_str(&self.correlation_id) else {
+            return false;
+        };
+        id.get_version_num() == 4
+            && id.get_variant() == uuid::Variant::RFC4122
+            && id.to_string() == self.correlation_id
+            && hook_event_status(&self.event).is_some()
+    }
+}
+
 /// Lightweight runtime state updated by hook events while the PTY is alive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntimeState {
@@ -513,11 +555,22 @@ pub struct SessionRuntimeState {
     pub child_started_at: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
+    /// Accepted provider tool calls awaiting a matching completion event.
+    /// `None` preserves legacy/unknown observation; an empty set confirms
+    /// that no identified tool call remains in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tool_calls: Option<BTreeSet<String>>,
     /// When the most recent managed hook event finished successfully,
     /// protocol output included (Issue #3541). `hook.health` compares it with
     /// the newest hook failure to tell "recovered" from "unresolved".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_hook_event_at: Option<DateTime<Utc>>,
+    /// Missing in old sidecars; absence is never evidence of a normal outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completed_hook_outcome: Option<HookCompletionOutcome>,
+    /// Missing, pending and malformed observations cannot certify a current Stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_hook_event: Option<CurrentHookEventObservation>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
@@ -547,6 +600,7 @@ impl Session {
             branch: branch.into(),
             agent_id,
             agent_name: None,
+            agent_member_id: None,
             agent_session_id: None,
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
@@ -958,18 +1012,48 @@ impl Session {
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
         with_session_lock(dir, &self.id, || {
-            let path = session_file_path(dir, &self.id);
-            let durable = match inspect_session_path(&path) {
-                SessionPathState::Present(session) => session,
-                SessionPathState::Missing => return Ok(false),
-                SessionPathState::Error(error) => return Err(error),
-            };
-            if serialize_session_toml(&durable)? != expected_content {
-                return Ok(false);
-            }
-            write_session_toml_atomic(&path, &content)?;
-            Ok(true)
+            self.commit_if_unchanged_under_lease(dir, &content, &expected_content)
         })
+    }
+
+    /// Use the caller's already-held lease for this exact Session, retaining
+    /// the ordinary canonical snapshot CAS instead of entering a nested lease.
+    pub fn save_if_unchanged_under_lease(
+        &self,
+        dir: &Path,
+        expected: &Session,
+    ) -> std::io::Result<bool> {
+        require_current_thread_session_lease()?;
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.id != expected.id {
+            return Ok(false);
+        }
+        self.commit_if_unchanged_under_lease(
+            dir,
+            &serialize_session_toml(self)?,
+            &serialize_session_toml(expected)?,
+        )
+    }
+
+    fn commit_if_unchanged_under_lease(
+        &self,
+        dir: &Path,
+        content: &str,
+        expected_content: &str,
+    ) -> std::io::Result<bool> {
+        require_current_thread_session_lease()?;
+        let path = session_file_path(dir, &self.id);
+        let durable = match inspect_session_path(&path) {
+            SessionPathState::Present(session) => session,
+            SessionPathState::Missing => return Ok(false),
+            SessionPathState::Error(error) => return Err(error),
+        };
+        if serialize_session_toml(&durable)? != expected_content {
+            return Ok(false);
+        }
+        write_session_toml_atomic(&path, content)?;
+        Ok(true)
     }
 
     /// Create this Session when absent, or replace one exact pre-mutation
@@ -1273,6 +1357,38 @@ where
     }
 }
 
+/// Ordered Session path locks held until this guard is dropped.
+/// Acquire owner leases first and do not persist these Sessions while held.
+#[must_use]
+pub struct SessionPathLeases {
+    files: Vec<File>,
+    _thread_guard: Option<SessionLeaseThreadGuard>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl SessionPathLeases {
+    fn unlock(self) -> io::Result<()> {
+        let mut result = Ok(());
+        for file in self.files.iter().rev() {
+            if let Err(error) = file.unlock() {
+                if result.is_ok() {
+                    result = Err(error);
+                }
+            }
+        }
+        result
+    }
+}
+
+/// Hold sorted, deduplicated Session path leases across an external transaction.
+/// An empty set takes no lock and may be used inside an existing Session lease.
+pub fn acquire_session_path_leases(
+    sessions_dir: &Path,
+    session_ids: &[&str],
+) -> io::Result<SessionPathLeases> {
+    acquire_session_path_leases_wait(sessions_dir, session_ids, SESSION_LEASE_WAIT)
+}
+
 /// Hold the per-Session lease while classifying its durable path and running
 /// one operation without releasing the lease after a `Missing` observation.
 ///
@@ -1300,48 +1416,76 @@ pub fn with_session_path_lease_wait<T, F>(
 where
     F: FnOnce(SessionPathState) -> io::Result<T>,
 {
-    let _thread_guard = SessionLeaseThreadGuard::enter()?;
-    validate_session_id_path_component(session_id)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    fs::create_dir_all(sessions_dir)?;
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(session_lock_path(sessions_dir, session_id))?;
-    let deadline = Instant::now() + wait;
-    let is_contended = |error: &io::Error| {
-        error.kind() == io::ErrorKind::WouldBlock
-            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-    };
-    loop {
-        match lock_file.try_lock_exclusive() {
-            Ok(()) => break,
-            Err(error) if is_contended(&error) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Session lease is held by another gwt operation; retry after it settles",
-                    ));
-                }
-                std::thread::sleep(SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let leases = acquire_session_path_leases_wait(sessions_dir, &[session_id], wait)?;
     let result = operation(inspect_session_path(&session_file_path(
         sessions_dir,
         session_id,
     )));
-    match lock_file.unlock() {
+    match leases.unlock() {
         Ok(()) => result,
         Err(unlock_error) => match result {
             Ok(_) => Err(unlock_error),
             Err(operation_error) => Err(operation_error),
         },
     }
+}
+
+fn acquire_session_path_leases_wait(
+    sessions_dir: &Path,
+    session_ids: &[&str],
+    wait: Duration,
+) -> io::Result<SessionPathLeases> {
+    let ids: BTreeSet<_> = session_ids.iter().copied().collect();
+    let mut leases = SessionPathLeases {
+        files: Vec::new(),
+        _thread_guard: if ids.is_empty() {
+            None
+        } else {
+            Some(SessionLeaseThreadGuard::enter()?)
+        },
+        _not_send: std::marker::PhantomData,
+    };
+    if ids.is_empty() {
+        return Ok(leases);
+    }
+    for id in &ids {
+        validate_session_id_path_component(id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    }
+    fs::create_dir_all(sessions_dir)?;
+    let deadline = Instant::now() + wait;
+    let is_contended = |error: &io::Error| {
+        error.kind() == io::ErrorKind::WouldBlock
+            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+    };
+    for id in ids {
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .truncate(false)
+            .write(true)
+            .open(session_lock_path(sessions_dir, id))?;
+        loop {
+            match lock_file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if is_contended(&error) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Session lease is held by another gwt operation; retry after it settles",
+                    ));
+                    }
+                    std::thread::sleep(
+                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        leases.files.push(lock_file);
+    }
+    Ok(leases)
 }
 
 /// Hold the per-Session lease while reading one exact durable Session and
@@ -1479,6 +1623,8 @@ pub fn persist_observed_session_runtime_stopped_under_lease(
         return Ok(false);
     }
     let runtime_path = runtime_state_path_for_pid(sessions_dir, host_pid, &expected.id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let _publication = runtime_publication_lease(&runtime_path)?;
     let mut runtime = SessionRuntimeState::load(&runtime_path)?;
     if runtime.execution_identity != expected_runtime.execution_identity
         || runtime.runtime_incarnation != expected_runtime.runtime_incarnation
@@ -1493,7 +1639,7 @@ pub fn persist_observed_session_runtime_stopped_under_lease(
     runtime.status = AgentStatus::Stopped;
     runtime.updated_at = Utc::now();
     write_session_toml_atomic(&path, &serialize_session_toml(&current)?)?;
-    runtime.save(&runtime_path)?;
+    writer.save(&runtime)?;
     Ok(true)
 }
 
@@ -1737,6 +1883,28 @@ where
     validate_session_id_path_component(&expected.id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let expected_content = serialize_session_toml(expected)?;
+    update_session_if_matches_with(
+        sessions_dir,
+        expected,
+        |current, _| Ok(serialize_session_toml(current)? == expected_content),
+        mutate,
+    )
+}
+
+/// Update the latest Session under the same bounded, atomic snapshot transaction
+/// as [`update_session_if_unchanged_with`], using an operation-specific comparison.
+/// The predicate runs before mutation under the lease; rejected or unreadable
+/// snapshots never invoke `mutate`, and semantic no-ops preserve durable bytes.
+pub fn update_session_if_matches_with<T, P, F>(
+    sessions_dir: &Path,
+    expected: &Session,
+    matches: P,
+    mutate: F,
+) -> io::Result<SessionSnapshotUpdateOutcome<T>>
+where
+    P: FnOnce(&Session, &Session) -> io::Result<bool>,
+    F: FnOnce(&mut Session) -> io::Result<T>,
+{
     with_session_path_lease(sessions_dir, &expected.id, |state| {
         let path = session_file_path(sessions_dir, &expected.id);
         let mut session = match state {
@@ -1746,7 +1914,7 @@ where
                 return Ok(SessionSnapshotUpdateOutcome::SnapshotUnreadable(error))
             }
         };
-        if serialize_session_toml(&session)? != expected_content {
+        if !matches(&session, expected)? {
             return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged);
         }
         let before = serialize_session_toml(&session)?;
@@ -1949,7 +2117,10 @@ impl SessionRuntimeState {
             child_pid: None,
             child_started_at: None,
             source_event: None,
+            active_tool_calls: None,
             last_completed_hook_event_at: None,
+            last_completed_hook_outcome: None,
+            current_hook_event: None,
             pending_discussion: None,
         }
     }
@@ -1993,13 +2164,35 @@ impl SessionRuntimeState {
         })
     }
 
+    /// A necessary observation for handoff, never a replacement for source,
+    /// process, activity, input, checkpoint or native authority checks.
+    pub fn is_current_normal_stop(&self) -> bool {
+        self.current_hook_event.as_ref().is_some_and(|current| {
+            current.is_valid()
+                && current.event == "Stop"
+                && current.outcome == Some(HookCompletionOutcome::Normal)
+        })
+    }
+
     /// Save the runtime state to a JSON sidecar file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        runtime_writer_lease(path)?.save(self)
+    }
+
+    fn save_under_writer(&self, path: &Path) -> std::io::Result<()> {
         let _publication = runtime_publication_lease(path)?;
+        if Self::load(path).ok().as_ref() == Some(self) {
+            return Ok(());
+        }
+        let mut replacement = self.clone();
+        // Generic lifecycle/context writers cannot retain current certification
+        // across a material change. Hook output publishes its owned receipt
+        // explicitly under the same writer and publication leases.
+        replacement.current_hook_event = None;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)
+        let content = serde_json::to_string_pretty(&replacement)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let tmp_path = dir.join(format!(
@@ -2067,6 +2260,64 @@ pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
         }
     }
     Ok(publication)
+}
+
+/// Serialize one runtime sidecar's read-modify-write without waiting on the
+/// durable Session metadata lease. Acquire after any Session lease and before
+/// the shared GC publication lease. Keep lock files outside PID namespaces.
+pub fn runtime_writer_lease(path: &Path) -> io::Result<RuntimeWriterLease> {
+    let filename = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime sidecar has no filename",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut lock_name = std::ffi::OsString::from(".runtime-writer-");
+    let lock_dir = match parent
+        .parent()
+        .filter(|root| root.file_name().is_some_and(|name| name == "runtime"))
+    {
+        Some(root) => {
+            lock_name.push(parent.file_name().unwrap_or_default());
+            lock_name.push("-");
+            root.parent().unwrap_or(parent)
+        }
+        None => parent,
+    };
+    lock_name.push(filename);
+    lock_name.push(".lock");
+    fs::create_dir_all(lock_dir)?;
+    let writer = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_dir.join(lock_name))?;
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + SESSION_LEASE_WAIT,
+    );
+    gwt_core::operation_deadline::lock_exclusive(&writer)?;
+    Ok(RuntimeWriterLease {
+        path: path.to_path_buf(),
+        _writer: writer,
+    })
+}
+
+/// A writer lease bound to the sidecar whose read-modify-write it protects.
+pub struct RuntimeWriterLease {
+    path: PathBuf,
+    _writer: File,
+}
+
+impl RuntimeWriterLease {
+    /// Publish while reusing this writer lease, without nested acquisition.
+    pub fn save(&self, state: &SessionRuntimeState) -> io::Result<()> {
+        state.save_under_writer(&self.path)
+    }
 }
 
 /// Return the JSON sidecar path for a session runtime state record.
@@ -2460,20 +2711,23 @@ pub fn persist_session_status(
     session_id: &str,
     status: AgentStatus,
 ) -> std::io::Result<()> {
-    update_session(sessions_dir, session_id, |session| {
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_and_migrate(&path)?;
         session.update_status(status);
-        Ok(())
-    })?;
-    let runtime_path = runtime_state_path(sessions_dir, session_id);
-    let mut runtime = SessionRuntimeState::new(status);
-    if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
-        runtime.execution_identity = previous.execution_identity;
-        runtime.runtime_incarnation = previous.runtime_incarnation;
-        runtime.host_started_at = previous.host_started_at;
-        runtime.child_pid = previous.child_pid;
-        runtime.child_started_at = previous.child_started_at;
-    }
-    runtime.save(&runtime_path)
+        write_session_toml_atomic(&path, &serialize_session_toml(&session)?)?;
+        let runtime_path = runtime_state_path(sessions_dir, session_id);
+        let writer = runtime_writer_lease(&runtime_path)?;
+        let _publication = runtime_publication_lease(&runtime_path)?;
+        let mut runtime = SessionRuntimeState::load(&runtime_path)
+            .unwrap_or_else(|_| SessionRuntimeState::new(status));
+        runtime.status = status;
+        runtime.updated_at = Utc::now();
+        runtime.last_activity_at = runtime.updated_at;
+        writer.save(&runtime)
+    })
 }
 
 /// Persist how one session's PTY child ended (Issue #3341).
@@ -2557,15 +2811,31 @@ fn persist_session_running_state_if_execution_identity_matches_under_lease(
     if exact_durable_session_under_lease(sessions_dir, expected)?.is_none() {
         return Ok(false);
     }
-    SessionRuntimeState::for_execution_process(
+    let runtime_path = runtime_state_path(sessions_dir, &expected.session_id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let _publication = runtime_publication_lease(&runtime_path)?;
+    let mut runtime = SessionRuntimeState::for_execution_process(
         AgentStatus::Running,
         expected,
         runtime_incarnation,
         host_started_at,
         child_pid,
         child_started_at,
-    )
-    .save(&runtime_state_path(sessions_dir, &expected.session_id))?;
+    );
+    if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
+        if previous.execution_identity.as_ref() == Some(expected)
+            && previous.runtime_incarnation == Some(runtime_incarnation)
+            && previous.host_started_at == Some(host_started_at)
+            && previous.child_pid == Some(child_pid)
+            && previous.child_started_at == Some(child_started_at)
+        {
+            runtime = previous;
+        } else {
+            runtime.last_completed_hook_event_at = previous.last_completed_hook_event_at;
+            runtime.last_completed_hook_outcome = previous.last_completed_hook_outcome;
+        }
+    }
+    writer.save(&runtime)?;
     Ok(true)
 }
 
@@ -2632,21 +2902,26 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
     session.update_status(status);
     let session_content = serialize_session_toml(&session)?;
     let runtime_path = runtime_state_path(sessions_dir, &expected.session_id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let _publication = runtime_publication_lease(&runtime_path)?;
     let mut runtime = SessionRuntimeState::for_execution(status, expected, runtime_incarnation);
     if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
         if previous.execution_identity.as_ref() == Some(expected)
             && previous.runtime_incarnation == Some(runtime_incarnation)
         {
-            runtime.host_started_at = previous.host_started_at;
-            runtime.child_pid = previous.child_pid;
-            runtime.child_started_at = previous.child_started_at;
+            runtime = previous;
+            runtime.status = status;
+            runtime.updated_at = Utc::now();
+        } else {
+            runtime.last_completed_hook_event_at = previous.last_completed_hook_event_at;
+            runtime.last_completed_hook_outcome = previous.last_completed_hook_outcome;
         }
     }
     write_session_toml_atomic(
         &session_file_path(sessions_dir, &expected.session_id),
         &session_content,
     )?;
-    runtime.save(&runtime_path)?;
+    writer.save(&runtime)?;
     Ok(true)
 }
 
@@ -2717,6 +2992,8 @@ pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
     };
     let runtime_path =
         runtime_state_path_for_pid(sessions_dir, runtime.host_pid, &expected.session_id);
+    let writer = runtime_writer_lease(&runtime_path)?;
+    let _publication = runtime_publication_lease(&runtime_path)?;
     let mut exact_runtime = match SessionRuntimeState::load(&runtime_path) {
         Ok(runtime) => runtime,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -2736,7 +3013,7 @@ pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
         &session_file_path(sessions_dir, &expected.session_id),
         &session_content,
     )?;
-    exact_runtime.save(&runtime_path)?;
+    writer.save(&exact_runtime)?;
     Ok(true)
 }
 
@@ -2782,11 +3059,49 @@ pub fn persist_session_completed_stop(
     sessions_dir: &Path,
     session_id: &str,
 ) -> std::io::Result<()> {
-    update_session(sessions_dir, session_id, |session| {
-        session.record_completed_stop();
-        Ok(())
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock(sessions_dir, session_id, || {
+        persist_session_completed_stop_under_lease(sessions_dir, session_id)
     })
     .map(|_| ())
+}
+
+/// Persist the original completed-Stop mutation while an owned hook keeps its
+/// matching Session and runtime writer leases through the decision boundary.
+pub fn persist_session_completed_stop_under_lease(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<Session> {
+    require_current_thread_session_lease()?;
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let path = session_file_path(sessions_dir, session_id);
+    let mut session = Session::load_and_migrate(&path)?;
+    session.record_completed_stop();
+    write_session_toml_atomic(&path, &serialize_session_toml(&session)?)?;
+    Ok(session)
+}
+
+/// Restore a blocked Stop's Running metadata with the original semantic-no-op
+/// behavior, without reacquiring an already-held Session lease.
+pub fn persist_session_blocked_stop_under_lease(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<Session> {
+    require_current_thread_session_lease()?;
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let path = session_file_path(sessions_dir, session_id);
+    let mut session = Session::load(&path)?;
+    let before = serialize_session_toml(&session)?;
+    session.migrate_legacy_launch_args();
+    session.record_hook_status(AgentStatus::Running);
+    let after = serialize_session_toml(&session)?;
+    if before != after {
+        write_session_toml_atomic(&path, &after)?;
+    }
+    Ok(session)
 }
 
 /// Persist the backing agent session id into the session TOML so quick-start
@@ -2843,32 +3158,56 @@ pub fn persist_session_hook_metadata_with_wait(
     project_state_root: Option<&Path>,
     wait: Duration,
 ) -> io::Result<Session> {
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock_wait(sessions_dir, session_id, wait, || {
+        persist_session_hook_metadata_under_lease(
+            sessions_dir,
+            session_id,
+            event,
+            agent_session_id,
+            project_state_root,
+        )
+    })
+}
+
+/// The original hook metadata transaction, reusing the caller's Session lease.
+/// Migration and SessionStart's supplied-provider-ID durability are unchanged.
+pub fn persist_session_hook_metadata_under_lease(
+    sessions_dir: &Path,
+    session_id: &str,
+    event: &str,
+    agent_session_id: Option<&str>,
+    project_state_root: Option<&Path>,
+) -> io::Result<Session> {
+    require_current_thread_session_lease()?;
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let agent_session_id = agent_session_id
         .map(str::trim)
         .filter(|agent_session_id| !agent_session_id.is_empty());
-    let update = |session: &mut Session| {
-        if let Some(agent_session_id) = agent_session_id {
-            apply_agent_session_id(session, agent_session_id);
-        }
-        if session.project_state_root.is_none() {
-            session.project_state_root = project_state_root.map(Path::to_path_buf);
-        }
-        session.record_hook_event(event);
-        Ok(())
-    };
-    if event == "SessionStart" && agent_session_id.is_some() {
-        update_session_with_wait(sessions_dir, session_id, wait, update)
+    let path = session_file_path(sessions_dir, session_id);
+    let mut session = Session::load_and_migrate(&path)?;
+    if let Some(agent_session_id) = agent_session_id {
+        apply_agent_session_id(&mut session, agent_session_id);
+    }
+    if session.project_state_root.is_none() {
+        session.project_state_root = project_state_root.map(Path::to_path_buf);
+    }
+    session.record_hook_event(event);
+    let durability = if event == "SessionStart" && agent_session_id.is_some() {
+        SessionDurability::FlushToDevice
     } else {
         // Issue #3777: liveness must not wait for the device inside the
         // UserPromptSubmit budget.
-        update_session_with_wait_and_durability(
-            sessions_dir,
-            session_id,
-            wait,
-            SessionDurability::RenameOnly,
-            update,
-        )
-    }
+        SessionDurability::RenameOnly
+    };
+    write_session_toml_atomic_with_durability(
+        &path,
+        &serialize_session_toml(&session)?,
+        durability,
+    )?;
+    Ok(session)
 }
 
 /// Persist or clear a Session's Execution generation projection under the
@@ -3002,11 +3341,13 @@ mod tests {
         let session = Session::new("/tmp/wt", "main", AgentId::Codex);
         let mut value = serde_json::to_value(&session).unwrap();
         value["agent_name"] = serde_json::json!("ハヤテ");
+        value["agent_member_id"] = serde_json::json!("stable-member");
         let named: Session = serde_json::from_value(value).unwrap();
         let persisted = toml::to_string(&named).unwrap();
         let restored: Session = toml::from_str(&persisted).unwrap();
         let mut value = serde_json::to_value(restored).unwrap();
         assert_eq!(value["agent_name"], "ハヤテ");
+        assert_eq!(value["agent_member_id"], "stable-member");
         value.as_object_mut().unwrap().remove("agent_name");
         let legacy: Session = serde_json::from_value(value).unwrap();
         assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
@@ -3324,6 +3665,32 @@ display_name = "Codex"
             .save_if_execution_identity_matches(dir.path(), &identity)
             .expect("reject replacement"));
         assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
+    fn held_lease_snapshot_cas_rejects_unleased_and_stale_name_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = Session::new(dir.path(), "main", AgentId::Codex);
+        original.save(dir.path()).unwrap();
+        let mut named = original.clone();
+        named.agent_name = Some("Ada".into());
+        assert!(named
+            .save_if_unchanged_under_lease(dir.path(), &original)
+            .is_err());
+        with_session_lease(dir.path(), &original.id, |_| {
+            assert!(named.save_if_unchanged_under_lease(dir.path(), &original)?);
+            let mut stale = original.clone();
+            stale.agent_name = Some("Bert".into());
+            assert!(!stale.save_if_unchanged_under_lease(dir.path(), &original)?);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            Session::load(&dir.path().join(format!("{}.toml", original.id)))
+                .unwrap()
+                .agent_name,
+            Some("Ada".into())
+        );
     }
 
     #[test]
@@ -5402,6 +5769,114 @@ display_name = "Claude Code"
     }
 
     #[test]
+    fn runtime_state_completion_outcome_is_optional_and_roundtrips_without_guessing() {
+        let fresh = SessionRuntimeState::new(AgentStatus::Running);
+        let mut wire = serde_json::to_value(&fresh).unwrap();
+        assert!(wire.get("last_completed_hook_outcome").is_none());
+        for outcome in ["normal", "blocked"] {
+            wire["last_completed_hook_outcome"] = serde_json::json!(outcome);
+            let state: SessionRuntimeState = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(state).unwrap()["last_completed_hook_outcome"],
+                outcome
+            );
+        }
+        wire["last_completed_hook_outcome"] = serde_json::json!("future_unknown");
+        assert!(serde_json::from_value::<SessionRuntimeState>(wire).is_err());
+    }
+
+    #[test]
+    fn runtime_state_owned_observation_rejects_unknown_outcome() {
+        let mut wire = serde_json::to_value(SessionRuntimeState::new(AgentStatus::Idle)).unwrap();
+        wire["current_hook_event"] = serde_json::json!({
+            "correlation_id": "bed28968-51d4-4789-ad42-94cead261861",
+            "event": "Stop",
+            "outcome": "future_unknown"
+        });
+        assert!(serde_json::from_value::<SessionRuntimeState>(wire).is_err());
+    }
+
+    #[test]
+    fn runtime_current_normal_stop_requires_valid_owned_completed_observation() {
+        let mut state = SessionRuntimeState::new(AgentStatus::Idle);
+        state.last_completed_hook_event_at = Some(state.updated_at);
+        state.last_completed_hook_outcome = Some(HookCompletionOutcome::Normal);
+        assert!(
+            !state.is_current_normal_stop(),
+            "history cannot certify current"
+        );
+
+        let mut current = CurrentHookEventObservation::pending("Stop").unwrap();
+        assert!(current.is_valid());
+        state.current_hook_event = Some(current.clone());
+        assert!(!state.is_current_normal_stop(), "pending is uncertified");
+        current.outcome = Some(HookCompletionOutcome::Blocked);
+        state.current_hook_event = Some(current.clone());
+        assert!(!state.is_current_normal_stop(), "blocked is not Normal");
+        current.outcome = Some(HookCompletionOutcome::Normal);
+        state.current_hook_event = Some(current.clone());
+        assert!(state.is_current_normal_stop());
+
+        current.event = "PostToolUse".into();
+        state.current_hook_event = Some(current.clone());
+        assert!(
+            !state.is_current_normal_stop(),
+            "a different event is not Stop"
+        );
+        current.event = "Stop".into();
+        current.correlation_id = Uuid::nil().to_string();
+        state.current_hook_event = Some(current.clone());
+        assert!(
+            !state.is_current_normal_stop(),
+            "correlation must be UUIDv4"
+        );
+        current.correlation_id = "BED28968-51D4-4789-AD42-94CEAD261861".into();
+        state.current_hook_event = Some(current);
+        assert!(
+            !state.is_current_normal_stop(),
+            "correlation must be canonical"
+        );
+        assert!(CurrentHookEventObservation::pending(" stop ").is_none());
+    }
+
+    #[test]
+    fn runtime_state_neutral_save_preserves_observation_and_material_change_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = runtime_state_path(dir.path(), "owned-hook");
+        let mut state = SessionRuntimeState::new(AgentStatus::Idle);
+        state.source_event = Some("Stop".into());
+        state.last_completed_hook_event_at = Some(state.updated_at);
+        state.last_completed_hook_outcome = Some(HookCompletionOutcome::Normal);
+        let mut wire = serde_json::to_value(&state).unwrap();
+        wire["current_hook_event"] = serde_json::json!({
+            "correlation_id": "bed28968-51d4-4789-ad42-94cead261861",
+            "event": "Stop",
+            "outcome": "normal"
+        });
+        let before = serde_json::to_vec(&wire).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &before).unwrap();
+
+        let mut observed = SessionRuntimeState::load(&path).unwrap();
+        observed.save(&path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "neutral save keeps raw bytes"
+        );
+
+        observed.source_event = Some("UserPromptSubmit".into());
+        observed.save(&path).unwrap();
+        let changed: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(changed.get("current_hook_event").is_none());
+        assert_eq!(changed["last_completed_hook_outcome"], "normal");
+        assert_eq!(
+            changed["last_completed_hook_event_at"],
+            wire["last_completed_hook_event_at"]
+        );
+    }
+
+    #[test]
     fn runtime_state_legacy_json_defaults_execution_proof_to_none() {
         let legacy = r#"{
   "status": "Running",
@@ -5416,6 +5891,8 @@ display_name = "Claude Code"
         assert!(runtime.execution_identity.is_none());
         assert!(runtime.runtime_incarnation.is_none());
         assert!(runtime.host_started_at.is_none());
+        assert!(runtime.active_tool_calls.is_none());
+        assert!(runtime.last_completed_hook_outcome.is_none());
     }
 
     #[test]
@@ -5432,6 +5909,8 @@ display_name = "Claude Code"
 
         assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
         assert_eq!(runtime.runtime_incarnation, Some(17));
+        assert!(runtime.last_completed_hook_event_at.is_none());
+        assert!(runtime.last_completed_hook_outcome.is_none());
     }
 
     #[test]
@@ -5944,6 +6423,102 @@ display_name = "Claude Code"
             malformed_bytes,
         );
         assert!(!active_launch_handshake_path(dir.path(), &session.id).exists());
+    }
+
+    #[test]
+    fn exact_running_runtime_preserves_active_tools_only_for_the_same_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let path = runtime_state_path(dir.path(), &session.id);
+        let mut runtime = SessionRuntimeState::for_execution_process(
+            AgentStatus::Running,
+            &identity,
+            17,
+            101,
+            std::process::id(),
+            1,
+        );
+        let calls = Some(["tool-call".to_string()].into());
+        runtime.active_tool_calls = calls.clone();
+
+        for (incarnation, child_started_at, expected) in
+            [(17, 1, calls), (18, 1, None), (17, 2, None)]
+        {
+            runtime.save(&path).unwrap();
+            assert!(persist_session_running_state_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                incarnation,
+                101,
+                std::process::id(),
+                child_started_at,
+            )
+            .unwrap());
+            assert_eq!(
+                SessionRuntimeState::load(&path).unwrap().active_tool_calls,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn exact_running_runtime_rebind_preserves_complete_observation_until_context_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let path = runtime_state_path(dir.path(), &session.id);
+        let mut runtime = SessionRuntimeState::for_execution_process(
+            AgentStatus::Idle,
+            &identity,
+            17,
+            101,
+            std::process::id(),
+            1,
+        );
+        runtime.source_event = Some("Stop".into());
+        runtime.active_tool_calls = Some(Default::default());
+        runtime.last_completed_hook_event_at = Some(runtime.updated_at);
+        runtime.last_completed_hook_outcome = Some(HookCompletionOutcome::Normal);
+        let mut wire = serde_json::to_value(&runtime).unwrap();
+        wire["current_hook_event"] = serde_json::json!({
+            "correlation_id": "bed28968-51d4-4789-ad42-94cead261861",
+            "event": "Stop",
+            "outcome": "normal"
+        });
+        let before = serde_json::to_vec(&wire).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &before).unwrap();
+        assert!(persist_session_running_state_if_execution_identity_matches(
+            dir.path(),
+            &identity,
+            17,
+            101,
+            std::process::id(),
+            1,
+        )
+        .unwrap());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "same physical rebind is neutral"
+        );
+
+        assert!(persist_session_running_state_if_execution_identity_matches(
+            dir.path(),
+            &identity,
+            18,
+            101,
+            std::process::id(),
+            1,
+        )
+        .unwrap());
+        let changed: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(changed.get("current_hook_event").is_none());
+        assert_eq!(changed["last_completed_hook_outcome"], "normal");
+        assert_eq!(
+            changed["last_completed_hook_event_at"],
+            wire["last_completed_hook_event_at"]
+        );
+        assert_eq!(changed["runtime_incarnation"], 18);
     }
 
     #[test]

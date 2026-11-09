@@ -222,7 +222,10 @@ impl WorkEvent {
             && self.status_category.is_none()
             && (self.id == format!("superseded-{}", self.work_item_id)
                 || self
-                    .successor_supersession_content_id()
+                    .successor_supersession_content_id(false)
+                    .is_ok_and(|id| self.id == id)
+                || self
+                    .successor_supersession_content_id(true)
                     .is_ok_and(|id| self.id == id))
             && self.agent_session_id.is_none()
             && self.execution_container.is_some()
@@ -237,19 +240,42 @@ impl WorkEvent {
     /// those are distinct immutable events, while exact retries are idempotent.
     /// Legacy identities remain readable and can be copied by reconciliation.
     pub fn bind_successor_supersession_identity(&mut self) -> crate::error::Result<()> {
+        self.bind_supersession_identity(false)
+    }
+
+    /// New branch-bound audits use the source root as transport context, so
+    /// portable serialization and resolution cannot invalidate their identity.
+    /// Path-only Work identities retain the historical path-bound contract.
+    pub fn bind_portable_successor_supersession_identity(&mut self) -> crate::error::Result<()> {
+        let portable = self
+            .execution_container
+            .as_ref()
+            .and_then(|container| container.branch.as_deref())
+            .is_some_and(|branch| !branch.trim().is_empty());
+        self.bind_supersession_identity(portable)
+    }
+
+    fn bind_supersession_identity(&mut self, portable: bool) -> crate::error::Result<()> {
         if !self.is_successor_supersession() {
             return Err(crate::error::GwtError::Other(
                 "content identity requires a valid successor supersession event".to_string(),
             ));
         }
-        self.id = self.successor_supersession_content_id()?;
+        self.id = self.successor_supersession_content_id(portable)?;
         Ok(())
     }
 
-    fn successor_supersession_content_id(&self) -> crate::error::Result<String> {
+    fn successor_supersession_content_id(&self, portable: bool) -> crate::error::Result<String> {
         use sha2::{Digest, Sha256};
         let mut payload = self.clone();
-        payload.id = format!("superseded-{}", self.work_item_id);
+        payload.id = if portable {
+            if let Some(container) = payload.execution_container.as_mut() {
+                container.worktree_path = None;
+            }
+            format!("superseded-portable-{}", self.work_item_id)
+        } else {
+            format!("superseded-{}", self.work_item_id)
+        };
         let bytes = serde_json::to_vec(&payload).map_err(|error| {
             crate::error::GwtError::Other(format!("successor supersession identity: {error}"))
         })?;

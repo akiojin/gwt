@@ -32,7 +32,7 @@ test("Issue #5500: live sampler renews the machine snapshot and renders capacity
     await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
       .some(({ payload }: any) => payload.kind === "workspace_state"));
     await page.locator(".op-rail").getByRole("button", { name: "Issues", exact: true }).click();
-    const surface = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="settings"]');
+    const surface = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
     await expect(surface).toHaveCount(1);
     await expect(surface).toBeVisible();
     const latest = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])

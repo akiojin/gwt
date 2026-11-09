@@ -686,6 +686,12 @@ impl WindowsRealGwtFixture {
         self.child.as_ref().expect("running gwt child").id()
     }
 
+    /// Borrow the fixture-owned process handle for exact Windows birth and lineage proof.
+    pub fn process_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        self.child.as_ref().expect("running gwt child").as_handle()
+    }
+
     pub fn stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path)
             .unwrap_or_else(|error| format!("<unreadable: {error}>"))
@@ -869,6 +875,8 @@ const childProcess = require('child_process');\n\
 const version = {version:?};\n\
 const packageName = {package:?};\n\
 if (process.argv.includes('--version')) {{ console.log(version); process.exit(0); }}\n\
+// Configuration probes do not start a Session or run its hooks.\n\
+if (packageName === '@openai/codex' && process.argv.at(-2) === 'features' && process.argv.at(-1) === 'list') {{ process.exit(0); }}\n\
 const capture = process.env.GWT_PHASE75_CAPTURE;\n\
 if (!capture) {{ console.error('GWT_PHASE75_CAPTURE is required'); process.exit(2); }}\n\
 const hookPath = packageName === '@openai/codex'\n\

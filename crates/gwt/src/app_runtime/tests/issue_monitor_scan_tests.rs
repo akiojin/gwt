@@ -8,7 +8,7 @@ use super::*;
 /// the wiring — every supervision tick that finds an enabled project must ask
 /// the supervisor to keep a daemon alive — rather than a spawn detail.
 #[test]
-fn the_daemon_supervision_tick_keeps_a_runtime_daemon_alive_for_enabled_projects() {
+fn the_daemon_supervision_tick_keeps_a_runtime_daemon_alive_for_all_open_projects() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -34,11 +34,17 @@ fn the_daemon_supervision_tick_keeps_a_runtime_daemon_alive_for_enabled_projects
         },
     )
     .expect("seed disabled prefs");
-    runtime.ensure_runtime_daemons_for_enabled_projects();
+    runtime.ensure_runtime_daemons_for_open_projects();
     assert_eq!(
         runtime.daemon_supervisor.ensure_attempts(),
         0,
         "a disabled monitor needs no daemon"
+    );
+
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "disabled Monitor projects still need an owner"
     );
 
     gwt::save_issue_monitor_prefs(
@@ -49,13 +55,13 @@ fn the_daemon_supervision_tick_keeps_a_runtime_daemon_alive_for_enabled_projects
         },
     )
     .expect("seed enabled prefs");
-    runtime.ensure_runtime_daemons_for_enabled_projects();
+    runtime.ensure_runtime_daemons_for_open_projects();
     assert_eq!(
         runtime.daemon_supervisor.ensure_attempts(),
         0,
         "GUI only enqueues ensure"
     );
-    runtime.ensure_runtime_daemons_for_enabled_projects();
+    runtime.ensure_runtime_daemons_for_open_projects();
     assert_eq!(
         tasks.lock().unwrap().len(),
         1,
@@ -71,7 +77,7 @@ fn the_daemon_supervision_tick_keeps_a_runtime_daemon_alive_for_enabled_projects
 
     // AC-2 in the topology: supervision is "the tick keeps asking", so a
     // second tick has to ask again rather than trust the first answer.
-    runtime.ensure_runtime_daemons_for_enabled_projects();
+    runtime.ensure_runtime_daemons_for_open_projects();
     let task = tasks.lock().unwrap().pop().unwrap();
     task();
     assert_eq!(runtime.daemon_supervisor.ensure_attempts(), 2);
@@ -189,244 +195,231 @@ fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overl
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    // Assert committed outcomes through the real ACK and scan gates, not IPC latency.
+    let outcome_budget = gwt_core::deadline_budget::HANG_GUARD
+        .as_millis()
+        .to_string();
+    let _control_budget =
+        ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_CONTROL_MS", &outcome_budget);
+    let _durable_control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        &outcome_budget,
+    );
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, owner, pm, _) =
+        super::managed_launch_tests::managed_owner_fixture(temp.path(), true);
     let foreign_repo = temp.path().join("foreign-repo");
-    fs::create_dir_all(&foreign_repo).expect("foreign repo");
+    fs::create_dir_all(&foreign_repo).unwrap();
     init_repo_with_initial_commit(&foreign_repo);
-    let foreign_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&foreign_repo);
+    let foreign_prefs = gwt::issue_monitor_prefs_path_for_repo_path(&foreign_repo);
     gwt::save_issue_monitor_prefs(
-        &foreign_prefs_path,
+        &foreign_prefs,
         &gwt::IssueMonitorPrefs {
             enabled: true,
-            ..gwt::IssueMonitorPrefs::default()
+            ..Default::default()
         },
     )
-    .expect("seed foreign monitor prefs");
-    runtime.tabs.insert(
-        0,
-        sample_project_tab(
-            "tab-foreign",
-            "Foreign",
-            foreign_repo.clone(),
-            ProjectKind::Git,
-            &[],
+    .unwrap();
+    let foreign_before = fs::read(&foreign_prefs).unwrap();
+    let mismatched = owner_scan_reply(
+        &owner,
+        &pm,
+        gwt_core::paths::project_scope_hash(&foreign_repo).to_string(),
+    );
+    assert_eq!(mismatched["accepted"], false);
+    assert_eq!(mismatched["reason"], "project_scope_mismatch");
+
+    // Fixture setup awaits the real durable ACK; GUI latency is not this case's contract.
+    gwt::daemon_publisher::publish_durable_issue_monitor_control(
+        &repo,
+        gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"enabled":true}),
+            std::process::id(),
         ),
-    );
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let principal =
-        AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("registered PM principal");
-
-    let mismatched = runtime.handle_agent_frontend_event(
-        "pm-client".to_string(),
-        principal.clone(),
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&foreign_repo)
-                .as_str()
-                .to_string(),
-        },
-    );
-    assert!(mismatched.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: false,
-            reason: Some(reason),
-        } if reason == "project_scope_mismatch"
-    )));
-    assert!(
-        tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty(),
-        "a mismatched requested scope must be rejected before enqueue"
-    );
-
-    let accepted = runtime.handle_agent_frontend_event(
-        "pm-client".to_string(),
-        principal.clone(),
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
-                .as_str()
-                .to_string(),
-        },
-    );
-    assert!(accepted.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: true,
-            reason: None,
-        }
-    )));
-    assert_eq!(
-        tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        1,
-        "one exact project worker is queued"
-    );
-    assert_eq!(
-        runtime
-            .project_state(&runtime.test_context())
-            .unwrap()
-            .issue_monitor_scheduled_scans_in_flight,
-        HashSet::from([prefs_path])
-    );
-    assert!(!runtime
-        .project_state(&runtime.test_context())
+    )
+    .unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound the real daemon IPC/worker idle barrier; the canonical driver runs independently of the caller executor.
+        tokio::time::timeout(
+            gwt_core::deadline_budget::HANG_GUARD,
+            owner.wait_monitor_idle(),
+        )
+        .await
         .unwrap()
-        .issue_monitor_scheduled_scans_in_flight
-        .contains(&foreign_prefs_path));
-
-    let overlapping = runtime.handle_agent_frontend_event(
-        "pm-client".to_string(),
-        principal,
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
-                .as_str()
-                .to_string(),
-        },
-    );
-    assert!(overlapping.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: false,
-            reason: Some(reason),
-        } if reason == "scan_already_in_flight"
-    )));
+        .unwrap();
+    });
+    let scan = owner.pause_next_monitor_scan().unwrap();
     assert_eq!(
-        tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
+        scan.scans_started(),
+        0,
+        "no scan starts before the exact PM request"
+    );
+    let scope = gwt_core::paths::project_scope_hash(&repo).to_string();
+    let accepted = owner_scan_reply(&owner, &pm, scope.clone());
+    assert_eq!(accepted["accepted"], true, "{accepted}");
+    assert!(accepted["reason"].is_null());
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe arrival at the real canonical scan hook; this is an IPC/worker hang guard, not policy timing.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, scan.wait())
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        scan.scans_started(),
+        1,
+        "one canonical project scan is physically blocked"
+    );
+    let overlapping = owner_scan_reply(&owner, &pm, scope);
+    assert_eq!(overlapping["accepted"], false);
+    assert_eq!(overlapping["reason"], "scan_already_in_flight");
+    assert_eq!(
+        scan.scans_started(),
         1,
         "overlap never creates a second worker"
     );
+    assert_eq!(
+        fs::read(&foreign_prefs).unwrap(),
+        foreign_before,
+        "the foreign Monitor is untouched"
+    );
+    scan.release();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound the real daemon IPC/worker idle barrier; the canonical driver runs independently of the caller executor.
+        tokio::time::timeout(
+            gwt_core::deadline_budget::HANG_GUARD,
+            owner.wait_monitor_idle(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    });
+}
+
+fn owner_scan_reply(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    caller: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    expected_project_scope: String,
+) -> serde_json::Value {
+    let client = owner_fixture_block_on(owner.agent_client("scan-client")).unwrap();
+    let reply = owner_fixture_block_on(client.request(
+        caller.grant.as_ref().unwrap().clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope,
+        },
+    ))
+    .unwrap();
+    reply
+        .events
+        .into_iter()
+        .find(|event| event["kind"] == "issue_monitor_scan_request_result")
+        .expect("actual owner scan request result")
 }
 
 #[test]
 fn authenticated_scan_now_rejects_non_pm_and_disabled_monitor_without_enqueuing() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-
-    let ordinary =
-        AgentSessionPrincipal::for_test(&repo, "other-session").expect("ordinary principal");
-    let denied = runtime.handle_agent_frontend_event(
-        "agent-client".to_string(),
-        ordinary,
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
-                .as_str()
-                .to_string(),
-        },
-    );
-    assert!(denied.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: false,
-            reason: Some(reason),
-        } if reason == "caller_not_registered_pm"
-    )));
-
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, owner, pm, ordinary) =
+        super::managed_launch_tests::managed_owner_fixture(temp.path(), false);
+    let scope = gwt_core::paths::project_scope_hash(&repo).to_string();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
-            enabled: false,
-            ..gwt::load_issue_monitor_prefs(&prefs_path).expect("monitor prefs")
-        },
-    )
-    .expect("disable monitor");
-    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
-    let disabled = runtime.handle_agent_frontend_event(
-        "pm-client".to_string(),
-        pm,
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
-                .as_str()
-                .to_string(),
-        },
+    let original = fs::read(&prefs_path).unwrap();
+    let denied = owner_scan_reply(&owner, &ordinary, scope.clone());
+    assert_eq!(denied["accepted"], false);
+    assert_eq!(denied["reason"], "caller_not_registered_pm");
+    assert_eq!(
+        fs::read(&prefs_path).unwrap(),
+        original,
+        "refusal must not enqueue or mutate Monitor state"
     );
-    assert!(disabled.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: false,
-            reason: Some(reason),
-        } if reason == "monitor_disabled"
-    )));
 
-    runtime.tabs.clear();
-    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
-    let missing_project = runtime.handle_agent_frontend_event(
-        "pm-client".to_string(),
-        pm,
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
-                .as_str()
-                .to_string(),
-        },
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.enabled = false;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let disabled_state = fs::read(&prefs_path).unwrap();
+    let disabled = owner_scan_reply(&owner, &pm, scope.clone());
+    assert_eq!(disabled["accepted"], false);
+    assert_eq!(disabled["reason"], "monitor_disabled");
+    assert_eq!(fs::read(&prefs_path).unwrap(), disabled_state);
+
+    // Project availability is an immutable owner dispatch fact. Test the
+    // existing pure guard with the actual captured PM identity and row.
+    let mut window =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&repo))
+            .unwrap()
+            .windows
+            .into_iter()
+            .find(|window| {
+                window.session_id.as_deref()
+                    == pm.session.as_ref().map(|session| session.id.as_str())
+            })
+            .unwrap();
+    window.id = pm.id.clone();
+    let panes = [gwt::project_runtime::agent_dispatch::PaneProjection {
+        project_root: repo.clone(),
+        tab_id: pm.active_session.as_ref().unwrap().tab_id.clone(),
+        window,
+        active: pm.active_session.clone(),
+    }];
+    assert_eq!(
+        gwt::project_runtime::agent_dispatch::issue_monitor_scan_permission(
+            &repo,
+            &panes,
+            false,
+            pm.grant.as_ref().unwrap().principal(),
+            &scope,
+        ),
+        Err("project_not_open")
     );
-    assert!(missing_project.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: false,
-            reason: Some(reason),
-        } if reason == "project_not_open"
-    )));
-    assert!(
-        tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty(),
-        "rejected requests enqueue no worker"
+    assert_eq!(
+        fs::read(&prefs_path).unwrap(),
+        disabled_state,
+        "all rejected requests leave the canonical Monitor untouched"
     );
 }
 
 #[test]
-fn authenticated_scan_now_reports_worker_failure_and_releases_single_flight() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
-    runtime.blocking_tasks = BlockingTaskSpawner::failing("injected spawn failure");
-    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
-
-    let events = runtime.handle_agent_frontend_event(
-        "pm-client".to_string(),
-        pm,
-        AgentFrontendRequest::IssueMonitorScanNow {
-            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
-                .as_str()
-                .to_string(),
-        },
+fn authenticated_scan_now_reports_unavailable_daemon_without_enqueuing() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, owner, pm, _) =
+        super::managed_launch_tests::managed_owner_fixture(temp.path(), false);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.enabled = true;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let before = fs::read(&prefs_path).unwrap();
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        &repo,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = scope.endpoint_path(&gwt_core::paths::gwt_home());
+    let withheld = endpoint.with_extension("withheld-fixture");
+    fs::rename(&endpoint, &withheld).unwrap();
+    let refused = owner_scan_reply(
+        &owner,
+        &pm,
+        gwt_core::paths::project_scope_hash(&repo).to_string(),
     );
-
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorScanRequestResult {
-            accepted: false,
-            reason: Some(reason),
-        } if reason == "scan_worker_unavailable"
-    )));
-    assert!(runtime
-        .project_state(&runtime.test_context())
-        .unwrap()
-        .issue_monitor_scheduled_scans_in_flight
-        .is_empty());
+    fs::rename(&withheld, &endpoint).unwrap();
+    assert_eq!(refused["accepted"], false);
+    assert_eq!(refused["reason"], "monitor_state_unavailable");
+    assert_eq!(
+        fs::read(&prefs_path).unwrap(),
+        before,
+        "an unadmitted scan leaves canonical Monitor state untouched"
+    );
+    let health =
+        owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
+            .unwrap();
+    assert_eq!(
+        health["panes"], 2,
+        "failed Monitor admission must preserve both actual owner panes"
+    );
+    assert_eq!(health["pending_transport"], 0);
 }
 
 #[test]
@@ -679,6 +672,8 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
 /// planner only walks far enough to fill the free claim slots, so the scan
 /// must probe exactly that far and no further.
 fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
+    use gwt::issue_monitor::ClaimProbeOutcome;
+
     let candidates = (1..=50).collect::<Vec<u64>>();
     let probed = std::cell::RefCell::new(Vec::new());
 
@@ -687,7 +682,7 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
         candidates.clone(),
         |issue_number| {
             probed.borrow_mut().push(issue_number);
-            Ok::<_, std::convert::Infallible>(false)
+            Ok::<_, std::convert::Infallible>(ClaimProbeOutcome::Claimable)
         },
     )
     .expect("infallible probe");
@@ -699,21 +694,231 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
         "one free slot must cost exactly one probe, not one per open issue"
     );
 
-    // A completed candidate frees no slot, so the walk continues past it
-    // exactly like the claim planner does. Every answer is kept by identity.
+    // Completed and deferred candidates consume no slot. A deferred answer
+    // cannot authorize a claim, so only confirmed answers are kept by identity.
     let probed = std::cell::RefCell::new(Vec::new());
     let observed =
         super::super::claim_candidate_completion_observations(1, candidates, |issue_number| {
             probed.borrow_mut().push(issue_number);
-            Ok::<_, std::convert::Infallible>(issue_number <= 2)
+            Ok::<_, std::convert::Infallible>(match issue_number {
+                1 => ClaimProbeOutcome::Completed,
+                2 => ClaimProbeOutcome::Deferred,
+                _ => ClaimProbeOutcome::Claimable,
+            })
         })
         .expect("infallible probe");
 
     assert_eq!(
         observed,
-        std::collections::BTreeMap::from([(1, true), (2, true), (3, false)])
+        std::collections::BTreeMap::from([(1, true), (3, false)])
     );
     assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+}
+
+fn dependency_completion_fixture() -> (
+    gwt::IssueMonitorState,
+    gwt::issue_monitor_worker::LoadedIssueMonitorCandidates,
+) {
+    let mut monitor = test_monitor_with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..queued_issue_monitor_prefs(&[42])
+        },
+    );
+    monitor.set_gui_connected(true);
+    let issues = [42, 44]
+        .into_iter()
+        .map(|number| gwt::IssueMonitorIssue {
+            author_login: None,
+            number,
+            title: format!("Issue {number}"),
+            labels: if number == 44 {
+                vec!["gwt-spec".to_string()]
+            } else {
+                Vec::new()
+            },
+            state: gwt::IssueMonitorIssueState::Open,
+            body: (number == 42).then(|| "Blocked-by: #44".to_string()),
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-10-23T00:00:00Z".to_string()),
+        })
+        .collect::<Vec<_>>();
+    gwt::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-10-23T00:00:00Z");
+    let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        linked_prs: Default::default(),
+        open_pr_observations: BTreeMap::new(),
+        open_pr_observed_at: None,
+        issues,
+        source: gwt::IssueMonitorCandidateSource::Live,
+        live_error: None,
+        readiness_failures: Vec::new(),
+        urgent_assignments: Default::default(),
+    };
+    (monitor, loaded)
+}
+
+#[test]
+fn issue_6746_local_completion_timeout_defers_only_its_candidate() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut monitor, mut loaded) = dependency_completion_fixture();
+    monitor.set_max_active_agents(1);
+    monitor.terminal_queue_push(&[44], "test", "2026-10-23T00:00:00Z");
+    loaded.issues[0].body = None;
+    loaded.issues[0].labels = vec!["gwt-spec".to_string()];
+    loaded.issues[0].readiness = gwt::IssueMonitorReadiness::ReadyWithCompletedTasks;
+    loaded.issues[1].labels.clear();
+    gwt::scan_issue_monitor_candidates(&mut monitor, &loaded.issues, "2026-10-23T00:00:00Z");
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |number| {
+            probed.lock().expect("probe log").push(number);
+            if number == 42 {
+                return Err(
+                    gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Operation(
+                        gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                            gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                            "process deadline expired",
+                        ),
+                    ),
+                );
+            }
+            Ok(false)
+        }
+    });
+
+    let observed =
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo")
+            .expect("one local timeout must not discard the scan")
+            .expect("authorized live scan");
+
+    assert_eq!(observed.1, BTreeMap::from([(44, false)]));
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[42, 44]);
+}
+
+#[test]
+fn local_claim_observation_rechecks_the_frontier_after_dependency_completion() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (monitor, loaded) = dependency_completion_fixture();
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |number| {
+            probed.lock().expect("probe log").push(number);
+            Ok(number == 44)
+        }
+    });
+
+    let observed =
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo")
+            .expect("completion observations")
+            .expect("authorized live scan");
+
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[44, 42]);
+    assert_eq!(observed.1, BTreeMap::from([(42, false)]));
+    let blocker = loaded
+        .issues
+        .iter()
+        .find(|issue| issue.number == 44)
+        .expect("the probed dependency");
+    assert_eq!(
+        observed.2,
+        BTreeMap::from([(
+            44,
+            gwt::issue_monitor::IssueMonitorDependencyObservation::new(blocker, Some(true)),
+        )])
+    );
+}
+
+#[test]
+fn local_claim_observation_reprobes_pending_claim_dependencies_without_free_capacity() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut monitor, loaded) = dependency_completion_fixture();
+    monitor.set_max_active_agents(1);
+    let now = "2026-10-23T00:00:00Z";
+    assert_eq!(
+        monitor.try_prepare_claim_effects_with_probe_confirmed("owner", now, 1, None, |number| {
+            Ok::<_, ()>(if number == 44 {
+                gwt::issue_monitor::ClaimProbeOutcome::Completed
+            } else {
+                gwt::issue_monitor::ClaimProbeOutcome::Claimable
+            })
+        }),
+        Ok(1)
+    );
+    gwt::scan_issue_monitor_candidates(&mut monitor, &loaded.issues, now);
+    assert_eq!(monitor.claim_probe_plan(1).0, 0);
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |number| {
+            probed.lock().expect("probe log").push(number);
+            Ok(true)
+        }
+    });
+
+    let observed =
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo")
+            .expect("completion observations")
+            .expect("authorized live scan");
+
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[44]);
+    assert!(observed.1.is_empty(), "no slot permits an owner probe");
+    let blocker = loaded
+        .issues
+        .iter()
+        .find(|issue| issue.number == 44)
+        .expect("the probed dependency");
+    assert_eq!(
+        observed.2,
+        BTreeMap::from([(
+            44,
+            gwt::issue_monitor::IssueMonitorDependencyObservation::new(blocker, Some(true)),
+        )])
+    );
+    monitor.observe_dependency_completions(&observed.2);
+    prepare_local_issue_monitor_claim_proposals(
+        &mut monitor,
+        &loaded,
+        &observed.0,
+        now,
+        &observed.1,
+    );
+    assert_eq!(pending_claim_issue_numbers(&monitor.prefs()), vec![42]);
+}
+
+#[test]
+fn local_claim_observation_discards_the_scan_when_a_dependency_probe_expires() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (monitor, loaded) = dependency_completion_fixture();
+    let _hook = super::super::set_local_completion_probe_test_hook(|number| {
+        if number != 44 {
+            return Ok(false);
+        }
+        Err(
+            gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Deadline(
+                gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                    gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                    "dependency completion deadline expired",
+                ),
+            ),
+        )
+    });
+
+    assert!(
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo").is_err()
+    );
 }
 
 /// Issue #3528 (SPEC #3200 FR-057): without a saved launch profile the scan
@@ -752,6 +957,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -811,6 +1017,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("an expired probe must not fail the commit");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -856,6 +1063,8 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
     let (repo, prefs_path) =
         seed_scheduled_scan_claim_fixture(&temp, Some(sample_issue_monitor_launch_profile()));
+    gwt::project_runtime::test_support::seed_actual_project_view(&repo)
+        .expect("the normal fail-open scan belongs to an opened Project");
     let _hook = super::super::set_local_completion_probe_test_hook(|_| {
         Err(
             gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Operation(
@@ -890,6 +1099,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         &issue_client_factory,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -958,6 +1168,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("an exhausted read phase must not fail the commit");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1106,6 +1317,7 @@ fn scheduled_scan_returns_while_generation_recovery_is_running() {
                 &super::super::default_issue_client_factory(),
                 Duration::from_secs(60),
                 Duration::from_secs(30),
+                &HashSet::new(),
             );
             completed_tx.send(outcome).expect("report scan completed");
         });
@@ -1193,6 +1405,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_in_background() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan runs");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1268,6 +1481,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan runs");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1607,6 +1821,10 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
     super::super::wait_scan_generation_reaper(&completed_prefs);
+    assert!(
+        matches!(&outcome, Ok(ScheduledIssueMonitorScanOutcome::Applied(_))),
+        "the daemon-absent scan must be applied: {outcome:?}"
+    );
     let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
@@ -1619,7 +1837,7 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("scheduled status");
+        .unwrap_or_else(|| panic!("scheduled status missing; events: {events:?}"));
     assert_eq!(
         status.total_candidates, 1,
         "the live candidate reached the scheduled snapshot"
@@ -1645,7 +1863,7 @@ fn issue_monitor_capacity_sampler_notifies_stopped_projects_without_scanning() {
         .split("let capacity_projects =")
         .nth(1)
         .expect("host sampler")
-        .split("let monitor_writers =")
+        .split("runtime_health_poller::spawn_runtime_health_poller")
         .next()
         .unwrap();
     assert!(

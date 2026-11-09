@@ -1,30 +1,14 @@
-//! Floating window handler split out of `app_runtime/mod.rs` for SPEC-2077
-//! Phase C (arch-review handoff, 2026-05-01).
+//! Window lifecycle and focus on the active project.
 //!
-//! Owns:
-//! - [`AppRuntime::create_window_events`] / [`AppRuntime::close_window_events`]
-//!   — window lifecycle on the active project tab
-//! - [`AppRuntime::focus_window_events`] / [`AppRuntime::cycle_focus_events`]
-//!   — keyboard / pointer focus rotation
-//! - [`AppRuntime::update_viewport_events`] /
-//!   [`AppRuntime::arrange_windows_events`] — viewport pan/zoom and arrange
-//!   tile / stack
-//! - [`AppRuntime::update_window_geometry_events`] — per-window geometry
-//!   adjustments (delegates terminal resize to the live runtime)
-//! - [`AppRuntime::list_windows_event`] — workspace snapshot across all
-//!   project tabs (the Command Rail Windows popover is a cross-tab list)
-//!
-//! GUI-side window contracts (canvas viewport pan/zoom, arrange/stack
-//! semantics) remain owned by SPEC-2008. This split keeps `mod.rs` lean
-//! while preserving the broadcast/persist contract through the existing
-//! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
+//! Rail, Agents tabs and split layout own presentation. The registry holds
+//! identity, metadata and process state; xterm's UpdateTerminalGrid is the
+//! only source of live PTY dimensions.
 
-use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection, WindowSurfaceOwner};
-use std::time::Instant;
+use gwt::{AgentKanbanLane, FocusCycleDirection, WindowSurfaceOwner};
 
 use super::{
-    close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
-    WindowPreset, WindowProcessStatus,
+    close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
+    WindowProcessStatus,
 };
 
 /// One uniform view over the window-keyed containers listed in
@@ -78,8 +62,13 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
 /// workspace record was actually removed, so callers can answer the requester
 /// instead of treating an empty event list as success.
 pub(crate) struct CloseWindowOutcome {
+    #[cfg(test)]
     pub(crate) closed: bool,
     pub(crate) events: Vec<OutboundEvent>,
+}
+
+pub(crate) struct PeerPaneCloseReply {
+    pub(super) client_id: String,
 }
 
 /// Issue #4234 AC-3: every `AppRuntime` map that is keyed by a combined window
@@ -113,10 +102,8 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, initial_launch_workers);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
-        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
-        $visit!($runtime, $id, pending_fresh_execution_finalizations);
         $visit!($runtime, $id, pending_auto_resume_sources);
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
@@ -136,63 +123,10 @@ macro_rules! window_scoped_state {
 }
 
 impl AppRuntime {
-    /// Agent lifecycle requests must preserve recent evidence from their actual target.
-    /// Human canvas close and runtime terminal cleanup do not call this guard.
-    pub(super) fn agent_close_board_check(
-        &self,
-        principal: &gwt::agent_capability::AgentSessionPrincipal,
-        id: &str,
-    ) -> Option<String> {
-        let (tab, window) = self.tabs.iter().find_map(|tab| {
-            tab.workspace
-                .persisted()
-                .windows
-                .iter()
-                .find(|window| super::combined_window_id(&tab.id, &window.id) == id)
-                .map(|window| (tab, window))
-        })?;
-        let target_session = window.session_id.as_deref();
-        let target_owner = window
-            .linked_issue_number
-            .or_else(|| {
-                target_session.and_then(|session_id| {
-                    self.launch_wizard_cache
-                        .session_by_id(session_id)
-                        .and_then(|session| session.linked_issue_number)
-                })
-            })
-            .or_else(|| self.issue_monitor_issue_number_for_window(&tab.project_root, id))
-            .or_else(|| {
-                target_session.and_then(|session_id| {
-                    gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
-                        .ok()
-                        .and_then(|session| session.linked_issue_number)
-                })
-            });
-        match gwt::board_read_receipts::recent_owner_unread(
-            &tab.project_root,
-            principal.session_id(),
-            target_session,
-            target_owner,
-            chrono::Utc::now(),
-        ) {
-            Ok(entries) if !entries.is_empty() => Some(
-                gwt::board_read_receipts::read_required_message("pane.close", &entries),
-            ),
-            Ok(_) => None,
-            Err(error) => {
-                let warning = gwt::board_read_receipts::warning(error);
-                tracing::warn!(%warning, window_id = id, "agent pane close Board observation failed open");
-                None
-            }
-        }
-    }
-
     pub(crate) fn create_window_events(
         &mut self,
         context: &super::ProjectContext,
         preset: WindowPreset,
-        bounds: WindowGeometry,
         surface_owner: Option<WindowSurfaceOwner>,
     ) -> Vec<OutboundEvent> {
         if preset.is_removed_legacy() {
@@ -202,10 +136,11 @@ impl AppRuntime {
             return Vec::new();
         }
         let tab_id = context.tab_id.clone();
+        let canonical_preset = preset.canonical_surface_preset();
         let surface_owner = surface_owner
             .filter(|owner| *owner != WindowSurfaceOwner::Pm || !preset.is_agent_terminal());
         if shares_work_surface_singleton(preset)
-            || (preset.canonical_surface_preset() == WindowPreset::Settings
+            || (canonical_preset == WindowPreset::Settings
                 && surface_owner == Some(WindowSurfaceOwner::Pm))
         {
             let existing_id = {
@@ -219,16 +154,13 @@ impl AppRuntime {
                     .iter()
                     .filter(|window| {
                         window.surface_owner == surface_owner
-                            && (shares_work_surface_singleton(window.preset)
-                                || window.preset == WindowPreset::Settings)
+                            && window.preset.canonical_surface_preset() == canonical_preset
                     })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
                 if let Some(existing_id) = existing_id.as_deref() {
                     let _ = tab.workspace.activate_window_tab(existing_id);
-                    let _ = tab
-                        .workspace
-                        .focus_window(existing_id, Some(bounds.clone()));
+                    let _ = tab.workspace.focus_window(existing_id);
                 }
                 existing_id
             };
@@ -236,35 +168,31 @@ impl AppRuntime {
                 return self.activate_tab_for_window_events(tab_id);
             }
         }
-        let preset = preset.canonical_surface_preset();
+        let preset = canonical_preset;
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            let window = tab.workspace.add_window(preset, bounds.clone());
+            let window = tab.workspace.add_window(preset);
             tab.workspace.set_surface_owner(&window.id, surface_owner);
             window
         };
         self.register_window(&tab_id, &window.id);
-        let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
+        let runtime_events = self.start_window(&tab_id, &window.id, window.preset);
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast(context)];
         events.extend(runtime_events);
         events
     }
 
-    pub(crate) fn focus_window_events(
-        &mut self,
-        id: &str,
-        bounds: Option<WindowGeometry>,
-    ) -> Vec<OutboundEvent> {
+    pub(crate) fn focus_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        if !tab.workspace.focus_window(&address.raw_id, bounds) {
+        if !tab.workspace.focus_window(&address.raw_id) {
             return Vec::new();
         }
         self.activate_tab_for_window_events(address.tab_id)
@@ -282,7 +210,6 @@ impl AppRuntime {
         &mut self,
         context: &super::ProjectContext,
         direction: FocusCycleDirection,
-        bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if !self.project_context_is_current(context) {
             return Vec::new();
@@ -292,94 +219,14 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.cycle_focus(direction, bounds)
+            tab.workspace.cycle_focus(direction)
         };
         if focused.is_none() {
             return Vec::new();
         }
-        // Issue #2937: do NOT resize PTYs here. PTY size is owned by the
-        // frontend's real xterm fit (sendGeometry → update_window_geometry_events).
-        // The frontend re-fits the focused window (scheduleTerminalFocusActivation)
-        // and any geometry-changed window (applyWorkspaceGeometry on the
-        // geometry_revision bump from a maximize-restore) on the resulting
-        // workspace_state render. Re-running geometry_to_pty_size here only
-        // clobbered the accurate cols/rows back to the spawn-time approximation
-        // on every window switch, desyncing the child's grid from xterm.
+        // Focus never changes the frontend-owned terminal grid.
         let _ = self.persist();
         vec![self.workspace_state_broadcast(context)]
-    }
-
-    pub(crate) fn update_viewport_events(
-        &mut self,
-        context: &super::ProjectContext,
-        viewport: CanvasViewport,
-    ) -> Vec<OutboundEvent> {
-        let Some(tab) = self.tab_mut(&context.tab_id) else {
-            return Vec::new();
-        };
-        if !tab.workspace.update_viewport(viewport) {
-            return Vec::new();
-        }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast(context)]
-    }
-
-    pub(crate) fn arrange_windows_events(
-        &mut self,
-        context: &super::ProjectContext,
-        mode: ArrangeMode,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        if !self.project_context_is_current(context) {
-            return Vec::new();
-        }
-        let tab_id = context.tab_id.clone();
-        let arranged = {
-            let Some(tab) = self.tab_mut(&tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.arrange_windows(mode, bounds)
-        };
-        if !arranged {
-            return Vec::new();
-        }
-        // Issue #2937: do NOT resize PTYs here (same rationale as
-        // cycle_focus_events). arrange_windows bumps geometry_revision for
-        // every window it moves, so the frontend re-fits each affected
-        // terminal (applyWorkspaceGeometry → fitTerminal → sendGeometry) on
-        // the resulting workspace_state render. The backend approximation
-        // must not clobber those frontend-fitted cols/rows.
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast(context)]
-    }
-
-    pub(crate) fn dock_window_tab_events(
-        &mut self,
-        id: &str,
-        target_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let Some(target_address) = self.window_lookup.get(target_id).cloned() else {
-            return Vec::new();
-        };
-        if address.tab_id != target_address.tab_id {
-            return Vec::new();
-        }
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace
-                .dock_window_tab(&address.raw_id, &target_address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        // Docking mutates shared canvas geometry, but the frontend's
-        // revisioned xterm fit remains authoritative for the live PTY grid.
-        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn activate_window_tab_events(&mut self, id: &str) -> Vec<OutboundEvent> {
@@ -395,33 +242,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        // Tab activation only changes the active marker/z-order. The revealed
-        // terminal's real grid is owned by the frontend xterm fit; resizing
-        // from backend geometry here clobbers that fit, especially for
-        // maximized tab groups where shared window geometry is only an
-        // approximation of the visible terminal body.
-        self.activate_tab_for_window_events(address.tab_id)
-    }
-
-    pub(crate) fn detach_window_tab_events(
-        &mut self,
-        id: &str,
-        geometry: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.detach_window_tab(&address.raw_id, geometry)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        // Detaching mutates canvas geometry, but the frontend's revisioned
-        // xterm fit remains authoritative for the live PTY grid.
+        // Activation records recency without changing the terminal grid.
         self.activate_tab_for_window_events(address.tab_id)
     }
 
@@ -491,11 +312,7 @@ impl AppRuntime {
         self.activate_tab_for_window_events(address.tab_id)
     }
 
-    pub(crate) fn undock_agent_window_events(
-        &mut self,
-        id: &str,
-        geometry: Option<WindowGeometry>,
-    ) -> Vec<OutboundEvent> {
+    pub(crate) fn undock_agent_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
@@ -503,7 +320,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&address.tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.undock_agent_window(&address.raw_id, geometry)
+            tab.workspace.undock_agent_window(&address.raw_id)
         };
         if !updated {
             return Vec::new();
@@ -512,7 +329,7 @@ impl AppRuntime {
     }
 
     /// SPEC-3885 FR-012: return a Windowized Issue window to the Issue list. The
-    /// canvas resolves both the Issue and its host window, so a stale frontend cannot
+    /// registry resolves both the Issue and its host window, so a stale frontend cannot
     /// send the window somewhere it does not belong.
     pub(crate) fn dock_agent_window_to_issue_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
@@ -578,53 +395,16 @@ impl AppRuntime {
         let Some(runtime) = self.runtimes.get(id) else {
             return Vec::new();
         };
-        if let Ok(mut pane) = runtime.pane.lock() {
-            let _ = pane.resize(cols.max(20), rows.max(6));
-        }
-        Vec::new()
-    }
-
-    pub(crate) fn update_window_geometry_events(
-        &mut self,
-        id: &str,
-        geometry: WindowGeometry,
-        cols: u16,
-        rows: u16,
-        base_geometry_revision: Option<u64>,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let Some(context) = self.project_context(&address.tab_id) else {
-            return Vec::new();
-        };
-        if let Some(base_geometry_revision) = base_geometry_revision {
-            let Some(tab) = self.tab(&address.tab_id) else {
-                return Vec::new();
-            };
-            let Some(window) = tab.workspace.window(&address.raw_id) else {
-                return Vec::new();
-            };
-            if window.geometry_revision != base_geometry_revision {
-                return vec![self.workspace_state_broadcast(&context)];
-            }
-        }
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.update_geometry(&address.raw_id, geometry)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        if let Some(runtime) = self.runtimes.get(id) {
-            if let Ok(mut pane) = runtime.pane.lock() {
-                let _ = pane.resize(cols.max(20), rows.max(6));
-            }
-        }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast(&context)]
+        self.queue_remote_runtime_command(
+            id,
+            gwt::project_runtime::events::OwnerCommand::Resize {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+                cols: cols.max(20),
+                rows: rows.max(6),
+            },
+            super::RemoteRuntimeCommandKind::Resize,
+        )
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
@@ -636,7 +416,7 @@ impl AppRuntime {
     /// distinguish a landed close from the silent no-op that an unknown or
     /// already-closed window produces.
     pub(crate) fn close_window_outcome(&mut self, id: &str) -> CloseWindowOutcome {
-        self.close_window_outcome_with_monitor_notification(id, true, None)
+        self.close_window_outcome_with_monitor_notification(id, true, None, None)
     }
 
     /// Issue #4234 AC-3: drop every window-keyed entry the closing window owns.
@@ -644,7 +424,7 @@ impl AppRuntime {
     /// Window ids are reassigned lowest-free, so a surviving entry is not only
     /// retained memory — it is state a future window with the same id would
     /// read as its own.
-    fn forget_window_scoped_state(&mut self, id: &str) {
+    pub(super) fn forget_window_scoped_state(&mut self, id: &str) {
         macro_rules! forget {
             ($runtime:ident, $id:ident, $field:ident) => {
                 WindowScopedEntries::forget(&mut $runtime.$field, $id);
@@ -712,16 +492,8 @@ impl AppRuntime {
         &mut self,
         id: &str,
     ) -> Vec<OutboundEvent> {
-        self.close_window_outcome_with_monitor_notification(id, false, None)
+        self.close_window_outcome_with_monitor_notification(id, false, None, None)
             .events
-    }
-
-    pub(super) fn close_window_outcome_with_self_close_ticket(
-        &mut self,
-        id: &str,
-        ticket: crate::AgentSelfCloseCapabilityTicket,
-    ) -> CloseWindowOutcome {
-        self.close_window_outcome_with_monitor_notification(id, true, Some(ticket))
     }
 
     fn close_window_outcome_with_monitor_notification(
@@ -729,6 +501,7 @@ impl AppRuntime {
         id: &str,
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        peer_client_id: Option<String>,
     ) -> CloseWindowOutcome {
         // Issue #4145 AC-1: every close route converges here, and Issue #3783
         // designed the accepted close to stay on the event loop, so this guard
@@ -750,11 +523,28 @@ impl AppRuntime {
             })
         else {
             return CloseWindowOutcome {
+                #[cfg(test)]
                 closed: false,
                 events: Vec::new(),
             };
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
+        let peer_reply = peer_client_id.and_then(|client_id| {
+            let session_id = self
+                .active_agent_sessions
+                .get(id)
+                .map(|active| active.session_id.clone())
+                .or_else(|| {
+                    let raw_id = id.strip_prefix(&format!("{}::", context.tab_id))?;
+                    self.tab(&context.tab_id)?
+                        .workspace
+                        .window(raw_id)?
+                        .session_id
+                        .clone()
+                });
+            (self.runtimes.contains_key(id) || session_id.is_some())
+                .then_some(PeerPaneCloseReply { client_id })
+        });
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
@@ -762,6 +552,7 @@ impl AppRuntime {
             id,
         ) {
             return CloseWindowOutcome {
+                #[cfg(test)]
                 closed: false,
                 events: Vec::new(),
             };
@@ -775,12 +566,14 @@ impl AppRuntime {
         self.restore_launch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
-        // runs in one detached finalizer and cannot delay PaneCloseResult.
+        // runs in one detached finalizer. Peer completion is sent after reap;
+        // visible removal and the event loop remain immediate.
         self.queue_accepted_window_close_finalizer(
             id,
             issue_monitor_project_root,
             notify_issue_monitor,
             self_close_ticket,
+            peer_reply,
         );
         // Issue #4234 AC-3: the finalizer above takes the runtime, the session
         // and the capability token because it needs their values. Everything
@@ -793,6 +586,7 @@ impl AppRuntime {
             events.push(event);
         }
         CloseWindowOutcome {
+            #[cfg(test)]
             closed: true,
             events,
         }
@@ -805,11 +599,11 @@ impl AppRuntime {
         &mut self,
         id: &str,
         project_root: Option<std::path::PathBuf>,
-        notify_issue_monitor: bool,
-        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        _notify_issue_monitor: bool,
+        _self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        peer_reply: Option<PeerPaneCloseReply>,
     ) {
         self.invalidate_launch_delivery_ack(id);
-        self.pending_launch_completions.remove(id);
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.
@@ -849,55 +643,35 @@ impl AppRuntime {
             project_root,
             closing_session_id,
             closing_pm_session,
-            notify_issue_monitor,
-            self_close_ticket,
             closing_window_generation,
+            peer_reply,
         );
-        self.pending_fresh_execution_finalizations.remove(id);
         self.profile_selections.remove(id);
     }
 
     /// SPEC-2356 安心 Addendum (FR-041): stop a single window's agent runtime
     /// (kill the PTY through the existing stop path) but keep the window and its
-    /// terminal output on the canvas, rendered as `Stopped`. Unlike
+    /// terminal output in its surface, rendered as `Stopped`. Unlike
     /// [`Self::close_window_events`], the window record is never removed, so the
     /// operator keeps the prior output and can later relaunch it through
     /// [`Self::restart_window_events`]. Idempotent: stopping an already-stopped
     /// window simply re-broadcasts the authoritative `Stopped` status.
     pub(crate) fn stop_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
+        let Some(runtime) = self.runtimes.get(id) else {
             return Vec::new();
         };
-        let Some(context) = self.project_context(&address.tab_id) else {
-            return Vec::new();
-        };
-        // Tear down the live runtime (kills the PTY + joins reader/status
-        // threads + deregisters the writer). This reuses the exact same stop
-        // primitive that `close_window_events` uses, so no PTY management is
-        // reimplemented. `stop_window_runtime` also persists the Paused Work
-        // marker for an agent session via `mark_agent_session_stopped`.
-        // Qualify the transition while its exact runtime incarnation still exists.
-        self.observe_notification_transition_at(id, WindowProcessStatus::Stopped, Instant::now());
-        self.stop_window_runtime(id);
-        // Render the surviving window as Stopped. `stop_window_runtime` already
-        // removed the pty/hook tracking, so the workspace record is the source
-        // of truth for the post-stop status.
-        self.set_window_status(
-            &address.tab_id,
-            &address.raw_id,
-            WindowProcessStatus::Stopped,
-        );
-        let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast(&context)];
-        events.extend(self.status_events(id.to_string(), WindowProcessStatus::Stopped, None));
-        if let Some(event) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
-            events.push(event);
-        }
-        events
+        self.queue_remote_runtime_command(
+            id,
+            gwt::project_runtime::events::OwnerCommand::Close {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+            },
+            super::RemoteRuntimeCommandKind::Stop,
+        )
     }
 
     /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's
-    /// runtime, keeping all windows on the canvas. Iterates the open windows
+    /// runtime, keeping all windows in its surface. Iterates the open windows
     /// and applies the per-window [`Self::stop_window_events`] stop to each
     /// window that currently has a live runtime, so the confirm-on-frontend
     /// "stop all" button resolves to the same kept-but-stopped state as the
@@ -923,7 +697,7 @@ impl AppRuntime {
     }
 
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a window's agent in place. The
-    /// window id, geometry, and placement are preserved; the prior terminal
+    /// window id and Issue association are preserved; the prior terminal
     /// output is appended to (never wiped) because the window record — and the
     /// frontend's xterm buffer bound to its id — survive the restart. Only acts
     /// on a window that is currently `Stopped` or `Error`; restarting a running
@@ -957,16 +731,15 @@ impl AppRuntime {
         }
 
         let preset = window.preset;
-        let geometry = window.geometry.clone();
 
         if preset == WindowPreset::Agent {
-            return self.restart_agent_window_in_place(&address.tab_id, &address.raw_id, geometry);
+            return self.restart_agent_window_in_place(&address.tab_id, &address.raw_id);
         }
 
         // Clear any stale "restored window is paused" detail before relaunching
         // so the new PTY's status is the authoritative one.
         self.window_details.remove(id);
-        let events = self.start_window(&address.tab_id, &address.raw_id, preset, geometry);
+        let events = self.start_window(&address.tab_id, &address.raw_id, preset);
         let _ = self.persist();
         let mut all = vec![self.workspace_state_broadcast(&context)];
         all.extend(events);

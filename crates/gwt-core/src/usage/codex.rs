@@ -305,7 +305,10 @@ pub fn parse_codex_session(session_id: &str, jsonl: &str) -> SessionUsage {
         .map(|v| !v.is_null())
         .unwrap_or(false);
 
-    let state = if tc.is_some() {
+    let state = if total.is_some_and(|total| {
+        total.get("input_tokens").and_then(Value::as_u64).is_some()
+            && total.get("output_tokens").and_then(Value::as_u64).is_some()
+    }) {
         UsageState::Ok
     } else {
         UsageState::NoData
@@ -318,6 +321,18 @@ pub fn parse_codex_session(session_id: &str, jsonl: &str) -> SessionUsage {
         input_tokens: input,
         output_tokens: output,
         total_tokens,
+        cache_read_tokens: total
+            .and_then(|t| t.get("cached_input_tokens"))
+            .and_then(Value::as_u64),
+        cache_creation_tokens: total
+            .and_then(|t| t.get("cache_creation_input_tokens"))
+            .and_then(Value::as_u64),
+        reported_context_left_pct: None,
+        provider_session_id: Some(session_id.to_owned()),
+        project_path: None,
+        agent_member_id: None,
+        active: true,
+        telemetry: None,
         context_used_tokens: context_used,
         context_limit_tokens: context_limit,
         context_left_pct,
@@ -806,6 +821,10 @@ mod tests {
         assert_eq!(s.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(s.state, UsageState::Ok);
         assert!(s.eligible);
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!(wire["cache_read_tokens"], 40);
+        assert!(wire["cache_creation_tokens"].is_null());
+        assert!(wire["reported_context_left_pct"].is_null());
     }
 
     #[test]

@@ -48,10 +48,17 @@ fn automatic_background_index_disabled_value(value: Option<&OsStr>) -> bool {
 /// Determine `RepoHash` for the given repository root by shelling out to
 /// `git remote get-url origin`. Returns `None` if no origin is configured.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
-    gwt_core::repo_hash::detect_repo_hash(repo_root).or_else(|| {
-        let index_root = resolve_project_index_repo_root(repo_root)?;
-        gwt_core::repo_hash::detect_repo_hash(&index_root)
-    })
+    gwt_core::repo_hash::detect_repo_hash(repo_root)
+        // Issue #6096: an unambiguous Nested Bare + Worktree layout root
+        // resolves from its bare child's config without spawning Git, which
+        // costs seconds per call on a loaded Windows host.
+        .or_else(|| {
+            gwt_core::repo_hash::detect_repo_identity(repo_root).map(|identity| identity.hash)
+        })
+        .or_else(|| {
+            let index_root = resolve_project_index_repo_root(repo_root)?;
+            gwt_core::repo_hash::detect_repo_hash(&index_root)
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3337,9 +3344,9 @@ mod tests {
             .join("worktrees/linked-index/keep");
         std::fs::create_dir_all(kept.parent().expect("parent")).expect("index directory");
         std::fs::write(&kept, b"live index").expect("live index");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() - Duration::from_millis(1),
-        );
+        let now = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         assert!(
             project_index_git_context(&checkout_root).is_none(),

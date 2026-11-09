@@ -1,3 +1,5 @@
+import { defaultScheduleFrame } from "./ui-state-store.js";
+
 // Issue #2694 Phase C — coalesced, rAF-flushed dispatch for WebSocket inbound
 // events.
 //
@@ -9,7 +11,8 @@
 //
 // `createSocketReceiveDispatcher` wraps `receive` so:
 // - inbound events accumulate in a queue,
-// - the queue is flushed on the next animation frame or a bounded timer,
+// - visible queues flush on a frame/timer race; hidden queues use the shared
+//   UI scheduler's yielding task instead of clamped timers,
 // - string payloads keep full JSON.parse work inside the scheduled flush budget,
 // - idempotent global-state kinds (e.g. workspace_state) collapse to the
 //   latest occurrence, sparing redundant DOM mutations,
@@ -19,16 +22,15 @@
 //   defer to the next scheduled flush.
 
 const DEFAULT_BUDGET_MS = 8;
-const DEFAULT_FALLBACK_DELAY_MS = 100;
 const DEFAULT_MAX_QUEUE_SIZE = 2048;
 export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 
 // Snapshot kinds that must preserve multiplicity and their position relative
 // to coalesced state. They are not latency-sensitive streams: moving them
 // ahead of workspace_state can make project-scoped snapshots fail their
-// active-project fence. Empty since Issue #3164 retired the Improvement Inbox
-// events; callers can still opt a kind in through `orderedStateKinds`.
-const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set([]));
+// active-project fence. Census observations must all reach the model's
+// observed_at authority: an older cache replay can arrive after fresh proof.
+const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set(["local_agent_activity"]));
 
 // Idempotent kinds where only the latest occurrence carries information. Any
 // kind not in this set preserves original order and every occurrence.
@@ -41,6 +43,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "window_list",
     "provider_usage",
     "runtime_health",
+    "project_owner_health",
     "project_index_status",
     "launch_wizard_state",
     "launch_wizard_open",
@@ -76,7 +79,7 @@ export function createSocketReceiveDispatcher({
       "createSocketReceiveDispatcher requires a receive callback",
     );
   }
-  const scheduleImpl = schedule ?? scheduleReceiveFlush;
+  const scheduleImpl = schedule ?? defaultScheduleFrame;
   const nowImpl = now ?? (() => {
     if (typeof performance !== "undefined" && typeof performance.now === "function") {
       return performance.now();
@@ -195,7 +198,7 @@ export function createSocketReceiveDispatcher({
           error_name: error && error.name,
         }));
         console.warn(
-          "[ws-dispatcher] receive threw for %s — continuing with remaining events",
+          "[ws-dispatcher] receive threw for %s",
           eventKind,
           error,
         );
@@ -205,6 +208,11 @@ export function createSocketReceiveDispatcher({
           } catch (_) {
             // The error reporter must never take down the event path.
           }
+        }
+        // Later ANSI chunks depend on the screen this packet produced.
+        // Discard the torn suffix and recover an authoritative snapshot.
+        if (!disposed && (eventKind === "terminal_output" || eventKind === "terminal_snapshot")) {
+          invalidate("receive-error");
         }
       }
       cursor += 1;
@@ -288,20 +296,6 @@ export function createSocketReceiveDispatcher({
   }
 
   return { handle, enqueue, flushNow, pendingCount, resume, dispose };
-}
-
-function scheduleReceiveFlush(callback) {
-  const hasFrameScheduler = typeof requestAnimationFrame === "function";
-  // rAF can stop in an inactive window. Keep state delivery independent of
-  // focus while retaining frame batching in active windows.
-  const timer = setTimeout(callback, hasFrameScheduler ? DEFAULT_FALLBACK_DELAY_MS : 0);
-  const frame = hasFrameScheduler ? requestAnimationFrame(callback) : null;
-  return () => {
-    clearTimeout(timer);
-    if (frame !== null && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(frame);
-    }
-  };
 }
 
 function parsedQueueEntry(event) {

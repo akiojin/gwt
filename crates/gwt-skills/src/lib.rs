@@ -1530,6 +1530,52 @@ mod tests {
     }
 
     #[test]
+    fn issue_4359_autonomous_guidance_continues_after_reversible_rulings() {
+        use crate::coordination_guidance::{SKILL_BODY_EN, SKILL_BODY_JA};
+
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(body.contains("PM default ruling (override available)"));
+            assert!(body.contains("needs_human"));
+        }
+        let materialized = tempfile::tempdir().unwrap();
+        generate_coordination_guidance(materialized.path()).unwrap();
+        let claude = read_asset_contract(
+            materialized
+                .path()
+                .join(".claude/skills/gwt-coordination/SKILL.md"),
+        )
+        .unwrap();
+        let codex = read_asset_contract(
+            materialized
+                .path()
+                .join(".codex/skills/gwt-coordination/SKILL.md"),
+        )
+        .unwrap();
+        assert_eq!(claude, codex);
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut execute_mirrors = Vec::new();
+        for provider in [".claude", ".codex"] {
+            let execute = std::fs::read_to_string(
+                workspace_root.join(format!("{provider}/skills/gwt-execute/SKILL.md")),
+            )
+            .unwrap();
+            for body in [&claude, &execute] {
+                for phrase in [
+                    "PM default ruling (override available)",
+                    "Do not stop to wait for a PM reply",
+                    "After receiving a Board ruling, resume",
+                    "irreversible decisions",
+                    "needs_human",
+                ] {
+                    assert!(body.contains(phrase), "{provider}: missing {phrase}");
+                }
+            }
+            execute_mirrors.push(execute);
+        }
+        assert_eq!(execute_mirrors[0], execute_mirrors[1]);
+    }
+
+    #[test]
     fn gwt_execute_documents_issue_bound_build_lifecycle() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let materialized = tempfile::tempdir().expect("materialization target");
@@ -2460,8 +2506,8 @@ mod tests {
     // verification contract. The skill must document Test Inventory emission,
     // a User Verification Handoff phase with a 4-step 導線 structure
     // (build → launch → navigate → observe), and explicit Check Items.
-    // Callers (gwt-build-spec, gwt-manage-pr) must gate completion / push on
-    // the User Verification Result.
+    // Callers honor a human handoff only on explicit owner request (Issue #4326);
+    // automated verification and measured UI evidence remain mandatory.
 
     #[test]
     fn gwt_verify_documents_test_inventory_section() {
@@ -2513,7 +2559,7 @@ mod tests {
     /// launch must never wait for a human to look at a screen, and the agent's
     /// own headed browser-check must be recorded as its own evidence line
     /// instead of being laundered into the user's verification result. Manual
-    /// launches keep the existing handoff.
+    /// launches require the handoff only on explicit owner request.
     #[test]
     fn gwt_verify_waives_user_verification_for_autonomous_launches() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2841,7 +2887,7 @@ mod tests {
     }
 
     #[test]
-    fn build_spec_phase_3_requires_user_verification_result() {
+    fn build_spec_phase_3_requires_user_verification_only_on_owner_request() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-build-spec/SKILL.md",
@@ -2850,14 +2896,15 @@ mod tests {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                content.contains("User Verification Result"),
-                "{relative} must gate Phase 3 completion on User Verification Result (SPEC-1935 FR-133)"
+                content.contains("User Verification Result is optional")
+                    && content.contains("owner explicitly requests"),
+                "{relative} must require human verification only when the owner explicitly requests it (Issue #4326 AC-D4)"
             );
         }
     }
 
     #[test]
-    fn manage_pr_pre_pr_requires_user_verification_result() {
+    fn manage_pr_pre_pr_requires_user_verification_only_on_owner_request() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-manage-pr/SKILL.md",
@@ -2866,8 +2913,9 @@ mod tests {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                content.contains("User Verification Result"),
-                "{relative} must gate push / PR create / update on User Verification Result (SPEC-1935 FR-133)"
+                content.contains("User Verification Result is optional")
+                    && content.contains("owner explicitly requests"),
+                "{relative} must require human verification only when the owner explicitly requests it (Issue #4326 AC-D4)"
             );
         }
     }
@@ -2888,6 +2936,7 @@ mod tests {
             "Draft PR",
             "単独で配信可能",
             "Draft PR を作成しない",
+            "User Verification Result` は任意",
         ] {
             assert!(
                 agents.contains(required),
@@ -2907,10 +2956,23 @@ mod tests {
                 "releaseable slice",
                 "Ready for review",
                 "known blockers",
+                "Draft PRs are prohibited",
+                "User Verification Result is optional",
             ] {
                 assert!(
                     content.contains(required),
                     "{relative} must document Ready/Draft PR gate phrase: {required}"
+                );
+            }
+            for retired in [
+                "pr.draft",
+                "Draft PR is the only allowed PR state",
+                "params.draft:true",
+                "Draft PR creation stays available",
+            ] {
+                assert!(
+                    !content.contains(retired),
+                    "{relative} must retire Draft creation advice: {retired}"
                 );
             }
         }
@@ -3056,7 +3118,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_body_template_surfaces_ready_and_draft_state() {
+    fn pr_body_template_surfaces_only_ready_state() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-manage-pr/references/pr-body-template.md",
@@ -3067,7 +3129,6 @@ mod tests {
             for required in [
                 "PR Readiness",
                 "Ready for review",
-                "Draft",
                 "Known blockers",
                 "Remaining acceptance",
             ] {
@@ -3076,6 +3137,10 @@ mod tests {
                     "{relative} must expose PR readiness fields: {required}"
                 );
             }
+            assert!(
+                !content.contains("| Draft"),
+                "{relative} must not offer Draft"
+            );
         }
     }
 
@@ -3127,7 +3192,6 @@ mod tests {
                 // Keep the repository's existing auto-merge delivery policy.
                 "Keep auto-merge enabled",
                 "pr.update_branch",
-                "pr.draft",
             ] {
                 assert!(
                     deliver.contains(required),
@@ -3177,7 +3241,6 @@ mod tests {
                 // Routine pushes and base updates do not suspend auto-merge.
                 "Keep auto-merge enabled",
                 "pr.update_branch",
-                "pr.draft",
             ] {
                 assert!(
                     content.contains(required),

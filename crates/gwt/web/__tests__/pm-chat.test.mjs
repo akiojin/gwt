@@ -8,12 +8,19 @@ const report = (id = 'one') => ({ id, kind: 'progress', created_at: '2026-10-11T
   body: '# Update\n\n**Ready** and `code`\n\n- checked\n\n```sh\ncargo test\n```',
   body_html: '<h1>Update</h1><p><strong>Ready</strong> and <code>code</code></p><ul><li>checked</li></ul><pre><code>cargo test</code></pre>' });
 
-function fixture() {
+const structuredReport = (id = 'typed') => ({ ...report(id),
+  body: 'Ready <literal>\nNext: Check delivery', body_html: '<p>Ready Next: Check delivery</p>',
+  structured: { summary: { result: 'Ready', next_action: 'Check delivery' },
+    details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
+  details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
+
+function fixture({ tasksDefault = false } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [];
   const view = createPmChat({ document, root, sessionId: 'session',
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text) });
+  if (!tasksDefault) view.showReports();
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
@@ -28,6 +35,78 @@ function fixture() {
   };
   return { root, model, view, visibility, copied, update };
 }
+
+const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
+  pending_intake, tasks });
+const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task ${key}`,
+  status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
+  review_required: false, ...extra });
+
+test('Tasks is the default PM view and preserves the unfinished filter and stable rows', () => {
+  const { root, update, view, model } = fixture({ tasksDefault: true });
+  update([report()], null, { request_tasks: taskOverview([
+    trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
+      wait_reason: 'Waiting for CI', review_required: true }),
+    trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
+  ]) });
+  const tasks = root.querySelector('.pm-chat__tasks');
+  assert.ok(tasks, 'a separate Tasks surface exists');
+  assert.equal(tasks.hidden, false);
+  assert.equal(root.querySelector('.pm-chat__body').hidden, true);
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 2);
+  assert.match(tasks.textContent, /Waiting for CI/);
+  assert.match(tasks.textContent, /PM reassessment required/);
+  assert.match(tasks.textContent, /Part of: Task parent/);
+  assert.match(tasks.textContent, /2 requests await classification/);
+  const row = root.querySelector('.pm-chat__task');
+  update([report('new')], null, { request_tasks: taskOverview([
+    trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
+      wait_reason: 'Waiting for CI', review_required: true }),
+    trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
+  ], 0) });
+  assert.match(tasks.textContent, /0 requests await classification/);
+  assert.equal(root.querySelector('.pm-chat__task'), row, 'report polls do not replace Task rows');
+  const noticeNode = tasks.querySelector('[role="status"]').firstChild;
+  update([report('poll')], null, model.readPmWindowState().windows.pm.current);
+  assert.ok(tasks.querySelector('[role="status"]').firstChild === noticeNode,
+    'unchanged polls do not replace the live status text');
+  const filter = [...tasks.querySelectorAll('button')].find(node => node.textContent === 'Include completed');
+  filter.click();
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+  view.showReports();
+  assert.equal(tasks.hidden, true);
+  assert.equal(root.querySelector('.pm-chat__body').hidden, false);
+  view.showTasks();
+  assert.equal(filter.getAttribute('aria-pressed'), 'true');
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
+  const { root, model, update } = fixture({ tasksDefault: true });
+  update();
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /unavailable/i);
+  update([], null, { request_tasks: { ...taskOverview([trackedTask('known')], 7), total: 83 } });
+  const before = model.readPmWindowState().windows.pm.requestTasks;
+  assert.equal(before?.state, 'ready');
+  assert.ok(Object.isFrozen(before));
+  update();
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks, before);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /last confirmed list.*unavailable/is);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent,
+    /Last confirmed summary \(stale\): 1 of 83 recorded tasks shown \(preview limited to 50; unfinished first\)\. 7 requests await classification\./);
+  update([], null, { request_tasks: { state: 'error', message: 'Unreadable task store' } });
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks, before);
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 1);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /last confirmed list.*Unreadable task store/s);
+  update([], 'Unreadable reports', { request_tasks: taskOverview([trackedTask('fresh')]) });
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks.tasks[0].key, 'fresh',
+    'Reports failure cannot hide independently confirmed Task data');
+  update([], null, { request_tasks: { state: 'absent' } });
+  assert.equal(root.querySelectorAll('.pm-chat__task').length, 0);
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /No request tasks have been recorded/);
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.readPmWindowState().windows.pm.requestTasks, null, 'a new session clears the old projection');
+});
 
 test('Reports revisions recover gaps and fence stale requests without starving slow replies', () => {
   const model = createPmWindowModel();
@@ -198,6 +277,125 @@ test('Q&A separates safe question text from the Markdown answer and copies both'
   assert.deepEqual(copied, [`Q: ${qa.question}\n\nA:\n${qa.body}`]);
 });
 
+test('decision Reports display and copy numbered choices without changing the stored body', async () => {
+  const { root, update, copied, model } = fixture();
+  const incoming = structuredReport('decision');
+  incoming.kind = 'decision';
+  incoming.structured.summary.decision = { question: 'Which recovery?', recommendation: 'Retry',
+    reason: 'The work is saved', options: ['Retry — run again', 'Wait — keep state',
+      'Inspect <logs> — gather evidence', 'Cancel — stop'] };
+  const expected = 'Ready\nNext: Check delivery\nDecision: Which recovery?\nRecommended: Retry (The work is saved)\n1. Retry — run again\n2. Wait — keep state\n3. Inspect <logs> — gather evidence\n4. Cancel — stop\nReply with the option number, or Other: your own answer.';
+  update([incoming]);
+  const article = root.querySelector('article');
+  assert.equal(article.querySelector('.pm-chat__text').textContent, expected);
+  assert.equal(article.querySelector('logs'), null, 'choices remain literal text');
+  article.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${expected}\n\n**All checks passed.**\n\n- https://example.com/issues/3431`]);
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
+});
+
+test('structured Reports show a compact overview and copy all expandable details and references', async () => {
+  const { root, update, copied } = fixture();
+  const incoming = structuredReport();
+  const complete = `${'詳細'.repeat(9000)}\n\nTAIL: item 48 remains available`;
+  incoming.structured.details = complete;
+  incoming.details_html = `<p>${complete}</p><p><strong>Complete evidence</strong></p><ul><li><a href="${incoming.structured.refs[0]}">Issue evidence</a></li></ul>`;
+  update([incoming]);
+  const article = root.querySelector('article');
+  const details = article.querySelector('details');
+  assert.ok(details, 'structured details use native disclosure');
+  assert.equal(details.hasAttribute('open'), false);
+  assert.equal(details.querySelector('summary').textContent, 'Details');
+  const overview = article.querySelector(':scope > .pm-chat__text');
+  assert.equal(overview.textContent, incoming.body, 'typed overview preserves literal text and logical lines');
+  assert.ok(overview.classList.contains('is-plaintext'));
+  assert.equal(overview.querySelector('literal'), null);
+  assert.ok(details.querySelector('.knowledge-markdown-body'), 'details use the common Markdown renderer');
+  assert.ok(details.textContent.includes(complete), 'all 18k characters and the final item survive');
+  assert.equal(details.querySelector('strong').textContent, 'Complete evidence');
+  assert.equal(details.querySelector('a').getAttribute('href'), incoming.structured.refs[0]);
+  article.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${incoming.body}\n\n${complete}\n\n- ${incoming.structured.refs[0]}`]);
+});
+
+test('structured details have a safe text fallback while legacy, peer and Q&A retain full content', () => {
+  const { root, update } = fixture();
+  const incoming = structuredReport();
+  delete incoming.details_html;
+  incoming.structured.details = '<script>literal detail</script>\nLast detail';
+  const legacy = report('legacy');
+  const peer = { ...report('pm-peer-one'), body: 'Complete peer text', body_html: '<p>Complete peer text</p>' };
+  const qa = { ...report('qa'), kind: 'qa', question: 'Explain every result.' };
+  update([incoming, legacy, peer, qa]);
+  const articles = Array.from(root.querySelectorAll('article'));
+  const details = articles[0].querySelector('details');
+  assert.ok(details, 'typed report retains its disclosure without HTML');
+  assert.equal(details.querySelector('script'), null);
+  assert.equal(details.querySelector('.is-plaintext').textContent,
+    `${incoming.structured.details}\n\n- ${incoming.structured.refs[0]}`);
+  assert.equal(root.querySelectorAll('article details').length, 1, 'legacy sources do not gain a disclosure');
+  assert.match(articles[1].textContent, /Update.*Ready.*checked.*cargo test/s);
+  assert.match(articles[2].textContent, /Complete peer text/);
+  assert.match(articles[3].querySelector('[aria-label="Answer"]').textContent, /Update.*Ready.*checked.*cargo test/s);
+});
+
+test('structured summary-only reports omit empty Details while refs-only reports retain disclosure and raw Copy', async () => {
+  const { root, update, copied } = fixture();
+  const empty = { ...structuredReport('empty'), structured: { summary: { result: 'Ready' }, details: '', refs: [] }, details_html: '' };
+  const refsOnly = { ...structuredReport('refs-only'), structured: { summary: { result: 'Ready' }, details: '',
+    refs: ['https://example.com/issues/3431'] }, details_html: '<ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' };
+  update([empty, refsOnly]);
+  assert.equal(root.querySelector('article[data-report-id="empty"] details') === null, true);
+  empty.structured.details = ' \n ';
+  update([empty, refsOnly]);
+  const emptyRow = root.querySelector('article[data-report-id="empty"]');
+  const refsRow = root.querySelector('article[data-report-id="refs-only"]');
+  assert.equal(emptyRow.querySelector('details') === null, true, 'whitespace has no detail content to expand');
+  assert.equal(emptyRow.querySelector('.pm-chat__text').textContent, empty.body);
+  assert.ok(refsRow.querySelector('details'), 'references alone remain expandable');
+  assert.equal(refsRow.querySelector('a').getAttribute('href'), refsOnly.structured.refs[0]);
+  refsRow.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${refsOnly.body}\n\n- ${refsOnly.structured.refs[0]}`]);
+});
+
+test('structured disclosure follows report identity across polling and filters without moving a history reader', () => {
+  const { root, model, update } = fixture();
+  const body = root.querySelector('.pm-chat__body');
+  Object.defineProperties(body, { clientHeight: { value: 100 }, scrollHeight: { value: 2000 } });
+  const first = structuredReport('first');
+  const second = { ...structuredReport('second'), kind: 'decision' };
+  update([first]);
+  const opened = root.querySelector('article details');
+  assert.ok(opened, 'typed report has a disclosure to open');
+  opened.setAttribute('open', '');
+  body.scrollTop = 120;
+  update([first, second]);
+  let details = root.querySelectorAll('article details');
+  assert.equal(details[0].hasAttribute('open'), true, 'a new report does not close an expanded report');
+  assert.equal(details[1].hasAttribute('open'), false, 'a different report starts collapsed');
+  assert.equal(body.scrollTop, 120);
+  const select = root.querySelector('select');
+  const choose = kind => {
+    select.querySelector(`option[value="${kind}"]`).selected = true;
+    select.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));
+  };
+  choose('decision');
+  choose('all');
+  details = root.querySelectorAll('article details');
+  assert.equal(details[0].hasAttribute('open'), true, 'filtering retains the state by report id');
+  details[0].removeAttribute('open');
+  update([second, first]);
+  assert.equal(Array.from(root.querySelectorAll('article details')).some(node => node.hasAttribute('open')), false,
+    'closing a report survives reordering and polling');
+  root.querySelector('article details').setAttribute('open', '');
+  model.bindPmWindowState('pm', 'replacement');
+  update([second]);
+  assert.equal(root.querySelector('article details').hasAttribute('open'), false, 'a new session resets local disclosure state');
+});
+
 test('report kind filter retains its selection on polling and hides with the execution log', () => {
   const { root, update } = fixture();
   const history = [report(), { ...report('qa'), kind: 'qa', question: 'Why?' }, { ...report('decision'), kind: 'decision' }];
@@ -225,14 +423,42 @@ test('report kind filter retains its selection on polling and hides with the exe
   }
   choose('blocker');
   assert.equal(root.querySelectorAll('article').length, 0);
-  assert.match(root.querySelector('[role="status"]').textContent, /No Blocker reports yet/);
-  root.querySelectorAll('.pm-chat__toolbar button')[1].click();
+  assert.match(root.querySelector('.pm-chat__body [role="status"]').textContent, /No Blocker reports yet/);
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Execution log').click();
   assert.equal(select.closest('.pm-chat__body').hidden, true);
-  root.querySelectorAll('.pm-chat__toolbar button')[0].click();
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Reports').click();
   assert.equal(select.value, 'blocker');
   assert.equal(select.closest('.pm-chat__body').hidden, false);
   choose('all');
   assert.equal(root.querySelectorAll('article').length, 4);
+});
+
+test('Reports starts at the tail, follows new reports and preserves history across hidden updates (Issue #6235)', () => {
+  const { root, update } = fixture();
+  const body = root.querySelector('.pm-chat__body');
+  const height = () => 500 + 100 * root.querySelectorAll('article').length;
+  let top = 0;
+  Object.defineProperties(body, {
+    clientHeight: { get: () => body.hidden ? 0 : 100 },
+    scrollHeight: { get: () => body.hidden ? 0 : height() },
+    scrollTop: {
+      get: () => body.hidden ? 0 : top,
+      set: value => { top = Math.max(0, Math.min(value, body.hidden ? 0 : height() - 100)); },
+    },
+  });
+  const history = [report()];
+  update(history);
+  assert.equal(body.scrollTop, 500, 'initial reports open at the latest content');
+  update([...history, report('two')]);
+  assert.equal(body.scrollTop, 600, 'new reports follow the tail');
+  body.scrollTop = 100;
+  body.dispatchEvent(new root.ownerDocument.defaultView.Event('scroll'));
+  update([...history, report('two'), report('three')]);
+  assert.equal(body.scrollTop, 100, 'new reports do not move a reader in history');
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Execution log').click();
+  update([...history, report('four')]);
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Reports').click();
+  assert.equal(body.scrollTop, 100, 'hidden zero-size updates must not overwrite the saved position');
 });
 
 test('report updates preserve nodes and scroll, append history, and retain history on read failure', () => {
@@ -251,7 +477,7 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   assert.equal(root.querySelectorAll('article').length, 1);
   update([], 'Reports could not be loaded');
   assert.equal(root.querySelectorAll('article').length, 1);
-  assert.match(root.querySelector('[role="status"]').textContent, /could not be loaded/);
+  assert.match(root.querySelector('.pm-chat__body [role="status"]').textContent, /could not be loaded/);
   update([report(), report('two'), report('pm-peer-a'), report('pm-peer-b')], null,
     { observed_at: '2026-10-15T00:00:00Z' });
   update([report(), report('two'), { ...report('qa'), kind: 'qa', question: 'Can we continue?' }], null,
@@ -282,7 +508,7 @@ test('Execution log toggle retains Reports; stale sessions and native transcript
   const { root, model, view, update, visibility } = fixture();
   update([report()]);
   const buttons = root.querySelectorAll('.pm-chat__toolbar button');
-  buttons[1].click();
+  [...buttons].find(button => button.textContent === 'Execution log').click();
   assert.equal(visibility.at(-1), true);
   view.showReports();
   assert.equal(visibility.at(-1), false);
@@ -307,6 +533,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
   assert.match(section, /\.pm-chat__filter\s*\{[^}]*var\(--space-/);
   assert.match(section, /\.pm-chat__filter select:focus-visible\s*\{[^}]*var\(--color-focus-ring\)/);
   assert.match(section, /\.pm-chat__question\s*\{[^}]*white-space:\s*pre-wrap/);
+  assert.match(section, /\.pm-chat__text\.is-plaintext\s*\{[^}]*white-space:\s*pre-wrap/);
   assert.match(section, /\.pm-chat__section-label\s*\{[^}]*var\(--type-/);
   assert.doesNotMatch(section, /#[\da-f]{3,8}\b|rgba?\(|position:\s*(fixed|absolute)/i);
 });
@@ -425,13 +652,13 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
 });
 
 
-test('Agents tiles own browser and native file drops and their progress', async () => {
+test('Works full terminals own browser and native file drops and their progress', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
-  const { document, window } = parseHTML('<html><body><section hidden><div class="workspace-window" data-id="agent"></div></section><article class="agent-tile" data-agent-id="agent"><header>Agent</header><div class="terminal-root"></div></article></body></html>');
+  const { document, window } = parseHTML('<html><body><section hidden><div class="workspace-window" data-id="agent"></div></section><section class="works-surface"><section class="works-full"><header class="works-full-header">Agent</header><div class="works-terminal-host"><div class="works-terminal terminal-root" data-window-id="agent"></div></div></section></section></body></html>');
   const previous = { window: globalThis.window, document: globalThis.document };
   globalThis.window = window;
   globalThis.document = document;
@@ -440,7 +667,7 @@ test('Agents tiles own browser and native file drops and their progress', async 
   window.__gwtAttachmentUploader = async () => ({ upload_id: 'tile-upload' });
   try {
     const cached = document.querySelector('.workspace-window');
-    const tile = document.querySelector('.agent-tile');
+    const tile = document.querySelector('.works-full');
     const terminalRoot = tile.querySelector('.terminal-root');
     document.elementFromPoint = () => terminalRoot;
     const bridge = createTerminalAttachments({ send: message => sent.push(message),

@@ -184,29 +184,14 @@ export function applyTelemetryCounts(doc, counts = {}) {
   };
   if ("error" in counts) toggleAlert("error", counts.error);
   if ("waiting" in counts) toggleAlert("waiting", counts.waiting);
-  // FR-047 (anshin): MISSION convergence indicator. Shows done/total agents so
-  // the operator can see the fleet trending toward completion at a glance, and
-  // flips a positive "complete" state (not an alert pulse) when every agent has
-  // converged (done === agents > 0).
-  const agents = Number(counts.agents ?? 0);
-  const done = Number(counts.done ?? 0);
-  setText("op-strip-mission", agents > 0 ? `${done}/${agents}` : "—");
-  const missionCell = doc.querySelector(".op-status-strip__cell--mission");
-  if (missionCell) {
-    if (agents > 0 && done === agents) {
-      missionCell.classList.add("op-status-strip__cell--complete");
-    } else {
-      missionCell.classList.remove("op-status-strip__cell--complete");
-    }
-  }
   // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
   setText("op-strip-running", counts.running ?? 0);
   // Issue #3884 AC-3: break out the running agents that live as inline
   // terminals in the Issue window (SPEC-3671 `issue_preview` placement), so
-  // "RUNNING 6" next to an empty canvas explains itself. Hidden when every
-  // running agent is on the canvas, and for callers that omit the breakdown.
+  // "RUNNING 6" next to an empty Agents view explains itself. Hidden when every
+  // running agent is in Agents, and for callers that omit the breakdown.
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
@@ -225,18 +210,13 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
-  // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
-  if ("windows" in counts) {
-    const badge = doc.getElementById("op-rail-window-count");
-    if (badge) {
-      const value = Number(counts.windows) || 0;
-      badge.textContent = String(value);
-      badge.hidden = value <= 0;
-    }
-  }
 }
 
-export function applyIssueMonitorStatus(doc, status = {}) {
+export function subscribeIssueMonitorStatus(doc, model) {
+  return model.subscribeFrame(state => state.status, status => renderIssueMonitorStatus(doc, status));
+}
+
+export function renderIssueMonitorStatus(doc, status = {}) {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
@@ -245,8 +225,8 @@ export function applyIssueMonitorStatus(doc, status = {}) {
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Issue Monitor: ${view.value}`);
-  cell.setAttribute("title", view.title);
+  cell.setAttribute("aria-label", `Open Monitor: ${view.value}`);
+  cell.setAttribute("title", `Open Monitor | ${view.title}`);
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -343,6 +323,10 @@ function usageProviderLabel(provider) {
 
 function usageSummaryPercent(account) {
   const percentages = (account.windows || [])
+    .filter(
+      (window) => account.provider !== "claude_code" ||
+        window.kind === "five_hour" || window.kind === "weekly",
+    )
     .map((window) => window.used_percent)
     .filter(
       (percent) =>
@@ -1087,7 +1071,7 @@ function wireMissionBriefing({ doc, win }) {
 
   // SPEC-2356 — let the user dismiss the splash early by pressing any
   // key or clicking through it. The splash is purely decorative and
-  // shouldn't block users who want to get into the canvas immediately.
+  // shouldn't block users who want to get into the workspace immediately.
   let exited = false;
   const exitNow = () => {
     if (exited) return;
@@ -1398,4 +1382,22 @@ function matchReduced(doc) {
 
 function pad2(n) {
   return String(n).padStart(2, "0");
+}
+
+// The project execution owner is independent of the browser's GUI connection.
+export function subscribeProjectOwnerHealth(doc, model) {
+  return model.subscribeFrame(state => state, health => {
+    if (health) applyProjectOwnerHealth(doc, health);
+  });
+}
+
+function applyProjectOwnerHealth(doc, health = {}) {
+  const cell = doc.querySelector("[data-project-owner-health]");
+  if (!cell) return;
+  const state = ["healthy", "degraded"].includes(health.state) ? health.state : "connecting";
+  cell.dataset.state = state;
+  cell.hidden = false;
+  cell.title = health.detail || "";
+  const value = cell.querySelector("[data-project-owner-health-value]");
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "degraded" ? "Unavailable" : "Connecting";
 }

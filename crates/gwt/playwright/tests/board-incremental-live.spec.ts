@@ -90,6 +90,11 @@ test("Issue #5402 live Board sends one new entry, retains existing entries, and 
   expect(await cards.evaluateAll(elements => elements.map(element => element.getAttribute("data-board-entry-id"))))
     .toEqual([...initialIds, newId]);
   await expect(board.locator(".board-for-you-filter")).toHaveText(expectedMentionLabel);
+  const notice = page.locator('.toast-alerts__item[data-toast-id="board-mention"]');
+  await expect(notice).toContainText("incremental Markdown");
+  await notice.click();
+  await expect(newCard).toHaveClass(/focus-target/);
+  await expect(board.locator(".board-for-you-filter")).toHaveText("For you");
 
   // A full refresh may repeat the already-delivered entry; it must not append
   // a second card or increment the mention count again.
@@ -98,7 +103,7 @@ test("Issue #5402 live Board sends one new entry, retains existing entries, and 
   await expect.poll(async () => (await boardFrames(page, id, beforeRefresh)).length).toBeGreaterThan(0);
   await expect(cards).toHaveCount(initialIds.length + 1);
   await expect(newCard).toHaveCount(1);
-  await expect(board.locator(".board-for-you-filter")).toHaveText(expectedMentionLabel);
+  await expect(board.locator(".board-for-you-filter")).toHaveText("For you");
   await info.attach(`board-incremental-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
   await info.attach(`board-delta-${theme}`, { body: JSON.stringify(deltaFrames), contentType: "application/json" });
   await sendLiveGwtEvent(page, { kind: "close_window", id });

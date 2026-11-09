@@ -7,11 +7,7 @@ const appUrl = liveBase
   ? new URL(liveBase).pathname === "/" ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : liveBase
   : APP_URL;
 const errors = new WeakMap<Page, string[]>();
-const rowFor = (page: Page, title: string) => page.locator(".window-list-row")
-  .filter({ has: page.locator(".window-list-title", { hasText: title }) });
-
-// #4777 T-3: grouped agents remain reachable through Windows after removing
-// the window tab strip. The existing titlebar/list retain title and telemetry.
+// #4777: grouped agents remain reachable through Works after the Windows list retires.
 test.describe("Agent window navigation without tabs", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
 
@@ -25,7 +21,9 @@ test.describe("Agent window navigation without tabs", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installTabbedAgentsBackend(page);
     await page.goto(appUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
   });
 
   test.afterEach(async ({ page }, info) => {
@@ -34,30 +32,28 @@ test.describe("Agent window navigation without tabs", () => {
     expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
-  test("full titles remain in the titlebar and Windows list without tab DOM", async ({ page }) => {
+  test("full titles remain in the titlebar without tab DOM", async ({ page }) => {
     await expect(page.locator(".window-tab-strip, .window-tab")).toHaveCount(0);
     await expect(page.locator(".workspace-window[data-id='agent-1'] .title-text"))
       .toHaveAttribute("title", "Codex · implementing complete maximize");
-    await page.locator("#window-list-button").click();
-    await expect(rowFor(page, "Aster").locator(".window-list-title"))
-      .toHaveAttribute("title", "Codex · implementing complete maximize");
-    await expect(rowFor(page, "Birch").locator(".window-list-title"))
-      .toHaveAttribute("title", "Birch");
+
   });
 
-  test("Windows focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
-    const active = page.locator(".agent-tile[data-agent-id='agent-1']");
-    const target = page.locator(".agent-tile[data-agent-id='agent-2']");
+  test("Works focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
+    const active = page.locator(".works-terminal[data-window-id='agent-1']");
+    const target = page.locator(".works-terminal[data-window-id='agent-2']");
     const source = page.locator(".workspace-window[data-id='agent-2']");
     await expect(target).toBeHidden();
-    await page.locator("#window-list-button").click();
-    await rowFor(page, "Birch").click();
+    await target.locator(".xterm").evaluate(node => { (window as any).__legacyGroupedTerminal = node; });
+    await page.locator('.works-full [data-action="back"]').click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
+    expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
     await expect(active).toBeHidden();
-    await expect(target.locator("h3")).toHaveText("Birch");
-    await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
-      .some(message => message.kind === "startup_terminal_ready" && message.id === "agent-2")))
-      .toBe(true);
+    await expect(page.locator(".works-full-name")).toHaveText("Birch");
+    // Read-only list caches intentionally omit the startup performance beacon;
+    // the existing input readiness metric and real input prove the live gate.
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("agent-2").isReady)).toBe(true);
     await target.locator(".xterm-helper-textarea").focus();
     await expect(target.locator(".xterm-helper-textarea")).toBeFocused();
     await page.keyboard.type("hello");
@@ -69,28 +65,48 @@ test.describe("Agent window navigation without tabs", () => {
     await expect(source.locator('[data-action="close"]')).toHaveCount(0);
     await expect(page.locator("#window-close-confirm-modal")).toHaveCount(0);
     expect(await closedIds()).toEqual([]);
-    // Agent tabs close only the view; the terminal remains owned by its session.
-    await page.getByRole("button", { name: "Close Birch tab", exact: true }).click();
+    // Back changes presentation only; the native terminal remains owned by its session.
+    await page.locator('.works-full [data-action="back"]').click();
     expect(await closedIds()).toEqual([]);
-    await page.locator("#window-list-button").click();
-    await rowFor(page, "Birch").click();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
+    expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
   });
 
-  test("Windows list updates inactive agent telemetry without activating it", async ({ page }) => {
-    await page.locator("#window-list-button").click();
-    const chip = rowFor(page, "Birch").locator(".status-chip");
-    await expect(chip).toHaveClass(/running/);
-    await expect(chip.locator(".status-label")).toHaveText("Running");
-    await page.evaluate(() => window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "idle"));
-    await expect(chip).toHaveClass(/idle/);
-    await expect(chip.locator(".status-label")).toHaveText("Idle");
-    await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveAttribute("aria-selected", "true");
+  test("provider runtime pushes update Works and fleet counts within one second", async ({ page }, info) => {
+    await page.locator('.works-full [data-action="back"]').click();
+    await page.evaluate(() => window.__tabbedAgentsFixture.emitStaleWorkProjection());
+    const transitions = [];
+    for (const state of ["running", "waiting", "idle"]) {
+      const label = state[0].toUpperCase() + state.slice(1);
+      await page.evaluate(state => window.__tabbedAgentsFixture.emitProviderStates(state), state);
+      await expect.poll(() => page.evaluate(({ state, label }) => {
+        const rows = ["agent-1", "agent-2"].every(id => document.querySelector(`.work-row[data-window-id="${id}"] .work-state`)?.textContent === label);
+        const counts = ["running", "waiting", "idle"].every(candidate =>
+          document.querySelector(`.works-counts [data-count="${candidate}"]`)?.textContent === (candidate === state ? "2" : "0") &&
+          document.getElementById(`op-strip-${candidate}`)?.textContent === (candidate === state ? "2" : "0"));
+        if (rows && counts) window.__tabbedAgentsFixture.lastStateObserved = performance.now();
+        return rows && counts;
+      }, { state, label }), { timeout: 1000, intervals: [10, 25, 50] }).toBe(true);
+      const elapsed = await page.evaluate(() => window.__tabbedAgentsFixture.lastStateObserved - window.__tabbedAgentsFixture.lastStatePush);
+      expect(elapsed, `${state} push reaches Works and fleet`).toBeLessThan(1000);
+      transitions.push({ state, elapsed_ms: elapsed });
+      for (const [id, name] of [["agent-1", "Aster"], ["agent-2", "Birch"]]) {
+        const row = page.locator(`.work-row[data-window-id="${id}"]`);
+        await expect(row.locator(".work-name")).toHaveText(name);
+        await expect(row).toHaveAttribute("data-state", state);
+        await expect(row.locator(".work-state")).toHaveText(label);
+      }
+    }
+    await info.attach("runtime-transitions", { body: JSON.stringify(transitions, null, 2), contentType: "application/json" });
+    await page.screenshot({ path: info.outputPath("provider-runtime-states.png"), fullPage: true });
   });
 });
 
 async function installTabbedAgentsBackend(page) {
   await page.addInitScript(() => {
+    window.__gwtPlaywrightTestBridge = true;
     const baseWindow = {
       preset: "agent",
       geometry: { x: 180, y: 120, width: 720, height: 360 },
@@ -114,6 +130,7 @@ async function installTabbedAgentsBackend(page) {
           {
             id: "tab-1",
             title: "Tab Title Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {
@@ -170,6 +187,10 @@ async function installTabbedAgentsBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
+          this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "window-navigation-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'session-agent-1', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-2', session_id: 'session-agent-2', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } });
         }, 0);
       }
 
@@ -181,23 +202,7 @@ async function installTabbedAgentsBackend(page) {
           for (const data of windows) data.tab_group_active = data.id === message.id;
           this.emit(workspaceState);
         }
-        if (message.kind === "dock_window_tab") {
-          const target = windows.find(data => data.id === message.target_id);
-          for (const data of windows) {
-            data.tab_group_id = "grp-1";
-            data.tab_group_active = data.id === message.id;
-            data.geometry = { ...target.geometry };
-          }
-          this.emit(workspaceState);
-        }
-        if (message.kind === "detach_window_tab") {
-          for (const data of windows) {
-            data.tab_group_id = null;
-            data.tab_group_active = false;
-            if (data.id === message.id) data.geometry = { ...message.geometry };
-          }
-          this.emit(workspaceState);
-        }
+
       }
 
       close() {
@@ -220,6 +225,21 @@ async function installTabbedAgentsBackend(page) {
     });
     window.__tabbedAgentsFixture = {
       sent,
+      lastStatePush: 0,
+      lastStateObserved: 0,
+      emitStaleWorkProjection() {
+        FixtureWebSocket.instances.forEach(socket => socket.emit({ kind: "active_work_projection", projection: {
+          status_category: "active", active_agents: 2, blocked_agents: 0,
+          agents: [{ window_id: "agent-1" }, { window_id: "agent-2" }], active_works: [],
+        } }));
+      },
+      emitProviderStates(status) {
+        this.lastStatePush = performance.now();
+        FixtureWebSocket.instances.forEach(socket => {
+          socket.emit({ kind: "window_state", window_id: "agent-1", state: status });
+          socket.emit({ kind: "terminal_status", id: "agent-2", status });
+        });
+      },
       resetUngrouped() {
         workspaceState.workspace.tabs[0].workspace.windows.forEach((data, index) => {
           data.tab_group_id = null;
@@ -228,10 +248,16 @@ async function installTabbedAgentsBackend(page) {
         });
         FixtureWebSocket.instances.forEach(socket => socket.emit(workspaceState));
       },
-      emitTerminalStatus(windowId, status) {
-        FixtureWebSocket.instances?.forEach((socket) =>
-          socket.emit({ kind: "terminal_status", id: windowId, status }),
-        );
+      emitTerminalStatus(windowId, status, immediate = false) {
+        const payload = { kind: "terminal_status", id: windowId, status };
+        // Controlled receiver bursts start after the transport dispatcher.
+        if (immediate) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+          return;
+        }
+        FixtureWebSocket.instances?.forEach((socket) => {
+          socket.emit(payload);
+        });
       },
     };
   });

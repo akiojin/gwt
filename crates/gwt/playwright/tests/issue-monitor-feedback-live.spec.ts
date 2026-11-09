@@ -45,7 +45,7 @@ test.describe("External feedback intake (isolated live backend)", () => {
       await expect(page.locator("#close-project-button")).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.locator('.op-rail [data-surface="issues"]').click();
-      const surface = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]:visible');
+      const surface = page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root:visible');
       await expect(surface).toBeVisible();
       // This existing control requests a real scan even with launches disabled.
       await sendLiveGwtEvent(page, { kind: "set_issue_monitor_allowed_labels", allowed_labels: [] });
@@ -58,13 +58,17 @@ test.describe("External feedback intake (isolated live backend)", () => {
       for (const number of [fixture.raw, fixture.external]) {
         const entry = inbox.find((row: any) => row.issue.number === number);
         expect(entry.issue.author_login).toBe(number === fixture.raw ? "akiojin" : "external-reporter");
-        expect(entry.state).toMatch(/hold_excluded|not_ready/);
+        expect(entry.state).toMatch(/source_excluded|not_ready/);
         expect(entry.claim_id ?? null).toBeNull();
         expect(entry.delivery_id ?? null).toBeNull();
         expect(entry.launched_window_id ?? null).toBeNull();
         const card = surface.locator(`.knowledge-row[data-issue-number="${number}"]:visible, .kanban-card[data-issue-number="${number}"]:visible`).first();
         await expect(card).toBeVisible();
         await expect(card).toContainText(entry.exclusion_reason);
+        if (entry.state === "source_excluded") {
+          await expect(card.locator(".knowledge-row-badge")).toHaveText("Needs triage");
+          await expect(card.locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "needs-input");
+        }
       }
       const status = cli();
       expect(status).toMatchObject({ enabled: false, autonomous_mode: false, active_launches: [] });
@@ -72,7 +76,13 @@ test.describe("External feedback intake (isolated live backend)", () => {
       expect(inbox.find((row: any) => row.issue.number === fixture.trusted).exclusion_reason ?? null).toBeNull();
       expect(status.inbox.filter((row: any) => [fixture.raw, fixture.external].includes(row.issue_number))
         .every((row: any) => !row.claim_id && !row.delivery_id && !row.launched_window_id)).toBe(true);
-      await expect(page.locator('.agent-tile, .workspace-window[data-preset="shell"]')).toHaveCount(0);
+      const launchedWindows = await page.evaluate(() => {
+        const workspace = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
+        return workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
+          .filter((pane: any) => ["agent", "codex", "claude", "shell"].includes(pane.preset));
+      });
+      expect(launchedWindows, "disabled intake creates no agent or Shell window").toEqual([]);
+      await expect(page.locator('.work-row, .workspace-window[data-preset="shell"]')).toHaveCount(0);
       const screenshot = info.outputPath(`feedback-intake-${theme}.png`);
       await page.screenshot({ path: screenshot, fullPage: true });
       await info.attach(`feedback-intake-${theme}`, { path: screenshot, contentType: "image/png" });

@@ -84,6 +84,12 @@ pub struct ScopedOperationClock {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ScopedOperationClock {
+    /// Capture an explicitly fixed clock for a synchronous scoped worker.
+    /// `None` preserves the host clock when the parent has no test override.
+    pub fn current() -> Option<Instant> {
+        TEST_NOW.with(Cell::get)
+    }
+
     pub fn set(now: Instant) -> Self {
         Self {
             previous: TEST_NOW.with(|current| current.replace(Some(now))),
@@ -216,6 +222,8 @@ impl NamedFileLock {
         let mut contention_observed = false;
         let result = lock_exclusive_with_observer(&file, || {
             contention_observed = true;
+            #[cfg(any(test, feature = "test-support"))]
+            notify_named_lock_contention(path);
             on_first_contention();
             if report_contention {
                 let _ = named_lock_error(
@@ -226,12 +234,21 @@ impl NamedFileLock {
             }
         });
         if operation == "pm_prefs" {
-            tracing::info!(
-                target: "gwt.pm.refresh",
-                stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
-                ?remaining_budget_ms, contention_observed, success = result.is_ok(),
-                "PM refresh stage"
-            );
+            if contention_observed || result.is_err() {
+                tracing::warn!(
+                    target: "gwt.pm.refresh",
+                    stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    ?remaining_budget_ms, contention_observed, success = result.is_ok(),
+                    "PM refresh stage"
+                );
+            } else {
+                tracing::debug!(
+                    target: "gwt.pm.refresh",
+                    stage = "pm_prefs.lock", duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    ?remaining_budget_ms, contention_observed, success = true,
+                    "PM refresh stage"
+                );
+            }
         }
         result.map_err(|error| {
             if contention_observed {
@@ -254,10 +271,7 @@ impl NamedFileLock {
     /// Work transaction): ordinary contention is not logged, only a failed
     /// acquisition is — and that failure still names the observed holder.
     pub fn acquire_quiet(path: &Path, operation: &str) -> io::Result<Self> {
-        Self::acquire_with_observer(path, operation, false, || {
-            #[cfg(any(test, feature = "test-support"))]
-            notify_named_lock_contention(path);
-        })
+        Self::acquire_with_observer(path, operation, false, || {})
     }
 
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
@@ -534,6 +548,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn issue_6678_uncontended_pm_lock_does_not_emit_info_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("events.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(File::create(&output).unwrap()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        NamedFileLock::acquire(&directory.path().join("pm.lock"), "pm_prefs")
+            .unwrap()
+            .unlock()
+            .unwrap();
+        assert!(std::fs::read_to_string(output).unwrap().is_empty());
+    }
+
+    #[test]
     fn issue_5391_expired_uncontended_lock_does_not_invent_an_unknown_holder() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("pm.lock");
@@ -666,10 +697,20 @@ mod tests {
             let _clock = ScopedOperationClock::set(start);
             let expiry = start + Duration::from_secs(1);
             let _deadline = ScopedOperationDeadline::enter(expiry);
+            let notifications = std::rc::Rc::new(Cell::new(0));
+            let observed = notifications.clone();
+            let _observer = ScopedNamedLockContentionObserver::set(&contender_path, move || {
+                observed.set(observed.get() + 1);
+            });
             let error = NamedFileLock::acquire_observed(&contender_path, "pm_prefs", || {
                 TEST_NOW.with(|clock| clock.set(Some(expiry)));
             })
             .unwrap_err();
+            assert_eq!(
+                notifications.get(),
+                1,
+                "the named observer sees real contention once"
+            );
             let message = error.to_string();
             assert!(message.contains("board.append"), "{message}");
             assert!(
@@ -862,14 +903,17 @@ mod tests {
 
     #[test]
     fn fixed_operation_clock_controls_expiry_without_spending_wall_time() {
+        assert!(ScopedOperationClock::current().is_none());
         let directory = tempfile::tempdir().expect("tempdir");
         let file = File::create(directory.path().join("lock")).expect("lock file");
         // This deadline is already expired on the host clock. Only the
         // explicitly advanced operation clock may decide the test's outcome.
+        // test-hygiene: allow-wall-clock-deadline A host-expired deadline proves the injected clock overrides real time.
         let start = Instant::now() - Duration::from_secs(1);
         let expiry = start + Duration::from_millis(250);
         let _clock = ScopedOperationClock::set(start);
         let _deadline = ScopedOperationDeadline::enter(expiry);
+        assert_eq!(ScopedOperationClock::current(), Some(start));
         assert_eq!(now(), start);
         lock_exclusive(&file).expect("logical budget remains");
         FileExt::unlock(&file).expect("unlock");
@@ -877,6 +921,7 @@ mod tests {
 
         {
             let _expired = ScopedOperationClock::set(expiry);
+            assert_eq!(ScopedOperationClock::current(), Some(expiry));
             assert_eq!(
                 lock_exclusive(&file).unwrap_err().kind(),
                 io::ErrorKind::TimedOut
@@ -889,6 +934,7 @@ mod tests {
         assert_eq!(now(), start, "nested clock restores the previous instant");
         assert!(std::thread::spawn(now).join().expect("other thread") > start);
         drop(_clock);
+        assert!(ScopedOperationClock::current().is_none());
         assert!(now() > start, "leaving the scope restores the host clock");
     }
 
@@ -904,12 +950,13 @@ mod tests {
             .expect("second lock file");
         first.lock_exclusive().expect("hold first lock");
         let started = Instant::now();
+        // The raw wrapper exposes no contention callback; real expiry is the
+        // behavior under test. Scheduler delays must not decide the verdict.
         let _deadline = ScopedOperationDeadline::enter(started + Duration::from_millis(40));
 
         let error = lock_exclusive(&second).expect_err("contended lock must time out");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(1));
         FileExt::unlock(&first).expect("unlock first lock");
     }
 
@@ -924,15 +971,37 @@ mod tests {
             .open(&path)
             .expect("second lock file");
         first.lock_exclusive().expect("hold first lock");
-        let _deadline = ScopedOperationDeadline::enter(Instant::now() + Duration::from_millis(40));
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its callback is lost; never decides success.
+            let requested = released.recv_timeout(crate::deadline_budget::HANG_GUARD);
+            FileExt::unlock(&first).expect("unlock first lock");
+            requested
+        });
+        // test-hygiene: allow-wall-clock-deadline Keep host expiry in the past so only the injected operation clock decides this test.
+        let start = Instant::now() - Duration::from_secs(1);
+        let _clock = ScopedOperationClock::set(start);
+        // test-hygiene: allow-short-duration Logical expiry advances only after real OS lock contention.
+        let expiry = start + Duration::from_millis(40);
+        let _deadline = ScopedOperationDeadline::enter(expiry);
         let mut observed = 0;
+        let mut expired_clock = None;
 
-        let error = lock_exclusive_with_observer(&second, || observed += 1)
-            .expect_err("contended lock must time out");
+        let result = lock_exclusive_with_observer(&second, || {
+            assert_eq!(now(), start, "time stays fixed until real contention");
+            observed += 1;
+            expired_clock = Some(ScopedOperationClock::set(expiry));
+        });
+        let _ = release.send(());
+        holder
+            .join()
+            .expect("lock holder")
+            .expect("contention call finishes before the stuck-fixture guard");
+        let error = result.expect_err("contended lock must time out");
+        let _expired_clock = expired_clock.expect("advance the clock from real contention");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(observed >= 1, "the exact call reports lock contention");
-        FileExt::unlock(&first).expect("unlock first lock");
     }
 
     #[test]
@@ -940,7 +1009,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("lock");
         let file = File::create(&path).expect("lock file");
-        let _deadline = ScopedOperationDeadline::enter(Instant::now() - Duration::from_millis(1));
+        let expiry = Instant::now();
+        let _clock = ScopedOperationClock::set(expiry);
+        let _deadline = ScopedOperationDeadline::enter(expiry);
 
         let error = lock_exclusive(&file).expect_err("expired deadline must reject lock");
 
@@ -949,7 +1020,9 @@ mod tests {
 
     #[test]
     fn nested_deadlines_keep_the_earliest_expiry() {
-        let outer_expiry = Instant::now() + Duration::from_secs(1);
+        let start = Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        let outer_expiry = start + Duration::from_secs(1);
         let _outer = ScopedOperationDeadline::enter(outer_expiry);
         let _inner = ScopedOperationDeadline::enter(outer_expiry + Duration::from_secs(1));
 

@@ -12,9 +12,9 @@ const errors = new WeakMap<Page, string[]>();
 //
 // Drives the embedded frontend against a WebSocket stub that captures every
 // event the frontend sends. Asserts the FR-040..044 controls:
-//   - FR-041: window-chrome STOP sends stop_window (window stays on canvas)
-//   - FR-044: a stopped window swaps STOP for RESTART -> restart_window
-//   - FR-042: STOP ALL rail item confirms then sends stop_all_windows
+//   - FR-041/3885: STOP is in the Issue menu; window chrome has no STOP
+//   - FR-044: a stopped window exposes RESTART -> restart_window
+//   - FR-042: palette STOP ALL confirms then sends stop_all_windows
 //   - FR-043: the palette send-input entry routes pane_send_input by session_id
 //   - FR-040: a needs_input transition pops an in-app attention toast that
 //     frames the window on click
@@ -60,6 +60,50 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
         ? label
         : `${label}: ${description}`);
     }
+  });
+
+  test("AS-01: stopped and interrupted retain runtime meaning without completion or dimming", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installKillSwitchBackend(page);
+    await page.goto(appUrl);
+    const win = page.locator('.workspace-window[data-id="agent-1"]');
+    await expect(win).toBeAttached();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await expect(page.locator('.works-terminal[data-window-id="agent-1"]')).toBeVisible();
+    for (const [wire, state, label] of [
+      ["stopped", "stopped", "Stopped"],
+      ["exited", "stopped", "Stopped"],
+      ["interrupted", "interrupted", "Interrupted"],
+    ]) {
+      await page.evaluate(state => window.__emit({ kind: "terminal_status", id: "agent-1", status: state }), wire);
+      await expect(win.locator(".status-label")).toHaveText(label);
+      await expect(page.locator(".works-full-meta")).toContainText(` · ${label} · `);
+      const row = page.locator('.work-row[data-window-id="agent-1"]');
+      await expect(row.locator(".work-state")).toHaveText(label);
+      const colors = await row.locator(".work-state").evaluate((node, token) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${token})`;
+        document.body.append(probe);
+        const expected = getComputedStyle(probe).color;
+        probe.remove();
+        return { expected, actual: getComputedStyle(node).color };
+      }, state === "stopped" ? "--color-state-idle" : "--color-state-blocked");
+      expect(colors.actual).toBe(colors.expected);
+      await expect(win).toHaveAttribute("data-agent-state", state);
+      await expect(win).toHaveCSS("opacity", "1");
+      await expect(win).toHaveCSS("pointer-events", "auto");
+      await expect(page.locator('.toast-alerts__item[data-level="done"]')).toHaveCount(0);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: /Agent (stopped|finished)/ })).toHaveCount(0);
+    }
+    await info.attach("runtime-without-completion", {
+      body: await page.screenshot({ path: info.outputPath("runtime-without-completion.png") }), contentType: "image/png",
+    });
+    await page.locator('.works-full [data-action="back"]').click();
+    await expect(page.locator('.work-row[data-window-id="agent-1"] .work-state')).toBeVisible();
+    await info.attach("runtime-list", {
+      body: await page.screenshot({ path: info.outputPath("runtime-list.png") }), contentType: "image/png",
+    });
   });
 
   // SPEC #3885 FR-015 (user ruling 2026-09-03) supersedes FR-041's titlebar
@@ -115,10 +159,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       timeout: 10_000,
     });
 
-    const stopAll = page.locator('.op-rail__item[data-cmd="stop-all-windows"]');
-    await expect(stopAll).toBeVisible();
+    await expect(page.locator('.op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
+    await page.locator("#op-palette-button").click();
+    await page.locator("#op-palette-input").fill("Stop all agents");
     page.once("dialog", (dialog) => dialog.accept());
-    await stopAll.click();
+    await page.locator("#op-palette-list .op-palette__row", { hasText: "Stop All Running Agents" }).click();
 
     await expect
       .poll(() => page.evaluate(() => window.__sentKinds))
@@ -132,9 +177,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
     await expect(win).toBeAttached({ timeout: 10_000 });
-    // Select the agent tab so the focused-pane helper has a target.
-    await page.getByRole("tab", { name: "Aster", exact: true }).click();
-    await page.locator('.agent-tile[data-agent-id="agent-1"]').click();
+    // Open the exact native work so the focused-pane helper has a target.
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await page.locator('.works-terminal[data-window-id="agent-1"] .xterm-helper-textarea').focus();
 
     await page.evaluate(() => {
       window.prompt = () => "hello agent";
@@ -172,7 +218,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       const win = page.locator(`.workspace-window[data-id="${id}"]`);
       return {
         win,
-        tile: page.locator(`.agent-tile[data-agent-id="${id}"]`),
+        tile: page.locator(`.works-terminal[data-window-id="${id}"]`),
         statusChip: win.locator(".status-chip"),
         toast: page.locator(
           `.toast-alerts__item[data-toast-id="attention-${id}"]`,
@@ -181,6 +227,8 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     };
     const manual = uiFor("agent-2");
     const monitor = uiFor("agent-3");
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(manual.tile).toBeVisible({ timeout: 10_000 });
     await expect(monitor.tile).toBeHidden();
 
@@ -257,7 +305,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
 
     await manual.toast.click();
-    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "agents");
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "works");
     await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(manual.toast).toHaveCount(0);
 
@@ -289,11 +337,9 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // `agent-3` models a pane launched by Issue Monitor. WindowState has no
     // launch-source field by design, so the fixture deliberately uses the same
     // Agent window schema and exact event projection as the manual pane. Switch
-    // to it through the Windows list before exercising its cues.
-    await page.locator("#window-list-button").click();
-    await page.locator(".window-list-row")
-      .filter({ has: page.locator(".window-list-title", { hasText: "Cedar — Monitor-linked Agent" }) })
-      .click();
+    // to it through Works before exercising its cues.
+    await page.locator('.works-full [data-action="back"]').click();
+    await page.locator('.work-row[data-window-id="agent-3"] .work-open').click();
     await expect(monitor.tile).toBeVisible();
     await expect(manual.tile).toBeHidden();
     // Issue #4887: start the next state in the same browser task after the
@@ -427,6 +473,13 @@ async function installKillSwitchBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit({ kind: "active_work_projection", projection: { id: "attention-local-live", active_works: [], local_agent_activity: {
+            project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "attention-fixture", observed_at: new Date().toISOString(), agents: [
+              { window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-2", session_id: "session-agent-2", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-3", session_id: "session-agent-3", runtime_incarnation: 1, is_pm: false, issue_number: null },
+            ],
+          } } });
         }, 0);
       }
 

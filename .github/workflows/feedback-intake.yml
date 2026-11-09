@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Identify origin without executing reporter content
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             if (context.repo.owner !== 'akiojin' || context.repo.repo !== 'gwt') return;

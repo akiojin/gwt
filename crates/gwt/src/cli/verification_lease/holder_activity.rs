@@ -381,6 +381,67 @@ fn descendants(owner_pid: u32, samples: &[ProcessSample]) -> Option<BTreeSet<u32
     Some(tree.into_iter().collect())
 }
 
+/// Exact roots whose descendants advanced during one shared sample window.
+/// Root CPU is not child progress, and a recycled or missing root is never
+/// credited. Start identities use `host_process_start_time`'s opaque token.
+/// An unavailable process observation returns `None`, never proven no-progress.
+pub(crate) fn progressing_descendants(roots: &[(u32, u64)]) -> Option<BTreeSet<(u32, u64)>> {
+    let mut roots: BTreeSet<_> = roots
+        .iter()
+        .copied()
+        .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
+        .collect();
+    roots.retain(|(pid, started_at)| {
+        crate::process::host_process_start_time(*pid) == Some(*started_at)
+    });
+    if roots.is_empty() {
+        return Some(roots);
+    }
+
+    let first = read_processes()?;
+    roots.retain(|(pid, _)| first.iter().any(|sample| sample.pid == *pid));
+    if roots.is_empty() {
+        return Some(roots);
+    }
+    let taken_at = Instant::now();
+    std::thread::sleep(PROGRESS_WINDOW);
+    let second = read_processes()?;
+    let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    roots.retain(|(pid, started_at)| {
+        crate::process::host_process_start_time(*pid) == Some(*started_at)
+            && descendants_advancing(*pid, &first, &second, window_ms)
+    });
+    Some(roots)
+}
+
+fn descendants_advancing(
+    root: u32,
+    first: &[ProcessSample],
+    second: &[ProcessSample],
+    window_ms: u64,
+) -> bool {
+    if !first.iter().any(|sample| sample.pid == root) {
+        return false;
+    }
+    let mut first = first.to_vec();
+    let mut second = second.to_vec();
+    for sample in first.iter_mut().chain(second.iter_mut()) {
+        if sample.pid == root {
+            sample.cpu_ms = 0;
+        }
+    }
+    activity_from_samples(
+        root,
+        &HolderWorkload::Owned,
+        0,
+        &first,
+        &second,
+        window_ms,
+        None,
+    )
+    .is_some_and(|activity| activity.advancing())
+}
+
 /// Repeated readings of one holder. Kept across a wait loop's polls so each
 /// verdict spans the whole interval since the last one instead of a window
 /// this call has to pay for itself.
@@ -404,13 +465,13 @@ impl HolderProbe {
         let (first, taken_at) = match self.previous.take() {
             Some(previous) => previous,
             None => {
-                let first = read_processes();
+                let first = read_processes()?;
                 let at = Instant::now();
                 std::thread::sleep(PROGRESS_WINDOW);
                 (first, at)
             }
         };
-        let (second, second_at, host_cpu_percent) = read_processes_and_host_cpu();
+        let (second, second_at, host_cpu_percent) = read_processes_and_host_cpu()?;
         let window_ms =
             u64::try_from(second_at.duration_since(taken_at).as_millis()).unwrap_or(u64::MAX);
         self.previous = Some((second.clone(), second_at));
@@ -456,24 +517,24 @@ pub(crate) fn workload_for(
     }
 }
 
-fn read_processes() -> Vec<ProcessSample> {
+fn read_processes() -> Option<Vec<ProcessSample>> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_cpu(),
     );
-    collect(&system)
+    Some(collect(&system))
 }
 
 /// Host CPU needs two readings of its own, so it is sampled alongside the
 /// process table rather than in a pass of its own.
-fn read_processes_and_host_cpu() -> (Vec<ProcessSample>, Instant, Option<f64>) {
+fn read_processes_and_host_cpu() -> Option<(Vec<ProcessSample>, Instant, Option<f64>)> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     system.refresh_cpu_usage();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -485,11 +546,11 @@ fn read_processes_and_host_cpu() -> (Vec<ProcessSample>, Instant, Option<f64>) {
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     let host = f64::from(system.global_cpu_usage());
-    (
+    Some((
         samples,
         read_at,
         (host.is_finite() && host > 0.0).then_some(host),
-    )
+    ))
 }
 
 fn collect(system: &sysinfo::System) -> Vec<ProcessSample> {
@@ -999,5 +1060,160 @@ mod tests {
             HolderWorkload::Owned
         );
         assert_eq!(workload_for(None, Vec::new), HolderWorkload::Owned);
+    }
+
+    #[test]
+    fn issue_3809_provider_cpu_and_unrelated_work_are_not_descendant_progress() {
+        let first = [
+            sample(42, Some(1), 100),
+            sample(43, Some(42), 10),
+            sample(900, Some(1), 100),
+        ];
+        let second = [
+            sample(42, Some(1), 2_000),
+            sample(43, Some(42), 10),
+            sample(900, Some(1), 2_000),
+            sample(901, Some(900), 100),
+        ];
+        assert!(!descendants_advancing(42, &first, &second, WINDOW_MS));
+        assert!(!descendants_advancing(42, &first[1..], &second, WINDOW_MS));
+        assert!(!descendants_advancing(42, &first, &second[1..], WINDOW_MS));
+    }
+
+    #[test]
+    fn issue_3809_descendant_cpu_and_turnover_are_progress() {
+        let first = [sample(42, Some(1), 100), sample(43, Some(42), 10)];
+        let cpu = [sample(42, Some(1), 100), sample(43, Some(42), 30)];
+        assert!(descendants_advancing(42, &first, &cpu, WINDOW_MS));
+        let replaced = [sample(42, Some(1), 100), sample(44, Some(42), 0)];
+        assert!(descendants_advancing(42, &first, &replaced, WINDOW_MS));
+        assert!(descendants_advancing(42, &first, &first[..1], WINDOW_MS));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue_3809_owned_windows_child_reports_silent_cpu_progress() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::windows::io::AsRawHandle;
+        use std::process::{Child, Stdio};
+        use windows::Win32::{
+            Foundation::{FILETIME, HANDLE},
+            System::Threading::GetProcessTimes,
+        };
+
+        fn log_child(phase: &str, child: &mut Child, samples: Option<&[ProcessSample]>) {
+            let (mut birth, mut exit, mut kernel, mut user) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
+            let ticks = |time: FILETIME| {
+                (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+            };
+            // This adjacent native observation cannot recover sysinfo's discarded
+            // GetProcessTimes result. Keep its own error distinct from CPU zero.
+            // SAFETY: Child retains the live process handle and all buffers are writable.
+            let native_times = unsafe {
+                GetProcessTimes(
+                    HANDLE(child.as_raw_handle()),
+                    &mut birth,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                )
+            }
+            .map(|()| {
+                format!(
+                    "birth_100ns={} kernel_100ns={} user_100ns={}",
+                    ticks(birth),
+                    ticks(kernel),
+                    ticks(user)
+                )
+            });
+            let sampled_child =
+                samples.and_then(|samples| samples.iter().find(|sample| sample.pid == child.id()));
+            // Bypass libtest capture so passing Windows CI keeps the observations too.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "owned_child_observation phase={phase} pid={} table_available={} \
+                 sampled_child={sampled_child:?} independent_native_times={native_times:?} \
+                 child_state={:?}",
+                child.id(),
+                samples.is_some(),
+                child.try_wait()
+            );
+        }
+
+        struct OwnedChild(Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let root = std::process::id();
+        let started_at = crate::process::host_process_start_time(root).unwrap();
+        assert!(progressing_descendants(&[]).unwrap().is_empty());
+        assert!(progressing_descendants(&[(0, 0), (root, started_at + 1)])
+            .unwrap()
+            .is_empty());
+        let mut child = OwnedChild(
+            gwt_core::process::hidden_command("powershell.exe")
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$value = 0; $value = ($value + 1) % 1000000; [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); while ($true) { $value = ($value + 1) % 1000000 }",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn an owned silent CPU child"),
+        );
+        let child_pid = child.0.id();
+        let mut ready = String::new();
+        BufReader::new(child.0.stdout.take().expect("owned child stdout"))
+            .read_line(&mut ready)
+            .expect("read owned child ready receipt");
+        assert_eq!(ready.trim_end(), "ready");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "owned_child_ready pid={child_pid} receipt={:?}",
+            ready.trim_end()
+        );
+        let first = read_processes();
+        let taken_at = Instant::now();
+        log_child("first", &mut child.0, first.as_deref());
+        let first = first.expect("first process observation");
+        let progressing =
+            progressing_descendants(&[(root, started_at)]).expect("observe owned descendants");
+        let second = read_processes();
+        let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap();
+        log_child("second", &mut child.0, second.as_deref());
+        let second = second.expect("second process observation");
+        let child_cpu = |samples: &[ProcessSample]| {
+            samples
+                .iter()
+                .find(|sample| sample.pid == child_pid)
+                .expect("the owned child remains in both samples")
+                .cpu_ms
+        };
+        assert!(child_cpu(&second) > child_cpu(&first));
+        let only_owned = |samples: &[ProcessSample]| {
+            samples
+                .iter()
+                .copied()
+                .filter(|sample| sample.pid == root || sample.pid == child_pid)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            descendants_advancing(root, &only_owned(&first), &only_owned(&second), window_ms),
+            "the owned child's CPU must advance without relying on parallel test children"
+        );
+        assert!(progressing.contains(&(root, started_at)), "{progressing:?}");
     }
 }

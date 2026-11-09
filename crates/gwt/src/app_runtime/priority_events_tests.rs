@@ -1,5 +1,5 @@
 use super::{AppEventQueue, ProjectContext, UserEvent};
-use gwt::{FrontendEvent, KnowledgeKind, WindowGeometry};
+use gwt::{FrontendEvent, KnowledgeKind};
 
 #[test]
 fn perf_pending_count_counts_actual_queued_events_and_never_waits_for_a_writer() {
@@ -66,15 +66,6 @@ fn frontend(event: FrontendEvent) -> UserEvent {
     }
 }
 
-fn geometry() -> WindowGeometry {
-    WindowGeometry {
-        x: 0.0,
-        y: 0.0,
-        width: 800.0,
-        height: 600.0,
-    }
-}
-
 fn grid(client_id: &str, id: &str, cols: u16, received_at: std::time::Instant) -> UserEvent {
     UserEvent::Frontend {
         client_id: client_id.into(),
@@ -110,12 +101,10 @@ fn terminal_grid_queue_coalesces_at_latest_arrival_position() {
         .push_back(grid("client", "window", 80, received_at))
         .unwrap();
     queue
-        .push_back(frontend(FrontendEvent::UpdateWindowGeometry {
+        .push_back(frontend(FrontendEvent::UpdateTerminalGrid {
             id: "window".into(),
-            geometry: geometry(),
             cols: 100,
             rows: 24,
-            base_geometry_revision: None,
         }))
         .unwrap();
     queue
@@ -124,7 +113,7 @@ fn terminal_grid_queue_coalesces_at_latest_arrival_position() {
             data: "input".into(),
         }))
         .unwrap();
-    // Equal timestamps still keep the later arrival, after the geometry commit.
+    // Equal timestamps still keep the later arrival, after the preceding layout event.
     queue
         .push_back(grid("client", "window", 120, received_at))
         .unwrap();
@@ -134,7 +123,7 @@ fn terminal_grid_queue_coalesces_at_latest_arrival_position() {
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::UpdateWindowGeometry { cols: 100, .. },
+            event: FrontendEvent::UpdateTerminalGrid { cols: 100, .. },
             ..
         })
     ));
@@ -190,9 +179,10 @@ fn terminal_grid_queue_coalesces_clients_and_keeps_window_and_project_scope_sepa
 fn terminal_grid_queue_replay_cannot_replace_newer_pending_update() {
     let received_at = std::time::Instant::now();
     let old = received_at - std::time::Duration::from_secs(1);
-    let arrange = frontend(FrontendEvent::ArrangeWindows {
-        mode: gwt::protocol::ArrangeMode::Tile,
-        bounds: geometry(),
+    let layout = frontend(FrontendEvent::UpdateTerminalGrid {
+        id: "layout-marker".into(),
+        cols: 90,
+        rows: 24,
     });
     let mut queue = AppEventQueue::default();
     queue
@@ -200,7 +190,7 @@ fn terminal_grid_queue_replay_cannot_replace_newer_pending_update() {
         .unwrap();
     queue.prepend(vec![
         grid("client", "window", 80, old),
-        arrange.clone(),
+        layout.clone(),
         grid("client", "window", 100, received_at),
     ]);
     // A late delivery also cannot replace a newer receive timestamp.
@@ -208,7 +198,7 @@ fn terminal_grid_queue_replay_cannot_replace_newer_pending_update() {
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::ArrangeWindows { .. },
+            event: FrontendEvent::UpdateTerminalGrid { cols: 90, .. },
             ..
         })
     ));
@@ -220,13 +210,13 @@ fn terminal_grid_queue_replay_cannot_replace_newer_pending_update() {
 
     queue.prepend(vec![
         grid("client", "window", 80, old),
-        arrange,
+        layout,
         grid("client", "window", 100, received_at),
     ]);
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::ArrangeWindows { .. },
+            event: FrontendEvent::UpdateTerminalGrid { cols: 90, .. },
             ..
         })
     ));
@@ -297,18 +287,17 @@ fn terminal_grid_queue_layout_precedes_background_with_bounded_burst() {
         })
         .unwrap();
     queue
-        .push_back(frontend(FrontendEvent::ArrangeWindows {
-            mode: gwt::protocol::ArrangeMode::Tile,
-            bounds: geometry(),
+        .push_back(frontend(FrontendEvent::UpdateTerminalGrid {
+            id: "layout-marker".into(),
+            cols: 90,
+            rows: 24,
         }))
         .unwrap();
     queue
-        .push_back(frontend(FrontendEvent::UpdateWindowGeometry {
+        .push_back(frontend(FrontendEvent::UpdateTerminalGrid {
             id: "window".into(),
-            geometry: geometry(),
             cols: 80,
             rows: 24,
-            base_geometry_revision: None,
         }))
         .unwrap();
     for index in 0..7 {
@@ -324,14 +313,14 @@ fn terminal_grid_queue_layout_precedes_background_with_bounded_burst() {
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::ArrangeWindows { .. },
+            event: FrontendEvent::UpdateTerminalGrid { cols: 90, .. },
             ..
         })
     ));
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::UpdateWindowGeometry { .. },
+            event: FrontendEvent::UpdateTerminalGrid { .. },
             ..
         })
     ));
@@ -374,14 +363,9 @@ fn launch_priority_queue_controls_overtake_background_and_keep_fifo() {
         },
         FrontendEvent::FocusWindow {
             id: "focus".to_string(),
-            bounds: None,
         },
         FrontendEvent::ActivateWindowTab {
             id: "activate".to_string(),
-        },
-        FrontendEvent::DockWindowTab {
-            id: "dock".to_string(),
-            target_id: "target".to_string(),
         },
     ];
     for event in &controls {
@@ -487,18 +471,17 @@ fn launch_priority_queue_pane_observation_overtakes_layout_backlog() {
     );
     let mut queue = AppEventQueue::default();
     queue
-        .push_back(frontend(FrontendEvent::ArrangeWindows {
-            mode: gwt::protocol::ArrangeMode::Tile,
-            bounds: geometry(),
+        .push_back(frontend(FrontendEvent::UpdateTerminalGrid {
+            id: "layout-marker".into(),
+            cols: 90,
+            rows: 24,
         }))
         .unwrap();
     queue
-        .push_back(frontend(FrontendEvent::UpdateWindowGeometry {
+        .push_back(frontend(FrontendEvent::UpdateTerminalGrid {
             id: "window".to_string(),
-            geometry: geometry(),
             cols: 80,
             rows: 24,
-            base_geometry_revision: None,
         }))
         .unwrap();
     queue
@@ -518,14 +501,14 @@ fn launch_priority_queue_pane_observation_overtakes_layout_backlog() {
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::ArrangeWindows { .. },
+            event: FrontendEvent::UpdateTerminalGrid { cols: 90, .. },
             ..
         })
     ));
     assert!(matches!(
         queue.pop_front(),
         Some(UserEvent::Frontend {
-            event: FrontendEvent::UpdateWindowGeometry { .. },
+            event: FrontendEvent::UpdateTerminalGrid { .. },
             ..
         })
     ));
@@ -578,4 +561,93 @@ fn launch_priority_queue_close_rejects_and_moves_payloads_outside_lock() {
         1,
         "pending payload is released outside the lock"
     );
+}
+
+#[test]
+fn owner_output_backpressure_bounds_a_stream_and_preserves_other_project_and_status_fifo() {
+    use gwt::project_runtime::events::OwnerEvent;
+    let context = ProjectContext {
+        tab_id: "a".into(),
+        project_key: gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap(),
+        generation: 1,
+        project_root: "/project-a".into(),
+    };
+    let mut other = context.clone();
+    other.tab_id = "b".into();
+    other.project_key = gwt_core::repo_hash::ProjectKey::parse("fedcba9876543210").unwrap();
+    other.project_root = "/project-b".into();
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: 42,
+        host_started_at: 100,
+        host_instance_id: "owner".into(),
+    };
+    let output = |context: &ProjectContext, id: &str, seq| UserEvent::ProjectOwnerEvent {
+        context: context.clone(),
+        connection_id: 1,
+        identity: identity.clone(),
+        event: OwnerEvent::Output {
+            id: id.into(),
+            incarnation: 7,
+            data: vec![b'x'; 1024],
+            seq,
+            previous_seq: Some(seq - 1),
+            screen: "latest screen".into(),
+            screen_ansi: b"latest ANSI".to_vec(),
+            screen_seq: seq,
+        },
+    };
+    let mut queue = AppEventQueue::default();
+    queue.push_back(output(&context, "pane-a", 1)).unwrap();
+    queue.push_back(output(&other, "pane-b", 1)).unwrap();
+    for seq in 2..=100 {
+        queue.push_back(output(&context, "pane-a", seq)).unwrap();
+    }
+    assert_eq!(
+        queue.len(),
+        2,
+        "one pending owner stream slot per pane; A cannot retain a byte backlog ahead of B"
+    );
+    queue
+        .push_back(UserEvent::ProjectOwnerEvent {
+            context: context.clone(),
+            connection_id: 1,
+            identity: identity.clone(),
+            event: OwnerEvent::Status {
+                id: "pane-a".into(),
+                incarnation: 7,
+                status: gwt::WindowProcessStatus::Stopped,
+                raw_status: gwt::WindowProcessStatus::Stopped,
+                detail: None,
+                exit_confirmed: true,
+                exit_code: Some(0),
+            },
+        })
+        .unwrap();
+    queue.push_back(output(&context, "pane-a", 101)).unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::FrontendReady))
+        .unwrap();
+    assert!(
+        matches!(queue.pop_front(), Some(UserEvent::Frontend { .. })),
+        "control remains responsive"
+    );
+    assert!(
+        matches!(queue.pop_front(), Some(UserEvent::ProjectOwnerEvent { context: b, event: OwnerEvent::Output { id, .. }, .. }) if b == other && id == "pane-b"),
+        "B progresses before the latest A repair"
+    );
+    assert!(
+        matches!(
+            queue.pop_front(),
+            Some(UserEvent::ProjectOwnerEvent {
+                event: OwnerEvent::Status { .. },
+                ..
+            })
+        ),
+        "status/control events are never conflated"
+    );
+    assert!(
+        queue.pop_front().is_some(),
+        "latest A display repair remains queued"
+    );
+    assert!(queue.pop_front().is_none());
 }

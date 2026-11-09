@@ -1,0 +1,59 @@
+{
+  "head": "cf0211c2b2d60fb621c3033c99c9a32b42af88d1",
+  "record_id": "vrr-e6fa3d3fccb5497ea05a87c555f2eb3f",
+  "record_content_hash": "93114fdde26fd6a187d0416cfad7198c0fd70e5abd369e4693f9b8522c6adec2",
+  "outcome": "FAIL: Light daemon exceeds the unchanged 1% budget; no delivery acceptance",
+  "measurement_scope": "Release, five real PTYs, no input/output, full warmed projection, Monitor OFF, one logical core = 100%",
+  "fixture_files": 7428,
+  "fixture_bytes": 37508132,
+  "release_gwt_sha256": "3ec37dd4efa37d181e82c4d1a08f39a52dbb23525cfd34c9889af532ee54f3ef",
+  "release_gwtd_sha256": "2b3c6073445e7c460ac63c0c06978dcb3aaaed8756dcc4df8de9a16432027d00",
+  "windows": [
+    {
+      "theme": "dark",
+      "artifact": "issue-5658-after-cdf607fbca0c4f73b87c82d561e90bd2",
+      "gui_cpu_seconds": 25.171875,
+      "gui_elapsed_seconds": 600.0708908,
+      "gui_percent_one_core": 4.194816876792917,
+      "gui_budget_pass": true,
+      "daemon_cpu_seconds": 5.78125,
+      "daemon_elapsed_seconds": 600.0819963,
+      "daemon_percent_one_core": 0.9634100065734632,
+      "daemon_budget_pass": true,
+      "expected_work_ids": 1855,
+      "missing_work_ids": 0,
+      "matched_sessions": 5,
+      "errors": [],
+      "owned_cleanup": {
+        "gui_exited": true,
+        "cleaned_at": "2026-11-07T04:15:33.6107475Z",
+        "daemon_exited": true,
+        "gui_pid": 33996,
+        "daemon_pid": 17392
+      }
+    },
+    {
+      "theme": "light",
+      "artifact": "issue-5658-after-6e1bcdecd636416397f606fa7489ee57",
+      "gui_cpu_seconds": 25.640625,
+      "gui_elapsed_seconds": 600.0557571,
+      "gui_percent_one_core": 4.2730404127640025,
+      "gui_budget_pass": true,
+      "daemon_cpu_seconds": 6.21875,
+      "daemon_elapsed_seconds": 600.0702364,
+      "daemon_percent_one_core": 1.0363370190309942,
+      "daemon_budget_pass": false,
+      "expected_work_ids": 1855,
+      "missing_work_ids": 0,
+      "matched_sessions": 5,
+      "errors": [],
+      "owned_cleanup": {
+        "gui_pid": 12068,
+        "gui_exited": true,
+        "daemon_exited": true,
+        "cleaned_at": "2026-11-07T04:33:11.8414041Z",
+        "daemon_pid": 4872
+      }
+    }
+  ]
+}

@@ -75,7 +75,7 @@ jobs:
       # the script and not GitHub reports a dependency-install failure. The
       # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
@@ -158,7 +158,7 @@ jobs:
 
   check-macos:
     name: Check (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
       - name: Reset broken pre-installed Rust on macOS runners
@@ -176,7 +176,11 @@ jobs:
           shared-key: macos-workspace
         continue-on-error: true
       - name: Check macOS compilation
-        run: cargo check -p gwt-core -p gwt
+        run: |
+          cargo check -p gwt-core -p gwt
+          # Cold linking belongs to preparation, outside the socket execution budget.
+          cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run
+          cargo test -p gwt --lib --test runtime_tests --no-run
       - name: Test short socket fixtures with a long native TMPDIR
         run: bash scripts/test-short-socket-fixtures.sh
         timeout-minutes: 15

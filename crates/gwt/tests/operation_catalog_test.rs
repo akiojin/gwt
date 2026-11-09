@@ -45,9 +45,10 @@ fn an_invented_name_falls_back_to_the_namespace_listing() {
         "the existing wording must open the message: {message}"
     );
     assert!(
-        message.contains("pr.ready") && message.contains("pr.draft"),
+        message.contains("pr.ready") && message.contains("pr.create"),
         "the message must list the pr. namespace: {message}"
     );
+    assert!(!message.contains("pr.draft"), "{message}");
     assert!(
         !message.contains("`pr.nonexistent_operation`"),
         "the unknown name must not be offered back as an option: {message}"

@@ -837,6 +837,30 @@ test("Workspace detail surfaces Managed Hooks health without raw JSON dumps", ()
   assert.match(hookSection.textContent, /workflow-policy/);
   assert.match(hookSection.textContent, /1250ms/);
   assert.match(hookSection.textContent, /Stop/);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("dd"), node => node.textContent), [
+    "Needs attention", "PreToolUse", "2026-06-17T00:00:00Z", "Proposal A", "Implement hook health first",
+  ]);
+  assert.deepEqual(Array.from(hookSection.querySelectorAll("p"), node => node.textContent), ["Choose the repair path"]);
+});
+
+test("Work detail renders all six hook health states without inventing pending work", () => {
+  for (const [status, label] of [
+    ["ready", "Ready"],
+    ["needs_attention", "Needs attention"],
+    ["self_healed", "Self healed"],
+    ["degraded", "Degraded"],
+    ["inactive", "Inactive"],
+    ["waiting_for_first_hook_event", "Waiting for first hook event"],
+  ]) {
+    const projection = sampleProjection();
+    projection.works[0].managed_hook_health = { status };
+    const fixture = createFixture();
+    createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+    const section = fixture.body.querySelector('[data-section="managed-hooks"]');
+    assert.equal(section.dataset.status, status);
+    assert.equal(section.querySelector("dd").textContent, label);
+    assert.deepEqual(Array.from(section.querySelectorAll("dt"), node => node.textContent), ["Status"]);
+  }
 });
 
 test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {
@@ -995,11 +1019,10 @@ test("each Work exposes one Continue work action with opaque Work identity (SPEC
   const fixture = createFixture();
   const continued = [];
   const surface = createSurface(fixture, projection, {
-    continueWork: (workId, bounds) => {
-      continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      continued.push({ workId });
       return true;
     },
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.renderInto(fixture.body, fixture.windowData.id);
@@ -1019,7 +1042,6 @@ test("each Work exposes one Continue work action with opaque Work identity (SPEC
   actions[0].click();
   assert.deepEqual(continued, [{
     workId: "work-opaque-1",
-    bounds: { x: 0, y: 0, width: 800, height: 600 },
   }]);
 });
 
@@ -1283,7 +1305,6 @@ test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", 
     },
   };
   const surface = createSurface(fixture, projection, {
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
 
@@ -1327,7 +1348,6 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   const sent = [];
   const surface = createSurface(fixture, projection, {
     send: (message) => sent.push(message),
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.renderInto(fixture.body, fixture.windowData.id);
@@ -1349,7 +1369,7 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.match(sent[0].operation_id, /^resume-/);
   assert.equal(sent[0].session_id, "work-launch-1");
   assert.equal(sent[0].agent_session_id, "conv-latest2222");
-  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+  assert.equal(Object.hasOwn(sent[0], "bounds"), false, "resume carries no window coordinates");
 });
 
 test("Non-resumable Sessions show no Resume control while Continue work owns fallback (SPEC-2359)", () => {
@@ -1360,11 +1380,10 @@ test("Non-resumable Sessions show no Resume control while Continue work owns fal
   const fixture = createFixture();
   const continued = [];
   const surface = createSurface(fixture, projection, {
-    continueWork: (workId, bounds) => {
-      continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      continued.push({ workId });
       return true;
     },
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.renderInto(fixture.body, fixture.windowData.id);
@@ -3281,7 +3300,6 @@ test("Continue work click marks the Work pending and a re-click does not re-send
   });
   const surface = createSurface(fixture, projection, {
     continueWork: dispatcher.dispatch,
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
 
@@ -3328,7 +3346,6 @@ test("Continue work keeps keyboard focus on the pending replacement action", () 
   });
   const surface = createSurface(fixture, projection, {
     continueWork: dispatcher.dispatch,
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
     createNode: (tag, className, text) => {
       const node = createNode(fixture.document, tag, className, text);
@@ -3364,7 +3381,6 @@ test("a pending Work renders focusable disabled semantics with progress label", 
     "Continue work",
   );
   const surface = createSurface(fixture, projection, {
-    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
 

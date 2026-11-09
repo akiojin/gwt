@@ -11,6 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A usage pool owner. Each variant maps to one CLI account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -196,6 +197,34 @@ impl ProviderUsage {
     }
 }
 
+/// One timestamped minute of a conversation's token activity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MinuteTokenBucket {
+    pub started_at: DateTime<Utc>,
+    /// Unknown coverage is null; an observed minute without tokens is zero.
+    pub tokens: Option<u64>,
+}
+
+/// Measurements from one provider conversation, never from its account quota.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionTelemetry {
+    pub source: String,
+    pub quality: String,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub today_tokens: Option<u64>,
+    /// Includes cached input for both providers. Total is input plus output.
+    pub today_input_tokens: Option<u64>,
+    pub today_cache_read_tokens: Option<u64>,
+    pub today_cache_creation_tokens: Option<u64>,
+    pub today_output_tokens: Option<u64>,
+    /// Thirty one-minute buckets, oldest first, including the current minute.
+    pub minute_buckets: Vec<MinuteTokenBucket>,
+}
+
+fn active_by_default() -> bool {
+    true
+}
+
 /// Per-session usage for a single agent session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionUsage {
@@ -205,6 +234,23 @@ pub struct SessionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u64>,
+    /// Direct provider report only; never derived from prompt size/model limits.
+    #[serde(default)]
+    pub reported_context_left_pct: Option<f32>,
+    #[serde(default)]
+    pub provider_session_id: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<PathBuf>,
+    #[serde(default)]
+    pub agent_member_id: Option<String>,
+    #[serde(default = "active_by_default")]
+    pub active: bool,
+    #[serde(default)]
+    pub telemetry: Option<SessionTelemetry>,
     /// Tokens currently occupying the context window, when derivable.
     pub context_used_tokens: Option<u64>,
     /// Model context window size, when known.
@@ -372,6 +418,14 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 total_tokens: 15,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                reported_context_left_pct: None,
+                provider_session_id: None,
+                project_path: None,
+                agent_member_id: None,
+                active: true,
+                telemetry: None,
                 context_used_tokens: Some(50),
                 context_limit_tokens: Some(200),
                 context_left_pct: Some(75.0),
@@ -384,5 +438,23 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let round: UsageSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, round);
+        let mut legacy = serde_json::to_value(&snap).unwrap();
+        let session = legacy["sessions"][0].as_object_mut().unwrap();
+        for key in [
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "reported_context_left_pct",
+            "provider_session_id",
+            "project_path",
+            "agent_member_id",
+            "active",
+            "telemetry",
+        ] {
+            session.remove(key);
+        }
+        assert_eq!(
+            serde_json::from_value::<UsageSnapshot>(legacy).unwrap(),
+            snap
+        );
     }
 }

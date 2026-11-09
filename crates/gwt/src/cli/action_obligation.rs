@@ -712,10 +712,15 @@ pub fn open_obligation_refusal(
     ))
 }
 
-/// Open (unsettled) obligation kinds for the session — the Stop gate input.
+/// Open obligation kinds, retaining the existing fail-open behavior on read errors.
 pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
-    match load(worktree) {
-        Ok(Some(state)) if state.session_id == session_id && integrity_ok(&state) => {
+    try_open_kinds(worktree, session_id).unwrap_or_default()
+}
+
+/// Open obligation kinds with read errors preserved for Stop diagnostics.
+pub fn try_open_kinds(worktree: &Path, session_id: &str) -> io::Result<Vec<ObligationKind>> {
+    Ok(match load(worktree)? {
+        Some(state) if state.session_id == session_id && integrity_ok(&state) => {
             let mut kinds: Vec<ObligationKind> = Vec::new();
             for entry in &state.obligations {
                 if entry.settled.is_none() && !kinds.contains(&entry.kind) {
@@ -724,11 +729,11 @@ pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
             }
             kinds
         }
-        // Missing, cross-session, tampered, or unreadable state fails open
+        // Missing, cross-session, or tampered state fails open
         // for the hook reader (FR-014u; tamper enforcement lives with the
         // execution-control gate).
         _ => Vec::new(),
-    }
+    })
 }
 
 #[cfg(test)]

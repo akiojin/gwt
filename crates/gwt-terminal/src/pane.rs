@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    pty::{PendingPty, PtyHandle, SpawnConfig},
+    pty::{CursorPositionReport, PendingPty, PtyHandle, SpawnConfig},
     TerminalError,
 };
 
@@ -29,14 +29,43 @@ pub enum PaneStatus {
 /// much the agent printed, so regression tests assert against this constant
 /// instead of a wall-clock budget (Issue #3988).
 pub const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
-/// Upper bound for the unterminated escape prefix a snapshot carries
-/// (Issue #4095); longer prefixes are abandoned string sequences.
-const MAX_INCOMPLETE_ESCAPE_TAIL: usize = 1_024;
+/// Upper bound for the incomplete output prefix a snapshot carries
+/// (Issue #4095); longer OSC / APC payloads retain only inert parser context.
+const MAX_INCOMPLETE_OUTPUT_TAIL: usize = 1_024;
 /// Process-wide source for [`Pane::output_seq`] (Issue #4095). Positions stay
 /// monotonic across pane restarts that reuse a window id, so a client queue
 /// never mistakes a restarted pane's first chunks for chunks an older
 /// snapshot of the same window already covered.
 static NEXT_OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+
+#[derive(Default)]
+struct TerminalCallbacks {
+    cursor_report: Option<CursorPositionReport>,
+}
+
+impl vt100::Callbacks for TerminalCallbacks {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if i1.is_none() && i2.is_none() && params == [&[6][..]] && c == 'n' {
+            let (row, col) = screen.cursor_position();
+            self.cursor_report = Some(CursorPositionReport::from_screen_position(row, col));
+        }
+    }
+}
+
+/// Display bytes and protocol replies from one bounded PTY read.
+pub struct PaneOutput {
+    pub data: Vec<u8>,
+    pub cursor_reports: Vec<CursorPositionReport>,
+}
 
 /// Trailing screen rows folded into the logged PTY exit record, and the
 /// character budget that keeps one log line readable (Issue #3341).
@@ -124,7 +153,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 pub struct Pane {
     id: String,
     pty: Arc<PtyHandle>,
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalCallbacks>,
     status: PaneStatus,
     /// Direct child pid captured at spawn. Kept separately because the pid is
     /// no longer reliably readable from the handle once the child is reaped,
@@ -140,11 +169,14 @@ pub struct Pane {
     /// streamed chunks that a later-queued snapshot already reproduces
     /// instead of re-applying their relative cursor moves on top of it.
     output_seq: u64,
-    /// Trailing bytes of the parsed stream that start an escape sequence the
-    /// parser has not finished (Issue #4095). Appended verbatim to snapshots
-    /// so a client that resets to the snapshot continues the sequence with
-    /// the next chunk exactly like the pane's own parser does.
-    incomplete_escape_tail: Vec<u8>,
+    /// Trailing bytes of the parsed stream that start an escape sequence or
+    /// UTF-8 scalar the parser has not finished. Appended verbatim to snapshots
+    /// so a client that resets to the snapshot continues parsing with the
+    /// next chunk exactly like the pane's own parser does (Issue #4095).
+    incomplete_output_tail: Vec<u8>,
+    // At most the three-byte prefix of the one query answered by this pane.
+    // Keep it off the public stream until the parser confirms the final byte.
+    cursor_query_prefix: Vec<u8>,
     /// Reconnects frequently request the same idle screen. Serialize it once
     /// until output or a successful resize changes the parser state.
     snapshot_cache: OnceLock<Vec<u8>>,
@@ -174,12 +206,18 @@ impl PendingPane {
         Ok(Pane {
             id: self.id,
             pty,
-            parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
+            parser: vt100::Parser::new_with_callbacks(
+                self.rows,
+                self.cols,
+                SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+                TerminalCallbacks::default(),
+            ),
             status: PaneStatus::Running,
             child_pid,
             last_exit: None,
             output_seq: 0,
-            incomplete_escape_tail: Vec::new(),
+            incomplete_output_tail: Vec::new(),
+            cursor_query_prefix: Vec::new(),
             snapshot_cache: OnceLock::new(),
         })
     }
@@ -194,33 +232,45 @@ impl PendingPane {
     }
 }
 
-fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
+fn resize_parser_preserving_state<CB: vt100::Callbacks>(
+    parser: &mut vt100::Parser<CB>,
+    rows: u16,
+    cols: u16,
+) {
     parser.screen_mut().set_size(rows, cols);
 }
 
-/// Longest suffix of `bytes` that starts an escape sequence the terminal
+/// Longest suffix of `bytes` that starts output the terminal
 /// parser cannot have finished yet (Issue #4095): a bare `ESC`, a CSI without
-/// its final byte, an OSC / DCS / SOS / PM / APC string without `BEL` or `ST`,
-/// or an `ESC` + intermediate without its final byte. Anything the parser
-/// would already have executed or aborted counts as complete.
-fn incomplete_escape_suffix(bytes: &[u8]) -> &[u8] {
-    let Some(esc) = bytes.iter().rposition(|byte| *byte == 0x1b) else {
-        return &[];
-    };
-    let Some((&kind, body)) = bytes[esc + 1..].split_first() else {
-        return &bytes[esc..];
-    };
-    let complete = match kind {
-        b'[' => body.iter().any(|byte| !(0x20..=0x3f).contains(byte)),
-        b']' | b'P' | b'X' | b'^' | b'_' => body.contains(&0x07),
-        0x20..=0x2f => body.iter().any(|byte| !(0x20..=0x2f).contains(byte)),
-        _ => true,
-    };
-    if complete {
-        &[]
-    } else {
-        &bytes[esc..]
+/// its final byte, an OSC / DCS / SOS / PM / APC string with no detected terminator,
+/// or an `ESC` + intermediate without its final byte. Otherwise retain only
+/// a valid incomplete UTF-8 scalar, which can occupy at most three bytes.
+fn incomplete_output_suffix(bytes: &[u8]) -> &[u8] {
+    if let Some(esc) = bytes.iter().rposition(|byte| *byte == 0x1b) {
+        let Some((&kind, body)) = bytes[esc + 1..].split_first() else {
+            return &bytes[esc..];
+        };
+        let complete = match kind {
+            b'[' => body.iter().any(|byte| !(0x20..=0x3f).contains(byte)),
+            b']' => body.iter().any(|byte| matches!(byte, 0x07 | 0x18 | 0x1a)),
+            b'_' => body.iter().any(|byte| matches!(byte, 0x18 | 0x1a)),
+            b'P' | b'X' | b'^' => body.contains(&0x07),
+            0x20..=0x2f => body.iter().any(|byte| !(0x20..=0x2f).contains(byte)),
+            _ => true,
+        };
+        if !complete {
+            return &bytes[esc..];
+        }
     }
+    for start in bytes.len().saturating_sub(3)..bytes.len() {
+        let suffix = &bytes[start..];
+        if let Err(error) = std::str::from_utf8(suffix) {
+            if error.valid_up_to() == 0 && error.error_len().is_none() {
+                return suffix;
+            }
+        }
+    }
+    &[]
 }
 
 impl Pane {
@@ -250,11 +300,25 @@ impl Pane {
 
     /// Create a new pane from a fully resolved PTY spawn configuration.
     pub fn new_with_spawn_config(id: String, config: SpawnConfig) -> Result<Self, TerminalError> {
+        Self::new_with_spawn_config_and_attempt_observer(id, config, || {})
+    }
+
+    /// Observe the OS child-spawn attempt while constructing this pane.
+    pub fn new_with_spawn_config_and_attempt_observer(
+        id: String,
+        config: SpawnConfig,
+        on_attempt: impl FnOnce(),
+    ) -> Result<Self, TerminalError> {
         let rows = config.rows;
         let cols = config.cols;
-        let pty = Arc::new(PtyHandle::spawn(config)?);
+        let pty = Arc::new(PtyHandle::spawn_with_attempt_observer(config, on_attempt)?);
         let child_pid = pty.process_id();
-        let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        let parser = vt100::Parser::new_with_callbacks(
+            rows,
+            cols,
+            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+            TerminalCallbacks::default(),
+        );
 
         Ok(Self {
             id,
@@ -264,7 +328,8 @@ impl Pane {
             child_pid,
             last_exit: None,
             output_seq: 0,
-            incomplete_escape_tail: Vec::new(),
+            incomplete_output_tail: Vec::new(),
+            cursor_query_prefix: Vec::new(),
             snapshot_cache: OnceLock::new(),
         })
     }
@@ -278,9 +343,34 @@ impl Pane {
         gate_args_prefix: Vec<String>,
         nonce: impl Into<String>,
     ) -> Result<PendingPane, TerminalError> {
+        Self::new_pending_with_spawn_config_and_attempt_observer(
+            id,
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            || {},
+        )
+    }
+
+    /// Observe the pending gate's actual OS child-spawn attempt.
+    pub fn new_pending_with_spawn_config_and_attempt_observer(
+        id: String,
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+        on_attempt: impl FnOnce(),
+    ) -> Result<PendingPane, TerminalError> {
         let rows = config.rows;
         let cols = config.cols;
-        let pty = PtyHandle::spawn_pending(config, gate_program, gate_args_prefix, nonce)?;
+        let pty = PtyHandle::spawn_pending_with_attempt_observer(
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            on_attempt,
+        )?;
         Ok(PendingPane {
             id,
             rows,
@@ -317,8 +407,77 @@ impl Pane {
     /// without bound on output that never reached a `\n`).
     pub fn process_bytes(&mut self, data: &[u8]) {
         self.snapshot_cache.take();
-        // Update vt100 screen state
         self.parser.process(data);
+        self.parser.callbacks_mut().cursor_report.take();
+        self.record_parsed_output(data);
+    }
+
+    /// Parse physical output and consume only canonical DSRs this parser handled.
+    /// Their public CAN placeholder also cancels an earlier incomplete escape,
+    /// preserving parser state without replaying a query to another responder.
+    /// The caller writes the typed replies after releasing the pane mutex.
+    pub fn process_owner_output(&mut self, data: &[u8]) -> PaneOutput {
+        self.snapshot_cache.take();
+        let mut output = PaneOutput {
+            data: Vec::with_capacity(data.len() + self.cursor_query_prefix.len()),
+            cursor_reports: Vec::new(),
+        };
+        let mut prefix = std::mem::take(&mut self.cursor_query_prefix);
+        let mut offset = 0;
+        while offset < data.len() {
+            if prefix.is_empty() {
+                let plain = data[offset..]
+                    .iter()
+                    .position(|byte| *byte == 0x1b)
+                    .unwrap_or(data.len() - offset);
+                if plain != 0 {
+                    let bytes = &data[offset..offset + plain];
+                    self.parser.process(bytes);
+                    self.parser.callbacks_mut().cursor_report.take();
+                    if output.cursor_reports.is_empty() {
+                        self.pty.discard_startup_cursor_preanswer();
+                    }
+                    output.data.extend_from_slice(bytes);
+                    offset += plain;
+                    continue;
+                }
+            }
+            let byte = data[offset];
+            offset += 1;
+            self.parser.process(std::slice::from_ref(&byte));
+            let report = self.parser.callbacks_mut().cursor_report.take();
+            prefix.push(byte);
+            if prefix == CURSOR_POSITION_QUERY {
+                if let Some(report) = report {
+                    output.cursor_reports.push(report);
+                    output.data.push(0x18);
+                } else {
+                    output.data.extend_from_slice(&prefix);
+                }
+                prefix.clear();
+            } else if !CURSOR_POSITION_QUERY.starts_with(&prefix) {
+                let trailing_escape = prefix.last() == Some(&0x1b);
+                let public_len = prefix.len() - usize::from(trailing_escape);
+                output.data.extend_from_slice(&prefix[..public_len]);
+                prefix.clear();
+                if trailing_escape {
+                    prefix.push(0x1b);
+                }
+            }
+            // The native query precedes public child output. Once output
+            // progressed, even a later query back at 1;1 needs its own reply.
+            // Output after a query in this same read must not discard that
+            // query's preanswer before the caller writes its captured reports.
+            if !output.data.is_empty() && output.cursor_reports.is_empty() {
+                self.pty.discard_startup_cursor_preanswer();
+            }
+        }
+        self.cursor_query_prefix = prefix;
+        self.record_parsed_output(data);
+        output
+    }
+
+    fn record_parsed_output(&mut self, data: &[u8]) {
         // Issue #4909: publish the child's bracketed-paste mode on the shared
         // PTY handle, where prompt injection reads it without the pane lock.
         self.pty
@@ -340,18 +499,43 @@ impl Pane {
                 }),
         );
         self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-        self.incomplete_escape_tail = if self.incomplete_escape_tail.is_empty() {
-            incomplete_escape_suffix(data).to_vec()
+        self.incomplete_output_tail = if self.incomplete_output_tail.is_empty() {
+            incomplete_output_suffix(data).to_vec()
         } else {
-            let mut carried = std::mem::take(&mut self.incomplete_escape_tail);
+            let mut carried = std::mem::take(&mut self.incomplete_output_tail);
             carried.extend_from_slice(data);
-            incomplete_escape_suffix(&carried).to_vec()
+            incomplete_output_suffix(&carried).to_vec()
         };
-        if self.incomplete_escape_tail.len() > MAX_INCOMPLETE_ESCAPE_TAIL {
-            // A string sequence this long is not one the PTY split; treat it
-            // as abandoned rather than letting the tail grow unbounded.
-            self.incomplete_escape_tail.clear();
+        if self.incomplete_output_tail.len() > MAX_INCOMPLETE_OUTPUT_TAIL {
+            let marker = if self.incomplete_output_tail.starts_with(b"\x1b]") {
+                // An invalid selector prevents replayed title/clipboard effects.
+                Some(b"\x1b]_".as_slice())
+            } else if self.incomplete_output_tail.starts_with(b"\x1b_") {
+                Some(b"\x1b_".as_slice())
+            } else {
+                None
+            };
+            if let Some(marker) = marker {
+                // Future string payload stays invisible until its own terminator.
+                let utf8 = incomplete_output_suffix(&self.incomplete_output_tail[2..]).to_vec();
+                self.incomplete_output_tail = marker.to_vec();
+                self.incomplete_output_tail.extend_from_slice(&utf8);
+            } else {
+                self.incomplete_output_tail.clear();
+            }
         }
+    }
+
+    /// At physical EOF an unfinished candidate cannot become a handled query.
+    /// Publish its original bytes once, with a fresh stream position.
+    pub fn finish_owner_output(&mut self) -> Vec<u8> {
+        if self.cursor_query_prefix.is_empty() {
+            return Vec::new();
+        }
+        self.pty.discard_startup_cursor_preanswer();
+        self.snapshot_cache.take();
+        self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        std::mem::take(&mut self.cursor_query_prefix)
     }
 
     /// Get the current vt100 screen.
@@ -397,7 +581,14 @@ impl Pane {
                     .parser
                     .screen()
                     .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-                snapshot.extend_from_slice(&self.incomplete_escape_tail);
+                // A withheld DSR prefix belongs to the physical terminal, not
+                // a reconnecting frontend. Other unfinished output retains
+                // its existing snapshot continuation contract.
+                if self.cursor_query_prefix.is_empty()
+                    || self.incomplete_output_tail != self.cursor_query_prefix
+                {
+                    snapshot.extend_from_slice(&self.incomplete_output_tail);
+                }
                 snapshot
             })
             .clone()
@@ -1574,6 +1765,146 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_snapshot_bytes_carries_incomplete_utf8_scalar_across_owner_output() {
+        #[derive(Default)]
+        struct ReplacementCallbacks {
+            replacements: usize,
+        }
+
+        impl vt100::Callbacks for ReplacementCallbacks {
+            fn unhandled_char(&mut self, _: &mut vt100::Screen, c: char) {
+                if c == '\u{fffd}' {
+                    self.replacements += 1;
+                }
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-utf8-tail", 6, sleep_command("60"));
+        pane.process_owner_output(b"before \xf0");
+        pane.process_owner_output(b"\x9f\xa6");
+
+        let snapshot = pane.snapshot_bytes();
+        assert!(
+            snapshot.ends_with(b"\xf0\x9f\xa6"),
+            "snapshot must carry the pending UTF-8 scalar prefix"
+        );
+        let mut replay = vt100::Parser::new_with_callbacks(
+            6,
+            80,
+            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+            ReplacementCallbacks::default(),
+        );
+        replay.process(&snapshot);
+        let continuation = pane.process_owner_output(b"\x80 after");
+        replay.process(&continuation.data);
+
+        assert_eq!(pane.screen().contents(), "before 🦀 after");
+        assert_eq!(replay.screen().contents(), pane.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            pane.screen().cursor_position()
+        );
+        assert_eq!(replay.callbacks().replacements, 0);
+        assert_eq!(
+            pane.snapshot_bytes(),
+            pane.screen()
+                .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
+        );
+        let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_snapshot_bytes_preserves_overlong_osc_context() {
+        #[derive(Default)]
+        struct ReplayCallbacks {
+            side_effects: usize,
+        }
+        impl vt100::Callbacks for ReplayCallbacks {
+            fn set_window_title(&mut self, _: &mut vt100::Screen, _: &[u8]) {
+                self.side_effects += 1;
+            }
+            fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _: &[u8], _: &[u8]) {
+                self.side_effects += 1;
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-osc-tail", 6, sleep_command("60"));
+        for terminator in [b"\x07".as_slice(), b"\x18", b"\x1a", b"\x1b\\"] {
+            pane.process_owner_output(b"\x1bc before \x1b]0;");
+            pane.process_owner_output(&vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1]);
+            // Overflow again mid-scalar, preserving the streaming decoder prefix.
+            let mut overflow = vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1];
+            overflow.push(0xf0);
+            pane.process_owner_output(&overflow);
+            assert!(pane.snapshot_bytes().ends_with(b"\xf0"));
+            pane.process_owner_output(b"\x9f\xa6\x80");
+            pane.process_owner_output(&vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1]);
+            // A bare OSC introducer would turn this payload into a title command.
+            pane.process_owner_output(b"2;title\xf0\x9f\xa6");
+            assert!(pane.incomplete_output_tail.len() <= MAX_INCOMPLETE_OUTPUT_TAIL);
+            let mut replay = vt100::Parser::new_with_callbacks(
+                6,
+                80,
+                SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+                ReplayCallbacks::default(),
+            );
+            replay.process(&pane.snapshot_bytes());
+            let rest = [b"\x80".as_slice(), terminator, b" after"].concat();
+            replay.process(&pane.process_owner_output(&rest).data);
+            assert_eq!(pane.screen().contents(), " before  after");
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+            assert_eq!(
+                replay.screen().cursor_position(),
+                pane.screen().cursor_position()
+            );
+            assert_eq!(replay.callbacks().side_effects, 0);
+            // A snapshot after termination must not re-enter the discarded OSC.
+            replay.process(&pane.snapshot_bytes());
+            replay.process(&pane.process_owner_output(" 🦀".as_bytes()).data);
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+            assert!(pane.incomplete_output_tail.is_empty());
+        }
+        let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_snapshot_bytes_preserves_overlong_apc_context() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-apc-tail", 6, sleep_command("60"));
+        for terminator in [b"\x18".as_slice(), b"\x1a", b"\x1b\\"] {
+            pane.process_owner_output(b"\x1bc before \x1b_");
+            pane.process_owner_output(&vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1]);
+            // The new scalar starts only after the ASCII payload overflowed.
+            pane.process_owner_output(b"\xf0");
+            assert!(pane.snapshot_bytes().ends_with(b"\xf0"));
+            pane.process_owner_output(b"\x9f\xa6");
+            assert!(pane.snapshot_bytes().ends_with(b"\xf0\x9f\xa6"));
+            assert!(pane.incomplete_output_tail.len() <= MAX_INCOMPLETE_OUTPUT_TAIL);
+            let mut replay = vt100::Parser::new(6, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+            replay.process(&pane.snapshot_bytes());
+            replay.process(&pane.process_owner_output(b"\x80\x07").data);
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+            // BEL is payload in APC; a later snapshot must still hide its body.
+            replay.process(&pane.snapshot_bytes());
+            let rest = [b"hidden".as_slice(), terminator, b" after"].concat();
+            replay.process(&pane.process_owner_output(&rest).data);
+            assert_eq!(pane.screen().contents(), " before  after");
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+            assert_eq!(
+                replay.screen().cursor_position(),
+                pane.screen().cursor_position()
+            );
+            assert!(pane.incomplete_output_tail.is_empty());
+            replay.process(&pane.snapshot_bytes());
+            replay.process(&pane.process_owner_output(" 🦀".as_bytes()).data);
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+        }
+        let _ = pane.kill();
+    }
+
     /// Issue #4095: a restarted window reuses its id but gets a fresh pane.
     /// Its first chunks must sort after any snapshot of the previous pane, or
     /// the client queue would discard them as already-covered output.
@@ -1594,8 +1925,101 @@ mod tests {
     }
 
     #[test]
-    fn test_incomplete_escape_suffix_recognizes_sequence_shapes() {
-        let cases: [(&[u8], &[u8]); 9] = [
+    fn owner_output_consumes_each_split_cursor_query_at_its_actual_cursor() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("owner-cursor-query", 6, sleep_command("60"));
+        for split in 0..=CURSOR_POSITION_QUERY.len() {
+            pane.process_owner_output(b"\x1b[4;8H");
+            let first = pane.process_owner_output(&CURSOR_POSITION_QUERY[..split]);
+            if split < CURSOR_POSITION_QUERY.len() {
+                assert!(first.data.is_empty());
+            }
+            if (1..CURSOR_POSITION_QUERY.len()).contains(&split) {
+                assert!(first.cursor_reports.is_empty());
+                assert!(!pane
+                    .snapshot_bytes()
+                    .ends_with(&CURSOR_POSITION_QUERY[..split]));
+            }
+            let second = pane.process_owner_output(&CURSOR_POSITION_QUERY[split..]);
+            let displayed: Vec<_> = first.data.into_iter().chain(second.data).collect();
+            assert_eq!(displayed, b"\x18");
+            let reports: Vec<_> = first
+                .cursor_reports
+                .into_iter()
+                .chain(second.cursor_reports)
+                .collect();
+            assert_eq!(
+                reports,
+                vec![CursorPositionReport::from_screen_position(3, 7)]
+            );
+            let following = pane.process_owner_output(b"x");
+            assert_eq!(following.data, b"x");
+            assert!(
+                following.cursor_reports.is_empty(),
+                "a query is consumed once"
+            );
+        }
+
+        let output = pane.process_owner_output(b"\x1b[2;3H\x1b[6nabc\x1b[6n");
+        assert_eq!(output.data, b"\x1b[2;3H\x18abc\x18");
+        assert_eq!(
+            output.cursor_reports,
+            vec![
+                CursorPositionReport::from_screen_position(1, 2),
+                CursorPositionReport::from_screen_position(1, 5),
+            ]
+        );
+        assert!(pane.process_owner_output(b"").cursor_reports.is_empty());
+
+        // A new ESC aborts a preceding incomplete escape. Consuming its DSR
+        // must also leave the public parser ready for the following text.
+        for (original, expected) in [
+            (b"\x1b\x1b[6nX".as_slice(), b"\x1b\x18X".as_slice()),
+            (b"\x1b[\x1b[6nX".as_slice(), b"\x1b[\x18X".as_slice()),
+        ] {
+            pane.process_bytes(b"\x1bc");
+            let output = pane.process_owner_output(original);
+            assert_eq!(
+                output.cursor_reports.len(),
+                1,
+                "the interrupted query remains owned"
+            );
+            assert_eq!(output.data, expected);
+            let mut public = vt100::Parser::new(6, 80, 0);
+            public.process(&output.data);
+            assert_eq!(public.screen().contents(), "X");
+            assert_eq!(public.screen().contents(), pane.screen().contents());
+            assert_eq!(
+                public.screen().cursor_position(),
+                pane.screen().cursor_position()
+            );
+        }
+
+        // Ordinary ANSI, UTF-8, OSC and queries not owned by this handler keep
+        // their exact bytes, including arbitrary read boundaries.
+        let original =
+            "\x1b]0;title [6n\x07通常\x1b[31mred\x1b[0m\x1b[06n\x1b[?6n\x1b[6K".as_bytes();
+        let mut displayed = Vec::new();
+        for byte in original {
+            let output = pane.process_owner_output(std::slice::from_ref(byte));
+            displayed.extend(output.data);
+            assert!(output.cursor_reports.is_empty());
+            assert!(pane.cursor_query_prefix.len() < CURSOR_POSITION_QUERY.len());
+        }
+        assert_eq!(displayed, original);
+        let partial = pane.process_owner_output(b"\x1b[6");
+        assert!(partial.data.is_empty());
+        assert!(partial.cursor_reports.is_empty());
+        let before_eof = pane.output_seq();
+        assert_eq!(pane.finish_owner_output(), b"\x1b[6");
+        assert!(pane.output_seq() > before_eof);
+        assert!(pane.finish_owner_output().is_empty());
+        let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_incomplete_output_suffix_recognizes_sequence_shapes() {
+        let cases: [(&[u8], &[u8]); 13] = [
             (b"plain text", b""),
             (b"text\x1b", b"\x1b"),
             (b"text\x1b[2", b"\x1b[2"),
@@ -1605,10 +2029,14 @@ mod tests {
             (b"text\x1b]0;title\x07", b""),
             (b"text\x1b]0;title\x1b\\", b""),
             (b"text\x1b(", b"\x1b("),
+            (b"text\x1b[2K\xf0\x9f", b"\xf0\x9f"),
+            (b"text\x1b]0;title \xf0\x9f", b"\x1b]0;title \xf0\x9f"),
+            (b"text\xf0\x90\x80\x80", b""),
+            (b"text\xf0\x80", b""),
         ];
         for (input, expected) in cases {
             assert_eq!(
-                incomplete_escape_suffix(input),
+                incomplete_output_suffix(input),
                 expected,
                 "input {:?}",
                 String::from_utf8_lossy(input)

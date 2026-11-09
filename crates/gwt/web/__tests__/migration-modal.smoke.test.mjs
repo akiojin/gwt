@@ -260,7 +260,7 @@ test("migration progress batches frames while modal lifecycle and actions stay s
       sent.push(message);
     },
     createNode: (...args) => { if (args[0] === 'h2') renders += 1; return createNode(...args); },
-    windowCatalogModel: { subscribe: () => () => {} },
+    windowCatalogModel: { subscribeFrame: () => () => {} },
     migrationModal: modalEl, migrationDialog: dialogEl,
     scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
   });

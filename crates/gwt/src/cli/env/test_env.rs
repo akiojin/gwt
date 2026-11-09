@@ -33,6 +33,17 @@ pub struct TargetIssueCreateCall {
 }
 
 pub struct TestEnv {
+    pub diagnostic_repository: Option<(String, String)>,
+    pub diagnostic_context: Option<serde_json::Value>,
+    pub diagnostic_runs: HashMap<u64, serde_json::Value>,
+    pub diagnostic_artifacts: HashMap<u64, Vec<u8>>,
+    pub diagnostic_dispatches: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub diagnostic_dispatch_results:
+        std::collections::VecDeque<io::Result<gwt_github::client::http::DiagnosticDispatchAck>>,
+    pub release_policy_context_hook:
+        Option<Box<dyn FnMut() -> io::Result<crate::cli::ReleasePolicyContext> + Send>>,
+    pub release_policy_contexts:
+        std::collections::VecDeque<io::Result<crate::cli::ReleasePolicyContext>>,
     pub client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
@@ -42,6 +53,7 @@ pub struct TestEnv {
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub feedback_worker_ids: Vec<String>,
+    pub feedback_worker_error: Option<String>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
@@ -49,6 +61,8 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub completion_pr_read_hook: Option<Box<dyn FnMut(usize) + Send>>,
+    pub completion_pr_candidates_call_count: usize,
     pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
@@ -77,7 +91,7 @@ pub struct TestEnv {
     pub pr_update_branch_outcomes: HashMap<u64, crate::cli::PrUpdateBranchResult>,
     pub pr_reviews_call_log: Vec<u64>,
     pub pr_review_threads_call_log: Vec<u64>,
-    pub pr_reply_and_resolve_call_log: Vec<(u64, String)>,
+    pub pr_reply_and_resolve_call_log: Vec<(u64, String, Option<String>)>,
     pub pr_checks_call_log: Vec<u64>,
     pub run_logs: HashMap<u64, String>,
     pub run_log_call_log: Vec<u64>,
@@ -102,6 +116,14 @@ impl TestEnv {
     pub fn new(cache_root: PathBuf) -> Self {
         let repo_path = cache_root.clone();
         TestEnv {
+            diagnostic_repository: None,
+            diagnostic_context: None,
+            diagnostic_runs: Default::default(),
+            diagnostic_artifacts: Default::default(),
+            diagnostic_dispatches: Default::default(),
+            diagnostic_dispatch_results: Default::default(),
+            release_policy_context_hook: None,
+            release_policy_contexts: Default::default(),
             client: FakeIssueClient::new(),
             cache_root,
             repo_path,
@@ -111,6 +133,7 @@ impl TestEnv {
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
             feedback_worker_ids: Vec::new(),
+            feedback_worker_error: None,
             linked_prs: HashMap::new(),
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
@@ -118,6 +141,8 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            completion_pr_read_hook: None,
+            completion_pr_candidates_call_count: 0,
             pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
@@ -248,7 +273,24 @@ impl CliEnv for TestEnv {
     }
     fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
         self.feedback_worker_ids.push(id.to_string());
+        if let Some(error) = &self.feedback_worker_error {
+            return Err(io::Error::other(error.clone()));
+        }
         Ok(())
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        super::super::feedback::send_auto_to_upstream_with_deadline(
+            &self.client,
+            snapshot,
+            &self.repo_path,
+            &gwt_github::client::ResolutionDeadline::new(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(120),
+            ),
+        )
     }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout
@@ -300,6 +342,7 @@ impl CliEnv for TestEnv {
         &mut self,
         number: Option<u64>,
     ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.completion_pr_candidates_call_count += 1;
         Ok(self
             .completion_prs
             .values()
@@ -309,6 +352,7 @@ impl CliEnv for TestEnv {
                 url: snapshot.inventory.url.clone(),
                 head_ref_name: snapshot.inventory.head_ref_name.clone(),
                 head_sha: snapshot.head_sha.clone(),
+                base_ref_name: snapshot.inventory.base_ref_name.clone(),
             })
             .collect())
     }
@@ -410,6 +454,9 @@ impl CliEnv for TestEnv {
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.completion_pr_call_log.push(number);
+        if let Some(hook) = self.completion_pr_read_hook.as_mut() {
+            hook(self.completion_pr_call_log.len());
+        }
         self.completion_prs
             .get(&number)
             .cloned()
@@ -560,15 +607,30 @@ impl CliEnv for TestEnv {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.pr_reply_and_resolve_call_log
-            .push((number, body.to_string()));
-        let count = self
+        self.pr_reply_and_resolve_call_log.push((
+            number,
+            body.to_string(),
+            thread_id.map(str::to_owned),
+        ));
+        let threads = self
             .pr_review_threads
             .get(&number)
-            .map(|threads| threads.iter().filter(|thread| !thread.is_resolved).count())
-            .unwrap_or(0);
-        Ok(count)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(id) = thread_id {
+            if !threads.iter().any(|thread| thread.id == id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("review thread {id} not found on PR #{number}"),
+                ));
+            }
+        }
+        Ok(threads
+            .iter()
+            .filter(|thread| !thread.is_resolved && thread_id.is_none_or(|id| thread.id == id))
+            .count())
     }
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
         self.pr_checks_call_log.push(number);
@@ -599,7 +661,45 @@ impl CliEnv for TestEnv {
     }
 
     fn github_repository(&self) -> io::Result<(String, String)> {
+        if let Some(repository) = &self.diagnostic_repository {
+            return Ok(repository.clone());
+        }
         Ok(("owner".into(), "repo".into()))
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.diagnostic_context
+            .clone()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.diagnostic_runs
+            .get(&run_id)
+            .cloned()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn diagnostic_artifact(&mut self, _run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.diagnostic_artifacts
+            .get(&artifact_id)
+            .cloned()
+            .ok_or_else(super::super::actions::diagnostic::unavailable)
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        _git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.diagnostic_dispatches.push(inputs.clone());
+        self.diagnostic_dispatch_results
+            .pop_front()
+            .unwrap_or_else(|| Err(super::super::actions::diagnostic::unavailable()))
+    }
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        if let Some(hook) = &mut self.release_policy_context_hook {
+            return hook();
+        }
+        self.release_policy_contexts
+            .pop_front()
+            .unwrap_or_else(|| super::super::actions::release_policy::context(&self.repo_path))
     }
     fn pm_settings_snapshot(
         &mut self,

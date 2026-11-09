@@ -88,16 +88,19 @@ fitting owner. Creating a new SPEC is the last resort, decided through
      verification because the fix looks small; `gwt-verify` self-selects the
      matrix (cargo / frontend / Playwright / docs) for the changed surfaces.
 5. **Gate the PR.** PR work goes through `gwt-manage-pr`, which requires
-   `gwt-verify --mode pre-pr` and a recorded `User Verification Result`.
-   Manual launches retain their `confirmed` (UI changes) or `n/a` (no visible
-   surface) gate. Autonomous launches record `n/a (autonomous)` and proceed
+   `gwt-verify --mode pre-pr` PASS. User Verification Result is optional unless
+   the owner explicitly requests a human check. Missing, pending, or legacy
+   deferred fields alone do not establish that request. Autonomous launches
+   record `n/a (autonomous)` and proceed
    through a Ready PR and the existing CI auto-merge path until merged.
    UI work requires `Agent Visual Check: pass` and actual passing headed
    Chromium dark/light results in the same fresh `verify.run` record, selected
    with `params.headed_e2e_commands`. Existing autonomous PRs may retain the
    legacy `deferred (autonomous execution)` body value with fresh evidence;
    no rewrite or human confirmation is required. Never open a Ready PR on
-   `pending`, failed automatic verification, or known blockers. For code-changing
+   failed automatic verification, known blockers, or an explicitly requested
+   human check still pending. An actual rejection is a known blocker. Draft PRs
+   are prohibited. For code-changing
    direct fixes, PR handoff is part of completion: a commit hash, branch push,
    and closure comment are push-only evidence, not completion. If no PR URL or
    PR number exists yet, report `PR handoff pending` or `blocked(<reason>)` and

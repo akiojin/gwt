@@ -34,6 +34,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || (github.event_name == 'schedule' && 'develop') || github.sha }}
       # A PR uses the merge-ref workflow but measures its exact head source.
       # Pre-shard heads must use their supported CLI and single-build report.
+      - name: Snapshot real HOME project stores
+        if: ${{ hashFiles('scripts/ci_home_guard.py') != '' }}
+        id: home-guard
+        run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
       - name: Select coverage transport
         id: transport
         shell: bash
@@ -69,7 +73,7 @@ jobs:
       # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: actions/setup-node@v7
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
@@ -199,6 +203,9 @@ jobs:
             target/coverage-cache-source.json
           key: ${{ steps.instrumented-cache.outputs.cache-primary-key }}
         continue-on-error: true
+      - name: Check tests left real HOME project stores unchanged
+        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
 
   rust-coverage:
     name: Rust Coverage

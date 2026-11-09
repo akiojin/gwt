@@ -17,13 +17,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
 import {
+  focusLiveWindow,
   gotoLiveGwt,
   liveGwtProjectUrl,
   readLiveHubCatalog,
   sendLiveGwtEvent,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+
+useManagedBrowserSource(test);
 
 type Frame = { kind: string; scope: string | null; payload: any };
 
@@ -64,7 +68,9 @@ async function createLiveShell(page: Page): Promise<string> {
   });
   const created = async () => (await ids()).filter((id) => !before.has(id));
   await expect.poll(created, { timeout: 30_000 }).toHaveLength(1);
-  return (await created())[0];
+  const id = (await created())[0];
+  await showShell(page, id);
+  return id;
 }
 
 async function expectTheme(page: Page, theme: string) {
@@ -96,19 +102,18 @@ test.describe("Project-per-Browser-Tab (live)", () => {
             frame.kind === "workspace_state" && frame.scope === keys[index])).toBe(true);
           await expectTheme(current, theme);
           expect(current.url()).toBe(liveGwtProjectUrl(base!, keys[index]));
-          await current.locator('.op-rail__surface[data-surface="agents"]').click();
         }
 
         // A/B isolation and A/A mirror.
         const aWindow = await createLiveShell(page);
         created.push({ page, id: aWindow });
-        await mirror.getByRole("tab", { name: "All agents", exact: true }).click();
-        await expect(mirror.locator(`.agent-tile[data-agent-id="${aWindow}"]`)).toBeVisible();
+        await showShell(mirror, aWindow);
+        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
         await expect(other.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         const bWindow = await createLiveShell(other);
         created.push({ page: other, id: bWindow });
-        await page.getByRole("tab", { name: "All agents", exact: true }).click();
-        await other.getByRole("tab", { name: "All agents", exact: true }).click();
+        await showShell(page, aWindow);
+        await showShell(other, bWindow);
         await expect(page.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
         await expect(mirror.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
 
@@ -163,13 +168,16 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         await expect.poll(() => frames[0].filter((frame) => frame.kind === "workspace_state").at(-1)?.scope)
           .toBe(projectA.project_key);
         expect(fullSyncs().slice(1)).toEqual(before.slice(1));
-        await page.getByRole("tab", { name: "All agents", exact: true }).click();
-        await expect(page.locator(`.agent-tile[data-agent-id="${aWindow}"]`)).toBeVisible();
+        await showShell(page, aWindow);
+        await expect(page.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
         await expect.poll(() => output(0, aWindow, "terminal_snapshot")).toContain("GWT_SCOPE_A");
         expectTerminalIsolation();
 
         // URL stability: workspace actions keep the URL; another Project and
         // Hub links open Projects in new browser tabs.
+        // Park each A client's auxiliary Shell before removing it; an empty
+        // Settings host otherwise requests a replacement Settings window.
+        for (const current of [page, mirror]) await current.locator('.op-rail__surface[data-surface="works"]').click();
         await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
         created.shift();
         await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
@@ -186,6 +194,8 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         await hubTab.close();
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
       } finally {
+        for (const current of pages) if (!current.isClosed())
+          await current.locator('.op-rail__surface[data-surface="works"]').click().catch(() => {});
         for (const window of created) {
           await sendLiveGwtEvent(window.page, { kind: "close_window", id: window.id }).catch(() => {});
         }
@@ -244,16 +254,18 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         // Known Recent, currently closed: direct access auto-opens it.
         const withRecent = await readLiveHubCatalog(page, base!, {
           send: { kind: "reopen_recent_project", path: recentRoot },
-          until: (catalog) => catalog.recent_projects.some((entry) => entry.path.includes("gwt-4538-recent-")),
+          until: (catalog, name) => catalog.recent_projects.some((entry) => entry.path.replaceAll('\\', '/').endsWith(`/${name}`)),
+          arg: recentRoot.replaceAll('\\', '/').split('/').at(-1),
         });
-        const recent = withRecent.recent_projects.find((entry) => entry.path.includes("gwt-4538-recent-"))!;
+        const recentName = recentRoot.replaceAll('\\', '/').split('/').at(-1);
+        const recent = withRecent.recent_projects.find((entry) => entry.path.replaceAll('\\', '/').endsWith(`/${recentName}`))!;
         const openEntry = await readLiveHubCatalog(page, base!, {
           until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
         recentProjectKey = openEntry.projects.find((entry) => entry.project_key === recent.project_key)!.project_key;
         await readLiveHubCatalog(page, base!, {
-          send: { kind: "preview_close_project", project_key: recentProjectKey },
-          until: (catalog, key) => !catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
+          send: { kind: "preview_close_project", project_key: recentProjectKey, project_wide: true },
+          until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key && entry.execution?.effective_state === "stopped"), arg: recent.project_key,
         });
         recentProjectKey = undefined;
         await page.goto(liveGwtProjectUrl(base!, recent.project_key!));
@@ -265,7 +277,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
       } finally {
         if (recentProjectKey) {
           await readLiveHubCatalog(page, base!, {
-            send: { kind: "preview_close_project", project_key: recentProjectKey },
+            send: { kind: "preview_close_project", project_key: recentProjectKey, project_wide: true },
           }).catch(() => {});
         }
         await rm(recentRoot, { recursive: true, force: true });
@@ -274,3 +286,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
     });
   });
 });
+
+async function showShell(page: Page, id: string) {
+  await focusLiveWindow(page, id);
+}
