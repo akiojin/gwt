@@ -29,7 +29,6 @@ short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_trace_and_failure_
 short-wall-clock|crates/gwt-agent/src/prepare.rs|windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker
 short-wall-clock|crates/gwt-agent/src/session.rs|hook_metadata_backfills_project_state_root_without_overwriting_authority
 short-wall-clock|crates/gwt-agent/src/session.rs|session_lease_contention_returns_retryable_timeout_then_succeeds
-short-wall-clock|crates/gwt-core/src/coordination.rs|prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment
 short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_fits_a_prompt_sized_budget
 short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_starts_small_and_grows
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_deferred_claimant_keeps_its_place_and_the_queue_shows_it
