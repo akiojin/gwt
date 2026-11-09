@@ -462,6 +462,21 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   let child: ChildProcess | undefined;
   let incarnation = 0;
   let url = "";
+  async function shutdownEvents() {
+    const directory = join(state, "logs");
+    const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const records = [];
+    for (const name of names.filter(name => name.startsWith("gwt.log.")).sort()) {
+      for (const line of (await readFile(join(directory, name), "utf8")).split("\n").filter(Boolean)) {
+        const event = JSON.parse(line);
+        if (event.target === "gwt::shutdown") records.push(event);
+      }
+    }
+    return records;
+  }
   async function launches(): Promise<ExactRelaunchInvocation[]> {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
@@ -510,13 +525,15 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     throw new Error("Fixture has no authenticated GUI-managed owner to drain");
   }
-  async function stopGui() {
+  async function stopGui(signalFree = false) {
+    let timedOut = false;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
-      current.kill("SIGTERM");
+      if (!signalFree) current.kill("SIGTERM");
       const deadline = Date.now() + 8_000;
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
       if (current.exitCode === null && current.signalCode === null) {
+        timedOut = true;
         current.kill("SIGKILL");
         const forcedDeadline = Date.now() + 8_000;
         while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
@@ -525,11 +542,39 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (child?.pid && processCommand(child.pid)) {
       throw new Error(`Fixture gwt process ${child.pid} remained after shutdown`);
     }
+    if (signalFree && timedOut) throw new Error("Fixture signal-free GUI shutdown timed out");
   }
-  async function stop(coldOwnerDrain = false) {
-    const owner = coldOwnerDrain ? await captureGuiOwner() : undefined;
+  async function stop(coldOwnerDrain = false, disconnectBrowser?: () => Promise<unknown>) {
+    const failures: unknown[] = [];
+    let owner: Awaited<ReturnType<typeof captureGuiOwner>> | undefined;
+    let shutdownOffset = 0;
+    if (coldOwnerDrain) {
+      try {
+        owner = await captureGuiOwner();
+        shutdownOffset = (await shutdownEvents()).length;
+      } catch (error) { failures.push(error); }
+    }
+    // Capture the live identity before disconnect can start its natural drain.
+    try { await disconnectBrowser?.(); } catch (error) { failures.push(error); }
     const ownedPid = child?.pid;
-    await stopGui();
+    try { await stopGui(coldOwnerDrain); } catch (error) { failures.push(error); }
+    if (coldOwnerDrain) {
+      try {
+        const events = (await shutdownEvents()).slice(shutdownOffset);
+        const proof = {
+          pid: ownedPid, exit_code: child?.exitCode, signal: child?.signalCode,
+          shutdown_requested: events.some(event => event.fields?.message === "gui shutdown requested"
+            && event.fields?.reason === "quit app"),
+          cleanup_completed: events.some(event => event.fields?.message === "gui shutdown cleanup completed"
+            && event.fields?.reason === "quit app"),
+          backstop: events.some(event => event.fields?.message === "gui shutdown timed out; forcing process exit"),
+          events,
+        };
+        await testInfo.attach("fixture-cold-gui-shutdown", { body: JSON.stringify(proof), contentType: "application/json" });
+        if (proof.exit_code !== 0 || proof.signal !== null || !proof.shutdown_requested
+          || !proof.cleanup_completed || proof.backstop) failures.push(new Error("Fixture cold GUI shutdown lacks normal-exit proof"));
+      } catch (error) { failures.push(error); }
+    }
     let drainError: Error | undefined;
     if (owner) {
       // Cold restore starts after the real GUI lifetime drain. Killing providers
@@ -550,7 +595,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
       }
     }
-    await Promise.all(providerPids.map(async pid => {
+    const providerCleanup = await Promise.allSettled(providerPids.map(async pid => {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {
         const command = processCommand(pid);
@@ -559,6 +604,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       }
       throw new Error(`Fixture provider ${pid} remained after shutdown`);
     }));
+    for (const result of providerCleanup) if (result.status === "rejected") failures.push(result.reason);
     // Cleanup only descendants recorded by this actor and carrying its unique HOME.
     const actorEvents = (await readFile(join(home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line));
@@ -571,14 +617,22 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     if (ownedPid) {
       const remaining = processCommand(ownedPid);
-      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining }), contentType: "application/json" });
-      if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
+      try {
+        await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining }), contentType: "application/json" });
+      } catch (error) { failures.push(error); }
+      if (remaining) failures.push(new Error(`Fixture gwt process ${ownedPid} remained after shutdown`));
     }
     child = undefined;
-    if (owner) await testInfo.attach("fixture-cold-owner-drain", {
-      body: JSON.stringify({ ...owner, exited: !drainError }), contentType: "application/json",
-    });
-    if (drainError) throw drainError;
+    if (owner) {
+      try {
+        await testInfo.attach("fixture-cold-owner-drain", {
+          body: JSON.stringify({ ...owner, exited: !drainError }), contentType: "application/json",
+        });
+      } catch (error) { failures.push(error); }
+    }
+    if (drainError) failures.push(drainError);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, failures.map(String).join("; "));
   }
   async function start() {
     const urlFile = join(home, `url-${++incarnation}.txt`);
@@ -622,5 +676,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   }
   await start();
   return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
-    async restart(options: { coldOwnerDrain?: boolean } = {}) { await stop(options.coldOwnerDrain); return start(); } };
+    async restart(options: { coldOwnerDrain?: boolean; disconnectBrowser?: () => Promise<unknown> } = {}) {
+      await stop(options.coldOwnerDrain, options.disconnectBrowser); return start();
+    } };
 }
