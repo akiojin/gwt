@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -4126,7 +4126,7 @@ fn decode_workspace_work_items(
     bytes: &[u8],
     detachments: &ContainerDetachments,
 ) -> Result<WorkItemsProjection> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_before_work_items_decode();
     #[cfg(debug_assertions)]
     mark_playwright_work_items_decode_started(path);
@@ -4201,7 +4201,7 @@ fn load_or_synthesize_workspace_work_items_profiled(
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let started = Instant::now();
+    let started = crate::operation_deadline::now();
     let (snapshot, lock_wait_micros, signature) =
         with_workspace_current_and_work_items_lock_profiled(
             &current_path,
@@ -4244,7 +4244,10 @@ fn load_or_synthesize_workspace_work_items_profiled(
         WorkItemsLoadProfile {
             cache_hit: false,
             lock_wait_micros,
-            parse_micros: (started.elapsed().as_micros() as u64).saturating_sub(lock_wait_micros),
+            parse_micros: (crate::operation_deadline::now()
+                .saturating_duration_since(started)
+                .as_micros() as u64)
+                .saturating_sub(lock_wait_micros),
         },
         signature,
     ))
@@ -4543,15 +4546,43 @@ pub struct WorkItemsCache {
     pub deep_copy_count: u64,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BEFORE_WORK_ITEMS_DECODE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-    static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
+thread_local! {
+    static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Observe the next Work-items decode on this thread.
+/// Restores the preceding observer when the guard is dropped.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScopedWorkItemsDecodeObserver {
+    previous: Option<Box<dyn FnOnce()>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ScopedWorkItemsDecodeObserver {
+    pub fn set(on_decode: impl FnOnce() + 'static) -> Self {
+        Self {
+            previous: BEFORE_WORK_ITEMS_DECODE
+                .with(|observer| observer.replace(Some(Box::new(on_decode)))),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScopedWorkItemsDecodeObserver {
+    fn drop(&mut self) {
+        BEFORE_WORK_ITEMS_DECODE.with(|observer| observer.replace(self.previous.take()));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn run_before_work_items_decode() {
     BEFORE_WORK_ITEMS_DECODE.with(|slot| {
         let operation = slot.borrow_mut().take();
@@ -4868,7 +4899,7 @@ fn with_workspace_work_items_locks_profiled<T>(
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let lock_started = Instant::now();
+        let lock_started = crate::operation_deadline::now();
         // Issue #4850 / #4686 AC-5: a named lock, so a contender that runs
         // out of its deadline is told who holds the Work items (pid /
         // operation / since) instead of only that the deadline expired.
@@ -4877,8 +4908,11 @@ fn with_workspace_work_items_locks_profiled<T>(
             lock_path,
             WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
         )?;
-        lock_wait_micros =
-            lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
+        lock_wait_micros = lock_wait_micros.saturating_add(
+            crate::operation_deadline::now()
+                .saturating_duration_since(lock_started)
+                .as_micros() as u64,
+        );
         locks.push(lock);
     }
     drop(acquisition_deadline);
