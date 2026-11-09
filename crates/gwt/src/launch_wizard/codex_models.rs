@@ -128,8 +128,7 @@ struct CacheModel {
     default_reasoning_level: Option<String>,
     #[serde(default)]
     supported_reasoning_levels: Vec<CacheEffort>,
-    #[serde(default)]
-    visibility: Option<String>,
+    visibility: String,
     #[serde(default)]
     priority: Option<i64>,
 }
@@ -148,7 +147,7 @@ pub fn parse_models_cache(body: &str) -> Option<Vec<CodexModelRow>> {
     let mut listed: Vec<CacheModel> = cache
         .models
         .into_iter()
-        .filter(|model| model.visibility.as_deref() == Some("list"))
+        .filter(|model| model.visibility == "list")
         .filter(|model| !model.slug.trim().is_empty())
         .collect();
     // Stable sort keeps file order for equal or missing priorities.
@@ -503,6 +502,7 @@ mod tests {
     fn unusable_cache_bodies_yield_none() {
         assert!(parse_models_cache("not json").is_none());
         assert!(parse_models_cache(r#"{"models": "nope"}"#).is_none());
+        assert!(parse_models_cache(r#"{"models":[{"slug":"gpt-6.1-sol"}]}"#).is_none());
     }
 
     #[test]
@@ -539,6 +539,8 @@ mod tests {
         assert_eq!(*current_rows(), snapshot_rows(), "missing cache");
         std::fs::write(&path, "{broken").unwrap();
         assert_eq!(*current_rows(), snapshot_rows(), "malformed cache");
+        std::fs::write(&path, r#"{"models":[{"slug":"gpt-6.1-sol"}]}"#).unwrap();
+        assert_eq!(*current_rows(), snapshot_rows(), "missing visibility");
         std::fs::write(&path, cache_json(&[("only", "Only", "list", 1)])).unwrap();
         assert_eq!(slugs(&current_rows()), ["only"]);
     }

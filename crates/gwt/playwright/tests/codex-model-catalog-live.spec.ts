@@ -73,7 +73,7 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
     expect(wizard.model_options.map(({ value, label }: any) => ({ value, label }))).toEqual(expected);
     const picker = page.locator("#wizard-modal").getByLabel("Model", { exact: true });
     await expect(picker).toBeVisible();
-    expect(await picker.locator("option").evaluateAll(options => options
+    await expect.poll(() => picker.locator("option").evaluateAll(options => options
       .map(option => ({ value: (option as HTMLOptionElement).value, label: option.textContent })))).toEqual(expected);
     // Exercise the rendering boundary for the saved-model state proved by the
     // Rust restoration tests, using the actual backend's catalog projection.
