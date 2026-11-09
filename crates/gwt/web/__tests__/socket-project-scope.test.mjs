@@ -352,6 +352,7 @@ test("route-bound Project tab reconnects to the same Project only", t => {
 });
 
 test("ordinary socket reconnect recovers only Knowledge reads sent before disconnect", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   const windows = [{ id: "knowledge", preset: "issue" }, { id: "offline", preset: "issue" }, { id: "closing", preset: "issue" }];
   context.activeWorkspace = () => ({ windows });
@@ -363,6 +364,7 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   t.after(() => { for (const id of ["knowledge", "offline", "closing", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
   Object.assign(context, {
     handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
+    knowledgeBridgeStateMap: knowledge.knowledgeBridgeStateMap,
     resyncKnowledge: knowledge.resyncKnowledge,
     clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
     tuningController: { disconnectTuning() {} },
@@ -384,6 +386,15 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   sockets[1].close();
   knowledge.requestKnowledgeBridge("offline", "issue");
   const queuedRead = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  t.mock.timers.tick(5000);
+  t.mock.timers.tick(56000);
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, true,
+    "an offline unsent read retains its owner beyond the response timeout");
+  assert.equal(knowledge.knowledgeBridgeStateMap.get("closing").loading, true,
+    "a CLOSING unsent read also retains its owner until replay");
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  knowledge.requestKnowledgeBridge("closing", "issue", true);
+  assert.equal(context.pendingMessages.length, 2, "Refresh is coalesced into each existing unsent owner");
   context.reconnectCallbacks.at(-1)(); // reports offline for a second time
   sockets.at(-1).open();
   const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
@@ -399,6 +410,10 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   assert.equal(foreign.loadQueued, true, "another project's queue has not been flushed");
   for (const read of reads.filter(message => message.id !== "closing")) knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id,
     request_id: read.request_id, knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  const refresh = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline" && message.refresh);
+  assert.equal(refresh.length, 1, "coalesced Refresh starts once after the queued read completes");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: refresh[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
   assert.equal(knowledge.knowledgeBridgeStateMap.get("knowledge").loading, false);
   assert.equal(knowledge.knowledgeBridgeStateMap.get("offline").loading, false);
   sockets.at(-1).close();
@@ -415,6 +430,40 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   sockets.at(-1).open();
   assert.equal(sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "knowledge").length, 1,
     "forced recovery leaves replacement ownership with the existing full resync");
+  for (const read of sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge")) {
+    knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: read.id, request_id: read.request_id,
+      knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  }
+  sockets.at(-1).close();
+  knowledge.requestKnowledgeBridge("offline", "issue");
+  const forcedQueued = context.pendingMessages.find(entry => entry.message.id === "offline").message;
+  const offline = knowledge.knowledgeBridgeStateMap.get("offline");
+  offline.selectedNumber = 50160001;
+  offline.selectionGeneration += 1;
+  knowledge.requestKnowledgeBridge("offline", "issue", true);
+  const phase = { kind: "update_knowledge_bridge_phase", id: "offline", request_id: 999,
+    issue_number: 50160001, target_phase: "implementation" };
+  context.send(phase);
+  context.send({ kind: "load_knowledge_bridge", id: "foreign", request_id: 998, knowledge_kind: "issue", refresh: false });
+  context.connectSocket(true);
+  sockets.at(-1).open();
+  const forcedReads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge" && message.id === "offline");
+  assert.equal(forcedReads.length, 1, "forced recovery replaces an unsent read instead of replaying it as well");
+  assert.ok(forcedReads[0].request_id > forcedQueued.request_id);
+  assert.equal(forcedReads[0].selected_number, 50160001, "the replacement uses the latest selection");
+  assert.equal(forcedReads[0].refresh, true, "the unsent owner's coalesced Refresh intent survives replacement");
+  const phaseIndex = sockets.at(-1).sent.findIndex(message => message.kind === phase.kind && message.request_id === phase.request_id);
+  assert.notEqual(phaseIndex, -1, "the queued write is retained");
+  assert.ok(phaseIndex < sockets.at(-1).sent.indexOf(forcedReads[0]),
+    "full recovery still reads after queued writes");
+  assert.equal(sockets.at(-1).sent.filter(message => message.id === "foreign").length, 1,
+    "a read outside the current workspace is not silently discarded");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: forcedQueued.request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(offline.loading, true, "the superseded request cannot settle the replacement");
+  knowledge.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "offline", request_id: forcedReads[0].request_id,
+    knowledge_kind: "issue", entries: [], refresh_enabled: true });
+  assert.equal(offline.loading, false);
 });
 
 test("receive recovery requests pane and open surface snapshots only on the owning socket", () => {

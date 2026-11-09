@@ -51,6 +51,7 @@ impl AppRuntime {
                                 kind: super::RemoteRuntimeCommandKind::Input { reply_client: None },
                                 approval_resolution_started: false,
                                 attachment_outcome: None,
+                                input_command_id: None,
                                 result: Ok(outcome.observation),
                             },
                         )));
@@ -147,16 +148,19 @@ impl AppRuntime {
                 // The only callback under Host/client fences is local permit
                 // arming. The owner performs the final one-shot acceptance CAS
                 // with its physical writer held, without retaining these locks.
-                let authorized =
-                    request.authorize_native_with(current_project, now, |issued, expires, time| {
+                let authorized = request.authorize_native_with(
+                    current_project,
+                    now,
+                    |issued, expires, time, deadline| {
                         binding
                             .with_native_permit(request.project(), &permit, || {
                                 permit
-                                    .arm(issued, expires, time)
+                                    .arm_until(issued, expires, time, deadline)
                                     .map_err(|_| AuthorizationError::Unavailable)
                             })
                             .ok_or(AuthorizationError::WrongProject)?
-                    });
+                    },
+                );
                 if let Err(error) = authorized {
                     permit.revoke();
                     // A definite pre-Commit rejection should release its

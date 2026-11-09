@@ -87,6 +87,51 @@ test("ordinary reconnect recovers a lost Knowledge cache reply in the mounted wi
     expect(await input.evaluate(element => element.isConnected && element === (window as any).__knowledgeReconnectInput)).toBe(true);
     expect(await page.evaluate(() => document === (window as any).__knowledgeReconnectDocument)).toBe(true);
     await expect(surface.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
+
+    // Hold the real socket in the CLOSING-before-close observation window.
+    // The read stays in the app's real pending queue until forced recovery.
+    await page.clock.install();
+    await page.clock.pauseAt(new Date(Date.now() + 1000));
+    await page.evaluate(() => {
+      const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!socket) throw new Error("missing owning project socket");
+      (window as any).__knowledgeQueuedSocket = socket;
+      Object.defineProperty(socket, "readyState", { configurable: true, value: WebSocket.CLOSING });
+      // Invalidate the cache view through the existing receive test bridge.
+      // A user Refresh would force a remote GitHub sync instead of a cache read.
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "issue_monitor_inbox", items: [] },
+      }));
+    });
+    const beforeQueued = requests.filter(request => request.kind === "load_knowledge_bridge").length;
+    const refresh = surface.locator("[data-action='refresh-knowledge']");
+    await page.clock.runFor(2000);
+    await page.clock.runFor(5000);
+    await page.clock.fastForward(56000);
+    await expect(surface.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
+    expect(requests.filter(request => request.kind === "load_knowledge_bridge")).toHaveLength(beforeQueued);
+    replacement = undefined;
+    // Controlled inbound frames overflow the actual receive dispatcher and
+    // force socket recovery while the cache read is still in the real queue.
+    await page.evaluate(() => {
+      const socket = (window as any).__knowledgeQueuedSocket;
+      for (let index = 0; index <= 2048; index++) {
+        socket.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ kind: "issue_monitor_inbox", items: [] }),
+        }));
+      }
+    });
+    await page.clock.runFor(100);
+    await page.clock.resume();
+    await expect.poll(() => replacement?.reply, { timeout: 20_000 }).toBeDefined();
+    expect(replacement!.reads).toHaveLength(1);
+    expect(replacement!.reads[0].refresh).toBe(false);
+    expect(replacement!.reply.request_id).toBe(replacement!.reads[0].request_id);
+    await expect(surface.locator('.knowledge-row[data-issue-number="50160001"]')).toBeVisible();
+    await expect(refresh).toBeEnabled();
+    await expect(input).toHaveValue("KLC");
+    expect(await input.evaluate(element => element.isConnected && element === (window as any).__knowledgeReconnectInput)).toBe(true);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     expect(requests.filter(request => /^(update_|save_|set_knowledge|run_branch|start_issue|launch_)/.test(request.kind))).toEqual([]);
     const screenshot = info.outputPath(`knowledge-reconnect-${theme}.png`);

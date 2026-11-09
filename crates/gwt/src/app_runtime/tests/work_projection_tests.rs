@@ -1988,9 +1988,10 @@ fn attachment_captured_staging_target_and_dispatched_completion_never_rebind() {
 
 #[test]
 fn attachment_completion_requires_typed_original_receipt_and_timeout_is_unknown() {
+    use crate::app_runtime::RemoteRuntimeCommandKind;
     use gwt::project_runtime::events::{
         OwnerAttachmentInputOutcome as Outcome, OwnerAttachmentInputReason as Reason,
-        OwnerAttachmentInputReceipt,
+        OwnerAttachmentInputReceipt, OwnerCommand, OwnerInputObservation,
     };
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -2031,6 +2032,7 @@ fn attachment_completion_requires_typed_original_receipt_and_timeout_is_unknown(
         approval_resolution_started: false,
         result: Ok(None),
         attachment_outcome: None,
+        input_command_id: None,
     };
     // Ordinary ok/input_observation or a missing private receipt proves nothing.
     assert_attachment_phase(
@@ -2077,12 +2079,58 @@ fn attachment_completion_requires_typed_original_receipt_and_timeout_is_unknown(
     let mut written = receipt;
     written.outcome = Outcome::Written;
     written.reason = None;
+    // An attachment ACK cannot clear an undelivered desktop input lane.
+    for chunk in ["first", "second"] {
+        runtime.terminal_input_events(&id, chunk);
+    }
+    let in_flight = runtime.runtimes[&id].input_in_flight.unwrap();
+    let observation = OwnerInputObservation {
+        revision: runtime.runtimes[&id]
+            .input_observation
+            .map_or(1, |previous| previous.revision + 1),
+        has_unsent_user_input: false,
+        human_input_elapsed_ms: None,
+    };
+    written.input_observation = Some(observation);
     let mut matching = completion.clone();
+    matching.attachment_outcome = Some(written.clone());
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(matching.clone()),
+        AttachmentProgressPhase::Attached,
+    );
+    assert!(runtime.runtimes[&id]
+        .input_observation
+        .is_some_and(
+            |current| current.revision == observation.revision && !current.has_unsent_user_input
+        ));
+    assert!(runtime.pane_has_unsent_user_input(&id));
+    assert_eq!(runtime.runtimes[&id].input_in_flight, Some(in_flight));
+    let pending = &runtime.runtimes[&id].pending_input_commands;
+    assert!(
+        pending.len() == 1
+            && matches!(pending.front(), Some((OwnerCommand::Input {
+        id: pane_id, incarnation, data,
+    }, RemoteRuntimeCommandKind::Input { reply_client: None }))
+        if pane_id == &operation.owner_pane_id
+            && *incarnation == operation.expected_target.runtime_incarnation
+            && data.as_slice() == b"second")
+    );
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        runtime.runtimes[&id].input_in_flight.is_none()
+            && runtime.runtimes[&id].pending_input_commands.is_empty()
+            && runtime.pane_has_unsent_user_input(&id)
+    );
+    written.input_observation = Some(OwnerInputObservation {
+        revision: runtime.runtimes[&id].input_observation.unwrap().revision + 1,
+        ..observation
+    });
     matching.attachment_outcome = Some(written.clone());
     assert_attachment_phase(
         &runtime.handle_remote_runtime_command_complete(matching),
         AttachmentProgressPhase::Attached,
     );
+    assert!(!runtime.pane_has_unsent_user_input(&id));
     written.session_id = "different-session".into();
     let mut wrong = completion;
     wrong.attachment_outcome = Some(written);

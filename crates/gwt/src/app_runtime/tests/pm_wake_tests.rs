@@ -645,6 +645,13 @@ fn agent_idle_wake_holds_composer_and_bounds_the_delivered_prompt() {
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
         .is_none());
     runtime.terminal_input_events(&pm_id, "\u{15}");
+    assert!(
+        runtime
+            .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_none(),
+        "queued composer clearing must wait for the owner's input ACK"
+    );
+    drain_browser_owner_input(&mut runtime);
     let decision = runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
         .expect("clearing the composer retains the edge");

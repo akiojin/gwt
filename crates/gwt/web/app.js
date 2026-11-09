@@ -1349,6 +1349,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             continue;
           }
           pendingMessages.splice(index, 1);
+          if (recoverSnapshots === true && pending.message.kind === "load_knowledge_bridge") {
+            const state = knowledgeBridgeStateMap.get(pending.message.id);
+            if (state?.loadQueued && state.loadRequestId === pending.message.request_id
+              && (activeWorkspace()?.windows || []).some(entry => entry.id === pending.message.id)) continue;
+          }
           socket.send(JSON.stringify(pending.message));
         }
         // Issue #4433 AC-2: this client has a new client_id, so it missed
@@ -3697,6 +3702,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         issueMonitorModel,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
+        knowledgeBridgeStateMap,
         requestKnowledgeBridge,
         resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,

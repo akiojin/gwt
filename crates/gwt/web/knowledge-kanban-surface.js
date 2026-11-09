@@ -2191,13 +2191,16 @@ export function createKnowledgeKanbanSurface({
           selected_number: state.selectedNumber ?? null,
           refresh,
         }) === "queued";
-        scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
+        // An unsent read has no backend response deadline until ordinary replay.
+        if (!state.loadQueued) scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
       function resyncKnowledge(windowIds) {
         for (const windowId of windowIds) {
           const state = knowledgeBridgeStateMap.get(windowId);
           if (!state) continue;
+          // Only an unsent owner's Refresh intent transfers to the full read.
+          const refresh = state.loadQueued && (state.refreshing || state.queuedLoadRefresh);
           clearKnowledgeLoadRecoveryTimer(state);
           invalidateKnowledgeSearchOwner(state, state.kind, state.query);
           state.inFlightSearchIntent = null;
@@ -2213,7 +2216,7 @@ export function createKnowledgeKanbanSurface({
           state.pendingPhaseUpdates.clear();
           state.dndSnapshot = null;
           // The full read includes selected detail; keep query and selection.
-          requestKnowledgeBridge(windowId, state.kind, false);
+          requestKnowledgeBridge(windowId, state.kind, refresh);
         }
       }
 
@@ -2530,9 +2533,10 @@ export function createKnowledgeKanbanSurface({
               requestKnowledgeBridge(windowId, state.kind, state.refreshing || state.queuedLoadRefresh);
             }
           }
-          if (online && state.loadQueued && workspaceWindowById(windowId)) {
-            // The current project's pending queue is flushed just after open.
+          if (online && !recoverSnapshots && state.loadQueued && workspaceWindowById(windowId)) {
+            // Ordinary open flushes this owner; forced open replaces it in resync.
             state.loadQueued = false;
+            scheduleKnowledgeLoadRecovery(windowId, state.kind, state.loadRequestId);
           }
           if (!online && state.revisionPending) {
             state.revisionPending = false;

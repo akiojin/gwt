@@ -280,15 +280,21 @@ impl IssueMonitorPrefs {
     }
 
     pub fn effective_launch_tiers(&self) -> Vec<Vec<IssueMonitorLaunchProfile>> {
+        self.launch_tiers_for_pool(&self.launch_profile_pool())
+    }
+
+    fn launch_tiers_for_pool(
+        &self,
+        selected: &[IssueMonitorLaunchProfile],
+    ) -> Vec<Vec<IssueMonitorLaunchProfile>> {
         if !self.launch_auto {
-            return vec![self.launch_profile_pool()];
+            return vec![selected.to_vec()];
         }
         let tiers = if self.launch_tiers.is_empty() {
             default_launch_tiers()
         } else {
             self.launch_tiers.clone()
         };
-        let selected = self.launch_profile_pool();
         let Some(primary) = selected
             .first()
             .filter(|profile| profile.agent_member_id.is_some())
@@ -327,8 +333,8 @@ impl IssueMonitorPrefs {
         available: Option<&[String]>,
         select: impl Fn(&[IssueMonitorLaunchProfile]) -> LaunchProfileSelection,
     ) -> Option<IssueMonitorTierSelection> {
-        let tiers = self.effective_launch_tiers();
         let selected = self.registered_launch_profiles_for_issue(issue_number);
+        let tiers = self.launch_tiers_for_pool(&selected);
         let bound = self
             .launch_profile_pool()
             .first()

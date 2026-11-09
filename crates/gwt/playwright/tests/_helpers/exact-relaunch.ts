@@ -499,6 +499,22 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (result.status !== 0 || paths.length !== 1 || !paths[0]) throw new Error(`Unknown PID ${pid} cwd`);
     return realpath(paths[0]);
   };
+  async function stopGui() {
+    if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
+      const current = child;
+      current.kill("SIGTERM");
+      const deadline = Date.now() + 8_000;
+      while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
+      if (current.exitCode === null && current.signalCode === null) {
+        current.kill("SIGKILL");
+        const forcedDeadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
+      }
+    }
+    if (child?.pid && processCommand(child.pid)) {
+      throw new Error(`Fixture gwt process ${child.pid} remained after shutdown`);
+    }
+  }
   async function stop(afterGuiStop?: () => Promise<void>) {
     let browserError: Error | undefined;
     let afterGuiStopError: Error | undefined;
@@ -886,6 +902,6 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
     async restart(options?: { coldOwner: ColdCensus }) { if (options) return coldRestart(options.coldOwner); await stop(); return start(); } };
 }

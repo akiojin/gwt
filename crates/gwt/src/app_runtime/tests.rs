@@ -2037,6 +2037,7 @@ fn sample_runtime_with_events(
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
+        issue_monitor_launch_attempts: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         // Issue #3878: own the fallback commit budget instead of inheriting
@@ -11028,6 +11029,12 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     use gwt::pm_registry::{self, PmDeliveryReceiptStatus as Status};
     use std::cell::Cell;
 
+    assert_eq!(
+        gwt::project_runtime::pm_delivery::PM_WAKE_DELIVERY_BUDGET.default_value(),
+        Duration::from_secs(2),
+        "outcome-test pins must preserve the production delivery budget"
+    );
+
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let path = temp.path().join("receipts.jsonl");
@@ -11171,6 +11178,26 @@ fn issue_6722_periodic_wake_delivers_with_monitor_off_and_no_queue() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Readiness and the child Stop hook are prerequisites, not latency checks.
+    let _hook_budgets = [
+        "GWT_TEST_BUDGET_HOOK_LIVE_ATTEMPT_MS",
+        "GWT_TEST_BUDGET_HOOK_LIVE_READINESS_MS",
+    ]
+    .map(|key| {
+        ScopedEnvVar::set(
+            key,
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        )
+    });
+    // This fixture asserts the native ACK, not the owner's two-second latency.
+    let _delivery_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let home =
         gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());
@@ -11206,6 +11233,26 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Readiness and the child Stop hook are prerequisites, not latency checks.
+    let _hook_budgets = [
+        "GWT_TEST_BUDGET_HOOK_LIVE_ATTEMPT_MS",
+        "GWT_TEST_BUDGET_HOOK_LIVE_READINESS_MS",
+    ]
+    .map(|key| {
+        ScopedEnvVar::set(
+            key,
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        )
+    });
+    // This fixture asserts the native ACK, not the owner's two-second latency.
+    let _delivery_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().unwrap();
     let home =
         gwt_core::paths::normalize_windows_child_process_path(&temp.path().canonicalize().unwrap());

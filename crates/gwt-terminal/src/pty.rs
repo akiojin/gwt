@@ -609,6 +609,8 @@ pub struct PtyHandle {
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     child: Arc<PtyChild>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    /// Serialize ordinary chunks without making input observations wait for I/O.
+    ordinary_input_order: Mutex<()>,
     input_state: Mutex<PtyInputState>,
     generation_active: AtomicBool,
     // The existing Windows start gate answers ConPTY before its reader can
@@ -916,6 +918,7 @@ impl PtyHandle {
             master: Arc::new(Mutex::new(Some(pair.master))),
             child: Arc::new(PtyChild::new(child)),
             writer: Arc::new(Mutex::new(Some(writer))),
+            ordinary_input_order: Mutex::new(()),
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
             startup_cursor_report_sent: AtomicBool::new(false),
@@ -1029,6 +1032,12 @@ impl PtyHandle {
     }
 
     fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
+        let _order =
+            self.ordinary_input_order
+                .lock()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("ordinary input order lock poisoned: {error}"),
+                })?;
         let mut state = self
             .input_state
             .lock()
@@ -1058,16 +1067,32 @@ impl PtyHandle {
             state.queued.push_back(data.to_vec());
             return Ok(());
         }
+        // A stalled writer must not pin input_state: snapshots hold Pane while
+        // observing it, and the output reader needs Pane to keep draining the
+        // child's output. Holding both would close an I/O wait cycle.
+        drop(state);
 
         let lock_started = Instant::now();
         let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+        let mut state = self
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
         if !self.generation_active.load(Ordering::Acquire) {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
             });
+        }
+        // A reservation may have started while we waited. Preserve its atomic
+        // body/submit ordering; the ordinary revision was recorded only once.
+        if state.protected {
+            state.queued.push_back(data.to_vec());
+            return Ok(());
         }
         drop(state);
 
@@ -3140,6 +3165,73 @@ mod tests {
         let status = handle.wait().expect("wait for successful child");
         assert!(status.success());
         assert!(handle.try_wait().unwrap().unwrap().success());
+    }
+
+    #[test]
+    fn waiting_ordinary_input_keeps_observation_and_protected_ordering_live() {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).expect("spawn sleeper"));
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = handle.writer.lock().unwrap();
+        let _physical_writer = writer.replace(Box::new(Capture(bytes.clone())));
+        let input = handle.clone();
+        let pending = std::thread::spawn(move || input.write_input(b"human"));
+
+        // Observe ingress, not a sleep: the old path retains input_state while
+        // waiting for writer; the fixed path publishes the ordinary revision.
+        // test-hygiene: allow-wall-clock-deadline Bounds worker ingress; the lock/revision establishes ordering.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let entered = loop {
+            match handle.input_state.try_lock() {
+                Ok(state) if state.ordinary_input_revision > 0 => break true,
+                Err(std::sync::TryLockError::WouldBlock) => break true,
+                Err(error) => panic!("input state: {error}"),
+                _ => {}
+            }
+            // test-hygiene: allow-wall-clock-deadline Bounds ingress when the worker cannot be scheduled; lock/revision establishes ordering.
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+        let observer = handle.clone();
+        let (observed, observation) = std::sync::mpsc::channel();
+        let snapshot = std::thread::spawn(move || {
+            let revision = observer.ordinary_input_observation().unwrap().0;
+            let reservation = observer.reserve_input_transaction().unwrap();
+            observed.send(revision).unwrap();
+            reservation
+        });
+        // test-hygiene: allow-wall-clock-deadline A blocked physical writer must not block snapshot input facts.
+        let result = observation.recv_timeout(Duration::from_secs(5));
+        drop(writer);
+        pending.join().unwrap().unwrap();
+        let reservation = snapshot.join().unwrap();
+        let before_release = bytes.lock().unwrap().clone();
+        drop(reservation);
+
+        assert!(entered, "ordinary input did not enter");
+        assert_eq!(
+            result.ok(),
+            Some(1),
+            "writer wait blocked input observation"
+        );
+        assert!(
+            before_release.is_empty(),
+            "pending input bypassed protection"
+        );
+        assert_eq!(&*bytes.lock().unwrap(), b"human");
     }
 
     #[test]
