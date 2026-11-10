@@ -201,6 +201,8 @@ impl AppRuntime {
                     && receipt["incarnation"].as_u64() == Some(identity.runtime_incarnation) =>
             {
                 if receipt["acknowledged"] == true {
+                    self.issue_monitor_launch_failure_causes
+                        .remove(&identity.context.project_root);
                     if let Some(delivery_id) = identity.delivery_id {
                         self.issue_monitor_launch_deliveries.insert(
                             delivery_id,

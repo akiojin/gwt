@@ -4792,10 +4792,11 @@ impl AppRuntime {
         error: String,
         _failed_attempt: Option<gwt::AutonomousHandoffDeliveryAttempt>,
     ) -> Vec<OutboundEvent> {
-        let repeated = request.delivery_id.as_ref().is_some_and(|delivery_id| {
-            matches!(self.issue_monitor_launch_deliveries.get(delivery_id),
-                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message, .. }) if message == &error)
-        });
+        let repeated = self
+            .issue_monitor_launch_failure_causes
+            .insert(context.project_root.clone(), error.clone())
+            .as_deref()
+            == Some(error.as_str());
         if !repeated {
             tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
