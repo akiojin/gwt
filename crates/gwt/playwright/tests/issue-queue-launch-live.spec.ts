@@ -810,8 +810,7 @@ test.describe("Issue queue real backend launch", () => {
 
       // Stop only the owned provider, then recover through the real authenticated
       // Issues path. No incoming census or roster frame is manufactured here.
-      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
-      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
+      // Keep the launch binding until the exact terminal receipt is accepted.
       await sendLiveGwtEvent(current, { kind: "terminal_input", id: firstObservation.agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
       await expect.poll(() => {
         try { process.kill(launch.pid, 0); return false; } catch { return true; }
