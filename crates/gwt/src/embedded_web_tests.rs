@@ -354,9 +354,13 @@ fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
         "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
+        settings_js.contains(r#"labels.setAttribute("role", "group")"#)
+            && settings_js.contains(r#"checkbox.type = "checkbox""#)
+            && settings_js.contains("settings-label-options")
+            && settings_js.contains("createRepositoryLabelChip")
+            && settings_js.contains("get_repository_labels")
             && settings_js.contains("settings-field")
-            && settings_js.contains("settings-input")
+            && !settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
             && !surface_js
                 .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#),
         "allowed labels must use existing Operator Settings controls instead of inline Issue details"
