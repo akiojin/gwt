@@ -7,9 +7,13 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir(&repo).unwrap();
+    let other_repo = temp.path().join("other-repo");
+    fs::create_dir(&other_repo).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let other_tab = sample_project_tab("tab-2", "Other", other_repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab, other_tab], Some("tab-1"));
     let context = runtime.project_context("tab-1").unwrap();
+    let other_context = runtime.project_context("tab-2").unwrap();
     let request = super::super::DeferredIssueMonitorLaunch {
         project_root: repo,
         issue_number: 6934,
@@ -28,15 +32,32 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
             "publish ack timeout; exact cleanup remains pending",
             "owner endpoint unavailable",
         ] {
-            for _ in 0..601 {
+            for observation in 0..601 {
+                let mut request = request.clone();
+                request.delivery_id =
+                    (observation % 3 != 0).then(|| format!("failed-owner-delivery-{observation}"));
                 notifications.extend(runtime.schedule_issue_monitor_launch_failure(
                     context.clone(),
-                    request.clone(),
+                    request,
                     reason.into(),
                     None,
                 ));
             }
         }
+        let mut other_request = request.clone();
+        other_request.project_root = other_repo;
+        notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+            other_context,
+            other_request,
+            "owner endpoint unavailable".into(),
+            None,
+        ));
+        notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+            context,
+            request,
+            "owner endpoint unavailable".into(),
+            None,
+        ));
         notifications
     });
     let errors = captured
@@ -52,15 +73,15 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
         })
         .count();
     assert_eq!(
-        errors, 2,
-        "each new failure reason is logged once, including after a reason change"
+        errors, 3,
+        "each project logs a new cause once across changing or absent deliveries"
     );
     assert_eq!(
         notifications
             .iter()
             .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
             .count(),
-        1202,
+        1204,
         "notification aggregation retains its existing raw observation path"
     );
 }
@@ -5988,9 +6009,22 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     assert_eq!(before_ready["acknowledged"], false);
     assert_eq!(before_ready["id"], pane.id);
     assert_eq!(before_ready["incarnation"], pane.incarnation);
+    let other_project = temp.path().join("other-project");
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(repo.clone(), "owner endpoint unavailable".into());
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(other_project.clone(), "owner endpoint unavailable".into());
     // Accepted replay now observes readiness too. Consume its negative GUI
     // completion before asserting a separate ACK worker can be scheduled.
     runtime.finish_queued_delivery_acks(&launch_tasks);
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a negative ACK must retain the consecutive failure cause"
+    );
     assert!(!runtime
         .pending_launch_delivery_acks
         .contains_key(&window_id));
@@ -6200,6 +6234,18 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         *ack
     };
     runtime.handle_issue_monitor_launch_delivery_ack(take_ack());
+    assert!(
+        !runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a successful owner ACK starts a new failure episode for its project"
+    );
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&other_project),
+        "an ACK must preserve another project's consecutive failure cause"
+    );
     assert_eq!(
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
         disk_after_ready
@@ -6348,10 +6394,19 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         stale_owner_ack.is_err(),
         "the replaced owner incarnation cannot ACK"
     );
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(repo.clone(), "owner endpoint unavailable".into());
     stale_ack();
     assert!(runtime
         .handle_issue_monitor_launch_delivery_ack(take_ack())
         .is_empty());
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a stale ACK must retain the consecutive failure cause"
+    );
     assert_eq!(
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
         disk_before_stale_ack
