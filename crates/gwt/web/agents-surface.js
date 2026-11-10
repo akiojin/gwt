@@ -435,7 +435,9 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
         }
         state.title = "Open current work in Works";
       }
-      who.append(name, purpose, stats(member, "roster-row-stats")); row.append(avatar(member), who, state);
+      const assignments = document.createElement("div"); assignments.className = "roster-assignments";
+      assignments.setAttribute("role", "group"); assignments.setAttribute("aria-label", "Project assignments");
+      who.append(name, purpose, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
@@ -446,6 +448,28 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     row.querySelector("h3").textContent = member.name;
     const purpose = row.querySelector(".roster-purpose");
     purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
+    const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
+    if (cached.summariesKey !== summariesKey) {
+      const assignments = row.querySelector(".roster-assignments"); assignments.replaceChildren();
+      for (const summary of summaries) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "roster-assignment";
+        button.dataset.assignmentProject = summary.project_key;
+        button.textContent = `${summary.project_name || "Unknown project"} · ${summary.issue_number ? `#${summary.issue_number}` : "No issue"} · ${summary.state || "Unknown"}`;
+        button.title = summary.project_key === rosterModel.read().project_key
+          ? current?.session_id === summary.session_id ? "Open current work in Works" : "Select this member"
+          : `Open project ${summary.project_name || "Unknown project"}`;
+        button.addEventListener("click", () => {
+          const latest = rosterModel.read().members.find(item => item.member_id === member.member_id);
+          if (!latest?.active_assignments?.some(item => item.project_key === summary.project_key && item.session_id === summary.session_id)) return;
+          if (summary.project_key !== rosterModel.read().project_key) { onNavigateProject(summary.project_key); return; }
+          const current = liveWork(latest);
+          if (current?.session_id === summary.session_id) openCurrent(member.member_id, current);
+          else selectMember(member.member_id);
+        });
+        assignments.append(button);
+      }
+      assignments.hidden = !summaries.length; cached.summariesKey = summariesKey;
+    }
     row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? `${member.enabled ? "" : "Resting · "}Activity unavailable` : member.enabled ? "Waiting" : "Resting";
     const values = [number(member.issue_count), number(member.landed_count), hours(member.active_seconds), number(member.tokens)];
     row.querySelectorAll(".roster-stat b").forEach((node, index) => { node.textContent = values[index]; });

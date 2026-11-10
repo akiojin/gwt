@@ -4027,6 +4027,13 @@ fn agent_roster_view(
 ) -> std::io::Result<gwt::AgentRosterView> {
     let snapshot = gwt::agent_registry::SessionMemberSnapshot::load()?;
     snapshot.configured_pm_member(&context.project_key)?;
+    // Local admission fields and all-project assignment summaries must describe
+    // the same registry generation, including when another project just changed.
+    let canonical = prefs
+        .agent_registry_revision
+        .map(|_| snapshot.project_snapshot(&context.project_key))
+        .transpose()?;
+    let prefs = canonical.as_ref().unwrap_or(prefs);
     agent_roster_view_from_snapshot(
         context,
         prefs,
@@ -4037,6 +4044,72 @@ fn agent_roster_view(
         Some(&snapshot),
         true,
     )
+}
+
+fn agent_roster_assignment_view(
+    context: &ProjectContext,
+    member_id: &str,
+    assignment: &gwt::agent_names::AgentMemberAssignment,
+    sessions: &[Arc<gwt_agent::Session>],
+    snapshot: Option<&gwt::agent_registry::SessionMemberSnapshot>,
+) -> std::io::Result<gwt::protocol::AgentRosterAssignmentView> {
+    let project_key = assignment
+        .project_key
+        .as_deref()
+        .ok_or_else(|| std::io::Error::other("Agent assignment has no project identity"))?;
+    let session = match sessions
+        .iter()
+        .find(|session| Some(session.id.as_str()) == assignment.session_id.as_deref())
+    {
+        Some(session) => {
+            let root = session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path);
+            let source = session
+                .repo_hash
+                .clone()
+                .unwrap_or_else(|| gwt_core::paths::project_scope_hash(root).to_string());
+            let member = match snapshot {
+                Some(snapshot) => snapshot.resolve_session(session)?,
+                None => session.agent_member_id.clone(),
+            };
+            (source == project_key && member.as_deref() == Some(member_id))
+                .then_some(session.as_ref())
+        }
+        None => None,
+    };
+    let root = session
+        .map(|session| {
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path)
+        })
+        .or_else(|| {
+            (project_key == context.project_key.as_str()).then_some(context.project_root.as_path())
+        });
+    let project_name = root
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("Unknown project")
+        .to_string();
+    let state = match session.map(|session| session.status) {
+        Some(gwt_agent::AgentStatus::Running) => "Recorded Running",
+        Some(gwt_agent::AgentStatus::Idle) => "Recorded Idle",
+        Some(gwt_agent::AgentStatus::WaitingInput) => "Recorded Waiting",
+        Some(gwt_agent::AgentStatus::Stopped) => "Recorded Stopped",
+        Some(gwt_agent::AgentStatus::Interrupted) => "Recorded Interrupted",
+        _ if assignment.session_id.is_none() => "Reserved",
+        _ => "Unknown",
+    };
+    Ok(gwt::protocol::AgentRosterAssignmentView {
+        project_key: project_key.into(),
+        project_name,
+        session_id: assignment.session_id.clone(),
+        issue_number: assignment.issue_number,
+        state: state.into(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4058,6 +4131,7 @@ fn agent_roster_view_from_snapshot(
     let normalized_root =
         dunce::canonicalize(&context.project_root).unwrap_or_else(|_| context.project_root.clone());
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(&context.project_root);
+    let all_sessions = sessions;
     let sessions: Vec<_> = sessions
         .iter()
         .filter(|session| {
@@ -4135,10 +4209,26 @@ fn agent_roster_view_from_snapshot(
                 .collect();
             let saved_manual_profile =
                 gwt::agent_registry::member_profile(prefs, &member.agent_member_id);
-            gwt::AgentRosterMemberView {
+            let active_assignments = member_snapshot
+                .map(|snapshot| snapshot.assignments_for_member(&member.agent_member_id))
+                .transpose()?
+                .unwrap_or_default()
+                .iter()
+                .map(|assignment| {
+                    agent_roster_assignment_view(
+                        context,
+                        &member.agent_member_id,
+                        assignment,
+                        all_sessions,
+                        member_snapshot,
+                    )
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok(gwt::AgentRosterMemberView {
                 member: member.clone(),
                 provider: member.agent_id.clone(),
                 model: latest.and_then(|session| session.model.clone()),
+                active_assignments,
                 saved_manual_revision: saved_manual_profile
                     .as_ref()
                     .map(saved_manual_profile_revision),
@@ -4157,9 +4247,9 @@ fn agent_roster_view_from_snapshot(
                 landed_count: None,
                 active_seconds: None,
                 tokens: None,
-            }
+            })
         })
-        .collect();
+        .collect::<std::io::Result<_>>()?;
     let mut past: BTreeMap<String, gwt::AgentPastContributorView> = BTreeMap::new();
     for entry in entries {
         let (Some(session_id), Some(name)) = (&entry.origin_session_id, &entry.origin_agent_name)
@@ -4331,6 +4421,123 @@ fn agent_roster_view_from_snapshot(
 }
 
 impl AppRuntime {
+    pub(crate) fn invalidate_agent_roster_refreshes(&mut self, context: &ProjectContext) {
+        if !self.project_context_is_current(context) {
+            return;
+        }
+        if let Some(state) = self.project_state_mut(context) {
+            state.agent_roster_foreground = Arc::new(());
+        }
+    }
+
+    pub(crate) fn note_agent_roster_response(
+        &mut self,
+        context: &ProjectContext,
+        events: &[OutboundEvent],
+    ) {
+        if events.iter().any(|event| match &event.event {
+            BackendEvent::AgentRoster { roster, .. } => {
+                roster.project_key == context.project_key.as_str()
+            }
+            BackendEvent::AgentRosterError { project_key, .. } => {
+                project_key == context.project_key.as_str()
+            }
+            _ => false,
+        }) {
+            self.invalidate_agent_roster_refreshes(context);
+        }
+    }
+
+    pub(crate) fn agent_roster_refresh_is_current(
+        &self,
+        context: &ProjectContext,
+        foreground: &Arc<()>,
+    ) -> bool {
+        self.project_context_is_current(context)
+            && self
+                .project_state(context)
+                .is_some_and(|state| Arc::ptr_eq(&state.agent_roster_foreground, foreground))
+    }
+
+    pub(crate) fn refresh_agent_roster_for_project(&mut self, context: &ProjectContext) {
+        let Some(foreground) = self
+            .project_state(context)
+            .map(|state| Arc::clone(&state.agent_roster_foreground))
+        else {
+            return;
+        };
+        let worker_foreground = Arc::clone(&foreground);
+        let context_owned = context.clone();
+        let sessions_dir = self.sessions_dir.clone();
+        let choices = self.member_tuning_choices(&context.project_root);
+        let proxy = self.proxy.clone();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let snapshot = gwt::agent_registry::SessionMemberSnapshot::load()?;
+                let prefs = snapshot.project_snapshot(&context_owned.project_key)?;
+                let sessions = gwt_agent::session_ledger::load_sessions_shared(&sessions_dir)?;
+                let entries = gwt_core::coordination::load_entries_since(
+                    &context_owned.project_root,
+                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                );
+                let complete = entries.is_ok();
+                agent_roster_view_from_snapshot(
+                    &context_owned,
+                    &prefs,
+                    &sessions,
+                    &entries.unwrap_or_default(),
+                    complete,
+                    &sessions_dir,
+                    Some(&snapshot),
+                    true,
+                )
+            }))
+            .unwrap_or_else(|_| Err(std::io::Error::other("Agent roster refresh interrupted")));
+            let event = match result {
+                Ok(mut roster) => {
+                    roster.tuning_choices = Some(choices);
+                    BackendEvent::AgentRoster {
+                        roster,
+                        request_id: None,
+                    }
+                }
+                Err(error) => BackendEvent::AgentRosterError {
+                    project_key: context_owned.project_key.to_string(),
+                    message: format!("Agent roster unavailable; refresh and retry: {error}"),
+                    request_id: None,
+                },
+            };
+            proxy.send(UserEvent::AgentRosterRefreshed {
+                context: context_owned,
+                foreground: worker_foreground,
+                event: Box::new(event),
+            });
+        });
+        if let Err(message) = spawn {
+            self.proxy.send(UserEvent::AgentRosterRefreshed {
+                context: context.clone(),
+                foreground,
+                event: Box::new(BackendEvent::AgentRosterError {
+                    project_key: context.project_key.to_string(),
+                    message,
+                    request_id: None,
+                }),
+            });
+        }
+    }
+
+    pub(crate) fn agent_roster_refreshed_events(
+        &self,
+        context: &ProjectContext,
+        foreground: &Arc<()>,
+        event: BackendEvent,
+    ) -> Vec<OutboundEvent> {
+        if !self.agent_roster_refresh_is_current(context, foreground) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::project(context.project_key.clone(), event)]
+    }
+
     pub(crate) fn agent_schedule_events(
         &mut self,
         context: &ProjectContext,
@@ -4378,6 +4585,7 @@ impl AppRuntime {
         expected_revision: Option<u64>,
         request_id: Option<String>,
     ) -> Vec<OutboundEvent> {
+        self.invalidate_agent_roster_refreshes(context);
         let tuning = matches!(action, gwt::agent_names::AgentRosterAction::SetTuning(_));
         if tuning && request_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
             return vec![OutboundEvent::reply(
@@ -6405,6 +6613,73 @@ pub(super) use gwt::project_runtime::workspace::{
 #[cfg(test)]
 mod bounded_cache_merge_tests {
     use super::*;
+
+    #[test]
+    fn roster_assignment_summaries_keep_both_projects_without_claiming_liveness() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = [temp.path().join("Alpha"), temp.path().join("Beta")];
+        for root in &roots {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let context = ProjectContext {
+            tab_id: "alpha".into(),
+            project_key: gwt_core::paths::project_scope_hash(&roots[0]),
+            generation: 1,
+            project_root: roots[0].clone(),
+        };
+        let sessions: Vec<_> = roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| {
+                let mut session = gwt_agent::Session::new(root, "work", gwt_agent::AgentId::Codex);
+                session.id = format!("session-{index}");
+                session.agent_member_id = Some("same-member".into());
+                session.project_state_root = Some(root.clone());
+                session.repo_hash = Some(gwt_core::paths::project_scope_hash(root).to_string());
+                session.status = gwt_agent::AgentStatus::Running;
+                Arc::new(session)
+            })
+            .collect();
+        let assignments: Vec<gwt::agent_names::AgentMemberAssignment> = roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| {
+                serde_json::from_value(serde_json::json!({
+                    "project_key": gwt_core::paths::project_scope_hash(root).to_string(),
+                    "reservation_id": format!("reservation-{index}"),
+                    "session_id": format!("session-{index}"),
+                    "issue_number": if index == 0 { Some(4777) } else { None },
+                    "spec_number": null, "delivery_id": null,
+                    "host_pid": 1, "host_started_at": 1,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let views = assignments
+            .iter()
+            .map(|assignment| {
+                agent_roster_assignment_view(&context, "same-member", assignment, &sessions, None)
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        let views = serde_json::to_value(views).unwrap();
+        assert_eq!(views[0]["project_name"], "Alpha");
+        assert_eq!(views[1]["project_name"], "Beta");
+        assert_eq!(views[0]["issue_number"], 4777);
+        assert!(views[1]["issue_number"].is_null());
+        assert_eq!(views[1]["state"], "Recorded Running");
+        let unknown = agent_roster_assignment_view(
+            &context,
+            "different-member",
+            &assignments[1],
+            &sessions,
+            None,
+        )
+        .unwrap();
+        let unknown = serde_json::to_value(unknown).unwrap();
+        assert_eq!(unknown["project_name"], "Unknown project");
+        assert_eq!(unknown["state"], "Unknown");
+    }
 
     #[test]
     fn roster_view_rejects_unreadable_registry_instead_of_fabricating_history() {

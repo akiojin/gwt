@@ -18,7 +18,7 @@ const members = [
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -36,7 +36,7 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
@@ -488,6 +488,36 @@ test("an observation timestamp alone preserves roster detail, controls and selec
   assert.ok(f.surface.element.querySelector(".roster-now button") === currentControl);
   assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row);
   assert.equal(row.getAttribute("aria-selected"), "true");
+  f.surface.dispose();
+});
+
+test("one member row shows both project assignments without granting foreign terminal access", async () => {
+  const navigated = [], f = await fixture({ onNavigateProject: key => navigated.push(key) });
+  const summaries = [
+    { project_key: "project", project_name: "Alpha", session_id: "s1", issue_number: 4777, state: "Recorded Running" },
+    { project_key: "project-b", project_name: "Beta", session_id: "foreign", issue_number: null, state: "Recorded Waiting" },
+  ];
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>
+    member.member_id === "m1" ? { ...member, active_assignments: summaries } : member) })); f.flush();
+  const row = f.surface.element.querySelector('.roster-row[data-member-id="m1"]');
+  const local = row.querySelector('[data-assignment-project="project"]');
+  const foreign = row.querySelector('[data-assignment-project="project-b"]');
+  assert.equal(local?.textContent, "Alpha · #4777 · Recorded Running");
+  assert.equal(foreign?.textContent, "Beta · No issue · Recorded Waiting");
+  assert.equal(f.surface.element.querySelectorAll('.roster-row[data-member-id="m1"]').length, 1);
+  assert.equal(row.querySelectorAll(".roster-purpose").length, 1, "the local current-work control stays distinct");
+  foreign.click();
+  assert.deepEqual(navigated, ["project-b"]);
+  assert.deepEqual(f.opened, [], "foreign summary only navigates to its own project");
+  local.click();
+  assert.deepEqual(f.opened, [current], "local input still requires the exact current census");
+  assert.equal(f.surface.element.querySelector(".roster-active").textContent, "Active 1");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[data-assignment-project="project-b"]').disabled, true);
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>
+    member.member_id === "m1" ? { ...member, active_assignments: summaries.slice(1) } : member) })); f.flush();
+  assert.equal(row.querySelectorAll("[data-assignment-project]").length, 1);
+  assert.equal(row.querySelector('[data-assignment-project="project-b"]').textContent, "Beta · No issue · Recorded Waiting");
   f.surface.dispose();
 });
 

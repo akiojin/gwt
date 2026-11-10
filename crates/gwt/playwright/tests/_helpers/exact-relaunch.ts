@@ -570,6 +570,17 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     let owner: { pid: number; birth: number; instance: string; startup_intent: "gui_managed" | "standalone"; natural: boolean | null } | null = null;
     let ownerCaptureFailed = false;
     let ownerError: Error | undefined;
+    const ownerHealthObservations: Record<string, unknown>[] = [];
+    const ownerHealthFields = (health: Record<string, unknown>) => {
+      const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+      const flag = (value: unknown) => typeof value === "boolean" ? value : null;
+      return { gui_presence_count: count(health.gui_presence_count), panes: count(health.panes),
+        pending_transport: count(health.pending_transport), draining: flag(health.draining),
+        reconciliation_required: flag(health.reconciliation_required),
+        reconciliation_retry_pending: flag(health.reconciliation_retry_pending),
+        reconciliation_needs_human: flag(health.reconciliation_needs_human) };
+    };
+    let sampleOwnerHealth: ((signal: AbortSignal) => Promise<Record<string, unknown>>) | undefined;
     if (ownedPid && ownerObservationSupported && !coldCleanupFailed && !protectGuiOwner) {
       try {
         const descriptorDirectory = join(state, "projects", hash, "runtime", "daemon");
@@ -629,6 +640,23 @@ readline.createInterface({input:process.stdin}).on('line', line => {
               throw new Error("Fixture owner physical identity changed");
             owner = { pid: descriptor.pid, birth: observed.birth, instance: health.host_instance_id,
               startup_intent: health.startup_intent, natural: health.startup_intent === "gui_managed" ? false : null };
+            ownerHealthObservations.push({ at: new Date().toISOString(), phase: "before_gui_stop",
+              status: "observed", ...ownerHealthFields(health) });
+            const capturedOwner = owner;
+            const authToken: string = descriptor.auth_token;
+            sampleOwnerHealth = async signal => {
+              const response = await fetch(new URL("/private/project/command", transport), {
+                method: "POST", redirect: "error", signal,
+                headers: { Authorization: `Bearer ${authToken}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ project_key: hash, command: { type: "health" } }),
+              });
+              if (!response.ok) return { status: "unavailable" };
+              const health = await response.json();
+              if (health?.pid !== capturedOwner.pid || health.project_key !== hash
+                || health.host_started_at !== capturedOwner.birth || health.host_instance_id !== capturedOwner.instance
+                || health.startup_intent !== capturedOwner.startup_intent) return { status: "identity_changed" };
+              return { status: "observed", ...ownerHealthFields(health) };
+            };
           }
         }
       } catch {
@@ -659,17 +687,45 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         }
       }
       if (owner?.startup_intent === "gui_managed") {
+        const waitStarted = performance.now();
+        let healthSamples = 0, healthStopped = false;
+        let healthRequest: AbortController | undefined;
+        let healthPending: Promise<void> | undefined;
+        const sampleHealth = () => {
+          if (!sampleOwnerHealth || healthPending || healthSamples >= 30 || healthStopped) return;
+          healthSamples += 1;
+          const request = new AbortController();
+          healthRequest = request;
+          const timeout = setTimeout(() => request.abort(), 500);
+          const at = new Date().toISOString(), elapsed_ms = Math.round(performance.now() - waitStarted);
+          // Diagnostics must not serialize the private endpoint, bearer, or raw errors.
+          healthPending = sampleOwnerHealth(request.signal).catch(() => ({ status: "unavailable" })).then(observation => {
+            if (!healthStopped) ownerHealthObservations.push({ at, phase: "waiting_for_owner_exit", elapsed_ms, ...observation });
+          }).finally(() => { clearTimeout(timeout); healthRequest = undefined; healthPending = undefined; });
+        };
+        const healthTimer = setInterval(sampleHealth, 1_000);
         try {
           const deadline = performance.now() + 30_000;
+          sampleHealth();
           while (performance.now() < deadline) {
             const current = await readProcessState(owner.pid);
             if (performance.now() >= deadline) break;
-            if (!current || current.birth !== owner.birth) { owner.natural = true; break; }
+            if (!current || current.birth !== owner.birth) {
+              owner.natural = true;
+              ownerHealthObservations.push({ at: new Date().toISOString(), phase: "waiting_for_owner_exit",
+                elapsed_ms: Math.round(performance.now() - waitStarted), status: current ? "process_identity_changed" : "process_absent" });
+              break;
+            }
             await delay(100);
           }
           if (!owner.natural) throw new Error("Fixture owner natural reap not observed before deadline");
         } catch {
           ownerError = new Error("Fixture owner natural reap not observed before deadline");
+        } finally {
+          healthStopped = true;
+          clearInterval(healthTimer);
+          healthRequest?.abort();
+          await healthPending;
         }
       }
       // PTYs can create their own process groups; clean only recorded fixture
@@ -717,7 +773,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       if (ownedPid) {
         const remaining = processCommand(ownedPid);
         await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining,
-          owner, ...(ownerObservationSupported ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
+          owner, owner_health_observations: ownerHealthObservations,
+          ...(ownerObservationSupported ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
           ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
         if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
       }

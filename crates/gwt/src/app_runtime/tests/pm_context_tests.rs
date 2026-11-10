@@ -3426,6 +3426,153 @@ fn unreadable_pm_status_never_fabricates_a_default_profile_or_token() {
 }
 
 #[test]
+fn shared_roster_watcher_broadcasts_without_mutation_and_rejects_retired_context() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (tasks, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = tasks;
+    let roster = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    let before = fs::read(gwt::agent_registry::path()).unwrap();
+    let context = runtime.project_contexts()[0].clone();
+    runtime.refresh_agent_roster_for_project(&context);
+    drain_queued_blocking_tasks(&queued);
+    let latest_refresh = || {
+        recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match recorded_project_payload(event) {
+                UserEvent::AgentRosterRefreshed {
+                    context,
+                    foreground,
+                    event,
+                } => Some((context.clone(), foreground.clone(), event.clone())),
+                _ => None,
+            })
+            .expect("watcher worker returns its captured project and snapshot")
+    };
+    let (captured, foreground, event) = latest_refresh();
+    assert_eq!(captured, context);
+    let events = runtime.agent_roster_refreshed_events(&captured, &foreground, *event.clone());
+    assert!(matches!(events.as_slice(), [OutboundEvent {
+        target: DispatchTarget::Project(key),
+        event: BackendEvent::AgentRoster { roster: view, request_id: None }, ..
+    }] if key.as_str() == context.project_key.as_str() && view.members.len() == roster.members.len()));
+    let mut retired = captured.clone();
+    retired.generation += 1;
+    assert!(runtime
+        .agent_roster_refreshed_events(&retired, &foreground, *event.clone())
+        .is_empty());
+    assert_eq!(fs::read(gwt::agent_registry::path()).unwrap(), before);
+    let rejected = runtime.agent_roster_events(
+        &context,
+        &"read-client".into(),
+        gwt::agent_names::AgentRosterAction::Add {
+            agent_id: Some("codex".into()),
+            name: None,
+            pm_eligible: false,
+        },
+        None,
+        Some("rejected-change".into()),
+    );
+    assert!(matches!(
+        rejected[0].event,
+        BackendEvent::AgentRosterError { .. }
+    ));
+    assert!(
+        runtime
+            .agent_roster_refreshed_events(&captured, &foreground, *event)
+            .is_empty(),
+        "a newer direct response invalidates an older background result"
+    );
+
+    assert!(runtime
+        .agent_roster_events(
+            &context,
+            &"read-client".into(),
+            gwt::agent_names::AgentRosterAction::Read,
+            None,
+            Some("fresh-read".into()),
+        )
+        .is_empty());
+    // This background read starts after the direct request began. Its completion
+    // must still be fenced when the direct receipt is delivered first.
+    runtime.refresh_agent_roster_for_project(&context);
+    drain_queued_blocking_tasks(&queued);
+    let (_, during_foreground, during_event) = latest_refresh();
+    let direct = recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => Some(events.clone()),
+            _ => None,
+        })
+        .expect("direct read returns its client receipt");
+    assert!(direct.iter().all(
+        |event| matches!(&event.target, DispatchTarget::Client(client) if client == "read-client")
+    ));
+    let direct_revision = direct
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::AgentRoster { roster, request_id }
+                if request_id.as_deref() == Some("fresh-read") =>
+            {
+                Some(roster.revision)
+            }
+            _ => None,
+        })
+        .expect("direct receipt retains its request id");
+    assert!(
+        matches!(during_event.as_ref(), BackendEvent::AgentRoster { roster, .. }
+        if roster.revision == direct_revision)
+    );
+    runtime.note_agent_roster_response(&context, &direct);
+    assert!(!runtime.agent_roster_refresh_is_current(&context, &during_foreground));
+    for event in [
+        *during_event,
+        BackendEvent::AgentRosterError {
+            project_key: context.project_key.to_string(),
+            message: "old read failed".into(),
+            request_id: None,
+        },
+    ] {
+        assert!(runtime
+            .agent_roster_refreshed_events(&context, &during_foreground, event)
+            .is_empty());
+    }
+    // The existing queue reruns a mismatched completion so other clients also
+    // receive the latest project-wide view after the direct client-only reply.
+    runtime.refresh_agent_roster_for_project(&context);
+    drain_queued_blocking_tasks(&queued);
+    let (_, latest_foreground, latest_event) = latest_refresh();
+    let mut foreign = context.clone();
+    foreign.project_key = gwt_core::paths::project_scope_hash(&temp.path().join("foreign"));
+    runtime.note_agent_roster_response(&foreign, &direct);
+    runtime.invalidate_agent_roster_refreshes(&retired);
+    assert!(
+        runtime.agent_roster_refresh_is_current(&context, &latest_foreground),
+        "foreign or retired scope must not rotate the current project's token"
+    );
+    let broadcast =
+        runtime.agent_roster_refreshed_events(&context, &latest_foreground, *latest_event);
+    assert!(matches!(broadcast.as_slice(), [OutboundEvent {
+        target: DispatchTarget::Project(key), event: BackendEvent::AgentRoster { request_id: None, .. }, ..
+    }] if key.as_str() == context.project_key.as_str()));
+}
+
+#[test]
 fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
     let _env_lock = env_test_lock()
         .lock()

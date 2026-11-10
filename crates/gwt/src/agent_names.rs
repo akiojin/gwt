@@ -1778,10 +1778,10 @@ pub(crate) fn release_reaped_project_member(
         None => {
             let snapshot = crate::agent_registry::SessionMemberSnapshot::load()
                 .map_err(|error| error.to_string())?;
-            let assignment = snapshot
-                .member(member_id)
+            let mut assignments = snapshot
+                .assignments_for_member(member_id)
                 .map_err(|error| error.to_string())?
-                .and_then(|member| member.assignment)
+                .into_iter()
                 .filter(|assignment| {
                     assignment.role == AgentAssignmentRole::Implementation
                         && assignment.reservation_id == reservation_id
@@ -1793,10 +1793,13 @@ pub(crate) fn release_reaped_project_member(
                                 && Some(started)
                                     == crate::process::host_process_start_time(std::process::id())
                         })
-                })
-                .ok_or_else(|| {
-                    "Cannot prove the reaped Agent reservation; retry cleanup".to_string()
-                })?;
+                });
+            let assignment = assignments.next().ok_or_else(|| {
+                "Cannot prove the reaped Agent reservation; retry cleanup".to_string()
+            })?;
+            if assignments.next().is_some() {
+                return Err("Reaped Agent reservation is ambiguous; retry cleanup".into());
+            }
             let key = assignment.project_key.as_deref().ok_or_else(|| {
                 "Reaped Agent reservation has no stored project; retry cleanup".to_string()
             })?;
@@ -3303,12 +3306,17 @@ mod tests {
         );
         let another_root = temp.path().join("another");
         std::fs::create_dir_all(&another_root).unwrap();
+        let mut shared_people = persisted.members.clone();
+        for member in &mut shared_people {
+            member.assignment = None;
+            member.pm_project_key = None;
+        }
         assert_eq!(
             read_project_roster(&another_root, &gwt_core::paths::gwt_sessions_dir())
                 .unwrap()
                 .members,
-            persisted.members,
-            "another project observes the same people and exact assignments"
+            shared_people,
+            "another project observes the same people without inheriting their assignments"
         );
     }
 
@@ -3366,7 +3374,7 @@ mod tests {
     }
 
     #[test]
-    fn competing_reservations_cannot_allocate_the_same_member() {
+    fn competing_projects_can_reserve_the_same_member_without_sharing_their_assignments() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let _home = gwt_core::test_support::ScopedGwtHome::set(&home);
@@ -3381,6 +3389,12 @@ mod tests {
             roster.members, second.members,
             "both projects share one registered roster"
         );
+        crate::machine_agent_settings::set(
+            Some(2),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:00:00Z",
+        )
+        .unwrap();
         let gate = std::sync::Barrier::new(2);
         let results = std::thread::scope(|scope| {
             let handles: Vec<_> = [(&root, "first"), (&second_root, "second")]
@@ -3407,13 +3421,137 @@ mod tests {
                 .map(|handle| handle.join().unwrap())
                 .collect::<Vec<_>>()
         });
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
+        assert_eq!(
+            results[0].as_ref().unwrap().agent_member_id,
+            results[1].as_ref().unwrap().agent_member_id
+        );
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        assert!(
+            reserve_project_member(&root, &sessions, "duplicate", None, None, None, None).is_err()
+        );
+        let before_b = read_project_roster(&second_root, &sessions).unwrap();
+        assert_eq!(
+            before_b.members[0]
+                .assignment
+                .as_ref()
+                .unwrap()
+                .reservation_id,
+            "second"
+        );
+        let third_root = temp.path().join("third-repo");
+        std::fs::create_dir_all(&third_root).unwrap();
+        read_project_roster(&third_root, &sessions).unwrap();
+        assert!(reserve_project_member(
+            &third_root,
+            &sessions,
+            "over-limit",
+            None,
+            None,
+            None,
+            None
+        )
+        .unwrap_err()
+        .contains("Machine Agent capacity"));
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let assignment = prefs.agent_roster.as_mut().unwrap().members[0]
+                .assignment
+                .as_mut()
+                .unwrap();
+            assignment.host_pid = 0;
+            assignment.host_started_at = None;
+            Ok(())
+        })
+        .unwrap();
+        crate::machine_agent_settings::set(
+            Some(1),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:01:00Z",
+        )
+        .unwrap();
+        assert!(
+            reserve_project_member(
+                &root,
+                &sessions,
+                "replacement-over-limit",
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap_err()
+            .contains("Machine Agent capacity"),
+            "replacing a dead slot must obey the current machine limit"
+        );
+        crate::machine_agent_settings::set(
+            Some(2),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:02:00Z",
+        )
+        .unwrap();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment =
+                results[0].as_ref().unwrap().assignment.clone();
+            Ok(())
+        })
+        .unwrap();
+        release_project_member(
+            &root,
+            &sessions,
+            &roster.members[0].agent_member_id,
+            "first",
+        )
+        .unwrap();
+        assert_eq!(
+            read_project_roster(&second_root, &sessions)
+                .unwrap()
+                .members,
+            before_b.members
+        );
         assert_eq!(
             read_project_roster(&root, &gwt_core::paths::gwt_sessions_dir())
                 .unwrap()
                 .members[0]
                 .agent_member_id,
             roster.members[0].agent_member_id
+        );
+        crate::machine_agent_settings::set(
+            None,
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:03:00Z",
+        )
+        .unwrap();
+        assert!(
+            reserve_project_member(&second_root, &sessions, "second", None, None, None, None)
+                .is_ok(),
+            "an existing reservation remains replayable without a fresh sample"
+        );
+        assert!(
+            reserve_project_member(&root, &sessions, "auto-unmeasured", None, None, None, None)
+                .unwrap_err()
+                .contains("capacity observation"),
+            "Auto must not become unlimited while its census is unavailable"
+        );
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let snapshot = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+        std::fs::write(
+            snapshot,
+            serde_json::to_vec(&serde_json::json!({
+                "observed_at": observed_at,
+                "expires_at": observed_at + 30,
+                "machine_budget": 3,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            reserve_project_member(&root, &sessions, "auto-unmeasured", None, None, None, None)
+                .is_ok(),
+            "the same explicit Auto reservation succeeds after a bounded census arrives"
         );
     }
 
@@ -3469,20 +3607,97 @@ mod tests {
         assert!(other_roster
             .members
             .iter()
-            .any(|member| { &member.agent_member_id == global && member.assignment.is_some() }));
+            .any(|member| { &member.agent_member_id == global && member.assignment.is_none() }));
+        assert_eq!(
+            crate::agent_registry::SessionMemberSnapshot::load()
+                .unwrap()
+                .assignments_for_member(global)
+                .unwrap()
+                .len(),
+            1
+        );
         let other_path = crate::issue_monitor_prefs_path_for_repo_path(&other);
         let before = (
             std::fs::read(&path).unwrap(),
             std::fs::read(&other_path).unwrap(),
         );
         assert!(adopt_project_member_session(&other, &sessions, &mut session).is_err());
-        assert!(release_project_member(&other, &sessions, global, "legacy-reservation").is_err());
+        release_project_member(&other, &sessions, global, "legacy-reservation").unwrap();
         assert!(
             bind_project_member_session(&other, global, "legacy-reservation", &session.id).is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), before.0);
         assert_eq!(std::fs::read(&other_path).unwrap(), before.1);
         assert_eq!(std::fs::read(&session_path).unwrap(), original_session);
+    }
+
+    #[test]
+    fn pm_selection_is_local_while_the_registered_member_is_shared() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let first = read_project_roster(&a, &sessions).unwrap();
+        let added = mutate_project_roster(
+            &a,
+            &sessions,
+            AgentRosterAction::Add {
+                agent_id: Some("codex".into()),
+                name: Some("Shared PM".into()),
+                pm_eligible: true,
+            },
+            Some(first.revision),
+        )
+        .unwrap();
+        let id = added.members.last().unwrap().agent_member_id.clone();
+        mutate_project_roster(
+            &a,
+            &sessions,
+            AgentRosterAction::SelectPm {
+                member_id: id.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        let in_b = read_project_roster(&b, &sessions).unwrap();
+        assert!(in_b
+            .members
+            .iter()
+            .find(|member| member.agent_member_id == id)
+            .unwrap()
+            .implementation_eligible());
+        let selected_b = mutate_project_roster(
+            &b,
+            &sessions,
+            AgentRosterAction::SelectPm {
+                member_id: id.clone(),
+            },
+            Some(in_b.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            selected_b
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == id)
+                .unwrap()
+                .pm_project_key
+                .as_deref(),
+            Some(gwt_core::paths::project_scope_hash(&b).as_str())
+        );
+        let in_a = read_project_roster(&a, &sessions).unwrap();
+        assert_eq!(
+            in_a.members
+                .iter()
+                .find(|member| member.agent_member_id == id)
+                .unwrap()
+                .pm_project_key
+                .as_deref(),
+            Some(gwt_core::paths::project_scope_hash(&a).as_str())
+        );
     }
 
     fn with_rosterless_live_sources(
@@ -3601,7 +3816,8 @@ mod tests {
                 "activating one project must retain rosterless live people in the others"
             );
             for (root, session, bytes) in retained.iter_mut() {
-                let member = roster
+                let local_roster = read_project_roster(root, sessions).unwrap();
+                let member = local_roster
                     .members
                     .iter()
                     .find(|member| member.origin_session_id.as_deref() == Some(session.id.as_str()))
@@ -3684,13 +3900,16 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_string();
-            let original_member = prepared["roster"]["members"]
+            let mut original_member = prepared["roster"]["members"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|member| member["agent_member_id"] == global)
                 .unwrap()
                 .clone();
+            let original_assignment = prepared["project_assignments"][&key][&global].clone();
+            assert_eq!(original_assignment["session_id"], session.id);
+            original_member["assignment"] = original_assignment.clone();
             let mut observed_raws = vec![original_raw.clone()];
             for step in [1, 2] {
                 let mut drift: serde_json::Value = serde_json::from_str(&original_raw).unwrap();
@@ -3730,8 +3949,8 @@ mod tests {
                     "refresh retains the currently observed live source person"
                 );
                 assert_eq!(
-                    current.unwrap()["assignment"],
-                    original_member["assignment"]
+                    refreshed["project_assignments"][&key][&global],
+                    original_assignment
                 );
                 for raw in &observed_raws {
                     assert!(

@@ -1689,6 +1689,8 @@ pub(crate) struct PreparedIssueMonitorMaxActive {
 
 pub(crate) struct ProjectRuntimeState {
     pub(crate) workspace_state_notice: Option<gwt::WorkspaceStateNoticeView>,
+    /// Direct roster requests and receipts invalidate older background views.
+    pub(crate) agent_roster_foreground: Arc<()>,
     pub(crate) project_owner_health: Option<gwt::protocol::ProjectOwnerHealthView>,
     pub(crate) project_owner_connection_id: u64,
     pub(crate) project_owner_identity: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
@@ -1805,6 +1807,7 @@ pub(crate) fn initial_project_states(
                 context.project_key.clone(),
                 ProjectRuntimeState {
                     workspace_state_notice: None,
+                    agent_roster_foreground: Arc::new(()),
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
@@ -4850,6 +4853,7 @@ impl AppRuntime {
                 .entry(context.project_key.clone())
                 .or_insert_with(|| ProjectRuntimeState {
                     workspace_state_notice: None,
+                    agent_roster_foreground: Arc::new(()),
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
@@ -12109,6 +12113,7 @@ impl AppRuntime {
                             | gwt::agent_names::AgentRosterAction::SetTuning(_)
                     ) && project_key.is_none()
                 {
+                    self.invalidate_agent_roster_refreshes(context);
                     vec![OutboundEvent::reply(&client_id, BackendEvent::AgentRosterError {
                         project_key: context.project_key.to_string(),
                         message: "Load the current project's Agent roster before changing PM selection".into(), request_id,

@@ -3172,7 +3172,12 @@ pub(crate) fn prepare_owner_agent_admission(
                 return Err("Captured PM conversation profile changed; retry Resume".into());
             }
             let member = crate::agent_registry::SessionMemberSnapshot::load()
-                .and_then(|snapshot| snapshot.member(member_id))
+                .and_then(|snapshot| {
+                    snapshot.member_in_project(
+                        &gwt_core::paths::project_scope_hash(input.project_root),
+                        member_id,
+                    )
+                })
                 .map_err(|error| error.to_string())?
                 .ok_or("PM member is unavailable")?;
             config.env_vars.insert("GWT_AGENT_NAME".into(), member.name);

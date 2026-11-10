@@ -16,6 +16,7 @@ import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/liv
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
   assignment: { session_id: string | null; issue_number: number | null } | null;
+  active_assignments?: { project_key: string; project_name: string | null; session_id: string | null; issue_number: number | null; state: string }[];
   saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
   saved_manual_revision?: string | null;
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
@@ -175,6 +176,140 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     } finally {
       await fixture.stop();
     }
+  });
+
+  test("one shared member runs in two projects and closing one preserves the other", async ({ page }, info) => {
+    let firstKey = "", secondKey = "";
+    const fixture = await startExactRelaunchFixture(info, {
+      page, freshNativeIds: true,
+      monitorPreferences: { max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2 },
+      async beforeStart({ home, project, env, preferences }) {
+        firstKey = basename(dirname(preferences));
+        const second = join(home, "project-b");
+        await mkdir(second);
+        for (const args of [["init", "-q", "-b", "main"], ["-c", "user.name=gwt", "-c", "user.email=gwt@example.invalid",
+          "commit", "-q", "--allow-empty", "-m", "shared member fixture"]]) {
+          execFileSync("git", args, { cwd: second, env, encoding: "utf8" });
+        }
+        const status = JSON.parse(execFileSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
+          cwd: second, env: { ...env, GWT_PROJECT_ROOT: second }, encoding: "utf8", timeout: 30_000,
+          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.status", params: {} }),
+        }));
+        expect(status.ok).toBe(true);
+        secondKey = status.project_store.hash;
+        expect(secondKey).not.toBe(firstKey);
+        const secondPreferences = join(home, ".gwt/projects", secondKey, "project-state");
+        await mkdir(secondPreferences, { recursive: true });
+        await writeFile(join(secondPreferences, "pm.json"), JSON.stringify({ settings: { auto_start: false } }));
+        await writeFile(join(secondPreferences, "issue-monitor.json"), JSON.stringify({ enabled: false,
+          max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2, priority_order: [] }));
+        await writeFile(join(home, ".gwt/session.json"), JSON.stringify({ tabs: [
+          { id: "shared-a", title: "Project A", project_root: project, kind: "git" },
+          { id: "shared-b", title: "Project B", project_root: second, kind: "git" },
+        ], active_tab_id: "shared-a", recent_projects: [] }));
+        // Reading the fixture's initial status already creates the shared Auto
+        // policy. A project JSON seed cannot change that machine authority.
+        const configured = JSON.parse(execFileSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
+          cwd: project, env, encoding: "utf8", timeout: 30_000,
+          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.config.set", params: { max_active: 2 } }),
+        }));
+        expect(configured.ok).toBe(true);
+        expect(JSON.parse(await readFile(join(home, ".gwt/machine-state/agent-settings.json"), "utf8")))
+          .toMatchObject({ mode: "manual", manual_limit: 2 });
+      },
+    });
+    const secondPage = await page.context().newPage().catch(async error => {
+      await fixture.stop();
+      throw error;
+    });
+    const errors = capture(page), secondErrors = capture(secondPage);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const openAgents = async (target: Page) => target.locator('.op-rail__surface[data-surface="agents"]').click();
+    let secondOwner: { pid: number; birth: number } | undefined;
+    let secondWindow: AgentWindow | undefined;
+    try {
+      for (const target of [page, secondPage]) {
+        await target.addInitScript(value => {
+          if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", value);
+        }, theme);
+        await target.setViewportSize({ width: 400, height: 1000 });
+      }
+      await gotoLiveGwt(page, liveGwtProjectUrl(fixture.url, firstKey), { enableTestBridge: true });
+      await openAgents(page);
+      let before = await readRoster(page);
+      const resizeSequence = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: before.revision,
+        action: { kind: "resize", size: 1 } });
+      before = await rosterAfter(page, resizeSequence, before.revision);
+      expect(before.error).toBeNull();
+      expect(before.members.filter(member => member.enabled)).toHaveLength(1);
+      const memberId = before.members.find(member => member.agent_id === "codex" && member.enabled)!.agent_member_id;
+      await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondKey), { enableTestBridge: true });
+      await openAgents(secondPage);
+      expect((await readRoster(secondPage)).members.some(member => member.agent_member_id === memberId)).toBe(true);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const first = await liveCodexWindow(page, (await fixture.launches())[0].gwt_session_id!);
+      await openAgents(page);
+      const firstRow = page.locator(`.roster-row[data-member-id="${memberId}"]`);
+      await expect(firstRow.locator("[data-assignment-project]")).toHaveCount(1);
+      await launchCodex(secondPage, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(2);
+      const second = await liveCodexWindow(secondPage, (await fixture.launches())[1].gwt_session_id!);
+      secondWindow = second;
+      const [pid, birth] = (await readLatestOwnActivity(secondPage, secondKey)).host_id.split(":").map(Number);
+      secondOwner = { pid, birth };
+      expect(second.session_id).not.toBe(first.session_id);
+      // A's local census did not change: the shared update must arrive without
+      // reentering Agents or explicitly reading its roster.
+      await expect(firstRow.locator("[data-assignment-project]")).toHaveCount(2);
+      for (const session of [first.session_id, second.session_id]) {
+        expect(tomlString(await sessionRecord(fixture.home, session), "agent_member_id")).toBe(memberId);
+      }
+      const assignments = (roster: AgentRoster) => roster.members.find(member => member.agent_member_id === memberId)?.active_assignments ?? [];
+      for (const [target, own, session] of [[page, firstKey, first.session_id], [secondPage, secondKey, second.session_id]] as const) {
+        await openAgents(target);
+        await expect.poll(async () => assignments(await readRoster(target)).map(assignment => assignment.project_key).sort())
+          .toEqual([firstKey, secondKey].sort());
+        expect((await readRoster(target)).members.find(member => member.agent_member_id === memberId)?.assignment?.session_id).toBe(session);
+        const row = target.locator(`.roster-row[data-member-id="${memberId}"]`);
+        await expect(row.locator(".roster-assignments [data-assignment-project]")).toHaveCount(2);
+        await expect(row.locator(`[data-assignment-project="${own}"]`)).toContainText("No issue");
+        await expect(row.locator(`[data-assignment-project="${firstKey}"]`)).toHaveText(/^project · No issue · Recorded (Running|Idle|Waiting)$/);
+        await expect(row.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · No issue · Recorded (Running|Idle|Waiting)$/);
+        await expect(target.locator("html")).toHaveAttribute("data-theme", theme);
+        expect(await target.locator(".agents-surface:not(.agents-surface--preview)").evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      }
+      await attachScreenshot(page, info, `shared-projects-${theme}`);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: first.id });
+      const secondRow = secondPage.locator(`.roster-row[data-member-id="${memberId}"]`);
+      await expect(secondRow.locator("[data-assignment-project]")).toHaveCount(1);
+      await expect(secondRow.locator(`[data-assignment-project="${secondKey}"]`)).toBeVisible();
+      await expect.poll(async () => (await readRoster(page)).members.find(member => member.agent_member_id === memberId)?.assignment ?? null)
+        .toBeNull();
+      expect((await readRoster(secondPage)).members.find(member => member.agent_member_id === memberId)?.assignment?.session_id).toBe(second.session_id);
+      await liveCodexWindow(secondPage, second.session_id);
+      await expect.poll(async () => assignments(await readRoster(secondPage)).map(assignment => assignment.project_key))
+        .toEqual([secondKey]);
+      expect(errors).toEqual([]);
+      expect(secondErrors).toEqual([]);
+    } finally {
+      try {
+        if (secondWindow && !secondPage.isClosed()) {
+          await sendLiveGwtEvent(secondPage, { kind: "close_window", id: secondWindow.id });
+          await expect.poll(async () => (await codexWindows(secondPage)).some(window => window.id === secondWindow!.id)).toBe(false);
+        }
+        await page.goto("about:blank");
+        await secondPage.close();
+      }
+      finally {
+        await fixture.stop();
+        if (secondOwner) await expect.poll(async () => (await readProcessState(secondOwner!.pid))?.birth,
+          { timeout: 60_000, message: "secondary project owner exits with the private fixture" }).not.toBe(secondOwner.birth);
+      }
+    }
+    expect(errors).toEqual([]);
+    expect(secondErrors).toEqual([]);
   });
 
   test("named registration and inline rename persist their UUID through rejection, reload and native restart", async ({ page }, info) => {
@@ -453,7 +588,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         const source = sourceSnapshot.members.find(value => value.agent_member_id === memberId)!;
         const shared = sharedSnapshot.members.find(value => value.agent_member_id === memberId)!;
         expect(shared).toMatchObject({ agent_member_id: memberId, agent_id: source.agent_id, name: source.name,
-          enabled: source.enabled, assignment: source.assignment });
+          enabled: source.enabled, assignment: null });
+        // Sequential reads can observe different live Session states; the
+        // project-qualified assignment identity must remain the same.
+        const identities = (member: RosterMember) => member.active_assignments?.map(assignment => ({
+          project_key: assignment.project_key, session_id: assignment.session_id, issue_number: assignment.issue_number,
+        }));
+        expect(identities(shared)).toEqual(identities(source));
         expect({ prefer_for: [], ...shared.saved_manual_profile })
           .toMatchObject({ ...savedCandidate, ...secondDefaults, prefer_for: [] });
         // Candidate selection/order and execution permissions remain project-owned.

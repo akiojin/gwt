@@ -88,6 +88,9 @@ struct Registry {
     profiles: BTreeMap<String, AgentProfileCore>,
     sources: BTreeMap<String, Source>,
     #[serde(default)]
+    project_assignments:
+        BTreeMap<String, BTreeMap<String, crate::agent_names::AgentMemberAssignment>>,
+    #[serde(default)]
     pm_projects: BTreeMap<String, PmProjectIdentity>,
 }
 
@@ -95,7 +98,265 @@ struct Registry {
 #[serde(deny_unknown_fields)]
 struct PmProjectIdentity {
     #[serde(default)]
+    member_id: Option<String>,
+    #[serde(default)]
     legacy_sessions: BTreeMap<String, PmLegacyMemberProof>,
+}
+
+fn project_roster(registry: &Registry, key: &str) -> Option<AgentRoster> {
+    let mut roster = registry.roster.clone()?;
+    let selected = registry
+        .pm_projects
+        .get(key)
+        .and_then(|project| project.member_id.as_deref());
+    for member in &mut roster.members {
+        member.assignment = registry
+            .project_assignments
+            .get(key)
+            .and_then(|assignments| assignments.get(&member.agent_member_id))
+            .cloned();
+        member.pm_project_key =
+            (selected == Some(member.agent_member_id.as_str())).then(|| key.into());
+    }
+    Some(roster)
+}
+
+fn project_member(registry: &Registry, key: &str, id: &str) -> Option<AgentMember> {
+    project_roster(registry, key)?
+        .members
+        .into_iter()
+        .find(|member| member.agent_member_id == id)
+}
+
+fn selected_pm_member(registry: &Registry, key: &str) -> Option<AgentMember> {
+    let id = registry.pm_projects.get(key)?.member_id.as_deref()?;
+    project_member(registry, key, id)
+}
+
+fn project_assignment<'a>(
+    registry: &'a Registry,
+    key: &str,
+    id: &str,
+) -> Option<&'a crate::agent_names::AgentMemberAssignment> {
+    registry.project_assignments.get(key)?.get(id)
+}
+
+fn set_project_assignment(
+    registry: &mut Registry,
+    key: &str,
+    id: &str,
+    assignment: Option<crate::agent_names::AgentMemberAssignment>,
+) {
+    if let Some(assignment) = assignment {
+        registry
+            .project_assignments
+            .entry(key.into())
+            .or_default()
+            .insert(id.into(), assignment);
+    } else if let Some(assignments) = registry.project_assignments.get_mut(key) {
+        assignments.remove(id);
+        if assignments.is_empty() {
+            registry.project_assignments.remove(key);
+        }
+    }
+}
+
+fn member_has_pm_duty(registry: &Registry, id: &str) -> bool {
+    registry
+        .pm_projects
+        .values()
+        .any(|project| project.member_id.as_deref() == Some(id))
+        || registry.project_assignments.values().any(|assignments| {
+            assignments
+                .get(id)
+                .is_some_and(|assignment| assignment.role == AgentAssignmentRole::Pm)
+        })
+}
+
+/// Move legacy runtime fields without changing source snapshots or identity aliases.
+fn extract_legacy_runtime(registry: &mut Registry) -> io::Result<()> {
+    if let Some(roster) = &mut registry.roster {
+        for member in &mut roster.members {
+            if let Some(key) = member.pm_project_key.take() {
+                let selected = &mut registry.pm_projects.entry(key).or_default().member_id;
+                if selected
+                    .as_ref()
+                    .is_some_and(|id| id != &member.agent_member_id)
+                {
+                    return Err(invalid(
+                        "Conflicting project PM selection during Agent migration",
+                    ));
+                }
+                *selected = Some(member.agent_member_id.clone());
+            }
+            if let Some(assignment) = member.assignment.take() {
+                let key = assignment
+                    .project_key
+                    .clone()
+                    .ok_or_else(|| invalid("Shared Agent assignment has no source project"))?;
+                let assignments = registry.project_assignments.entry(key).or_default();
+                if assignments
+                    .get(&member.agent_member_id)
+                    .is_some_and(|current| current != &assignment)
+                {
+                    return Err(invalid(
+                        "Conflicting project Agent assignment during migration",
+                    ));
+                }
+                assignments.insert(member.agent_member_id.clone(), assignment);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn store_project_roster(
+    registry: &mut Registry,
+    key: &str,
+    roster: Option<AgentRoster>,
+) -> io::Result<()> {
+    let Some(mut roster) = roster else {
+        registry.roster = None;
+        return Ok(());
+    };
+    let mut assignments = BTreeMap::new();
+    let mut selected = None;
+    for member in &mut roster.members {
+        if (!member.enabled || !member.pm_eligible)
+            && member_has_pm_duty(registry, &member.agent_member_id)
+        {
+            return Err(invalid(
+                "Choose another PM before resting this member or removing PM eligibility",
+            ));
+        }
+        if let Some(assignment) = member.assignment.take() {
+            if assignment.project_key.as_deref() != Some(key) {
+                return Err(invalid("Agent assignment belongs to another project"));
+            }
+            assignments.insert(member.agent_member_id.clone(), assignment);
+        }
+        if let Some(project) = member.pm_project_key.take() {
+            if project != key || selected.is_some() {
+                return Err(invalid("Ambiguous project PM selection"));
+            }
+            selected = Some(member.agent_member_id.clone());
+        }
+    }
+    registry.roster = Some(roster);
+    if assignments.is_empty() {
+        registry.project_assignments.remove(key);
+    } else {
+        registry.project_assignments.insert(key.into(), assignments);
+    }
+    if selected.is_some() || registry.pm_projects.contains_key(key) {
+        registry
+            .pm_projects
+            .entry(key.into())
+            .or_default()
+            .member_id = selected;
+    }
+    Ok(())
+}
+
+fn validate_assignment_budget(previous: &Registry, next: &Registry) -> io::Result<()> {
+    let all = |registry: &Registry| {
+        registry
+            .project_assignments
+            .values()
+            .flat_map(|assignments| assignments.values())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let after = all(next);
+    let implementation_count = |assignments: &[crate::agent_names::AgentMemberAssignment]| {
+        assignments
+            .iter()
+            .filter(|assignment| assignment.role == AgentAssignmentRole::Implementation)
+            .count()
+    };
+    let new_slot = |role| {
+        next.project_assignments.iter().any(|(key, assignments)| {
+            assignments.iter().any(|(id, assignment)| {
+                assignment.role == role
+                    && project_assignment(previous, key, id).is_none_or(|old| {
+                        old.role != assignment.role
+                            || old.reservation_id != assignment.reservation_id
+                            || old.host_id != assignment.host_id
+                            || old.host_pid != assignment.host_pid
+                            || old.host_started_at != assignment.host_started_at
+                            || old.session_id.is_some()
+                                && assignment.session_id.is_some()
+                                && old.session_id != assignment.session_id
+                    })
+            })
+        })
+    };
+    let new_worker = new_slot(AgentAssignmentRole::Implementation);
+    let new_pm = new_slot(AgentAssignmentRole::Pm);
+    if !new_worker && !new_pm {
+        return Ok(());
+    }
+    let policy = crate::machine_agent_settings::load()?;
+    let census = crate::agent_capacity::registry_assignment_census()?;
+    let mut occupied = implementation_count(&after);
+    let mut pm_count = after
+        .iter()
+        .filter(|assignment| assignment.role == AgentAssignmentRole::Pm)
+        .count();
+    if let Some((_, inventory)) = &census {
+        let hostname = crate::process::current_hostname();
+        for observed in &inventory.sessions {
+            let host_started_at =
+                crate::process::host_process_start_time(observed.session.host_pid);
+            let project_key = observed.repo_hash.clone().or_else(|| {
+                observed.project_root.exists().then(|| {
+                    gwt_core::paths::project_scope_hash(&observed.project_root).to_string()
+                })
+            });
+            if after.iter().any(|assignment| {
+                assignment.session_id.as_deref() == Some(observed.session.session_id.as_str())
+                    && assignment.host_pid == observed.session.host_pid
+                    && assignment.host_id == hostname
+                    && assignment
+                        .host_started_at
+                        .is_some_and(|started| started > 0 && host_started_at == Some(started))
+                    && assignment.project_key.is_some()
+                    && assignment.project_key == project_key
+            }) {
+                continue;
+            }
+            if observed.role == crate::session_inventory::MachineSessionRole::Pm {
+                pm_count += 1;
+            } else {
+                occupied += 1;
+            }
+        }
+    }
+    let measured_budget = census.as_ref().and_then(|(budget, _)| *budget);
+    let total = occupied.saturating_add(pm_count.max(1));
+    let registered_limit = next.roster.as_ref().map_or(0, AgentRoster::enabled_count);
+    let over_budget = match policy {
+        Some(policy) if policy.mode == crate::issue_monitor::IssueMonitorMaxActiveMode::Manual => {
+            (new_worker && policy.manual_limit.is_some_and(|limit| occupied > limit))
+                || (new_pm && total > measured_budget.unwrap_or(registered_limit))
+        }
+        Some(policy) if policy.last_change.is_some() => total > measured_budget.ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock,
+            "Machine Agent capacity observation is unavailable; wait for the next fresh measurement"))?,
+        // First-project migration materializes default Auto before its sampler
+        // runs. Preserve the former global roster bound until a measurement
+        // exists; an explicit Auto choice above still waits for that evidence.
+        _ => measured_budget.map_or_else(
+            || occupied.saturating_add(pm_count) > registered_limit,
+            |budget| total > budget,
+        ),
+    };
+    if over_budget {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Machine Agent capacity is occupied; wait for an exact slot to be released",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,14 +473,22 @@ fn load() -> io::Result<Option<Registry>> {
     let Some(raw) = raw(&path())? else {
         return Ok(None);
     };
-    let registry: Registry = serde_json::from_str(&raw).map_err(io::Error::other)?;
+    let mut registry: Registry = serde_json::from_str(&raw).map_err(io::Error::other)?;
     validate(&registry)?;
+    if registry.schema_version < 3 {
+        extract_legacy_runtime(&mut registry)?;
+        registry.schema_version = 3;
+        if let Some(roster) = &mut registry.roster {
+            roster.schema_version = 3;
+        }
+        validate(&registry)?;
+    }
     Ok(Some(registry))
 }
 
 fn save(registry: &Registry) -> io::Result<()> {
     let mut registry = registry.clone();
-    registry.schema_version = 2;
+    registry.schema_version = 3;
     if let Some(roster) = &mut registry.roster {
         roster.schema_version = 3;
     }
@@ -281,7 +550,7 @@ fn settings_revision(registry: &Registry) -> u64 {
 }
 
 fn validate(registry: &Registry) -> io::Result<()> {
-    if !matches!(registry.schema_version, 1 | 2)
+    if !matches!(registry.schema_version, 1 | 2 | 3)
         || !matches!(
             registry.phase,
             RegistryPhase::Prepared | RegistryPhase::Active
@@ -361,7 +630,7 @@ fn validate(registry: &Registry) -> io::Result<()> {
         roster.validate().map_err(invalid)?;
         if !matches!(
             (registry.schema_version, roster.schema_version),
-            (1, 2) | (2, 3)
+            (1, 2) | (2, 3) | (3, 3)
         ) {
             return Err(invalid(
                 "Unsupported shared Agent registry/roster schema pair",
@@ -375,6 +644,13 @@ fn validate(registry: &Registry) -> io::Result<()> {
                 .entry(member.name.trim().to_lowercase())
                 .or_default()
                 .push(member);
+            if registry.schema_version == 3
+                && (member.assignment.is_some() || member.pm_project_key.is_some())
+            {
+                return Err(invalid(
+                    "Project runtime fields cannot be stored in the common Agent roster",
+                ));
+            }
             if let Some(assignment) = &member.assignment {
                 let Some(key) = assignment.project_key.as_deref() else {
                     return Err(invalid("Shared Agent assignment has no source project"));
@@ -387,6 +663,33 @@ fn validate(registry: &Registry) -> io::Result<()> {
                         "Shared Agent assignment has an unknown source project",
                     ));
                 }
+            }
+        }
+        for (key, assignments) in &registry.project_assignments {
+            ProjectKey::parse(key).map_err(|error| invalid(error.to_string()))?;
+            for (id, assignment) in assignments {
+                if !roster
+                    .members
+                    .iter()
+                    .any(|member| &member.agent_member_id == id)
+                    || assignment.project_key.as_deref() != Some(key)
+                    || (!registry.sources.contains_key(key)
+                        && !(assignment.role == AgentAssignmentRole::Pm
+                            && registry.pm_projects.contains_key(key)))
+                {
+                    return Err(invalid(
+                        "Shared Agent assignment has no exact registered member and source project",
+                    ));
+                }
+            }
+        }
+        for project in registry.pm_projects.values() {
+            if project.member_id.as_ref().is_some_and(|id| {
+                !roster.members.iter().any(|member| {
+                    &member.agent_member_id == id && member.enabled && member.pm_eligible
+                })
+            }) {
+                return Err(invalid("Configured PM must remain enabled and PM-eligible"));
             }
         }
         for members in names.values().filter(|members| members.len() > 1) {
@@ -486,9 +789,7 @@ pub(crate) fn mutate_pm_selection(
         ));
     }
     confirm_durable()?;
-    let roster = registry
-        .roster
-        .as_ref()
+    let roster = project_roster(&registry, &key)
         .ok_or_else(|| invalid("Load the Agent roster before changing members"))?;
     if !matches!(action, AgentRosterAction::Read) && expected_revision != Some(roster.revision) {
         return Err(invalid("Agent roster changed; reload before retrying"));
@@ -507,12 +808,7 @@ pub(crate) fn mutate_pm_selection(
         match &action {
             AgentRosterAction::SetPmEligibility {
                 eligible: false, ..
-            } if member.pm_project_key.is_some()
-                || member
-                    .assignment
-                    .as_ref()
-                    .is_some_and(|assignment| assignment.role == AgentAssignmentRole::Pm) =>
-            {
+            } if member_has_pm_duty(&registry, member_id) => {
                 return Err(invalid("Choose another PM before removing PM eligibility"));
             }
             AgentRosterAction::SelectPm { .. } => {
@@ -542,7 +838,11 @@ pub(crate) fn mutate_pm_selection(
                             .and_then(|assignment| assignment.project_key.as_ref())
                     )));
                 }
-                for (source_key, source) in &registry.sources {
+                for (source_key, source) in registry
+                    .sources
+                    .iter()
+                    .filter(|(source_key, _)| *source_key == &key)
+                {
                     let source_path = prefs_path(source_key)?;
                     assert_known(&registry, source_key, raw(&source_path)?.as_deref())?;
                     assert_known_floor(source, &source_path)?;
@@ -573,8 +873,8 @@ pub(crate) fn mutate_pm_selection(
             _ => {}
         }
     }
-    let before = registry.roster.clone();
-    let roster = registry.roster.as_mut().expect("checked roster");
+    let before = project_roster(&registry, &key);
+    let mut roster = before.clone().expect("checked roster");
     match action {
         AgentRosterAction::SetPmEligibility {
             member_id,
@@ -598,17 +898,18 @@ pub(crate) fn mutate_pm_selection(
             registry.pm_projects.entry(key.clone()).or_default();
         }
         action => {
-            crate::agent_names::apply_roster_action(roster, &history_path(), "codex", action)?
+            crate::agent_names::apply_roster_action(&mut roster, &history_path(), "codex", action)?
         }
     }
-    if registry.roster != before {
+    store_project_roster(&mut registry, &key, Some(roster))?;
+    if project_roster(&registry, &key) != before {
         let roster = registry.roster.as_mut().expect("checked roster");
         roster.schema_version = 3;
         roster.revision = roster
             .revision
             .checked_add(1)
             .ok_or_else(|| invalid("Agent roster revision exhausted"))?;
-        registry.schema_version = 2;
+        registry.schema_version = 3;
         registry.revision = registry
             .revision
             .checked_add(1)
@@ -681,7 +982,7 @@ fn commit_pm_identity(registry: &mut Registry) -> io::Result<()> {
         .revision
         .checked_add(1)
         .ok_or_else(|| invalid("Agent roster revision exhausted"))?;
-    registry.schema_version = 2;
+    registry.schema_version = 3;
     registry.revision = registry
         .revision
         .checked_add(1)
@@ -699,16 +1000,7 @@ pub(crate) fn pm_assignment(
     let Some(registry) = load()? else {
         return Ok(None);
     };
-    let Some(assignment) = registry
-        .roster
-        .as_ref()
-        .and_then(|roster| {
-            roster
-                .members
-                .iter()
-                .find(|member| member.agent_member_id == member_id)
-        })
-        .and_then(|member| member.assignment.as_ref())
+    let Some(assignment) = project_assignment(&registry, key.as_str(), member_id)
         .filter(|assignment| assignment.role == AgentAssignmentRole::Pm)
     else {
         return Ok(None);
@@ -811,17 +1103,17 @@ fn reserve_new_pm_member_inner(
             ));
         }
         confirm_durable()?;
+        let previous = registry.clone();
         if let Some(draft) = draft {
-            let selected = registry.roster.as_ref().and_then(|roster| {
-                roster
-                    .members
-                    .iter()
-                    .find(|member| member.pm_project_key.as_deref() == Some(key.as_str()))
-            });
+            let selected = selected_pm_member(&registry, key.as_str());
             let bootstrap_replay = draft.member_id.is_none()
                 && selected
+                    .as_ref()
                     .is_some_and(|member| member.assignment.as_ref() == Some(&expected_assignment));
-            if selected.map(|member| member.agent_member_id.as_str()) != draft.member_id
+            if selected
+                .as_ref()
+                .map(|member| member.agent_member_id.as_str())
+                != draft.member_id
                 && !bootstrap_replay
                 || revision != draft.profile_revision
                 || profile.agent_id != draft.agent_id
@@ -833,12 +1125,7 @@ fn reserve_new_pm_member_inner(
                 ));
             }
         }
-        if !registry.roster.as_ref().is_some_and(|roster| {
-            roster
-                .members
-                .iter()
-                .any(|member| member.pm_project_key.as_deref() == Some(key.as_str()))
-        }) {
+        if selected_pm_member(&registry, key.as_str()).is_none() {
             let roster = registry.roster.get_or_insert_with(|| AgentRoster {
                 schema_version: 3,
                 revision: 0,
@@ -849,17 +1136,14 @@ fn reserve_new_pm_member_inner(
                 .map_err(io::Error::other)?;
             let member = roster.members.last_mut().expect("bootstrap member");
             member.pm_eligible = true;
-            member.pm_project_key = Some(key.to_string());
+            registry
+                .pm_projects
+                .entry(key.to_string())
+                .or_default()
+                .member_id = Some(member.agent_member_id.clone());
         }
         registry.pm_projects.entry(key.to_string()).or_default();
-        let member = registry
-            .roster
-            .as_mut()
-            .expect("PM roster")
-            .members
-            .iter_mut()
-            .find(|member| member.pm_project_key.as_deref() == Some(key.as_str()))
-            .expect("configured member");
+        let mut member = selected_pm_member(&registry, key.as_str()).expect("configured member");
         if !member.enabled || !member.pm_eligible {
             return Err(invalid(
                 "Configured PM must be enabled and PM-eligible; choose another PM in Agents",
@@ -876,7 +1160,13 @@ fn reserve_new_pm_member_inner(
             return Err(invalid(format!("Configured PM {} retains a live or unknown reservation; resume its conversation or choose another PM", member.name)));
         }
         member.assignment = Some(expected_assignment);
-        let member = member.clone();
+        set_project_assignment(
+            &mut registry,
+            key.as_str(),
+            &member.agent_member_id,
+            member.assignment.clone(),
+        );
+        validate_assignment_budget(&previous, &registry)?;
         commit_pm_identity(&mut registry)?;
         Ok(PreparedPmMember {
             member,
@@ -899,14 +1189,7 @@ pub(crate) fn cancel_unspawned_pm_member(
 ) -> io::Result<bool> {
     let key = gwt_core::paths::project_scope_hash(root);
     let Some(observed) = load()?
-        .and_then(|registry| registry.roster)
-        .and_then(|roster| {
-            roster
-                .members
-                .into_iter()
-                .find(|member| member.agent_member_id == member_id)
-        })
-        .and_then(|member| member.assignment)
+        .and_then(|registry| project_assignment(&registry, key.as_str(), member_id).cloned())
         .filter(|assignment| {
             assignment.role == AgentAssignmentRole::Pm && assignment.reservation_id == reservation
         })
@@ -1036,20 +1319,15 @@ pub(crate) fn cancel_unspawned_pm_member(
                 ));
             }
         }
-        let member = registry
-            .roster
-            .as_mut()
-            .and_then(|roster| {
-                roster
-                    .members
-                    .iter_mut()
-                    .find(|member| member.agent_member_id == member_id)
-            })
-            .ok_or_else(|| invalid("PM member is unavailable"))?;
-        if member.assignment.as_ref() != Some(&observed) {
+        if project_assignment(&registry, key.as_str(), member_id) != Some(&observed) {
             return Ok(false);
         }
-        member.assignment = prior.and_then(|(_, previous)| previous.cloned());
+        set_project_assignment(
+            &mut registry,
+            key.as_str(),
+            member_id,
+            prior.and_then(|(_, previous)| previous.cloned()),
+        );
         commit_pm_identity(&mut registry)?;
         Ok(true)
     })
@@ -1122,20 +1400,13 @@ pub(crate) fn reserve_resume_pm_member(
                 ));
             }
             confirm_durable()?;
+            let previous = registry.clone();
             let id = (SessionMemberSnapshot {
                 registry: Some(registry.clone()),
             })
             .resolve_session(source)?
             .ok_or_else(|| invalid("Original PM member proof is unavailable"))?;
-            let member = registry
-                .roster
-                .as_mut()
-                .and_then(|roster| {
-                    roster
-                        .members
-                        .iter_mut()
-                        .find(|member| member.agent_member_id == id)
-                })
+            let mut member = project_member(&registry, key.as_str(), &id)
                 .ok_or_else(|| invalid("Original PM member is unavailable"))?;
             if member
                 .pm_project_key
@@ -1201,7 +1472,13 @@ pub(crate) fn reserve_resume_pm_member(
                 host_pid: std::process::id(),
                 host_started_at: Some(started),
             });
-            let member = member.clone();
+            set_project_assignment(
+                &mut registry,
+                key.as_str(),
+                &member.agent_member_id,
+                member.assignment.clone(),
+            );
+            validate_assignment_budget(&previous, &registry)?;
             commit_pm_identity(&mut registry)?;
             Ok(PreparedPmMember {
                 member,
@@ -1279,15 +1556,7 @@ pub(crate) fn bind_prepared_pm_member_session(
             ));
         }
         confirm_durable()?;
-        let member = registry
-            .roster
-            .as_ref()
-            .and_then(|roster| {
-                roster
-                    .members
-                    .iter()
-                    .find(|member| member.agent_member_id == member_id)
-            })
+        let member = project_member(&registry, key.as_str(), member_id)
             .ok_or_else(|| invalid("PM member is unavailable"))?;
         if member.assignment.as_ref() != Some(&expected)
             || !pm_host_matches(&expected)
@@ -1354,15 +1623,9 @@ pub(crate) fn bind_prepared_pm_member_session(
             }
         }
         registry
-            .roster
-            .as_mut()
-            .expect("PM roster")
-            .members
-            .iter_mut()
-            .find(|member| member.agent_member_id == member_id)
-            .expect("PM member")
-            .assignment
-            .as_mut()
+            .project_assignments
+            .get_mut(key.as_str())
+            .and_then(|assignments| assignments.get_mut(member_id))
             .expect("exact assignment")
             .session_id = Some(session_id.into());
         commit_pm_identity(&mut registry)
@@ -1388,16 +1651,20 @@ pub(crate) fn reaped_pm_assignment(
             "Agent registry is prepared; inspect agent.registry.status and reconcile",
         ));
     }
-    let Some(roster) = registry.roster.as_ref() else {
+    let Some(_) = registry.roster.as_ref() else {
         return Ok(None);
     };
     let (key, id, expected_token) = if let Some(id) = captured.agent_member_id.as_ref() {
-        let Some(assignment) = roster
-            .members
-            .iter()
-            .find(|member| &member.agent_member_id == id)
-            .and_then(|member| member.assignment.as_ref())
-        else {
+        let assignments = registry
+            .project_assignments
+            .values()
+            .filter_map(|assignments| assignments.get(id))
+            .filter(|assignment| assignment.session_id.as_deref() == Some(captured.id.as_str()))
+            .collect::<Vec<_>>();
+        if assignments.len() > 1 {
+            return Err(invalid("PM Session has ambiguous project assignments"));
+        }
+        let Some(assignment) = assignments.first().copied() else {
             return Ok(None);
         };
         if assignment.role != AgentAssignmentRole::Pm {
@@ -1454,12 +1721,7 @@ pub(crate) fn reaped_pm_assignment(
     if root.exists() && gwt_core::paths::project_scope_hash(root) != key {
         return Err(invalid("PM reservation belongs to another exact project"));
     }
-    let member = roster
-        .members
-        .iter()
-        .find(|member| member.agent_member_id == id)
-        .ok_or_else(|| invalid("PM proof member is unavailable"))?;
-    let Some(assignment) = member.assignment.as_ref() else {
+    let Some(assignment) = project_assignment(&registry, key.as_str(), &id) else {
         return Ok(None);
     };
     if assignment.role != AgentAssignmentRole::Pm
@@ -1506,20 +1768,10 @@ pub(crate) fn release_reaped_pm_assignment(
                 "Legacy PM proof changed before exact owner reap; retain its assignment",
             ));
         }
-        let member = registry
-            .roster
-            .as_mut()
-            .and_then(|roster| {
-                roster
-                    .members
-                    .iter_mut()
-                    .find(|member| member.agent_member_id == member_id)
-            })
-            .ok_or_else(|| invalid("PM member is unavailable"))?;
-        if member.assignment.is_none() {
+        let Some(assignment) = project_assignment(&registry, key.as_str(), member_id) else {
             return Ok(());
-        }
-        if member.assignment.as_ref() != Some(expected)
+        };
+        if assignment != expected
             || expected.role != AgentAssignmentRole::Pm
             || expected.project_key.as_deref() != Some(key.as_str())
             || !pm_host_matches(expected)
@@ -1528,7 +1780,7 @@ pub(crate) fn release_reaped_pm_assignment(
                 "PM reservation changed during exact owner reap; retain the current assignment",
             ));
         }
-        member.assignment = None;
+        set_project_assignment(&mut registry, key.as_str(), member_id, None);
         commit_pm_identity(&mut registry)
     })
 }
@@ -1542,7 +1794,12 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
     let Some(registration) = observed.registration else {
         return Ok(load()?.is_some_and(|registry| {
             registry.phase == RegistryPhase::Active
-                && registry.pm_projects.contains_key(key.as_str())
+                && registry
+                    .pm_projects
+                    .get(key.as_str())
+                    .is_some_and(|project| {
+                        project.member_id.is_some() || !project.legacy_sessions.is_empty()
+                    })
         }));
     };
     ensure_active_for_owner(root)?;
@@ -1579,6 +1836,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
             confirm_durable()?;
             let before_roster = registry.roster.clone();
             let before_projects = registry.pm_projects.clone();
+            let before_assignments = registry.project_assignments.clone();
             if let Some(proof) = registry
                 .pm_projects
                 .get(key.as_str())
@@ -1599,25 +1857,11 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                 return Err(invalid("Registered PM runtime is unknown or ambiguous; open its exact PM conversation and refresh Agents"));
             }
             let host_pid = hosts.into_iter().next().unwrap_or(0);
-            let configured = registry.roster.as_ref().is_some_and(|roster| {
-                roster
-                    .members
-                    .iter()
-                    .any(|member| member.pm_project_key.as_deref() == Some(key.as_str()))
-            });
+            let configured = selected_pm_member(&registry, key.as_str()).is_some();
             let member_id = if let Some(id) = session.agent_member_id.as_ref() {
-                let member = registry
-                    .roster
-                    .as_mut()
-                    .and_then(|roster| {
-                        roster
-                            .members
-                            .iter_mut()
-                            .find(|member| &member.agent_member_id == id)
-                    })
-                    .ok_or_else(|| {
-                        invalid("Registered PM member is unavailable; refresh Agents")
-                    })?;
+                let member = project_member(&registry, key.as_str(), id).ok_or_else(|| {
+                    invalid("Registered PM member is unavailable; refresh Agents")
+                })?;
                 if member
                     .pm_project_key
                     .as_deref()
@@ -1632,9 +1876,21 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         "Registered PM member retains a conflicting project assignment",
                     ));
                 }
-                member.pm_eligible = true;
+                registry
+                    .roster
+                    .as_mut()
+                    .expect("registered roster")
+                    .members
+                    .iter_mut()
+                    .find(|member| &member.agent_member_id == id)
+                    .expect("registered member")
+                    .pm_eligible = true;
                 if !configured {
-                    member.pm_project_key = Some(key.to_string());
+                    registry
+                        .pm_projects
+                        .entry(key.to_string())
+                        .or_default()
+                        .member_id = Some(id.clone());
                 }
                 id.clone()
             } else {
@@ -1666,7 +1922,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         name,
                         enabled: true,
                         pm_eligible: true,
-                        pm_project_key: (!configured).then(|| key.to_string()),
+                        pm_project_key: None,
                         created_at: session.created_at.to_rfc3339(),
                         origin_session_id: Some(session.id.clone()),
                         last_issue_number: None,
@@ -1674,6 +1930,13 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         last_owner_project_key: None,
                         assignment: None,
                     });
+                if !configured {
+                    registry
+                        .pm_projects
+                        .entry(key.to_string())
+                        .or_default()
+                        .member_id = Some(id.clone());
+                }
                 let registration_identity = fingerprint(
                     &serde_json::to_string(&(
                         &registration.session_id,
@@ -1700,36 +1963,36 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                 id
             };
             registry.pm_projects.entry(key.to_string()).or_default();
-            let member = registry
-                .roster
-                .as_mut()
-                .expect("imported roster")
-                .members
-                .iter_mut()
-                .find(|member| member.agent_member_id == member_id)
-                .expect("imported member");
-            if member.assignment.is_none() {
-                member.assignment = Some(crate::agent_names::AgentMemberAssignment {
-                    role: AgentAssignmentRole::Pm,
-                    pm_profile_revision: None,
-                    project_key: Some(key.to_string()),
-                    reservation_id: legacy_pm_reservation(key.as_str(), &session.id, &identity),
-                    session_id: Some(session.id.clone()),
-                    issue_number: None,
-                    spec_number: None,
-                    delivery_id: None,
-                    host_id: if host_pid == 0 {
-                        String::new()
-                    } else {
-                        crate::process::current_hostname()
-                    },
-                    host_pid,
-                    host_started_at: (host_pid > 0)
-                        .then(|| crate::process::host_process_start_time(host_pid))
-                        .flatten(),
-                });
+            if project_assignment(&registry, key.as_str(), &member_id).is_none() {
+                set_project_assignment(
+                    &mut registry,
+                    key.as_str(),
+                    &member_id,
+                    Some(crate::agent_names::AgentMemberAssignment {
+                        role: AgentAssignmentRole::Pm,
+                        pm_profile_revision: None,
+                        project_key: Some(key.to_string()),
+                        reservation_id: legacy_pm_reservation(key.as_str(), &session.id, &identity),
+                        session_id: Some(session.id.clone()),
+                        issue_number: None,
+                        spec_number: None,
+                        delivery_id: None,
+                        host_id: if host_pid == 0 {
+                            String::new()
+                        } else {
+                            crate::process::current_hostname()
+                        },
+                        host_pid,
+                        host_started_at: (host_pid > 0)
+                            .then(|| crate::process::host_process_start_time(host_pid))
+                            .flatten(),
+                    }),
+                );
             }
-            if registry.roster == before_roster && registry.pm_projects == before_projects {
+            if registry.roster == before_roster
+                && registry.pm_projects == before_projects
+                && registry.project_assignments == before_assignments
+            {
                 return Ok(true);
             }
             let roster = registry.roster.as_mut().expect("imported roster");
@@ -1738,7 +2001,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| invalid("Agent roster revision exhausted"))?;
-            registry.schema_version = 2;
+            registry.schema_version = 3;
             registry.revision = registry
                 .revision
                 .checked_add(1)
@@ -1924,13 +2187,12 @@ pub(crate) fn with_configured_pm_guard<T>(
         ));
     }
     confirm_durable()?;
-    let member = registry.roster.as_ref().and_then(|roster| {
-        roster
-            .members
-            .iter()
-            .find(|member| member.pm_project_key.as_deref() == Some(key.as_str()))
-    });
-    if member.map(|member| member.agent_member_id.as_str()) != Some(member_id) {
+    let member = selected_pm_member(&registry, key.as_str());
+    if member
+        .as_ref()
+        .map(|member| member.agent_member_id.as_str())
+        != Some(member_id)
+    {
         return Err(invalid(
             "The configured Project Manager changed. Reload and review this draft.",
         ));
@@ -2004,18 +2266,36 @@ impl SessionMemberSnapshot {
             ));
         }
         Ok(registry
-            .roster
-            .as_ref()
-            .and_then(|roster| {
-                roster
-                    .members
-                    .iter()
-                    .find(|member| member.pm_project_key.as_deref() == Some(source.as_str()))
-            })
-            .cloned())
+            .pm_projects
+            .get(source.as_str())
+            .and_then(|project| project.member_id.as_deref())
+            .and_then(|id| project_member(registry, source.as_str(), id)))
     }
 
-    pub(crate) fn member(&self, id: &str) -> io::Result<Option<AgentMember>> {
+    pub fn assignments_for_member(
+        &self,
+        member_id: &str,
+    ) -> io::Result<Vec<crate::agent_names::AgentMemberAssignment>> {
+        let Some(registry) = &self.registry else {
+            return Ok(Vec::new());
+        };
+        if registry.phase != RegistryPhase::Active {
+            return Err(invalid(
+                "Agent registry is prepared; inspect agent.registry.status and reconcile",
+            ));
+        }
+        Ok(registry
+            .project_assignments
+            .values()
+            .filter_map(|assignments| assignments.get(member_id).cloned())
+            .collect())
+    }
+
+    pub(crate) fn member_in_project(
+        &self,
+        source: &ProjectKey,
+        member_id: &str,
+    ) -> io::Result<Option<AgentMember>> {
         let Some(registry) = &self.registry else {
             return Ok(None);
         };
@@ -2024,16 +2304,7 @@ impl SessionMemberSnapshot {
                 "Agent registry is prepared; inspect agent.registry.status and reconcile",
             ));
         }
-        Ok(registry
-            .roster
-            .as_ref()
-            .and_then(|roster| {
-                roster
-                    .members
-                    .iter()
-                    .find(|member| member.agent_member_id == id)
-            })
-            .cloned())
+        Ok(project_member(registry, source.as_str(), member_id))
     }
 
     fn resolve_member_id(&self, source: &ProjectKey, observed_id: &str) -> io::Result<String> {
@@ -2136,13 +2407,14 @@ impl SessionMemberSnapshot {
 }
 
 fn bind_project_profiles(registry: &Registry, key: &str, prefs: &mut IssueMonitorPrefs) {
+    let local_roster = project_roster(registry, key);
     let mut profiles = prefs.launch_profile_pool();
     for profile in &mut profiles {
         if let Some(id) = profile.agent_member_id.as_deref() {
             if let Ok(global) = resolve(registry, key, id) {
                 profile.agent_member_id = Some(global);
             }
-        } else if let Some(roster) = &registry.roster {
+        } else if let Some(roster) = &local_roster {
             let source = registry.sources.get(key);
             let matching = |member: &&AgentMember| {
                 member.implementation_eligible()
@@ -2210,7 +2482,7 @@ fn project_identity(
 fn project(registry: &Registry, key: &str, raw: Option<&str>) -> io::Result<IssueMonitorPrefs> {
     let mut prefs = decode(raw)?;
     project_identity(registry, key, &mut prefs)?;
-    prefs.agent_roster = registry.roster.clone();
+    prefs.agent_roster = project_roster(registry, key);
     if let Some(roster) = &prefs.agent_roster {
         prefs.max_active_agents = roster.enabled_count();
     }
@@ -2538,7 +2810,7 @@ impl RegistryWrite {
                 ));
             }
             if prefs.agent_roster != latest.agent_roster {
-                next.roster = prefs.agent_roster.clone();
+                store_project_roster(&mut next, key, prefs.agent_roster.clone())?;
             }
             bind_project_profiles(&next, key, &mut candidate);
             for profile in candidate.launch_profile_pool() {
@@ -2565,7 +2837,7 @@ impl RegistryWrite {
             }
         }
         ensure_cores(&mut next);
-        candidate.agent_roster = next.roster.clone();
+        candidate.agent_roster = project_roster(&next, key);
         if let Some(roster) = &candidate.agent_roster {
             candidate.max_active_agents = roster.enabled_count();
         }
@@ -2575,15 +2847,21 @@ impl RegistryWrite {
             &candidate.launch_profile_pool(),
         )
         .map_err(invalid)?;
+        validate_assignment_budget(registry, &next)?;
         let source = &registry.sources[key];
         let after_json = mirror_json(&candidate, Some(&source.after_json))?;
         if next.roster == registry.roster
             && next.profiles == registry.profiles
+            && next.project_assignments == registry.project_assignments
+            && next.pm_projects == registry.pm_projects
             && after_json == source.after_json
         {
             return Ok(Some(latest));
         }
-        let global_changed = next.roster != registry.roster || next.profiles != registry.profiles;
+        let global_changed = next.roster != registry.roster
+            || next.profiles != registry.profiles
+            || next.project_assignments != registry.project_assignments
+            || next.pm_projects != registry.pm_projects;
         next.revision = next
             .revision
             .checked_add(1)
@@ -2767,6 +3045,7 @@ fn add_source(
         rosterless_snapshots,
     };
     registry.sources.insert(key.into(), placeholder);
+    extract_legacy_runtime(registry)?;
     let proven: Vec<_> = registry
         .roster
         .as_ref()
@@ -3124,13 +3403,14 @@ fn ensure_active(source: Option<&ProjectKey>) -> io::Result<()> {
     let imports_lock = crate::agent_registry_import::lock_for_registry()?;
     let mut imports = crate::agent_registry_import::load()?.unwrap_or_default();
     let mut registry = Registry {
-        schema_version: 2,
+        schema_version: 3,
         phase: RegistryPhase::Prepared,
         revision: 1,
         roster: None,
         profiles: BTreeMap::new(),
         sources: BTreeMap::new(),
         pm_projects: BTreeMap::new(),
+        project_assignments: BTreeMap::new(),
     };
     for key in &keys {
         let observed = raw(&prefs_path(key)?)?;
@@ -3229,17 +3509,20 @@ pub fn status(source_key: Option<&str>) -> io::Result<RegistryStatus> {
         });
     }
     let assignments: Vec<_> = registry
-        .roster
-        .as_ref()
-        .into_iter()
-        .flat_map(|roster| &roster.members)
-        .filter_map(|member| member.assignment.as_ref())
+        .project_assignments
+        .values()
+        .flat_map(|assignments| assignments.values())
         .collect();
     Ok(RegistryStatus {
         phase: registry.phase,
         registry_revision: registry.revision,
         projects,
-        assigned_members: assignments.len(),
+        assigned_members: registry
+            .project_assignments
+            .values()
+            .flat_map(|assignments| assignments.keys())
+            .collect::<BTreeSet<_>>()
+            .len(),
         unknown_assignments: assignments
             .iter()
             .filter(|assignment| {
@@ -3345,16 +3628,8 @@ pub fn reconcile(request: &RegistryReconcileRequest) -> io::Result<RegistryStatu
                         return Err(io::Error::new(io::ErrorKind::WouldBlock,
                             "Refreshed Agent roster does not retain a current source identity; restore its recorded member and exact assignment before retrying"));
                     };
-                    let current = registry
-                        .roster
-                        .as_ref()
-                        .and_then(|roster| {
-                            roster
-                                .members
-                                .iter()
-                                .find(|member| &member.agent_member_id == global)
-                        })
-                        .ok_or_else(|| {
+                    let current =
+                        project_member(&registry, key.as_str(), global).ok_or_else(|| {
                             invalid("Current Agent source proof has no recorded member")
                         })?;
                     let retained = roster.members.iter().any(|member| {
@@ -3419,6 +3694,9 @@ pub fn reconcile(request: &RegistryReconcileRequest) -> io::Result<RegistryStatu
                 aliases.insert(old.clone(), global.clone());
             }
             let retired: BTreeSet<_> = source.aliases.values().cloned().collect();
+            if let Some(assignments) = registry.project_assignments.get_mut(key.as_str()) {
+                assignments.retain(|id, _| !retired.contains(id));
+            }
             if let Some(roster) = &mut registry.roster {
                 roster
                     .members
@@ -3504,6 +3782,25 @@ mod tests {
         (root, session, prefs)
     }
 
+    fn measured_machine_budget(budget: usize) {
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let path = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "observed_at": observed_at,
+                "expires_at": observed_at + 30,
+                "machine_budget": budget,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn pm_only_identity_import_preserves_legacy_bytes_without_a_monitor_source() {
         let home = tempfile::tempdir().unwrap();
@@ -3549,7 +3846,7 @@ mod tests {
         // A prepared NEW may not bind after its independently saved PM profile changes.
         let mut registry = load().unwrap().unwrap();
         let member_id = member.agent_member_id.clone();
-        registry.roster.as_mut().unwrap().members[0].assignment = None;
+        set_project_assignment(&mut registry, key.as_str(), &member_id, None);
         save(&registry).unwrap();
         crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
             .unwrap();
@@ -3691,14 +3988,22 @@ mod tests {
         write_candidate(&mut load().unwrap().unwrap(), explicit);
         let before = fs::read(path()).unwrap();
         let source_before = fs::read(&source_path).unwrap();
-        assert!(crate::agent_names::mutate_project_roster(
+        crate::agent_names::mutate_project_roster(
             &root,
             &sessions,
-            AgentRosterAction::SelectPm { member_id: pinned },
-            Some(added.revision)
+            AgentRosterAction::SelectPm {
+                member_id: pinned.clone(),
+            },
+            Some(added.revision),
         )
-        .is_err());
-        assert_eq!(fs::read(path()).unwrap(), before);
+        .expect("a candidate in another project does not exclude this project's PM");
+        assert_ne!(fs::read(path()).unwrap(), before);
+        assert_eq!(
+            selected_pm_member(&load().unwrap().unwrap(), key.as_str())
+                .unwrap()
+                .agent_member_id,
+            pinned
+        );
         assert_eq!(fs::read(&source_path).unwrap(), source_before);
         assert!(!monitor_path.exists());
     }
@@ -3744,7 +4049,12 @@ mod tests {
         .expect("the same exact unpublished bootstrap attempt is idempotent");
         assert_eq!(replay.member, first.member);
         assert_eq!(fs::read(path()).unwrap(), before);
-        let roster = load().unwrap().unwrap().roster.unwrap();
+        let registry = load().unwrap().unwrap();
+        let roster = project_roster(
+            &registry,
+            gwt_core::paths::project_scope_hash(&root).as_str(),
+        )
+        .unwrap();
         assert_eq!(roster.members.len(), 1);
         assert_eq!(roster.implementation_enabled_count(), 0);
         assert!(gwt_agent::session_ledger::load_sessions_shared(&sessions)
@@ -3792,8 +4102,126 @@ mod tests {
         .is_err());
         assert_eq!(fs::read(path()).unwrap(), changed);
         assert_eq!(
-            load().unwrap().unwrap().roster.unwrap().members[0].assignment,
+            project_assignment(
+                &load().unwrap().unwrap(),
+                gwt_core::paths::project_scope_hash(&root).as_str(),
+                &first.member.agent_member_id
+            )
+            .cloned(),
             first.member.assignment
+        );
+    }
+
+    #[test]
+    fn shared_pm_reservations_obey_total_budget_without_charging_manual_worker_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let first = reserve_new_pm_member(
+            &a,
+            &sessions,
+            &crate::pm_registry::pm_worktree_path_for_repo_path(&a),
+            "first-pm",
+        )
+        .unwrap();
+        let roster = crate::agent_names::read_project_roster(&b, &sessions).unwrap();
+        let error = crate::agent_names::reserve_project_member(
+            &b,
+            &sessions,
+            "worker-after-pm",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("unmeasured default Auto must count the already reserved PM against its total");
+        assert!(error.contains("Machine Agent capacity"));
+        crate::agent_names::mutate_project_roster(
+            &b,
+            &sessions,
+            AgentRosterAction::SelectPm {
+                member_id: first.member.agent_member_id.clone(),
+            },
+            Some(roster.revision),
+        )
+        .unwrap();
+        let prefs =
+            crate::pm_registry::load_pm_prefs(&crate::pm_registry::pm_prefs_path_for_repo_path(&b))
+                .unwrap();
+        let revision = crate::pm_registry::pm_profile_revision(&prefs);
+        let draft = PmLaunchDraft {
+            member_id: Some(&first.member.agent_member_id),
+            profile_revision: &revision,
+            agent_id: "claude",
+            model: None,
+            reasoning: None,
+        };
+        let reserve_second = || {
+            reserve_new_pm_member_from_draft(
+                &b,
+                &sessions,
+                &crate::pm_registry::pm_worktree_path_for_repo_path(&b),
+                "second-pm",
+                &draft,
+            )
+        };
+        let before = fs::read(path()).unwrap();
+        crate::machine_agent_settings::set(
+            None,
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(
+            reserve_second()
+                .err()
+                .expect("NEW PM must wait for an explicit Auto measurement")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        measured_machine_budget(1);
+        assert_eq!(
+            reserve_second()
+                .err()
+                .expect("NEW PM must reject a fully occupied measured budget")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs::read(path()).unwrap(), before);
+        crate::machine_agent_settings::set(
+            Some(1),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:01:00Z",
+        )
+        .unwrap();
+        assert_eq!(
+            reserve_second()
+                .err()
+                .expect("Manual worker limit must not bypass the PM physical budget")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        measured_machine_budget(2);
+        let second =
+            reserve_second().expect("two PM slots fit despite the worker-only limit of one");
+        assert_eq!(second.member.agent_member_id, first.member.agent_member_id);
+        assert_eq!(
+            SessionMemberSnapshot::load()
+                .unwrap()
+                .assignments_for_member(&first.member.agent_member_id)
+                .unwrap()
+                .len(),
+            2
+        );
+        measured_machine_budget(0);
+        assert_eq!(
+            reserve_second().unwrap().member,
+            second.member,
+            "same-slot replay does not consume another slot"
         );
     }
 
@@ -3829,15 +4257,12 @@ mod tests {
         .unwrap();
         // A completed crash reap can retain registration/backoff with no assignment.
         let mut registry = load().unwrap().unwrap();
-        registry
-            .roster
-            .as_mut()
-            .unwrap()
-            .members
-            .iter_mut()
-            .find(|member| member.agent_member_id == old_id)
-            .unwrap()
-            .assignment = None;
+        set_project_assignment(
+            &mut registry,
+            gwt_core::paths::project_scope_hash(&root).as_str(),
+            &old_id,
+            None,
+        );
         save(&registry).unwrap();
         prefs.settings.launch_profile = Some(crate::pm_registry::PmLaunchProfile {
             agent_id: "codex".into(),
@@ -3848,11 +4273,36 @@ mod tests {
         crate::pm_registry::save_pm_prefs(&pm_path, &prefs).unwrap();
         let old_bytes = fs::read(sessions.join(format!("{}.toml", source.id))).unwrap();
         let profile_bytes = fs::read(&pm_path).unwrap();
+        crate::machine_agent_settings::set(
+            None,
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:00:00Z",
+        )
+        .unwrap();
+        measured_machine_budget(0);
+        let before = fs::read(path()).unwrap();
+        assert_eq!(
+            reserve_resume_pm_member(&root, &sessions, &source, "restore-pm-attempt", false)
+                .err()
+                .expect("PM Resume must reject a zero measured physical budget")
+                .kind(),
+            io::ErrorKind::WouldBlock,
+        );
+        assert_eq!(fs::read(path()).unwrap(), before);
+        measured_machine_budget(1);
         let restored =
             reserve_resume_pm_member(&root, &sessions, &source, "restore-pm-attempt", false)
                 .unwrap();
         assert_eq!(restored.member.agent_member_id, old_id);
         assert!(restored.prior_assignment.is_none());
+        measured_machine_budget(0);
+        assert_eq!(
+            reserve_resume_pm_member(&root, &sessions, &source, "restore-pm-attempt", false)
+                .unwrap()
+                .member,
+            restored.member,
+            "same-slot PM Resume remains replayable after capacity changes",
+        );
         assert_eq!(restored.profile.agent_id, "claude");
         assert_eq!(restored.profile.model, source.model);
         assert_eq!(
@@ -3899,27 +4349,17 @@ mod tests {
         )
         .unwrap());
         let after = load().unwrap().unwrap();
-        assert!(after
-            .roster
-            .as_ref()
-            .unwrap()
-            .members
-            .iter()
-            .find(|member| member.agent_member_id == old_id)
-            .unwrap()
-            .assignment
-            .is_none());
+        assert!(project_assignment(
+            &after,
+            gwt_core::paths::project_scope_hash(&root).as_str(),
+            &old_id
+        )
+        .is_none());
         assert_eq!(
-            after
-                .roster
-                .as_ref()
+            selected_pm_member(&after, gwt_core::paths::project_scope_hash(&root).as_str())
                 .unwrap()
-                .members
-                .iter()
-                .find(|member| member.agent_member_id == successor)
-                .unwrap()
-                .pm_project_key,
-            source.repo_hash
+                .agent_member_id,
+            successor
         );
         assert_eq!(
             fs::read(sessions.join(format!("{}.toml", source.id))).unwrap(),
@@ -3978,6 +4418,82 @@ mod tests {
     }
 
     #[test]
+    fn legacy_single_assignment_migrates_without_changing_its_project_or_aliases() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, prefs_path, _) = source();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "legacy-slot",
+            Some(42),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let before = load().unwrap().unwrap();
+        let mut legacy = serde_json::to_value(&before).unwrap();
+        legacy["schema_version"] = serde_json::json!(2);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("project_assignments");
+        let row = legacy["roster"]["members"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row["agent_member_id"] == member.agent_member_id)
+            .unwrap();
+        row["assignment"] = serde_json::to_value(&member.assignment).unwrap();
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        fs::write(path(), &bytes).unwrap();
+        let snapshot = SessionMemberSnapshot::load().unwrap();
+        assert_eq!(
+            snapshot
+                .assignments_for_member(&member.agent_member_id)
+                .unwrap(),
+            vec![member.assignment.clone().unwrap()]
+        );
+        assert_eq!(
+            snapshot
+                .project_snapshot(&key)
+                .unwrap()
+                .agent_roster
+                .unwrap()
+                .members[0]
+                .assignment,
+            member.assignment
+        );
+        assert_eq!(
+            fs::read(path()).unwrap(),
+            bytes,
+            "read-only migration does not rewrite durable state"
+        );
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.priority_order = vec![42];
+            Ok(())
+        })
+        .unwrap();
+        let saved = load().unwrap().unwrap();
+        assert_eq!(saved.schema_version, 3);
+        assert!(saved
+            .roster
+            .as_ref()
+            .unwrap()
+            .members
+            .iter()
+            .all(|member| member.assignment.is_none() && member.pm_project_key.is_none()));
+        assert_eq!(saved.project_assignments, before.project_assignments);
+        assert_eq!(
+            saved.sources[key.as_str()].aliases,
+            before.sources[key.as_str()].aliases
+        );
+    }
+
+    #[test]
     fn member_tuning_preserves_candidates_other_cores_and_immutable_refusals() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -3997,12 +4513,19 @@ mod tests {
             "reservation_id":"retained-dead","session_id":"dead-session","issue_number":null,"spec_number":null,
             "delivery_id":null,"project_key":gwt_core::paths::project_scope_hash(&root).to_string(),"host_id":"unreachable-host","host_pid":0,"host_started_at":null
         })).unwrap());
+        let other_assignment = other.assignment.take();
         registry
             .roster
             .as_mut()
             .unwrap()
             .members
             .push(other.clone());
+        set_project_assignment(
+            &mut registry,
+            gwt_core::paths::project_scope_hash(&root).as_str(),
+            &other.agent_member_id,
+            other_assignment,
+        );
         let core = registry.profiles.get_mut(&target).unwrap();
         core.version = Some("kept-version".into());
         core.fast_mode = true;

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import * as terminalViewportReflow from "../terminal-viewport-reflow.js";
+import { createTerminalWheelScrollController } from "../terminal-wheel-scroll.js";
 
 import {
   applyVisibilityTransition,
@@ -376,6 +377,31 @@ test("snapshot replacement follows the tail and preserves history through overla
   history.terminal.buffer.active = { viewportY: 0, baseY: 200 };
   history.terminal.completeNextWrite();
   assert.equal(history.terminal.buffer.active.viewportY, 25, 'latest-wins snapshots retain the original reading position');
+});
+
+test("a wheel scroll during an asynchronous snapshot replaces its earlier tail intent", () => {
+  const harness = snapshotWriteHarness();
+  const { terminal, coordinator } = harness;
+  let wheel;
+  terminal.modes = { mouseTrackingMode: "any" };
+  terminal.scrollLines = (lines) => { terminal.buffer.active.viewportY += lines; };
+  const controller = createTerminalWheelScrollController({
+    terminalRoot: { addEventListener(type, handler) { if (type === "wheel") wheel = handler; }, removeEventListener() {} },
+    terminal,
+    isWindowsHost: () => false,
+    onUserScroll: () => coordinator.recordUserScroll?.(),
+  });
+  terminal.buffer.active = { viewportY: 100, baseY: 100 };
+  harness.receiveSnapshot("replacement");
+  terminal.completeNextWrite();
+  // xterm has parsed some snapshot rows, but its completion callback has not run.
+  terminal.buffer.active = { viewportY: 150, baseY: 150 };
+  wheel({ deltaY: -96, preventDefault() {}, stopPropagation() {} });
+  assert.equal(terminal.buffer.active.viewportY, 147);
+  terminal.buffer.active = { viewportY: 160, baseY: 160 };
+  terminal.completeNextWrite();
+  assert.equal(terminal.buffer.active.viewportY, 147, "snapshot completion must retain the user's newer position");
+  controller.dispose();
 });
 
 test("snapshot coordinator callbacks are no-ops after terminal runtime teardown", () => {

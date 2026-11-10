@@ -692,6 +692,8 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 choose `Back to latest entries` to resume the latest updates.
 
 Implementation Agents are persistent members shared by projects on this computer, with memorable names in the output language.
+The same member can work in different projects at the same time, with one assignment per project and the shared machine budget still enforced.
+Agents lists those project assignments together; selecting another project's assignment opens that project.
 Resting members remain in Agents with their saved settings and history;
 they do not receive new work.
 A new Issue reuses an available member; a continuation prefers its previous member when available.

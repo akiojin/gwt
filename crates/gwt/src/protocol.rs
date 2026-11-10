@@ -2332,6 +2332,10 @@ pub struct AgentRosterMemberView {
     pub member: crate::agent_names::AgentMember,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Unreleased assignments across projects, for display and navigation only.
+    /// The flattened member assignment remains scoped to the current project.
+    #[serde(default)]
+    pub active_assignments: Vec<AgentRosterAssignmentView>,
     /// Saved manual candidate input, distinct from Auto tiers and Session facts.
     #[serde(default)]
     pub saved_manual_profile: Option<crate::IssueMonitorLaunchProfile>,
@@ -2347,6 +2351,16 @@ pub struct AgentRosterMemberView {
     pub landed_count: Option<usize>,
     pub active_seconds: Option<u64>,
     pub tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterAssignmentView {
+    pub project_key: String,
+    pub project_name: String,
+    pub session_id: Option<String>,
+    pub issue_number: Option<u64>,
+    /// Recorded Session status is not proof of a live process or input authority.
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

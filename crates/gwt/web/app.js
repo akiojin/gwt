@@ -3108,6 +3108,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           terminalRoot: terminalContainer,
           terminal,
           window,
+          onUserScroll: () => terminalMap.get(windowId)?.snapshotWriteCoordinator?.recordUserScroll(),
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
           isRuntimeStopped: () => {

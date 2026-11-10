@@ -12100,7 +12100,10 @@ fn retry_unclaimed_monitor_capacity(
     detail: &str,
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
-        detail.starts_with("Issues max_active reached (")
+        (detail.starts_with("Issues max_active reached (")
+            || detail.starts_with("Machine Agent capacity is occupied;")
+            || detail.starts_with("Machine Agent capacity observation is unavailable;")
+            || detail.starts_with("Machine Agent census is uncertain;"))
             && !feedback.issue_monitor_review_dispatch
             && feedback.issue_monitor_autonomous_handoff.is_none()
             && current.load(Ordering::Acquire)
@@ -12312,6 +12315,12 @@ mod worker_tests {
 
     #[test]
     fn capacity_refusal_requeues_only_the_unclaimed_delivery() {
+        for message in [
+            "Issues max_active reached (8/8) before launching Issue #42",
+            "Machine Agent capacity is occupied; wait for an exact slot to be released",
+            "Machine Agent capacity observation is unavailable; wait for the next fresh measurement",
+            "Machine Agent census is uncertain; wait for its next observation",
+        ] {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
         let path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
@@ -12339,7 +12348,6 @@ mod worker_tests {
         }))
         .unwrap();
         let current = AtomicBool::new(false);
-        let message = "Issues max_active reached (8/8) before launching Issue #42";
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         assert!(
             !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
@@ -12390,6 +12398,7 @@ mod worker_tests {
             monitor.autonomous_record(42).unwrap().phase,
             crate::issue_monitor::AutonomousPhase::Idle
         );
+        }
     }
 
     #[test]
@@ -14449,26 +14458,20 @@ mod tests {
             &pty
         )
         .is_err());
-        assert!(crate::agent_registry::SessionMemberSnapshot::load()
+        assert!(!crate::agent_registry::SessionMemberSnapshot::load()
             .unwrap()
-            .member(&member.agent_member_id)
+            .assignments_for_member(&member.agent_member_id)
             .unwrap()
-            .unwrap()
-            .assignment
-            .is_some());
+            .is_empty());
         crate::agent_names::release_reaped_project_member(
             &root, &sessions, &snapshot, "reaped", &pty,
         )
         .unwrap();
         let saved = crate::agent_registry::SessionMemberSnapshot::load()
             .unwrap()
-            .member(&member.agent_member_id)
-            .unwrap()
+            .assignments_for_member(&member.agent_member_id)
             .unwrap();
-        assert!(
-            saved.assignment.is_none(),
-            "exact reaped member must be released"
-        );
+        assert!(saved.is_empty(), "exact reaped member must be released");
     }
 
     #[tokio::test]
