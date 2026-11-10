@@ -7167,8 +7167,28 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
     crate::update_settings::migrate_before_project_save(path, false)?;
     let prepared_at = std::time::Instant::now();
     let committed = durable_atomic_write(path, content.as_bytes());
+    let canonical_finished_at = std::time::Instant::now();
+    let mut sidecar_ms = 0.0;
+    let result = (|| {
+        // Invalidate even if parent sync failed after the rename became visible.
+        // Local writers cannot rely on metadata granularity to distinguish a save.
+        issue_monitor_prefs_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&std::path::absolute(path)?);
+        committed?;
+        #[cfg(test)]
+        PREFS_IO_COUNTS.set((PREFS_IO_COUNTS.get().0, PREFS_IO_COUNTS.get().1 + 1));
+        // Issue #3883 AC-2: retain the last committed generation for recovery.
+        // A missing sidecar only costs recovery its floor; it must never fail
+        // a canonical write that already succeeded.
+        let sidecar_started = std::time::Instant::now();
+        let _ = durable_atomic_write(&committed_prefs_generation_path(path), content.as_bytes());
+        sidecar_ms = sidecar_started.elapsed().as_secs_f64() * 1000.0;
+        Ok(())
+    })();
     let elapsed = started.elapsed();
-    if committed.is_err() || elapsed >= std::time::Duration::from_millis(100) {
+    if result.is_err() || elapsed >= std::time::Duration::from_millis(100) {
         tracing::info!(
             target: "gwt.issue_monitor.prefs",
             path = %path.display(),
@@ -7177,32 +7197,14 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
             machine_migration_ms = migrated_at.duration_since(validated_at).as_secs_f64() * 1000.0,
             serialize_ms = serialized_at.duration_since(migrated_at).as_secs_f64() * 1000.0,
             update_migration_ms = prepared_at.duration_since(serialized_at).as_secs_f64() * 1000.0,
-            write_ms = prepared_at.elapsed().as_secs_f64() * 1000.0,
+            write_ms = canonical_finished_at.duration_since(prepared_at).as_secs_f64() * 1000.0,
+            sidecar_ms,
             elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-            success = committed.is_ok(),
+            success = result.is_ok(),
             "Issues prefs save timing"
         );
     }
-    // Invalidate even if parent sync failed after the rename became visible.
-    // Local writers cannot rely on metadata granularity to distinguish a save.
-    issue_monitor_prefs_cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&std::path::absolute(path)?);
-    committed?;
-    #[cfg(test)]
-    PREFS_IO_COUNTS.set((PREFS_IO_COUNTS.get().0, PREFS_IO_COUNTS.get().1 + 1));
-    // Issue #3883 AC-2: keep the generation this commit just made readable from
-    // somewhere the canonical file's own corruption cannot reach. The recovery
-    // below needs a floor, and without one it resets to `Default` — losing
-    // every launch record, the operator's `autonomous_mode`, and `enabled` in a
-    // single write while the agents those launches describe keep running.
-    //
-    // Written after the canonical rename and never allowed to fail the commit:
-    // a missing sidecar only costs the recovery its floor, whereas failing here
-    // would lose a write that already succeeded.
-    let _ = durable_atomic_write(&committed_prefs_generation_path(path), content.as_bytes());
-    Ok(())
+    result
 }
 
 /// Issue #3883 AC-2: the sibling holding the last successfully committed prefs.
