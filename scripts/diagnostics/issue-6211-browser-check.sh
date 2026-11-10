@@ -3,7 +3,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 # Install the version in scripts/playwright-version.txt into target/e2e-deps before running.
-# Additional arguments (including the canonical headed reporter) pass to Playwright.
+# Use --serve-only from the owning session for canonical verify.run: detached
+# verification workers cannot satisfy hook.doctor process ancestry.
+# Additional arguments in normal mode pass to Playwright.
 test -f target/e2e-deps/node_modules/@playwright/test/cli.js || { echo "Install pinned Playwright in target/e2e-deps first" >&2; exit 1; }
 CHECK_HOME="$(mktemp -d "$ROOT/target/gwt-fresh-home.XXXXXX")"
 mkdir -p "$CHECK_HOME/.gwt/projects/99a8660247f5bc49/project-state"
@@ -59,4 +61,9 @@ BASE="$(cat "$CHECK_HOME/url")"
 curl -fsS -I "$BASE" > "$CHECK_HOME/http-check.txt"
 check_hooks
 printf 'Isolated checkout PID=%s HOME=%s\n' "$CHECK_PID" "$CHECK_HOME"
+printf '%s\n' "$CHECK_HOME" > "$ROOT/target/issue-6211-browser-home"
+if [ "${1:-}" = "--serve-only" ]; then
+  wait "$CHECK_PID"
+  exit $?
+fi
 GWT_PLAYWRIGHT_BASE_URL="$BASE" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" GWT_PLAYWRIGHT_PROJECT_ROOT="$ROOT" NODE_PATH="$ROOT/target/e2e-deps/node_modules" node target/e2e-deps/node_modules/@playwright/test/cli.js test --config crates/gwt/playwright/playwright.config.ts tests/kanban.spec.ts --grep 'Issue #6211|p95 budget' --workers=1 "$@"
