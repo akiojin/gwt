@@ -277,6 +277,24 @@ test('Q&A separates safe question text from the Markdown answer and copies both'
   assert.deepEqual(copied, [`Q: ${qa.question}\n\nA:\n${qa.body}`]);
 });
 
+test('decision Reports display and copy numbered choices without changing the stored body', async () => {
+  const { root, update, copied, model } = fixture();
+  const incoming = structuredReport('decision');
+  incoming.kind = 'decision';
+  incoming.structured.summary.decision = { question: 'Which recovery?', recommendation: 'Retry',
+    reason: 'The work is saved', options: ['Retry — run again', 'Wait — keep state',
+      'Inspect <logs> — gather evidence', 'Cancel — stop'] };
+  const expected = 'Ready\nNext: Check delivery\nDecision: Which recovery?\nRecommended: Retry (The work is saved)\n1. Retry — run again\n2. Wait — keep state\n3. Inspect <logs> — gather evidence\n4. Cancel — stop\nReply with the option number, or Other: your own answer.';
+  update([incoming]);
+  const article = root.querySelector('article');
+  assert.equal(article.querySelector('.pm-chat__text').textContent, expected);
+  assert.equal(article.querySelector('logs'), null, 'choices remain literal text');
+  article.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${expected}\n\n**All checks passed.**\n\n- https://example.com/issues/3431`]);
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
+});
+
 test('structured Reports show a compact overview and copy all expandable details and references', async () => {
   const { root, update, copied } = fixture();
   const incoming = structuredReport();

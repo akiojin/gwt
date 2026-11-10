@@ -62,6 +62,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         createAgentCompletionNotifier,
         createAgentAttentionToaster,
         notificationForTransition,
+        monitorDiagnostic,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -3047,6 +3048,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
+          isRuntimeStopped: () => {
+            const windowData = workspaceWindowById(windowId);
+            return isAgentWindowPreset(windowData?.preset)
+              && ["stopped", "interrupted"].includes(runtimeStateForWindow(windowData));
+          },
           sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
@@ -4847,6 +4853,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
+        if (event.level === "error") {
+          const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
+          if (diagnostic) {
+            const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
+            const notice = { ...diagnostic, title: `${transition?.title || "Issue Monitor"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
+            else notificationCenter.recordError(notice);
+          }
+          return;
+        }
         // Repeated launch attempts update one Issue notice until it is dismissed.
         if (event.level === "info" && !event.notification_transition
           && event.message === "Issue Monitor launch requested"
@@ -4884,7 +4900,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         showToast: showAttentionToast,
         dismissToast: (id) => {
           alertsToasts.dismiss(id);
-          notificationCenter.resolveError(id);
+          notificationCenter.removeNotice(id);
         },
       });
 
