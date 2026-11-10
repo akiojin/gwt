@@ -3,11 +3,11 @@
 //!
 //! gwt creates one `work/issue-N` branch per launch and never deletes it, so
 //! every merged PR leaves a branch behind on the remote. 265 of them had piled
-//! up by 2026-09-05, and the Issue Monitor's open-PR readback walks that list
+//! up by 2026-09-05, and Issues' open-PR readback walks that list
 //! once per scan — the accumulation is what pushed a scan past its budget and
 //! stopped launches (Issue #3963).
 //!
-//! Two entrances share one decision. The Issue Monitor deletes a head branch
+//! Two entrances share one decision. Issues deletes a head branch
 //! right after it confirms the delivery; `branch.prune_merged` sweeps whatever
 //! already accumulated. Both call [`prune_merged_branches`], so a branch the
 //! sweep would refuse is a branch the delivery hook refuses too.
@@ -297,7 +297,7 @@ pub trait PruneEnvironment {
 /// Run one prune pass over `branches`.
 ///
 /// When the PR inventory cannot be read the pass reports a skip and deletes
-/// nothing (Issue #3970 AC-5); the caller — the Issue Monitor scan in
+/// nothing (Issue #3970 AC-5); the caller — Issues scan in
 /// particular — keeps going.
 pub fn prune_merged_branches<E: PruneEnvironment>(
     env: &mut E,

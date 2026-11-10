@@ -4,7 +4,7 @@
 //! contract cannot make an agent take another turn: after its bootstrap turn
 //! the PM simply stopped, and nothing in gwt ever woke it again — observed
 //! live as "the PM runs once and is done". This Stop gate is the driving
-//! mechanism: while the Issue Monitor is enabled for the project, a stopping
+//! mechanism: while Issues is enabled for the project, a stopping
 //! PM is turned around into the next loop cycle.
 //!
 //! The brakes live here, in the mechanism, not in guidance an unattended LLM
@@ -478,7 +478,7 @@ fn handle_at(
     // Issue #3607: the resident loop belongs to the *registered* PM. This gate
     // keys on the worktree's path shape alone, so a PM that `pm.stop` retired —
     // or that another PM superseded — otherwise kept forcing itself into the
-    // next cycle and kept rewriting Issue Monitor state a second PM was also
+    // next cycle and kept rewriting Issues state a second PM was also
     // writing. Deregistration is the durable, GUI-free way to end that, so it
     // has to be observable here.
     //
@@ -1063,7 +1063,7 @@ mod tests {
     /// Issue #3607 AC-5: `pm.stop` clears the registration, and that has to
     /// actually quiet the PM. The Stop gate keys only on the worktree's path
     /// shape, so without this a retired orphan kept forcing itself into the
-    /// next cycle — and kept rewriting the Issue Monitor state a second PM was
+    /// next cycle — and kept rewriting Issues state a second PM was
     /// also writing.
     #[test]
     fn a_deregistered_session_stops_driving_the_resident_loop() {
@@ -1390,7 +1390,7 @@ mod tests {
             "drifting outside its owner Issue's scope",
             "waiting for its next action",
             "`board.post` with a mention or `pm.message.send`",
-            "never inject launch or bootstrap instructions past the Issue Monitor",
+            "never inject launch or bootstrap instructions past Issues",
             "A launch left idle without a directive is never a no-change cycle",
             // An orphan window is reported by no snapshot except the gap
             // between the session count and the tracked launches, so the

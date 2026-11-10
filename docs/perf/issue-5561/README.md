@@ -74,7 +74,7 @@ installed の[30分ごとのサンプル](before-installed/process-samples.jsonl
 
 再起動後の最初の試行では、PowerShell wrapper の任意引数転送が末尾に空文字を加え、Playwright が対象2件でなく全642件を選ぶことを実 command line で確認した。所有 runner のみ停止し、fixture の finally による GUI 停止を確認した。[状態](argument-failed/status.json)、[終了処理](argument-failed/shutdown.json)、[識別](argument-failed/metadata.json)。両 wrapper で空引数を除外し、同じ起動コマンドが2件だけを選ぶことを再確認した。この試行はメモリ観測に含めない。
 
-実モデル Agent 10〜12窓・同条件4時間で WS が1.5GB以下で頭打ちになる Issue #5561 AC-2 は、deterministic PTY で代用しない。provider inference、provider hooks、実装ビルド、PM/Issue Monitor の稼働はこの fixture の対象外である。1.5GB は1,500,000,000 bytesとして判定する。
+実モデル Agent 10〜12窓・同条件4時間で WS が1.5GB以下で頭打ちになる Issue #5561 AC-2 は、deterministic PTY で代用しない。provider inference、provider hooks、実装ビルド、PM/Issues の稼働はこの fixture の対象外である。1.5GB は1,500,000,000 bytesとして判定する。
 
 再開後の4時間試験も2回失敗した。最初の dark は観測約54分で定常出力の30秒predicate待機がタイムアウトした。最大WSは601,468,928 B、browser errorは0、12 producerは存続していた。[結果](trace-failed/runtime-memory-dark.json)、[traceのエラー要約](trace-failed/failure.json)、[識別](trace-failed/metadata.json)、[終了処理](trace-failed/shutdown.json)。失敗後のtrace保存は約7.6GBのresourceを処理しており、その間のGUI生存やWS減少は観測成功に数えない。所有runnerを停止し、wrapperのGUI/producer cleanup完了を確認した。巨大なraw traceはリポジトリに含めない。
 

@@ -237,7 +237,7 @@ fn within_cooldown(last_finished_at: Option<DateTime<Utc>>, now: DateTime<Utc>) 
     last_finished_at.is_some_and(|last| (now - last).num_seconds() < COOLDOWN_SECS)
 }
 
-/// Called by the Issue Monitor scan on every pass. Cheap unless it decides to
+/// Called by Issues scan on every pass. Cheap unless it decides to
 /// run: one free-space query per volume and one small file read. The sweep
 /// itself — which walks every worktree and may delete hundreds of gigabytes —
 /// runs on its own thread so it never holds the scan.

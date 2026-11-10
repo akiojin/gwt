@@ -1,5 +1,5 @@
 /* Issue #6678: real checkout GUI observation. This deliberately keeps PM and
- * Monitor off; the busy-owner Deferred-loop regression is a separate Rust test.
+ * Issues off; the busy-owner Deferred-loop regression is a separate Rust test.
  */
 import { expect, test } from "@playwright/test";
 import { readdir, readFile, writeFile } from "node:fs/promises";
@@ -73,7 +73,7 @@ test("isolated GUI keeps PM diagnostic volume bounded", async ({ page }, info) =
     measured_ten_minutes: elapsedMs >= 600_000, headed: true, console_page_errors: errors,
     inspected_lines: inspectedLines, pm_refresh_lines: matchingLines, diagnostic_bytes: bytes,
     baseline_lines_per_second: 350, maximum_fraction: 0.01,
-    scenario: "isolated idle GUI; PM auto-start and Monitor disabled",
+    scenario: "isolated idle GUI; PM auto-start and Issues disabled",
     limitation: "Different workload from the reported busy-owner loop; root regression is covered separately by Rust.",
     fixture: JSON.parse(await readFile(join(home!, "fixture.json"), "utf8")) };
   const path = info.outputPath(`pm-refresh-log-budget-${theme}.json`);

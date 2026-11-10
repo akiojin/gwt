@@ -313,7 +313,7 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         // Agents continue their authenticated, phase-spread pane.read calls.
         if (daemonPid) {
           const prefs = JSON.parse(await readFile(join(process.env.GWT_IDLE_PROJECT_STATE!, "issue-monitor.json"), "utf8"));
-          expect(prefs.enabled, "measured daemon keeps Issue Monitor OFF").toBe(false);
+          expect(prefs.enabled, "measured daemon keeps Issues OFF").toBe(false);
         }
         if (theme === "dark" && nativeProfileSeconds > 0) {
           const targets = [{ name: "native-profile", pid: targetPid,
@@ -440,7 +440,7 @@ test.describe("Issue #5658 idle GUI CPU", () => {
         expect(successes, "phase-spread Ready throughput across launched Agents")
           .toBeGreaterThanOrEqual(Math.max(0, Math.floor(readyRequestsPerMinute * elapsed / 60) - paneCount));
         expect(errors, "console and page errors").toEqual([]);
-        if (maxDaemonCores > 0) expect(daemonCores, "whole owned Monitor OFF daemon idle CPU budget").toBeLessThanOrEqual(maxDaemonCores);
+        if (maxDaemonCores > 0) expect(daemonCores, "whole owned Issues OFF daemon idle CPU budget").toBeLessThanOrEqual(maxDaemonCores);
         if (assertCpuBudget) expect(averageCores, "whole owned GUI idle CPU budget").toBeLessThanOrEqual(maxCores);
         if (theme === "dark" && paneCount !== 5) await writeFile(fleetPath, JSON.stringify({ gui_pid: targetPid,
           gui_started_at: process.env.GWT_PLAYWRIGHT_GUI_STARTED_AT,

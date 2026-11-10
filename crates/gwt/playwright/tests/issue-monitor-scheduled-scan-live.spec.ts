@@ -9,7 +9,7 @@ const PREFS = process.env.GWT_5119_PREFS_PATH ?? "";
 const LOGS = process.env.GWT_5119_LOG_DIR ?? "";
 const COMPLETIONS = ["IssueMonitorScheduledScanComplete", "IssueMonitorScheduledScanPrepared"];
 
-test.describe("scheduled Issue Monitor completion (isolated live backend)", () => {
+test.describe("scheduled Issues completion (isolated live backend)", () => {
   test.skip(!BASE || !CHECK_HOME, "requires the isolated checkout launcher");
   test.setTimeout(380_000);
 
@@ -97,7 +97,7 @@ test("Issue #5876 canvas readiness precedes materializer admission", async ({ pa
       for (const line of (await readFile(join(root, file), "utf8")).split("\n")) {
         try {
           const row = JSON.parse(line);
-          if (row.fields?.message === "Issue Monitor subscriber role changed") rows.push(row.fields);
+          if (row.fields?.message === "Issues subscriber role changed") rows.push(row.fields);
         } catch { /* retry partial log writes */ }
       }
     }

@@ -71,7 +71,7 @@ pub(crate) fn capture_restored_launch(
         current,
         feedback: LaunchFeedbackContext {
             client_id: "__issue_monitor__".into(),
-            title: "Issue Monitor".into(),
+            title: "Issues".into(),
             issue_monitor_issue_number: Some(issue),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(root.into()),
@@ -393,7 +393,7 @@ pub(crate) fn reject_preflight_launch(
             source: None,
             feedback: LaunchFeedbackContext {
                 client_id: "__issue_monitor__".into(),
-                title: "Issue Monitor".into(),
+                title: "Issues".into(),
                 issue_monitor_issue_number: Some(issue),
                 issue_monitor_delivery_id: expected.map(|expected| expected.delivery_id.clone()),
                 issue_monitor_project_root: Some(root.into()),
@@ -1169,7 +1169,7 @@ impl MonitorLaunch {
     }
 }
 
-const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issue Monitor startup timed out after ";
+const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issues startup timed out after ";
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
     let owner = format!("#{issue}");

@@ -104,7 +104,7 @@ impl OwnerLaunchPermissionCheck {
     }
 }
 
-pub const MONITOR_PREPARATION_EXHAUSTED: &str = "Issue Monitor launch stopped after 3 preparations without spawning or adopting an owner pane; requeue the Issue to retry";
+pub const MONITOR_PREPARATION_EXHAUSTED: &str = "Issues launch stopped after 3 preparations without spawning or adopting an owner pane; requeue the Issue to retry";
 
 /// An observation from the first read-only facts pass, never a claim or a
 /// cleanup permit. The fixed owner revalidates every expected source field.

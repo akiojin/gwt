@@ -811,7 +811,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-runtime gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor scheduled driver contracts
+      - name: Run Issues scheduled driver contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
@@ -820,7 +820,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime_local_driver_ -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor launch_now control-path contracts
+      - name: Run Issues launch_now control-path contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
@@ -958,12 +958,12 @@ jobs:
       - name: Run inherited Claude session environment regressions
         run: node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor scheduled driver contracts
+      - name: Run Issues scheduled driver contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt local_fallback_lease -- --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor launch_now control-path contracts
+      - name: Run Issues launch_now control-path contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1
@@ -995,7 +995,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
         timeout-minutes: 15
       # Issue #4078: pin both the wait declaration and its durable prefs fallback.
-      - name: Run Issue Monitor wait declaration contracts
+      - name: Run Issues wait declaration contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1

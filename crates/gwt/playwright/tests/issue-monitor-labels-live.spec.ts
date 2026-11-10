@@ -1,6 +1,6 @@
 /* Issues #4158 / #6211 — selected labels and next-scan admission through the real
  * checkout backend, in both Operator themes. Requires a browser-check fresh
- * HOME with PM/Monitor disabled and a PATH gh fixture serving matching,
+ * HOME with PM/Issues disabled and a PATH gh fixture serving matching,
  * nonmatching and unlabelled open Issues, plus a repository label catalog
  * containing allowed_label and agent-ready. GWT_PLAYWRIGHT_BASE_URL / CHECK_HOME /
  * PROJECT_ROOT identify the fresh launch. CHECK_HOME/url contains its URL;
@@ -58,7 +58,7 @@ async function isolatedFixture() {
   return { fixture, preferences, cli };
 }
 
-test.describe("Issue Monitor allowed labels (live backend)", () => {
+test.describe("Issues allowed labels (live backend)", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });

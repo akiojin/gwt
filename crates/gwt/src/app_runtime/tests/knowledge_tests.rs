@@ -1168,7 +1168,7 @@ fn frontend_user_action_logs_project_index_search_without_query_values() {
 #[test]
 fn frontend_user_action_logs_issue_monitor_global_profile_configure() {
     let log = super::super::frontend_user_action_log(&FrontendEvent::IssueMonitorConfigureProfile)
-        .expect("issue monitor configure profile user action log");
+        .expect("Issues configure profile user action log");
 
     assert_eq!(log.action, "issue_monitor_configure_profile");
     assert_eq!(log.surface, "issue_monitor");

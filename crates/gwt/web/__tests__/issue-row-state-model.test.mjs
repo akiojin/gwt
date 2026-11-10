@@ -579,7 +579,7 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     entry: knowledgeEntry(1, { monitor_state: "launched" }),
     inlineWindow: agentWindow("agent-1", 1, { status: "stopped" }),
   });
-  assert.equal(stopped.primary.label, "Launched", "a stopped agent falls back to the Monitor state");
+  assert.equal(stopped.primary.label, "Launched", "a stopped agent falls back to the Issues state");
 
   const needsHuman = issueRowStateModel({
     entry: knowledgeEntry(47, { monitor_state: "needs_human" }),
@@ -1101,7 +1101,7 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   );
 
   // The agent window is closed: the row drops the face and falls back to the
-  // Monitor state.
+  // Issues state.
   fixture.setWindows([]);
   fixture.surface.renderKnowledgeBridge("win-1");
   const gone = fixture.body.querySelector('[data-issue-number="3671"]');

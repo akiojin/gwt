@@ -68,7 +68,7 @@ struct KnowledgeMonitorSnapshotEntry {
     snapshot: Arc<KnowledgeMonitorByNumber>,
 }
 
-/// SPEC #3214 Phase 15: bounded latest Issue Monitor read models keyed by
+/// SPEC #3214 Phase 15: bounded latest Issues read models keyed by
 /// project root. Monitor lifecycle producers remain the authority; Knowledge
 /// load/search workers only consume the newest complete projection.
 #[derive(Default)]

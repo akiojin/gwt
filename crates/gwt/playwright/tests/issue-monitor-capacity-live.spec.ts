@@ -44,7 +44,7 @@ async function expectOverride(page: Page, override: number | null) {
   return latestStatus(page);
 }
 
-test.describe("Issue Monitor machine capacity (live backend)", () => {
+test.describe("Issues machine capacity (live backend)", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
   test.setTimeout(900_000);
   test.use({ viewport: { width: 1440, height: 1100 } });

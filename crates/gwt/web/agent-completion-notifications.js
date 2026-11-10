@@ -52,7 +52,7 @@ function appendStatusDetail(body, detail) {
 
 /**
  * Source-tagged notification inputs. Runtime states come from WindowProcessStatus;
- * NeedsHuman comes only from the Monitor's typed transition, never Waiting/text.
+ * NeedsHuman comes only from the Issues's typed transition, never Waiting/text.
  * @typedef {{source: "runtime", state: "stopped" | "interrupted" | "error", windowData?: object,
  * projectTab?: object} | {source: "monitor", state: "needs_human", issueNumber: number}} NotificationTransition
  */
@@ -83,7 +83,7 @@ export function monitorDiagnostic({ message, kind, stage, issue_number } = {}) {
   const continuations = [...raw.matchAll(/\(continued_with_([\w]+)\)/g)];
   if (raw.startsWith("scan continued:") && !raw.includes("launch_suppressed") && continuations.length
     && continuations.every(([, value]) => ["stale_readback", "previous_candidates"].includes(value))) return null;
-  const stalled = raw.startsWith("Issue Monitor scan stalled");
+  const stalled = raw.startsWith("Issues scan stalled");
   const normalized = raw
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g, "<time>")
     .replace(/\b\d+(?:\.\d+)?(?:ms|s)\b/g, "<duration>")

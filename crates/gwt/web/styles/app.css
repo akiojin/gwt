@@ -1963,7 +1963,7 @@ body {
   color: var(--color-text-strong);
 }
 
-/* SPEC #3885 Phase 5 (T-032..T-035): the Issue window's Monitor band, the
+/* SPEC #3885 Phase 5 (T-032..T-035): the Issue window's Issues band, the
    "+ New" popover body and the detail pane. Operator tokens and the shared
    `.modal-*` primitive only. */
 .knowledge-monitor-bar {
@@ -5719,7 +5719,7 @@ body {
   color: var(--color-text-strong);
 }
 
-/* Issue 4911 — the Issue Monitor settings form repeats the Agent Settings
+/* Issue 4911 — Issues settings form repeats the Agent Settings
    block once per launch candidate; the open set carries the form.
    (No `#` before the number: the token audits scan this block for hex colors.) */
 .launch-agent-sets {

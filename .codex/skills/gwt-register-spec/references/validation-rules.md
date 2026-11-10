@@ -37,7 +37,7 @@ offset inside the body.
 | R12 | Format | FR identifiers are contiguous (`FR-001`, `FR-002`, …) | `FR-001, FR-003` |
 | R13 | Structural | Section `## 受け入れ基準` exists (Issue #3873) | AC lines under `## 成功基準` only |
 
-R13 exists because the Issue Monitor's autonomous gate reads acceptance
+R13 exists because the Issues autonomous gate reads acceptance
 criteria only from a `## 受け入れ基準` / `## Acceptance Criteria` heading
 followed by `- [ ] AC-N:` items. `## 成功基準` is the human-facing
 verification recipe and is never scanned, so a SPEC that keeps its AC

@@ -10,7 +10,7 @@ import { gotoLiveGwt, liveGwtRouteUrl } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
-test("Monitor strip coalesces receiver bursts and updates without animation frames", async ({ page }, info) => {
+test("Issues strip coalesces receiver bursts and updates without animation frames", async ({ page }, info) => {
   test.skip(!BASE, "requires an isolated checkout server");
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));

@@ -138,7 +138,7 @@ pub struct LaunchWizardOptionView {
     pub color: Option<gwt_agent::AgentColor>,
 }
 
-/// Read-only input assistance for the saved Issue Monitor candidate pool.
+/// Read-only input assistance for the saved Issues candidate pool.
 /// These choices do not normalize or replace any saved profile fields.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IssueMonitorProfileChoices {
@@ -342,7 +342,7 @@ struct AgentUpdateState {
     status: String,
 }
 
-/// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
+/// Issue #4079 AC-2: what an Issues Agent Settings save will do to the
 /// candidate pool. Absent for every other wizard.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LaunchWizardIssueMonitorPoolImpactView {
@@ -359,7 +359,7 @@ pub struct LaunchWizardIssueMonitorPoolImpactView {
     pub resulting_summary: String,
 }
 
-/// Issue #4911: the Agent Settings sets of the Issue Monitor settings form, in
+/// Issue #4911: the Agent Settings sets of Issues settings form, in
 /// launch order. Absent for every other wizard.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardIssueMonitorPoolView {
@@ -459,7 +459,7 @@ pub struct LaunchWizardView {
     /// configure when first-time setup is missing). `None` when launchable.
     pub agent_setup: Option<LaunchWizardAgentSetupView>,
     /// Issue #4079 AC-2: filled by the app runtime when this wizard is the
-    /// Issue Monitor Agent Settings form, so the operator sees which candidate
+    /// Issues Agent Settings form, so the operator sees which candidate
     /// the save writes before committing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_monitor_pool_impact: Option<LaunchWizardIssueMonitorPoolImpactView>,
@@ -765,7 +765,7 @@ impl LaunchWizardLaunchRequest {
     /// and re-run the shared validator against the argv and environment the
     /// request actually carries.
     ///
-    /// The Issue Monitor identifies itself — and may force skip-permissions —
+    /// Issues identifies itself — and may force skip-permissions —
     /// only after the wizard has already built the config. Without this the
     /// recorded decision would describe the wizard's guess rather than the
     /// launch that ships, and a post-build `skip_permissions = true` on a
@@ -806,7 +806,7 @@ impl LaunchWizardLaunchRequest {
         }
     }
 
-    /// Issue #4217 (AC-2): record that the Issue Monitor started this launch.
+    /// Issue #4217 (AC-2): record that Issues started this launch.
     ///
     /// Unconditional on purpose. `set_autonomous_execution_context` below is
     /// gated on the project's `autonomous_mode` preference, which answers a
@@ -906,7 +906,7 @@ mod autonomous_launch_tests {
         }
     }
 
-    /// Issue #4217 AC-2: the Issue Monitor stamps the route it launched
+    /// Issue #4217 AC-2: Issues stamps the route it launched
     /// through, and it does so whatever the project's `autonomous_mode`
     /// preference says. That preference records an opt-in; it does not record
     /// who pressed the button, and conflating the two is what let a
@@ -1179,7 +1179,7 @@ pub enum LaunchWizardAction {
     GotoStep {
         phase: WizardPhase,
     },
-    /// Issue #4911: the Issue Monitor Agent Settings form holds an ordered
+    /// Issue #4911: Issues Agent Settings form holds an ordered
     /// list of sets, one per launch candidate. The list lives in the app
     /// runtime next to the saved pool, so the runtime handles these four and
     /// the wizard state ignores them.

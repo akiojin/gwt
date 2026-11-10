@@ -3354,7 +3354,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
 fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
     LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(issue_number),
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: None,
@@ -7756,9 +7756,10 @@ fn owner_monitor_fixture_with_prefs(
             std::process::id(),
         ),
     ) {
-        assert_eq!(
-            error.to_string(),
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+        assert!(
+            matches!(error,
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(message)
+                if message == gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR),
             "the actual initial source scan must be reserved or already running"
         );
     }
@@ -11765,7 +11766,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
     }
 }
 
-/// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
+/// Repo with an enabled Issues, a registered PM whose pane is live,
 /// and a second non-PM pane that the wake must never reach.
 pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     let repo = temp.path().join("repo");

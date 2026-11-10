@@ -86,7 +86,7 @@ test("requires a document; mount builds the drawer shell and the history log reg
 
 test("record() prepends newest-on-top with level, kind, title, message and issue suffix", () => {
   const { document, center } = setup();
-  center.record({ kind: "issue-monitor", level: "info", title: "Issue Monitor", message: "started", issueNumber: 42 });
+  center.record({ kind: "issue-monitor", level: "info", title: "Issues", message: "started", issueNumber: 42 });
   center.record({ kind: "attention", level: "error", title: "Agent error", message: "boom" });
   const list = items(document);
   assert.equal(list.length, 2);
@@ -96,7 +96,7 @@ test("record() prepends newest-on-top with level, kind, title, message and issue
   assert.match(list[0].textContent, /boom/);
   assert.equal(list[1].dataset.level, "info");
   assert.equal(list[1].dataset.kind, "issue-monitor");
-  assert.match(list[1].textContent, /Issue Monitor #42/, "issue number suffix is reproduced");
+  assert.match(list[1].textContent, /Issues #42/, "issue number suffix is reproduced");
   assert.match(list[1].textContent, /started/);
   assert.equal(center.count(), 2);
   assert.equal(document.querySelector(".notification-center__empty").hidden, true, "empty state hides once history exists");
@@ -284,8 +284,8 @@ test("recordError dedups by key: repeats bump the occurrence count on ONE error 
   const { document, center } = setup();
   const unreadChanges = [];
   center.onUnreadChange((count, hasError) => unreadChanges.push([count, hasError]));
-  const first = center.recordError({ key: "issue-monitor:last_error", title: "Issue Monitor", message: "scan failed" });
-  const again = center.recordError({ key: "issue-monitor:last_error", title: "Issue Monitor", message: "scan failed" });
+  const first = center.recordError({ key: "issue-monitor:last_error", title: "Issues", message: "scan failed" });
+  const again = center.recordError({ key: "issue-monitor:last_error", title: "Issues", message: "scan failed" });
   assert.equal(unreadChanges.length, 2, "one unread publication per recorded occurrence");
   assert.equal(first, again, "same key reuses the row");
   assert.equal(center.count(), 1);
@@ -298,7 +298,7 @@ test("recordError dedups by key: repeats bump the occurrence count on ONE error 
   center.recordError({ key: "issue-window:w1:load", title: "Issue window", message: "gh: rate_limited" });
   assert.equal(center.count(), 2, "different keys are different rows");
   center.recordError({ key: "issue-monitor:last_error" });
-  assert.match(first.querySelector(".notification-center__title").textContent, /Issue Monitor/);
+  assert.match(first.querySelector(".notification-center__title").textContent, /Issues/);
   assert.equal(first.querySelector(".notification-center__message")?.textContent, "scan failed", "legacy errors retain omitted optional fields");
 });
 
