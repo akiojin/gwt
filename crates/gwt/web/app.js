@@ -6310,6 +6310,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               snapshotAccepted: runtime?.playwrightSnapshotAccepted ?? 0,
               snapshotApplied: runtime?.playwrightSnapshotApplied ?? 0,
               snapshotPending: runtime?.snapshotWriteCoordinator?.shouldDeferOutput() ?? false,
+              outputPending: (socketReceiveDispatcher?.pendingCount() ?? 0) > 0
+                || terminalOutputBatcher.pendingCount(windowId) > 0
+                || (runtime?.outputWrites ?? 0) > 0,
               cols: terminal?.cols ?? 0,
               rows: terminal?.rows ?? 0,
               baseY: buffer?.baseY ?? 0,

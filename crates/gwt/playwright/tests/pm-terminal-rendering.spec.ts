@@ -880,9 +880,36 @@ exit 67
     for (let n = 1; n <= 64; n++) expect(response).toContain(`${marker}${String(n).padStart(2, "0")}`);
     expect(rolloutRows.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))).toBe(false);
     await expect.poll(async () => (await rows()).some(row => row.type === "event_msg" && row.payload?.type === "task_complete"), { timeout: 60_000 }).toBe(true);
+    const responseLinePattern = new RegExp(`${marker}\\d{2}(?!\\d)`);
+    const responseHistory = (state: { lines: string[]; scrollbackLineCount: number }) =>
+      state.lines.slice(0, state.scrollbackLineCount).filter(line => responseLinePattern.test(line));
+    const sequenceBeforeReentry = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
     await page.locator("#op-pm-entry").click();
-    await expect.poll(buffer, { timeout: 60_000 }).toContain("Ask Codex");
-    await expect.poll(renderedNumbers).toEqual(expectedNumbers);
+    // Returning from Works resizes the native TUI. Its clear-and-repaint can
+    // arrive after task_complete and the old composer is still visible until
+    // then. Establish the reading baseline only after that repaint finishes.
+    await expect.poll(async () => {
+      const rendered = await page.evaluate(({ id, after }) => {
+        const api = (window as any).__gwtTerminalTestApi;
+        const output = ((window as any).__gwtPlaywrightMessages ?? [])
+          .filter((row: any) => row.sequence > after && row.payload.kind === "terminal_output" && row.payload.id === id)
+          .map((row: any) => atob(row.payload.data_base64)).join("");
+        const clear = output.lastIndexOf("\x1b[3J");
+        return {
+          repainted: clear >= 0 && output.indexOf("\x1b[?2026l", clear) >= 0,
+          metrics: api.metrics(id),
+          buffer: api.logicalBufferLines(id),
+          composer: api.bufferText(id).includes("Ask Codex"),
+        };
+      }, { id, after: sequenceBeforeReentry });
+      return {
+        repainted: rendered.repainted,
+        drained: rendered.metrics.outputPending === false && rendered.metrics.snapshotPending === false,
+        composer: rendered.composer,
+        historyCount: responseHistory(rendered.buffer).length,
+        numbers: numberedLines(rendered.buffer.lines),
+      };
+    }, { timeout: 60_000 }).toEqual({ repainted: true, drained: true, composer: true, historyCount: 64, numbers: expectedNumbers });
     await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(0);
     const box = await pm.locator(".terminal-root").boundingBox();
     expect(box).not.toBeNull();
@@ -890,9 +917,6 @@ exit 67
     await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
     await page.mouse.wheel(0, -900);
     await expect.poll(async () => (await metrics()).viewportY).toBeLessThan(bottom.viewportY);
-    const responseLinePattern = new RegExp(`${marker}\\d{2}(?!\\d)`);
-    const responseHistory = (state: { lines: string[]; scrollbackLineCount: number }) =>
-      state.lines.slice(0, state.scrollbackLineCount).filter(line => responseLinePattern.test(line));
     await expect.poll(async () => {
       const state = await logicalBuffer();
       return { historyCount: responseHistory(state).length, numbers: numberedLines(state.lines) };
