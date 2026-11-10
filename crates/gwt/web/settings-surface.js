@@ -238,6 +238,7 @@ export function mountProjectManagerSettingsPanel(
 function renderIssuesSettingsPanel(panel, options) {
   const { project, status, send, launchControls = [], catalog = {} } = options;
   const document = panel.ownerDocument;
+  const labelsScrollTop = panel.querySelector(".settings-label-options")?.scrollTop ?? 0;
   const focusedLabel = panel.dataset.pendingLabelFocus ?? (panel.contains(document.activeElement) ? document.activeElement?.dataset.repositoryLabel : undefined);
   const restoreRefreshFocus = panel.contains(document.activeElement) && document.activeElement?.dataset.action === "refresh-repository-labels";
   panel.replaceChildren();
@@ -386,12 +387,13 @@ function renderIssuesSettingsPanel(panel, options) {
   refresh.setAttribute("aria-label", "Refresh repository labels");
   refresh.addEventListener("click", () => send({ kind: "get_repository_labels", refresh: true }));
   target.appendChild(refresh);
-  if (restoreRefreshFocus) refresh.focus();
+  if (restoreRefreshFocus) refresh.focus({ preventScroll: true });
   else if (focusedLabel !== undefined && !options.labelsPending) {
     const replacement = [...labels.querySelectorAll("input")].find(input => input.dataset.repositoryLabel === focusedLabel);
-    (replacement || refresh).focus();
+    (replacement || refresh).focus({ preventScroll: true });
     delete panel.dataset.pendingLabelFocus;
   }
+  labels.scrollTop = labelsScrollTop;
 }
 
 function renderCandidateSaveError(panel, event) {

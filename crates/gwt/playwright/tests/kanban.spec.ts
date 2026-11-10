@@ -89,6 +89,22 @@ test("Issue #6211: repository label choices preserve selections and bound colore
   await page.mouse.move(5, 5);
   await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
   await page.screenshot({ path: info.outputPath(`repository-labels-${theme}.png`) });
+  await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({
+    kind: "repository_labels", project_root: "/fixture", loaded: true, error: null,
+    labels: Array.from({ length: 240 }, (_, index) => ({ name: `Label ${index}`, color: "0075ca" })),
+  }));
+  await expect(choices.getByRole("checkbox", { name: "Label 239", exact: true })).toHaveCount(1);
+  const firstLabel = choices.getByRole("checkbox", { name: "Label 0", exact: true });
+  await firstLabel.focus();
+  expect(await choices.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  await choices.evaluate(element => { element.scrollTop = 150; });
+  expect(await choices.evaluate(element => element.scrollTop)).toBe(150);
+  await page.evaluate(async () => {
+    window.__issueBridgeFixtureSocket.send(JSON.stringify({ kind: "list_issue_monitor" }));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  await expect(firstLabel).toBeFocused();
+  expect(await choices.evaluate(element => element.scrollTop), "status updates preserve the catalog scroll position").toBe(150);
   expect(errors, "zero console/page errors").toEqual([]);
 });
 

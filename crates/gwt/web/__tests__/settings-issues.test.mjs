@@ -762,7 +762,7 @@ test("Agents Settings preserves unavailable and resting members without provider
 });
 
 
-test("Repository label picker preserves missing selections and failed refresh errors", () => {
+test("Repository label picker preserves missing selections, refresh errors and scroll position", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   const render = load("renderIssuesSettingsPanel");
@@ -782,7 +782,9 @@ test("Repository label picker preserves missing selections and failed refresh er
   assert.equal(bug.checked, false, "rejected or pending changes retain the authoritative selection");
   panel.querySelector('[aria-label="Refresh repository labels"]').click();
   assert.deepEqual(sent.pop(), { kind: "get_repository_labels", refresh: true });
+  panel.querySelector('.settings-label-options').scrollTop = 120;
   render(panel, { ...options, catalog: { loaded: false, labels: [] } });
+  assert.equal(panel.querySelector('.settings-label-options').scrollTop, 120, "status redraw keeps the label list position");
   assert.doesNotMatch(panel.textContent, /Unavailable/);
   assert.equal(panel.querySelector('[aria-label="removed"]').checked, true);
 });
