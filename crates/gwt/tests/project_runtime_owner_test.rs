@@ -215,6 +215,29 @@ fn gui_connection_holds_presence_through_its_operation() {
     use gwt::project_runtime::{client::ProjectRuntimeClient, events::OwnerCommand};
     let fixture = RealOwnerFixture::start(None);
     let _home = gwt_core::test_support::ScopedGwtHome::set(&fixture.home);
+    let prefs_path = fixture
+        .home
+        .join(".gwt/projects")
+        .join(&fixture.scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    // The endpoint is bound before the authority worker starts. Sibling
+    // worktrees discover the owner through its later-published authority.
+    loop {
+        if matches!(
+            gwt::load_issue_monitor_authority_fence(&prefs_path),
+            Ok(gwt::IssueMonitorAuthorityFenceState::Active(fence))
+                if fence.pid == fixture.child.0.id()
+        ) {
+            break;
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bounds observable authority publication before sibling discovery.
+            Instant::now() < fixture.deadline,
+            "daemon did not publish its project authority: {:?}",
+            fs::read_to_string(fixture.home.join("daemon.stderr"))
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let caller = fixture._temp.path().join("sibling");
     assert!(gwt_core::process::hidden_command("git")
         .args(["clone", "--quiet"])
