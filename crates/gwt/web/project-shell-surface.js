@@ -173,6 +173,17 @@ export function createProjectShellSurface({
         }));
       }
 
+      function resyncCloneProjectSearch(replayedQueries = []) {
+        const { form, modal } = cloneProjectModel.read();
+        const query = form.query.trim();
+        if (!modal.open || !modal.searching || modal.cloning) return;
+        if (!query) {
+          cloneProjectModel.update(current => ({ ...current, modal: { ...current.modal, searching: false } }));
+        } else if (!replayedQueries.includes(query)) {
+          send({ kind: "github_repository_search", query });
+        }
+      }
+
       function renderProjectCloneModal() {
         if (!cloneProjectModal || !cloneProjectDialog) return;
         const { form, modal } = cloneProjectModel.read();
@@ -537,6 +548,7 @@ export function createProjectShellSurface({
         dispose() { unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); unsubscribeCloneFrame(); folderPicker.dispose(); openPathDialog.dispose(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
+        resyncCloneProjectSearch,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
