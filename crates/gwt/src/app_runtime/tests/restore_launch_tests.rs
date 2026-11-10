@@ -148,8 +148,20 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
         session.branch = format!("work/{id}");
         session.project_state_root = Some(repo.clone());
         session.save(&runtime.sessions_dir).unwrap();
+        gwt::agent_names::adopt_project_member_session(&repo, &runtime.sessions_dir, &mut session)
+            .expect("register the saved identity before restoring its runtime");
     }
 
+    let before = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    assert_eq!(before.enabled_count(), 1);
+    assert_eq!(before.members.len(), 2);
+    // Physical resume capacity is independent of the registered roster size.
+    gwt::machine_agent_settings::set(
+        Some(2),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-11-10T00:00:00Z",
+    )
+    .expect("admit both saved Sessions without enlarging their member roster");
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
     let events = drain_startup_auto_resume(&mut runtime);
 

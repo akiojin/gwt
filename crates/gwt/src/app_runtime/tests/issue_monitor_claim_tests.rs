@@ -9521,7 +9521,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
                 BackendEvent::IssueMonitorStatus { status } => Some(status),
                 _ => None,
             })
-            .expect("pre-cleanup issue monitor status");
+            .expect("pre-cleanup Issues status");
         assert_eq!(
             live_status.state, "active",
             "the pre-cleanup snapshot still accounts for the proven live physical pane"

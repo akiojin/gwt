@@ -462,14 +462,20 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
             let failed_retry =
                 gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project)
                     .await
-                    .err()
-                    .expect("unreadable registry source must refuse owner readiness");
+                    .expect("the owner stays reachable to report registry recovery");
+            let health = failed_retry.command(OwnerCommand::Health).await.unwrap();
+            assert_eq!(health["reconciliation_required"], true, "{health}");
             assert!(
-                failed_retry.contains("requires reconciliation"),
-                "{failed_retry}"
+                health["agent_registry_initialization_error"]
+                    .as_str()
+                    .is_some_and(
+                        |error| error.contains("Shared Agent registry initialization failed")
+                    ),
+                "{health}"
             );
             retained_during_startup_fault =
                 Some(durable_launch_recovery_exists(&sessions, &source.id));
+            failed_retry.shutdown().await;
             fs::remove_dir(&prefs_path).unwrap();
             fs::rename(&prefs_backup, &prefs_path).unwrap();
             let normal_retry = production_owner_fixture(&project).await;

@@ -6954,7 +6954,7 @@ fn validate_existing_issue_monitor_prefs_schema(path: &Path) -> io::Result<()> {
         let actual: u32 = serde_json::from_str(actual.get())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         if actual != ISSUE_MONITOR_PREFS_SCHEMA_VERSION {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Issue Monitor preferences schema mismatch: actual={actual}, expected=1 for a legacy writer")));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Issues preferences schema mismatch: actual={actual}, expected=1 for a legacy writer")));
         }
     }
     Ok(())
@@ -7055,7 +7055,7 @@ fn load_issue_monitor_prefs_raw_with_cache(
             io::Error::new(kind, error)
         })?;
     if prefs.schema_version != 1 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Issue Monitor preferences schema mismatch: actual={}, expected=1 without an Active Agent registry", prefs.schema_version)));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Issues preferences schema mismatch: actual={}, expected=1 without an Active Agent registry", prefs.schema_version)));
     }
     let after = file.metadata()?;
     if after.len() == size && after.modified()? == modified {
@@ -7537,7 +7537,7 @@ pub(crate) fn issue_monitor_daemon_lease_is_held(prefs_path: &Path) -> io::Resul
     }
     let _prefs = gwt_core::operation_deadline::NamedFileLock::acquire(
         &prefs_path.with_extension("lock"),
-        "Issue Monitor lease probe",
+        "Issues lease probe",
     )?;
     (|| {
         let lock = match fs::OpenOptions::new()

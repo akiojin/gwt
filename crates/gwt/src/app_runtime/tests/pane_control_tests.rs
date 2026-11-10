@@ -4094,7 +4094,7 @@ fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment
 }
 
 #[test]
-fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
+fn agent_name_assigns_only_self_and_preserves_shared_identity_across_tabs() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let own = temp.path().join("own");
@@ -4143,10 +4143,12 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     assert_eq!(result["ok"], true);
     assert!(result["error"].is_null());
     let assigned = result["agent_name"].as_str().unwrap().to_owned();
-    assert_ne!(
-        assigned.chars().next().unwrap().to_ascii_lowercase(),
-        first_assigned.chars().next().unwrap().to_ascii_lowercase()
+    assert_eq!(
+        caller.session.as_ref().unwrap().agent_member_id,
+        foreign_pane.session.as_ref().unwrap().agent_member_id,
+        "the same shared member may work in both projects"
     );
+    assert_eq!(assigned, first_assigned, "a shared member keeps its name");
     assert!(!first_assigned.starts_with("Orven"));
     assert!(!assigned.starts_with("Orven"));
     assert_eq!(

@@ -550,7 +550,7 @@ fn settings_revision(registry: &Registry) -> u64 {
 }
 
 fn validate(registry: &Registry) -> io::Result<()> {
-    if !matches!(registry.schema_version, 1 | 2 | 3)
+    if !matches!(registry.schema_version, 1..=3)
         || !matches!(
             registry.phase,
             RegistryPhase::Prepared | RegistryPhase::Active

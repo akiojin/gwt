@@ -280,6 +280,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await expect(target.locator("html")).toHaveAttribute("data-theme", theme);
         expect(await target.locator(".agents-surface:not(.agents-surface--preview)").evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       }
+      await firstRow.scrollIntoViewIfNeeded();
+      await expect(firstRow).toBeVisible();
       await attachScreenshot(page, info, `shared-projects-${theme}`);
       await sendLiveGwtEvent(page, { kind: "close_window", id: first.id });
       const secondRow = secondPage.locator(`.roster-row[data-member-id="${memberId}"]`);

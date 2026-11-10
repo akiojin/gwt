@@ -767,15 +767,16 @@ mod tests {
         let b_path = gwt::issue_monitor_prefs_path_for_repo_path(&b_root);
         let operation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let host = gwt::process::current_hostname();
-        let assignment = serde_json::from_value(serde_json::json!({
+        let mut assignment: gwt::agent_names::AgentMemberAssignment =
+            serde_json::from_value(serde_json::json!({
             "reservation_id":"next-reservation", "session_id":"new-session",
             "project_key":b_key, "issue_number":42, "spec_number":null,
             "delivery_id":"next-delivery", "host_id":host,
             "host_pid":std::process::id(), "host_started_at":1
-        }))
-        .unwrap();
+            }))
+            .unwrap();
         gwt::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
-            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment);
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment.clone());
             Ok(())
         })
         .unwrap();
@@ -814,13 +815,6 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let foreign = gwt::load_issue_monitor_prefs(&a_path)
-            .unwrap()
-            .agent_roster
-            .unwrap()
-            .members[0]
-            .assignment
-            .clone();
         let writers = Arc::new(RwLock::new(HashMap::new()));
         drive_switch(&a_root, &sessions, &intent, &[], &writers, |_| {
             panic!("LaunchingNext does not retire a runtime")
@@ -832,15 +826,29 @@ mod tests {
             AgentSwitchStage::LaunchingNext,
             "a same-number assignment in project B cannot complete project A's switch"
         );
-        assert_eq!(pending.agent_roster.unwrap().members[0].assignment, foreign);
-        // Change only the assignment's project. Its same Session/number and
-        // project A's already-confirmed launch now legitimately complete it.
-        gwt::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
-            prefs.agent_roster.as_mut().unwrap().members[0]
-                .assignment
-                .as_mut()
+        assert!(pending.agent_roster.unwrap().members[0]
+            .assignment
+            .is_none());
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&b_path)
                 .unwrap()
-                .project_key = Some(a_key.clone());
+                .agent_roster
+                .unwrap()
+                .members[0]
+                .assignment,
+            Some(assignment.clone()),
+            "project A's switch leaves project B's assignment untouched"
+        );
+        // Assign the same Session/number in project A's own projection. Its
+        // already-confirmed launch can now legitimately complete the switch.
+        gwt::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = None;
+            Ok(())
+        })
+        .unwrap();
+        assignment.project_key = Some(a_key.clone());
+        gwt::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment.clone());
             Ok(())
         })
         .unwrap();

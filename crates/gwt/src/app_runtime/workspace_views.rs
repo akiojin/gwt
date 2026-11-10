@@ -6617,6 +6617,7 @@ mod bounded_cache_merge_tests {
     #[test]
     fn roster_assignment_summaries_keep_both_projects_without_claiming_liveness() {
         let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let roots = [temp.path().join("Alpha"), temp.path().join("Beta")];
         for root in &roots {
             std::fs::create_dir_all(root).unwrap();
