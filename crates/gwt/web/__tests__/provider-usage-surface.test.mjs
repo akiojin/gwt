@@ -19,6 +19,10 @@ test("Usage severity styles use Operator tokens without raw color fallbacks", ()
   );
   assert.match(componentsCss, /\.op-usage-sum--models\s*\{[^}]*flex-wrap:\s*wrap;[^}]*inline-size:\s*auto;/s);
   assert.match(componentsCss, /\.op-usage-model\s*\{[^}]*white-space:\s*nowrap;/s);
+  assert.doesNotMatch(componentsCss.match(/\.op-status-strip\s*\{([^}]*)\}/s)[1], /flex-wrap:/,
+    "without Usage, preserve the existing status-strip layout");
+  assert.match(componentsCss, /#app:has\(#op-strip-usage:not\(\[hidden\]\)\)\s*\{[^}]*--usage-strip-row-size:\s*auto;/s);
+  assert.match(componentsCss, /\.op-status-strip:has\(> #op-strip-usage:not\(\[hidden\]\)\)\s*\{[^}]*flex-wrap:\s*wrap;/s);
   assert.match(
     componentsCss,
     /\.op-usage-more\s*\{[^}]*color:\s*var\(--color-status-strip-fg\);/s,

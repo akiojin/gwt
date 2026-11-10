@@ -159,7 +159,7 @@ body::after {
      and never overlays surface windows. Issue 4777 T-1 widens it to 64px so
      each surface entry carries a visible label under its icon. */
   grid-template-columns: 64px 1fr;
-  grid-template-rows: 44px minmax(0, 1fr) auto;
+  grid-template-rows: 44px 1fr var(--usage-strip-row-size, 28px);
   grid-template-areas:
     "projectbar projectbar"
     "rail surface"
@@ -887,7 +887,7 @@ body::after {
 @media (max-width: 860px) {
   #app {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 44px auto minmax(0, 1fr) auto;
+    grid-template-rows: 44px auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
     grid-template-areas:
       "projectbar"
       "rail"
@@ -939,7 +939,7 @@ body::after {
    Let the chrome row grow when the existing controls wrap. */
 @media (max-width: 600px) {
   #app {
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
   }
 
   .project-bar {
@@ -1007,8 +1007,6 @@ body::after {
   background: var(--color-status-strip-bg);
   color: var(--color-status-strip-fg);
   display: flex;
-  flex-wrap: wrap;
-  min-height: 28px;
   align-items: center;
   padding: 0 var(--space-4);
   font-family: var(--font-mono);
@@ -5048,6 +5046,15 @@ button.workspace-board-ref:focus-visible {
 /* Provider usage & rate limits (SPEC-2970)                            */
 /* ------------------------------------------------------------------ */
 
+#app:has(#op-strip-usage:not([hidden])) {
+  --usage-strip-row-size: auto;
+}
+
+.op-status-strip:has(> #op-strip-usage:not([hidden])) {
+  flex-wrap: wrap;
+  min-height: 28px;
+}
+
 .op-status-strip__cell--usage {
   display: inline-flex;
   flex: 0 1 56ch;
@@ -5930,7 +5937,7 @@ button.workspace-board-ref:focus-visible {
 
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */
 #app:has(> .workspace-state-notice) {
-  grid-template-rows: 44px auto minmax(0, 1fr) auto;
+  grid-template-rows: 44px auto 1fr var(--usage-strip-row-size, 28px);
   grid-template-areas: "projectbar projectbar" "notice notice" "rail surface" "strip strip";
 }
 .workspace-state-notice {
@@ -5959,13 +5966,13 @@ button.workspace-board-ref:focus-visible {
 .workspace-state-notice button:focus-visible { outline: 2px solid var(--color-focus-ring); }
 @media (max-width: 860px) {
   #app:has(> .workspace-state-notice) {
-    grid-template-rows: 44px auto auto minmax(0, 1fr) auto;
+    grid-template-rows: 44px auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
     grid-template-areas: "projectbar" "notice" "rail" "surface" "strip";
   }
 }
 @media (max-width: 600px) {
   #app:has(> .workspace-state-notice) {
-    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
   }
   .workspace-state-notice span {
     max-height: 25vh;
