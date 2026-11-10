@@ -1023,6 +1023,16 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
     let completion = take_remote_owner_launch_completion(&recorded_events);
     let successor = completion.window_id.clone();
     assert!(
+        runtime
+            .capture_update_quiescence_inputs()
+            .0
+            .iter()
+            .any(|pane| {
+                pane.window_id == successor && pane.state == WindowProcessStatus::Starting
+            }),
+        "the exact retry protects its real pending launch"
+    );
+    assert!(
         completion.result.is_ok(),
         "normal GUI retry must reach the real owner: {:?}",
         completion.result.as_ref().err()
@@ -1231,6 +1241,18 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         failure = Some(runtime.handle_remote_owner_launch_complete(completion));
     });
     let failure = failure.expect("synchronous failure events");
+
+    assert!(
+        runtime
+            .pending_launch_completions
+            .values()
+            .any(|pending| { pending.current.load(Ordering::Acquire) }),
+        "exact recovery capability remains current"
+    );
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "a completed failed launch retained for retry has no process to drain"
+    );
 
     assert!(
         failure.iter().any(|event| matches!(

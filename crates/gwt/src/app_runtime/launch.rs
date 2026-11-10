@@ -55,6 +55,9 @@ pub(crate) struct PendingLaunchCompletion {
     pub(crate) generation: u64,
     pub(crate) context: Option<super::ProjectContext>,
     pub(crate) current: Arc<AtomicBool>,
+    /// A completed failure may retain current retry/cleanup authority without
+    /// a physical launch still awaiting its initial completion.
+    pub(crate) launch_in_flight: bool,
     pub(crate) operation_id: String,
     pub(crate) owner_pane_id: String,
     pub(crate) client_cell: super::RemoteLaunchClientCell,

@@ -4118,6 +4118,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
                 generation,
                 context: Some(context.clone()),
                 current: Arc::new(AtomicBool::new(true)),
+                launch_in_flight: true,
                 operation_id: captured.operation_id.clone(),
                 owner_pane_id: captured.id.clone(),
                 client_cell,

@@ -10281,7 +10281,8 @@ impl AppRuntime {
                     self.pending_launch_completions
                         .get(window_id)
                         .is_some_and(|pending| {
-                            pending.current.load(std::sync::atomic::Ordering::Acquire)
+                            pending.launch_in_flight
+                                && pending.current.load(std::sync::atomic::Ordering::Acquire)
                         });
                 if !live_runtime && !pending_launch {
                     return None;
@@ -15757,6 +15758,7 @@ impl AppRuntime {
                 generation,
                 context: Some(context.clone()),
                 current: current.clone(),
+                launch_in_flight: true,
                 operation_id: operation_id.clone(),
                 owner_pane_id: owner_pane_id.clone(),
                 client_cell: client_cell.clone(),
@@ -16008,10 +16010,11 @@ impl AppRuntime {
             });
             return Vec::new();
         }
-        let pending = self
+        let mut pending = self
             .pending_launch_completions
             .remove(&window_id)
             .expect("current exact owner completion");
+        pending.launch_in_flight = false;
         self.pending_auto_resume_sources.remove(&window_id);
         self.inflight_launches.retain(|_, (id, _)| id != &window_id);
         let mut wizard_events = Vec::new();

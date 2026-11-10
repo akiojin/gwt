@@ -1,6 +1,33 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
+fn insert_monitored_update_pane(runtime: &mut AppRuntime, id: &str) {
+    let root = runtime
+        .tab(&runtime.window_lookup[id].tab_id)
+        .unwrap()
+        .project_root
+        .clone();
+    let owner = Arc::new(
+        owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        )
+        .unwrap(),
+    );
+    configure_owner_fixture_start_gate(&owner);
+    runtime.test_project_owners.insert(root, owner);
+    insert_test_pane_runtime(runtime, id);
+    runtime.runtimes.get_mut(id).unwrap().status = WindowProcessStatus::Starting;
+}
+
+fn committed_update_status_events(runtime: &mut AppRuntime, root: &Path) -> Vec<OutboundEvent> {
+    // Outcome contracts read the durable control commit after the real daemon
+    // ACK; the GUI's short status-query deadline is a separate performance seam.
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root)).unwrap();
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    runtime.issue_monitor_daemon_status_events(root, Box::new(monitor.status_view()))
+}
+
 #[test]
 fn issue_7015_update_drain_ignores_ownerless_starting_rows_but_protects_pending_launches() {
     let temp = tempdir().unwrap();
@@ -3447,8 +3474,10 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
 
-    let events = runtime.update_staged_events_with("99.0.0", None);
+    let mut events = runtime.update_staged_events_with("99.0.0", None);
+    events.extend(committed_update_status_events(&mut runtime, &repo));
     let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
     assert!(
         log.lines().any(|line| {
@@ -3484,6 +3513,7 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
             .is_empty(),
         "staging sends no event-loop request that could restart gwt"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #5062 AC-2: once a staged update raised the drain, every drain tick
@@ -3514,6 +3544,8 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
     );
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.rebuild_window_lookup();
@@ -3548,6 +3580,7 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
             Some((tick + chrono::Duration::seconds(15)).to_rfc3339())
         );
     }
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4376 AC-1 / AC-2 / AC-7: a manual Update click (attended monitor,
@@ -3574,16 +3607,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
-    let owner = Arc::new(
-        owner_fixture_block_on(
-            gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&repo),
-        )
-        .unwrap(),
-    );
-    configure_owner_fixture_start_gate(&owner);
-    runtime.test_project_owners.insert(repo.clone(), owner);
-    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
-    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Starting;
+    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let seed = || {
         gwt::save_issue_monitor_prefs(
@@ -3624,18 +3648,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     );
     runtime.update_download_in_flight = Some("manual-client".into());
     let mut events = runtime.update_staged_events_with("99.0.0", None);
-    // A real owner publishes its status asynchronously instead of using the
-    // no-daemon fallback. Read that actual projection through the same adapter.
-    let status: gwt::IssueMonitorAgentStatus = serde_json::from_value(
-        gwt::daemon_publisher::read_issue_monitor_status(&repo)
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    events.extend(runtime.issue_monitor_daemon_status_events(
-        &repo,
-        Box::new(status.gui_status.expect("authoritative GUI projection")),
-    ));
+    events.extend(committed_update_status_events(&mut runtime, &repo));
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -3771,6 +3784,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
         user_events
             .lock()
@@ -3819,6 +3833,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert!(runtime
         .update_drain_tick_events_and_drain_at(at(45))
         .is_empty());
@@ -3917,6 +3932,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             )),
         "the drained manual click never uses the Restart-now route"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4376 AC-4 / AC-7: after the restart that applied a manually
