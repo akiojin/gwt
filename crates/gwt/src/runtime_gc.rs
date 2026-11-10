@@ -57,6 +57,7 @@ impl RuntimeNamespaceGcTask {
     }
 }
 
+/// Recognize a sibling collector's lock on every supported platform.
 fn gc_lock_is_contended(error: &io::Error) -> bool {
     gwt_core::operation_deadline::is_lock_contended(error)
 }
