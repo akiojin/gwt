@@ -298,7 +298,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           const runtime = terminalMap.get(windowId);
           return runtime?.isReady === true
             && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true
-            && (pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId));
+            && (pmChatViews.has(windowId) || worksSurface?.contains(windowId) || canRefreshTerminalViewport(windowId));
         },
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
@@ -3289,7 +3289,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (existing && !sameNativeSession(existing.nativeIdentity, nativeIdentity)) {
           replacedSession = disposeTerminalRuntime(windowId, existing, existing.terminalContainer);
         }
-        if (options.readOnly && !options.nativeHost && worksHost && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
+        const nativeRoot = terminalMap.get(windowId)?.terminalContainer;
+        if (options.readOnly && !options.nativeHost
+            && (worksHost || worksSurface?.nativeIdentity(windowId, nativeRoot))
+            && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
           const runtime = terminalMap.get(windowId) || createTerminalRuntime(windowId, terminalContainer);
           if (runtime) {
             queueMicrotask(cleanupTextPreviews);

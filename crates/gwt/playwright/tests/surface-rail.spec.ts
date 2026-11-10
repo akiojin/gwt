@@ -206,7 +206,7 @@ test.describe("Surface rail", () => {
     expect(errors).toEqual([]);
   });
 
-  test("PM owns only its terminal and auxiliary Settings across reload with nearby agents and Start Work", async ({ page }, testInfo) => {
+  test("PM owns only its terminal and opens Agents settings across reload with nearby agents and Start Work", async ({ page }, testInfo) => {
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     page.on("pageerror", error => errors.push(String(error)));
@@ -232,28 +232,42 @@ test.describe("Surface rail", () => {
     } }));
     await expectPm();
     await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
+    const operations = main.locator('.agents-surface [data-role="pm-project-operations"]');
+    const expectPmOperations = async () => {
+      await expect(main).toHaveAttribute("data-surface", "agents");
+      await expect(operations).toBeVisible();
+      await expect(windowById(page, "pm-window")).toBeHidden();
+      await expect(operations.locator('[data-action="close"]')).toHaveCount(0);
+      expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toEqual([]);
+      await expectSurfaceOnly(page);
+    };
     await page.locator("#op-pm-settings-button").click();
-    const auxiliary = main.locator('.workspace-window[data-preset="settings"]');
-    await expect(auxiliary).toBeVisible();
-    const auxiliaryId = await auxiliary.getAttribute("data-id");
-    expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toHaveLength(1);
-    await auxiliary.getByRole("tab", { name: "Project Manager", exact: true }).click();
+    await expectPmOperations();
+    await operations.evaluate(node => { (window as any).__ownedPmOperations = node; });
     await openPm();
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator('.op-rail__surface[data-surface="works"]').click();
     await expect(main.locator(".work-row")).toHaveCount(4);
     await openPm();
     await page.locator("#op-pm-settings-button").click();
+    await expectPmOperations();
+    expect(await operations.evaluate(node => node === (window as any).__ownedPmOperations)).toBe(true);
     await page.reload();
     await openPm();
     await expectPm();
+    await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
     await page.locator("#op-pm-settings-button").click();
-    await expect(auxiliary).toHaveAttribute("data-id", auxiliaryId!);
-    await expect(auxiliary.locator('[data-action="close"]')).toHaveCount(0);
-    await page.evaluate(id => (window as any).__removeSurfaceAgent(id), auxiliaryId);
+    await expectPmOperations();
+    // The Agents editor does not depend on a Settings window remaining open.
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("settings-window"));
+    await expect(windowById(page, "settings-window")).toHaveCount(0);
+    await expectPmOperations();
+    await openPm();
     await expectPm();
+    expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator("#op-pm-settings-button").click();
-    await expect(auxiliary).toBeVisible();
+    await expectPmOperations();
+    await expect(windowById(page, "settings-window")).toHaveCount(0);
     await openPm();
     await expectPm();
     await page.locator('.op-rail__surface[data-surface="works"]').click();
@@ -516,8 +530,9 @@ test.describe("Surface rail", () => {
         max_active_agents_mode: "manual", terminal_queue_auto_refill: true, terminal_queue_auto_refill_limit: 3,
         allowed_labels: ["bug"], terminal_queue: [], queue_len: 0,
       } });
-      (window as any).__surfaceRailSocket().emit({ kind: "pm_status", available: true, paused: false,
-        auto_start: true, configured_agent_id: "claude", loop_interval_secs: 60, running_agent_id: "claude", is_running: true,
+      (window as any).__surfaceRailSocket().emit({ kind: "pm_status", project_key: location.pathname.split("/").filter(Boolean).at(-1), available: true, paused: false,
+        auto_start: true, configured_agent_id: "claude", configured_model: "next-model", loop_interval_secs: 60,
+        running_agent_id: "claude", running_model: "current-model", is_running: true,
         agent_options: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }],
       });
     });
@@ -569,12 +584,16 @@ test.describe("Surface rail", () => {
       ["Autonomous", /human approval/i], ["Monitoring", /queued issues/i],
       ["Auto-refill", /queue/i], ["Refill limit", /on with 0.*default limit of 3/i], ["Allowed labels", /matching issues/i],
     ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
-    await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
-    const pm = settings.locator('[data-settings-panel="project-manager"]');
+    await page.locator("#op-pm-settings-button").click();
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "agents");
+    const pm = page.locator('.agents-surface [data-role="pm-project-operations"]');
+    await expect(pm).toBeVisible();
     for (const [role, pattern] of [
       ["pm-autonomy-status", /autonomous coordination/i], ["pm-pause-toggle", /Issues stays unchanged/],
-      ["pm-agent-select", /after restart/], ["pm-model-input", /after restart/], ["pm-effort-select", /after restart/],
+      ["pm-running-as", /agent, model and effort.*after restart/],
+      ["pm-pending-chip", /Agent, model, and effort.*after restart/],
       ["pm-loop-interval", /Minimum: 10 seconds/], ["pm-auto-start", /automatically/],
+      ["pm-restart", /new conversation[\s\S]*configured agent/],
     ] as const) await explain(pm.locator(`[data-role="${role}"]`), pattern);
     await page.screenshot({ path: testInfo.outputPath("settings-control-explanations.png") });
     await pm.locator('[data-role="pm-autonomy-status"]').focus();
@@ -582,7 +601,12 @@ test.describe("Surface rail", () => {
     await expect(page.locator(`#${popupId}`)).toBeVisible();
     await page.evaluate(() => (window as any).__removeSurfaceAgent("settings-window"));
     await expect(windowById(page, "settings-window")).toHaveCount(0);
-    await expect(page.locator(`#${popupId}`)).toHaveCount(0);
+    await expect(pm).toBeVisible();
+    await expect(page.locator(`#${popupId}`)).toBeVisible();
+    await page.locator("#op-pm-entry").click();
+    await expect(pm).toBeHidden();
+    await expect(page.locator(`#${popupId}`)).toBeHidden();
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toEqual([]);
     expect((await sentMessages(page)).filter(message => /^(set_issue_monitor|set_pm|restart_pm|update_viewport)/.test(message.kind || ""))).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     expect(errors).toEqual([]);
