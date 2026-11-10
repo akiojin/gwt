@@ -25,6 +25,46 @@ fn parse(agent: AgentId, records: &[Value]) -> PmConversationSnapshot {
 }
 
 #[test]
+fn native_record_excerpts_project_only_visible_conversation_text() {
+    for (agent, fixture, user_id, assistant_id, user_text) in [
+        (
+            AgentId::ClaudeCode,
+            include_bytes!("fixtures/claude-chat.jsonl").as_slice(),
+            "claude-human",
+            "claude-answer",
+            "Human question",
+        ),
+        (
+            AgentId::Codex,
+            include_bytes!("fixtures/codex-chat.jsonl").as_slice(),
+            "codex-human",
+            "codex-answer",
+            "Human question\nAdditional context",
+        ),
+    ] {
+        let result = parse_native(&agent, fixture, "conversation", Path::new("/work/project"));
+        assert_eq!(result.availability, PmConversationAvailability::Ready);
+        assert_eq!(result.conversation_id.as_deref(), Some("conversation"));
+        assert_eq!(
+            result.messages,
+            vec![
+                PmConversationMessage {
+                    id: user_id.into(),
+                    role: PmConversationRole::User,
+                    text: user_text.into(),
+                },
+                PmConversationMessage {
+                    id: assistant_id.into(),
+                    role: PmConversationRole::Assistant,
+                    text: "Assistant reply".into(),
+                },
+            ],
+            "{agent:?} must exclude internal records while preserving text block order"
+        );
+    }
+}
+
+#[test]
 fn claude_keeps_text_and_ignores_tools_meta_and_silent_cycles() {
     let mut meta = claude_message("meta", "user", json!("hidden reminder"));
     meta["isMeta"] = json!(true);

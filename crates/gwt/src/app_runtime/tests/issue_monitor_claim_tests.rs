@@ -2,6 +2,68 @@ use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
 #[test]
+fn repository_labels_read_runs_off_thread_for_the_requesting_project() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let active = temp.path().join("active");
+    let requested = temp.path().join("requested");
+    for root in [&active, &requested] {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+    }
+    let cache = gwt::issue_cache::issue_cache_root_for_repo_path(&requested).unwrap();
+    let (owner, repo) =
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(&requested).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(
+        cache.join("repository-labels.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "repository": format!("{owner}/{repo}"),
+            "labels": [{"name":"backend","color":"123abc"}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let tabs = vec![
+        sample_project_tab("active", "Active", active, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "requested",
+            "Requested",
+            requested.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("active"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.project_context("requested").unwrap();
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "get_repository_labels", "refresh": false,
+    }))
+    .expect("repository label request");
+    assert!(runtime
+        .handle_frontend_event_for_project(&context, "requesting-client".into(), event)
+        .is_empty());
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    assert!(recorded.lock().unwrap().is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let completion = recorded.lock().unwrap().pop().unwrap();
+    let UserEvent::Dispatch(events) = recorded_project_payload(&completion) else {
+        panic!("repository labels reply expected");
+    };
+    let reply = &events[0];
+    assert!(
+        matches!(&reply.target, DispatchTarget::Client(client_id) if client_id == "requesting-client")
+    );
+    let payload = serde_json::to_value(&reply.event).unwrap();
+    assert_eq!(payload["project_root"], requested.display().to_string());
+    assert_eq!(payload["loaded"], true);
+    assert_eq!(payload["labels"][0]["name"], "backend");
+    assert!(payload["error"].is_null());
+}
+
+#[test]
 fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notifications() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());

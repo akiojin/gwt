@@ -21,3 +21,15 @@ export function renderUiContent(document, content, className = '') {
   }
   return node;
 }
+
+// GitHub colors are external data, never CSS supplied by a label name.
+export function createRepositoryLabelChip(document, name, color) {
+  const chip = document.createElement('span');
+  chip.className = 'issue-card-label';
+  chip.textContent = name;
+  chip.title = name;
+  if (/^[0-9a-f]{6}$/i.test(color || '')) {
+    chip.style.setProperty('--github-label-color', `#${color}`);
+  }
+  return chip;
+}

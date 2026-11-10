@@ -92,6 +92,7 @@ function fixture({ routeProjectKey = null } = {}) {
     },
     clearTimeout() {}, clearPickerPending() {},
     cloneSearchResyncs: [], resyncCloneProjectSearch: query => context.cloneSearchResyncs.push(query),
+    advisoryResyncs: [], resyncWorkAdvisory: ids => context.advisoryResyncs.push([...ids]),
     setConnectionState(connected) { context.connectionStates.push(connected); }, syncRunningBranchCleanups() {},
     dispatcherOptions: [],
     disposedDispatchers: 0,
@@ -155,6 +156,21 @@ test("Project hub reconnect passes the flushed search to its recovery owner", ()
   context.connectHubSocket();
   sockets[1].open();
   assert.equal(JSON.stringify(context.cloneSearchResyncs), JSON.stringify([['fixture'], []]), 'a lost sent reply is recovered after a fresh connection');
+});
+
+test("project reconnect gives the advisory owner only IDs actually flushed on that connection", () => {
+  const { context, sockets, select } = fixture();
+  context.connectSocket(); sockets[0].open();
+  select("0123456789abcdef");
+  context.send({ kind: "request_work_advisory", request_id: 1, query: "first" });
+  context.send({ kind: "request_work_advisory", request_id: 2, query: "current" });
+  context.pendingMessages.push({ projectKey: "fedcba9876543210", message: { kind: "request_work_advisory", request_id: 3 } });
+  sockets[1].open();
+  assert.deepEqual(context.advisoryResyncs.at(-1), [1, 2]);
+  context.advisoryResyncs.length = 0;
+  context.connectSocket(true); sockets[2].open();
+  assert.deepEqual(context.advisoryResyncs, [[]], "forced recovery also retries a lost read once");
+  assert.equal(context.pendingMessages.length, 1, "foreign project work remains queued");
 });
 
 test("offline input is discarded while queued control messages retain project scope", () => {

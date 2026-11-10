@@ -1354,6 +1354,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (socketProjectKey) projectPageMetadata.reportAttention();
         let replayedReleaseNotesId = null;
         let replayedRecoveryCenterId = null;
+        const replayedWorkAdvisoryIds = [];
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1369,7 +1370,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
           if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
+          if (pending.message.kind === "request_work_advisory") replayedWorkAdvisoryIds.push(pending.message.request_id);
         }
+        resyncWorkAdvisory(replayedWorkAdvisoryIds);
         recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -3759,12 +3762,14 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         applyIssueMonitorQueueResult,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
+        applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
         windowMap,
@@ -4132,6 +4137,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
@@ -4617,6 +4623,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
+        applySettingsRepositoryLabels,
+        applySettingsLabelsFailure,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
@@ -5032,6 +5040,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
+        if (event?.level === "error" && event.message?.toLowerCase().includes("allowed labels")) {
+          applySettingsLabelsFailure({ ...event, project_root: activeProjectTab()?.project_root });
+        }
         if (!event) return;
         if (event.level === "error") {
           const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
@@ -5369,6 +5380,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyIssueSettingsStatus(event.status || {}, activeProjectTab()?.project_root);
             // Issue #3906 AC-12: the update CTA shows the drain progress.
             break;
+          case "repository_labels":
+            applySettingsRepositoryLabels(event);
+            applyRepositoryLabels(event);
+            break;
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
             break;
@@ -5376,6 +5391,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyIssueMonitorProfilesError(event);
             break;
           case "issue_monitor_allowed_labels_write_failed":
+            applySettingsLabelsFailure(event);
             applyKnowledgeReceiveEvent(event);
             break;
           case "issue_monitor_queue_result":

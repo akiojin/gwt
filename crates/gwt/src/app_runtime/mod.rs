@@ -11589,6 +11589,7 @@ impl AppRuntime {
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
             | FrontendEvent::SetIssueMonitorTier { .. }
             | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
+            | FrontendEvent::GetRepositoryLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
             | FrontendEvent::QuickRegisterIssue { .. } => {
@@ -12780,6 +12781,9 @@ impl AppRuntime {
                     allowed_labels,
                     request_id,
                 )
+            }
+            FrontendEvent::GetRepositoryLabels { refresh } => {
+                self.repository_labels_events(context, &client_id, refresh)
             }
             FrontendEvent::GetIssueMonitorProfiles => {
                 let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);

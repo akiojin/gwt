@@ -2599,6 +2599,31 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         .runtime
         .active_agent_sessions
         .contains_key(&source_window_id));
+    // The owner's periodic reconciler may publish its first empty census after
+    // Close. All three cases require that observation before preparing a new
+    // admission, not only before the byte-for-byte rejection snapshot.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound actual census publication; elapsed time never establishes readiness.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs.monitor_runtime_counts.values().any(|census| {
+                    census.host_pid == host_pid
+                        && census.host_started_at == host_started_at
+                        && census.counts.is_empty()
+                        && census.windows.is_empty()
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the exact empty host census must settle before admission");
+    });
     let source = gwt_agent::Session::load(
         &fixture
             .sessions_dir
@@ -2970,31 +2995,6 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
                             )
                             .await
                             .unwrap()
-                        });
-                        // The owner's periodic reconciler may publish its first
-                        // empty census after Close. Observe that commit before
-                        // the byte-for-byte rejection snapshot (Issue #6909).
-                        let host_pid = std::process::id();
-                        let host_started_at =
-                            gwt::process::host_process_start_time(host_pid).unwrap();
-                        owner_fixture_block_on(async {
-                            // test-hygiene: allow-wall-clock-deadline Bound actual census publication; elapsed time never establishes readiness.
-                            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-                                loop {
-                                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
-                                    if prefs.monitor_runtime_counts.values().any(|census| {
-                                        census.host_pid == host_pid
-                                            && census.host_started_at == host_started_at
-                                            && census.counts.is_empty()
-                                            && census.windows.is_empty()
-                                    }) {
-                                        break;
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                }
-                            })
-                            .await
-                            .expect("the exact empty host census must settle before rejection");
                         });
                         let was_current =
                             evidence.current.load(std::sync::atomic::Ordering::Acquire);
