@@ -1977,6 +1977,11 @@ impl AppRuntime {
             Ok(events) => events,
             Err(error) => {
                 self.pending_auto_resume_sources.remove(&window_id);
+                self.record_restore_window_outcome(
+                    &window_id,
+                    Err(RestoreRefusal::LaunchNotStarted),
+                );
+                self.restore_launch_windows.remove(&window_id);
                 self.restore_launch_error_events(tab_id, &session, origin, error)
             }
         }
@@ -1995,13 +2000,7 @@ impl AppRuntime {
                 .persisted()
                 .windows
                 .iter()
-                .find(|window| {
-                    window.session_id.as_deref() == Some(session.id.as_str())
-                        && matches!(
-                            window.status,
-                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                        )
-                })
+                .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
                 .map(|window| window.id.clone())
         });
         let mut events = Vec::new();
