@@ -28011,6 +28011,7 @@ exit 1
         // Phase 7 T-138/FR-047: a sibling that never releases the prefs lock
         // must not hang the daemon control plane indefinitely. No commit
         // receipt means the in-memory control is revoked as well.
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(Duration::from_millis(250));
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
