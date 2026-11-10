@@ -8087,6 +8087,9 @@ def _close_chroma_client(client) -> None:
 
 def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
     try:
+        # Acquiring the scope lock creates its directory; a status probe must not.
+        if not db_path.is_dir():
+            return False, 0
         with acquire_lock(db_path, exclusive=False):
             store = resolve_active_store(db_path)
             if (scope not in ("issues", "specs") or _active_issue_members(db_path) is None):
