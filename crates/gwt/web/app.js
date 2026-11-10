@@ -1343,6 +1343,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (socketProjectKey) projectPageMetadata.reportAttention();
         let replayedReleaseNotesId = null;
         let replayedRecoveryCenterId = null;
+        const replayedWorkAdvisoryIds = [];
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1358,7 +1359,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
           if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
+          if (pending.message.kind === "request_work_advisory") replayedWorkAdvisoryIds.push(pending.message.request_id);
         }
+        resyncWorkAdvisory(replayedWorkAdvisoryIds);
         recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -3974,6 +3977,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
