@@ -118,13 +118,26 @@ fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
-    // Seed the cache the cache-only acknowledgement reads from.
-    let _ = runtime.active_work_projection_for_tab("tab-1", &runtime.tabs[0]);
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, _window_id) = owner_browser_input_fixture(temp.path());
+    let owner = runtime.test_project_owners.values().next().unwrap().clone();
+    let status = owner_runtime_status_event(&owner, &probe, "Error", "Stop");
+    let context = runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let AppEventProxy::Stub(events) = &runtime.proxy else {
+        panic!("recording fixture");
+    };
+    let events = events.clone();
+    // Resolve the actual owner's saved Work outside the callback under test.
+    let job = runtime
+        .active_work_projection_refresh_job(&context.project_root)
+        .unwrap();
+    let prepared = super::super::run_active_work_projection_refresh(job);
+    runtime.apply_active_work_projection_refresh(prepared);
+    events.lock().unwrap().clear();
 
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    let hook_events = runtime.handle_runtime_hook_event(runtime_hook_state("Error", "session-1"));
+    let hook_events = runtime.handle_project_owner_event(&context, 1, &identity, status);
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
@@ -137,7 +150,10 @@ fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
             .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
         "the hook still acknowledges the rail from cache: {hook_events:?}"
     );
-    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
+    assert_eq!(
+        active_work_refresh_requests(&events, &context.project_root),
+        1
+    );
 }
 
 /// SPEC-2014 FR-PERF-003: ProjectTabRuntime caches `main_worktree_root`
@@ -412,7 +428,7 @@ fn clone_project_done_opens_workspace_home_and_replies_to_its_client() {
         event,
         OutboundEvent {
             target: DispatchTarget::Project(_),
-            event: BackendEvent::WindowCanvasState { .. },
+            event: BackendEvent::WorkspaceState { .. },
             ..
         }
     )));
@@ -1140,11 +1156,11 @@ fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
 
 #[test]
 fn codex_hook_discovery_has_no_standalone_process_probe() {
-    let source = include_str!("../launch.rs");
+    let source = include_str!("../../project_runtime/launch.rs");
     let discovery = source
-        .split("pub(super) fn codex_hook_discovery_mode_for_launch_config")
+        .split("pub fn codex_hook_discovery_mode_for_launch_config")
         .nth(1)
-        .and_then(|tail| tail.split("pub(super) fn maybe_register_codex").next())
+        .and_then(|tail| tail.split("pub fn maybe_register_codex").next())
         .expect("Codex hook discovery implementation");
 
     assert!(!discovery.contains("detect_installed_codex_hook_discovery_mode"));
@@ -1311,10 +1327,10 @@ fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
             &config,
             &worktrees,
         )
-        .expect("exact Issue Monitor worktree must validate");
+        .expect("exact Issues worktree must validate");
         assert!(managed.is_some(), "{mode:?} launch must mint managed proof");
     }
-    let managed = managed.expect("Codex Issue Monitor launch returns managed proof");
+    let managed = managed.expect("Codex Issues launch returns managed proof");
 
     let mut trust_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(worktree.path())
@@ -1847,7 +1863,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
     let _gwt_home = ScopedGwtHome::set(project.path());
     let complete = LaunchFeedbackContext {
         client_id: "client-1".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(42),
         issue_monitor_delivery_id: Some("delivery-42".to_string()),
         issue_monitor_project_root: Some(project.path().to_path_buf()),
@@ -1862,7 +1878,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
         Some(&complete),
     )
     .expect("complete provenance")
-    .expect("Issue Monitor candidate");
+    .expect("Issues candidate");
     assert_eq!(candidate.issue_number, 42);
     assert_eq!(candidate.project_root, project.path());
     assert_eq!(candidate.session_mode, gwt_agent::SessionMode::Normal);
@@ -1886,7 +1902,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
         &gwt_agent::AgentId::Codex,
         Some(&missing_mode),
     )
-    .expect_err("Issue Monitor ownership without a typed session mode must fail closed");
+    .expect_err("Issues ownership without a typed session mode must fail closed");
     assert!(error.contains("session mode provenance"), "{error}");
 
     let incomplete = LaunchFeedbackContext {
@@ -1897,7 +1913,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
         &gwt_agent::AgentId::Codex,
         Some(&incomplete),
     )
-    .expect_err("Issue Monitor ownership without project root must fail closed");
+    .expect_err("Issues ownership without project root must fail closed");
     assert!(error.contains("no project root provenance"), "{error}");
     assert!(super::super::issue_monitor_trust_candidate_from_feedback(
         &gwt_agent::AgentId::ClaudeCode,
@@ -1920,7 +1936,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     let delivery_id = format!("launch:{launch_effect_id}");
     let feedback = LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(42),
         issue_monitor_delivery_id: Some(delivery_id.clone()),
         issue_monitor_project_root: Some(project.clone()),
@@ -1933,7 +1949,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
         &gwt_agent::AgentId::Codex,
         Some(&feedback),
     )
-    .expect("typed Issue Monitor feedback")
+    .expect("typed Issues feedback")
     .expect("managed trust candidate");
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&worktree)
@@ -2056,15 +2072,15 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     assert_eq!(
         restored.active_count(),
         0,
-        "a fail-closed trust preflight must durably release its Issue Monitor slot"
+        "a fail-closed trust preflight must durably release its Issues slot"
     );
 }
 
 #[test]
 fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation() {
-    let source = include_str!("../launch.rs");
+    let source = include_str!("../../project_runtime/launch.rs");
     let worker = source
-        .split("fn spawn_agent_window_async_with_claim")
+        .split("fn prepare_agent_launch")
         .nth(1)
         .expect("launch worker source");
     let validate = worker
@@ -2083,8 +2099,18 @@ fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation(
         .find("resolve_host_runner_health_checked")
         .expect("host runner probe");
     let session = worker
-        .find("gwt_agent::Session::new")
+        .find("initialize_launch_session(")
         .expect("durable Session creation");
+    let initializer_source = include_str!("../../session_launch.rs");
+    let initializer = initializer_source
+        .split("pub fn initialize_launch_session(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn apply_resume_identity_to_session(")
+                .next()
+        })
+        .expect("shared Session initializer");
+    assert!(initializer.contains("Session::new("));
 
     assert!(
         validate < register,
@@ -2570,7 +2596,7 @@ fn codex_shared_hook_trust_survives_update_restart_and_new_window() {
 
 /// Issue #3967 AC-4: a pre-registration that cannot vouch for the gwt hooks
 /// must fail the launch with a concrete reason instead of handing the agent a
-/// human-only prompt that silently holds the Issue Monitor slot.
+/// human-only prompt that silently holds Issues slot.
 #[test]
 fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
     let home = tempdir().expect("home tempdir");
@@ -2616,7 +2642,7 @@ fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
 
 /// Issue #3967 AC-4: an unwritable Codex config used to be swallowed as a
 /// warning, which launched the agent straight into `Hooks need review` and let
-/// the pane hold its Issue Monitor slot in silence. The launch now fails with
+/// the pane hold its Issues slot in silence. The launch now fails with
 /// the reason so the slot is released and the cause is visible.
 #[test]
 fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
@@ -2710,7 +2736,7 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(empty_workspace_state()),
+        workspace: WindowRegistry::from_persisted(empty_workspace_state()),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

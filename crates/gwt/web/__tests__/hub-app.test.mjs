@@ -218,6 +218,62 @@ test("the Hub reconnects after its socket closes", () => {
   assert.equal(new URL(sockets[1].url).search, "");
 });
 
+test("Hub reconnect recovers a lost repository search without duplicating its offline queue", () => {
+  const { document, sockets, timers } = fixture();
+  sockets[0].open();
+  document.querySelector('[data-hub-action="clone"]').click();
+  document.querySelector('[data-clone-mode="search"]').click();
+  const query = document.getElementById('clone-project-search-input');
+  query.value = ' fixture ';
+  query.dispatchEvent(new document.defaultView.Event('input'));
+  document.querySelector('.clone-project-search-row button').click();
+  document.querySelector('[data-clone-mode="url"]').click();
+  sockets[0].readyState = 3;
+  sockets[0].handlers.close();
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: 'frontend_ready' }, { kind: 'github_repository_search', query: 'fixture' }]);
+  sockets[1].deliver({ kind: 'github_repository_search_results', query: 'stale', repositories: [] });
+  document.querySelector('[data-clone-mode="search"]').click();
+  assert.equal(document.querySelector('.clone-project-search-row button').disabled, true);
+  sockets[1].deliver({ kind: 'github_repository_search_results', query: 'fixture', repositories: [] });
+  assert.equal(document.querySelector('.clone-project-search-row button').disabled, false);
+  sockets[1].readyState = 3;
+  sockets[1].handlers.close();
+  timers.at(-1)();
+  document.querySelector('.clone-project-search-row button').click();
+  [...document.querySelectorAll('#clone-project-modal button')].find(button => button.textContent === 'Cancel').click();
+  document.querySelector('[data-hub-action="clone"]').click();
+  let draft = document.getElementById('clone-project-search-input');
+  draft.value = 'other';
+  draft.dispatchEvent(new document.defaultView.Event('input'));
+  document.querySelector('.clone-project-search-row button').click();
+  draft = document.getElementById('clone-project-search-input');
+  draft.value = 'fixture';
+  draft.dispatchEvent(new document.defaultView.Event('input'));
+  sockets[2].open();
+  assert.deepEqual(sockets[2].sent, [{ kind: 'frontend_ready' }, { kind: 'github_repository_search', query: 'fixture' }, { kind: 'github_repository_search', query: 'other' }]);
+  sockets[2].deliver({ kind: 'github_repository_search_error', query: 'fixture', message: 'Unavailable' });
+  sockets[2].readyState = 3;
+  sockets[2].handlers.close();
+  timers.at(-1)();
+  sockets[3].open();
+  assert.deepEqual(sockets[3].sent, [{ kind: 'frontend_ready' }], 'settled search does not replay');
+  document.querySelector('.clone-project-search-row button').click();
+  const clearedQuery = document.getElementById('clone-project-search-input');
+  clearedQuery.value = '';
+  clearedQuery.dispatchEvent(new document.defaultView.Event('input'));
+  sockets[3].readyState = 3;
+  sockets[3].handlers.close();
+  timers.at(-1)();
+  sockets[4].open();
+  const nextQuery = document.getElementById('clone-project-search-input');
+  nextQuery.value = 'next';
+  nextQuery.dispatchEvent(new document.defaultView.Event('input'));
+  assert.equal(document.querySelector('.clone-project-search-row button').disabled, false, 'an empty draft settles the lost search');
+  assert.deepEqual(sockets[4].sent, [{ kind: 'frontend_ready' }]);
+});
+
 test("folder picker refuses repeats and cancellation clears pending without an error", () => {
   const { document, sockets } = fixture();
   sockets[0].open();
@@ -303,18 +359,33 @@ test("manual open and clone destination work without a native picker", () => {
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'clone_project_start', url: url.value, parent_path: parent.value });
 });
 
-test("Hub Close Project previews the selected key and removes only a closed project", () => {
+test("Hub Close Project requires a choice and preserves the project execution row", () => {
   const { document, sockets } = fixture();
-  sockets[0].open();
-  sockets[0].deliver(hubState([projectA, projectB]));
+  sockets[0].open(); sockets[0].deliver(hubState([projectA, projectB]));
   document.querySelector(`[data-close-project="${projectA.project_key}"]`).click();
-  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key, project_wide: true });
   const token = { project_key: projectA.project_key, generation: 1, nonce: 'test' };
-  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [] });
-  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'confirm_close_project', token });
+  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [], choice_required: true,
+    policy_revision: 1, view_set_revision: 2, view_count: 2, project_wide: true });
+  assert.equal(sockets[0].sent.length, 2);
+  document.querySelector('[data-role="close-project-continue"]').click();
+  assert.equal(sockets[0].sent.at(-1).choice, 'continue');
   sockets[0].deliver({ kind: 'project_closed', project_key: projectA.project_key });
-  assert.equal(document.querySelector(`[data-close-project="${projectA.project_key}"]`), null);
+  assert.ok(document.querySelector(`[data-close-project="${projectA.project_key}"]`));
   assert.ok(document.querySelector(`[data-close-project="${projectB.project_key}"]`));
+});
+
+test("Hub shares project execution observations and marks a disconnect unknown", () => {
+  const { document, sockets } = fixture(); sockets[0].open();
+  sockets[0].deliver(hubState([{ ...projectA, execution: { project_key: projectA.project_key, generation: 2, revision: 4,
+    choice: 'continue', effective_state: 'waiting', start_reason: 'user_continue', observed_at: '2026-11-03T10:00:00Z', degraded: false } }, projectB], [{ ...projectA, path: '/fixture/alpha' }]));
+  const a = document.querySelector(`[data-project-execution="${projectA.project_key}"]`);
+  assert.match(a?.textContent || '', /Alpha.*Waiting.*Continue.*2026-11-03/);
+  assert.equal(a.querySelector('[data-project-execution-status]').dataset.state, 'waiting');
+  const b = document.querySelector(`[data-project-execution="${projectB.project_key}"]`);
+  assert.match(b?.textContent || '', /Unknown/);
+  sockets[0].handlers.close();
+  assert.match(a.textContent, /Unknown.*Last known: Waiting/);
 });
 
 test("Hub retries Close after its preview connection is lost", () => {
@@ -327,7 +398,7 @@ test("Hub retries Close after its preview connection is lost", () => {
   timers.at(-1)();
   sockets[1].open();
   close.click();
-  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key, project_wide: true });
 });
 
 
@@ -367,4 +438,45 @@ test("unknown Hub actions retain the ordinary picker", () => {
   sockets[0].open();
   assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
   assert.equal(document.querySelector('#clone-project-modal').getAttribute("aria-hidden"), "true");
+});
+
+// AC-5: one owner's failure must leave another project's row usable.
+test("project owner health updates only the matching Hub project", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([
+    { ...projectA, owner_health: { project_key: projectA.project_key, state: "degraded", detail: "Project connection lost" } },
+    { ...projectB, owner_health: { project_key: projectB.project_key, state: "healthy", detail: null } },
+  ]));
+  const a = document.querySelector(`[data-project-health="${projectA.project_key}"]`);
+  const b = document.querySelector(`[data-project-health="${projectB.project_key}"]`);
+  assert.equal(a?.dataset.state, "degraded");
+  assert.match(a.textContent, /unavailable/i);
+  assert.equal(b?.dataset.state, "healthy");
+  assert.equal(document.querySelector(`a[data-project-key="${projectB.project_key}"]`)?.getAttribute("href"), `/p/${projectB.project_key}`);
+});
+
+test("Hub retries an observed draining project with an opaque single-use token while Beta remains usable", () => {
+  const { document, sockets } = fixture();
+  const socket = sockets[0];
+  socket.open();
+  const state = hubState([projectB]);
+  state.hub.orphan_daemons = [{ project_key: projectA.project_key, title: "Alpha", detail: "終了処理の再試行が必要です", observation_token: "observation-once" }];
+  socket.deliver(state);
+  const retry = document.querySelector('[data-orphan-retry]');
+  assert.ok(retry);
+  assert.equal(retry.textContent, "Retry shutdown");
+  retry.click();
+  assert.deepEqual(socket.sent.at(-1), { kind: "reap_orphan_daemon", observation_token: "observation-once" });
+  assert.equal(retry.disabled, true);
+  socket.deliver({ kind: "orphan_daemon_result", message: "観測が古くなりました。再確認してください。" });
+  assert.match(document.querySelector('[role="alert"]').textContent, /観測が古く/);
+  assert.equal(document.querySelector(`[data-project-key="${projectB.project_key}"]`).getAttribute("href"), `/p/${projectB.project_key}`);
+  assert.doesNotMatch(document.body.innerHTML, /auth_token|host_instance_id|started_at|\bpid\b/);
+  const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+  const detailStyle = css.match(/\.gwt-hub__orphan-detail\s*\{([^}]+)\}/)?.[1];
+  assert.match(detailStyle, /color:\s*var\(--color-text-muted\)/);
+  assert.match(detailStyle, /font-size:\s*var\(--type-sm\)/);
+  document.querySelector('[data-hub-action="refresh-orphans"]').click();
+  assert.deepEqual(socket.sent.at(-1), { kind: "refresh_orphan_daemons" });
 });

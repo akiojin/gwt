@@ -12,6 +12,13 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod auto_report;
+use auto_report::{
+    AutoFeedbackRecord, AutoReason, OwnedAutoAttempt, OwnedAutoMetadata, OwnedAutoOrigin,
+    OwnedAutoPhase, OwnedAutoReason, OwnedCancelResult, OwnedCleanupObservation,
+    OwnedExitObservation, SafeAutoReport,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackKind {
@@ -56,6 +63,7 @@ pub enum FeedbackState {
     Declined,
     Failed,
     Uncertain,
+    Withheld,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,25 +85,55 @@ impl FeedbackRecord {
 
     /// Derive the immutable public preview/send payload. The stored receipt
     /// remains the complete original, including evidence hidden by these masks.
-    pub fn public_snapshot(&self) -> Self {
-        let mut public = self.clone();
-        let root = self.context.project_root.to_string_lossy();
+    pub fn public_snapshot(&self) -> PublicFeedback {
+        let mut input = self.input.clone();
+        let mut privacy = PrivacyMasks::new(self);
         for text in [
-            &mut public.input.title,
-            &mut public.input.operation,
-            &mut public.input.refusal,
-            &mut public.input.reproduction,
-            &mut public.input.body,
+            &mut input.title,
+            &mut input.operation,
+            &mut input.refusal,
+            &mut input.reproduction,
         ]
         .into_iter()
-        .chain(public.input.workaround.iter_mut())
-        .chain(public.input.error_record_id.iter_mut())
-        .chain(public.input.labels.iter_mut())
+        .chain(input.workaround.iter_mut())
         {
-            *text = public_text(text, &root);
+            *text = privacy.text(text);
         }
-        public.context.project_root = PathBuf::from("[REDACTED PATH]");
-        public
+        // These local fields have no role in the upstream diagnostic contract.
+        // Never serialize the raw context, arbitrary body, labels or ledger id.
+        input.body.clear();
+        input.labels.clear();
+        input.error_record_id = None;
+        PublicFeedback {
+            id: self.id.clone(),
+            input,
+            gwt_version: self.context.gwt_version.clone(),
+            gwtd_version: self.context.gwtd_version.clone(),
+            os: self.context.os.clone(),
+            removed: privacy.removed.into_iter().collect(),
+        }
+    }
+
+    pub fn render_issue(&self) -> String {
+        self.public_snapshot().render_issue()
+    }
+}
+
+/// The only payload accepted by the public sender. Source context cannot be
+/// serialized accidentally because it is absent from this transport type.
+#[derive(Debug, Clone)]
+pub struct PublicFeedback {
+    pub id: String,
+    pub input: FeedbackInput,
+    pub gwt_version: String,
+    pub gwtd_version: String,
+    pub os: String,
+    pub removed: Vec<&'static str>,
+}
+
+impl PublicFeedback {
+    pub fn marker(&self) -> String {
+        format!("<!-- gwt-feedback:{} -->", self.id)
     }
 
     pub fn render_issue(&self) -> String {
@@ -104,8 +142,6 @@ impl FeedbackRecord {
             FeedbackKind::Request => "request",
             FeedbackKind::Friction => "friction",
         };
-        // A longer fence prevents refusal text containing Markdown fences from
-        // swallowing the structured context. Evidence itself is never trimmed.
         let fence = "`".repeat(
             self.input
                 .refusal
@@ -118,83 +154,288 @@ impl FeedbackRecord {
         );
         let details = serde_json::to_string_pretty(&serde_json::json!({
             "kind": self.input.kind, "operation": self.input.operation,
-            "environment": self.context, "reproduction": self.input.reproduction,
-            "workaround": self.input.workaround, "error_record_id": self.input.error_record_id,
-            "requested_labels": self.input.labels,
+            "environment": {
+                "gwt_version": self.gwt_version,
+                "gwtd_version": self.gwtd_version,
+                "os": self.os,
+            },
+            "reproduction": self.input.reproduction,
+            "workaround": self.input.workaround,
         }))
-        .expect("feedback metadata serializes");
-        format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n{}\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim except privacy masks)\n\n{}text\n{}\n{}\n",
-            self.marker(), self.input.body, details, fence, self.input.refusal, fence)
+        .expect("public feedback metadata serializes");
+        format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim except privacy masks)\n\n{}text\n{}\n{}\n",
+            self.marker(), details, fence, self.input.refusal, fence)
+    }
+
+    pub fn privacy_summary(&self) -> String {
+        let text = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            self.input.title,
+            self.input.operation,
+            self.input.refusal,
+            self.input.reproduction,
+            self.input.workaround.as_deref().unwrap_or("")
+        );
+        let masks = regex::Regex::new(r"\[REDACTED(?: [A-Z]+)?\]|\*\*\*redacted\*\*\*")
+            .expect("privacy masks");
+        let masked: usize = masks
+            .find_iter(&text)
+            .map(|m| m.as_str().chars().count())
+            .sum();
+        let total = text.chars().count().max(1);
+        let percent = masked * 100 / total;
+        format!("Removed items: local metadata and unstructured context{}\nPrivacy masks: {percent}% of diagnostic text.{}\nUnknown project-specific names may remain; review the complete report before sending.",
+            if self.removed.is_empty() { String::new() } else { format!(", {}", self.removed.join(", ")) },
+            if masked * 2 > total { " The report may be unreadable because more than half is masked." } else { "" })
     }
 }
 
-fn public_text(text: &str, project_root: &str) -> String {
-    use pulldown_cmark::{Event, Parser, Tag};
-    use regex::Regex;
+struct PrivacyMasks {
+    identifiers: Vec<String>,
+    root: String,
+    removed: std::collections::BTreeSet<&'static str>,
+}
 
-    // Offset ranges retain the authored bytes; event text normalizes Markdown.
-    let mut masked = String::new();
-    let mut copied = 0;
-    for (event, range) in Parser::new(text).into_offset_iter() {
-        if matches!(event, Event::Start(Tag::CodeBlock(_)) | Event::Code(_))
-            && range.start >= copied
-        {
-            masked.push_str(&text[copied..range.start]);
-            masked.push_str("[REDACTED CODE]");
-            masked.extend(
-                text[range.clone()]
-                    .chars()
-                    .filter(|c| matches!(c, '\r' | '\n')),
-            );
-            copied = range.end;
+impl PrivacyMasks {
+    fn new(record: &FeedbackRecord) -> Self {
+        let root = &record.context.project_root;
+        let mut identifiers = vec![record.context.project_hash.clone()];
+        if let Some(name) = root.file_name().and_then(|s| s.to_str()) {
+            identifiers.push(name.into());
+        }
+        if let Some(origin) = crate::repo_hash::repository_local_origin(root) {
+            let parts: Vec<_> = origin
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .rsplit(['/', ':'])
+                .take(2)
+                .collect();
+            identifiers.extend(parts.into_iter().map(str::to_owned));
+        }
+        let dot_git = root.join(".git");
+        let git_dir = if dot_git.is_dir() {
+            dot_git
+        } else {
+            fs::read_to_string(&dot_git)
+                .ok()
+                .and_then(|s| {
+                    s.trim()
+                        .strip_prefix("gitdir:")
+                        .map(str::trim)
+                        .map(PathBuf::from)
+                })
+                .map(|p| if p.is_absolute() { p } else { root.join(p) })
+                .unwrap_or_default()
+        };
+        if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
+            if let Some(branch) = head.trim().strip_prefix("ref: refs/heads/") {
+                identifiers.push(branch.into());
+            }
+        }
+        identifiers
+            .retain(|s| !s.is_empty() && !matches!(s.as_str(), "gwt" | "akiojin" | "github.com"));
+        identifiers.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        identifiers.dedup();
+        Self {
+            identifiers,
+            root: root.to_string_lossy().into_owned(),
+            removed: Default::default(),
         }
     }
-    masked.push_str(&text[copied..]);
-    if !project_root.is_empty() {
-        masked = masked.replace(project_root, "[REDACTED PATH]");
-    }
 
+    fn text(&mut self, text: &str) -> String {
+        use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+        use regex::Regex;
+        let mut masked = String::new();
+        let mut copied = 0;
+        for (event, range) in Parser::new(text).into_offset_iter() {
+            // Preserve diagnostic literals such as `workspace.update`, status
+            // codes and CLI flags. Only source-shaped spans are code masks.
+            let source = match &event {
+                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language)))
+                    if !language.is_empty()
+                        && !matches!(
+                            language.as_ref(),
+                            "text" | "log" | "console" | "json" | "sh" | "bash" | "shell"
+                        ) =>
+                {
+                    true
+                }
+                Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => {
+                    looks_like_source(&text[range.clone()])
+                }
+                _ => false,
+            };
+            if source && range.start >= copied {
+                masked.push_str(&text[copied..range.start]);
+                masked.push_str("[REDACTED CODE]");
+                masked.extend(
+                    text[range.clone()]
+                        .chars()
+                        .filter(|c| matches!(c, '\r' | '\n')),
+                );
+                copied = range.end;
+                self.removed.insert("source code");
+            }
+        }
+        masked.push_str(&text[copied..]);
+        if !self.root.is_empty() && masked.contains(&self.root) {
+            masked = masked.replace(&self.root, "[REDACTED PATH]");
+            self.removed.insert("file paths");
+        }
+        for identifier in &self.identifiers {
+            let boundary = |c: Option<char>| {
+                if c.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    r"\b"
+                } else {
+                    ""
+                }
+            };
+            let pattern = Regex::new(&format!(
+                "(?i){}{}{}",
+                boundary(identifier.chars().next()),
+                regex::escape(identifier),
+                boundary(identifier.chars().last())
+            ))
+            .expect("source identifier");
+            if pattern.is_match(&masked) {
+                masked = pattern
+                    .replace_all(&masked, "[REDACTED PROJECT]")
+                    .into_owned();
+                self.removed.insert("project and repository identifiers");
+            }
+        }
+        static REFS: OnceLock<Regex> = OnceLock::new();
+        let refs = REFS.get_or_init(|| Regex::new(r"(?i)\b(?:commit|sha|head(?: stayed at)?)[ \t:=]+[0-9a-f]{7,64}\b|\b[0-9a-f]{40,64}\b|(?:\b(?:issue|pr)[ \t]*|#)#?[0-9]+\b|\b(?:branch|ref)[ \t:=]+[^\s,;`]+" ).expect("source references"));
+        if refs.is_match(&masked) {
+            masked = refs
+                .replace_all(&masked, |c: &regex::Captures<'_>| {
+                    if c[0].chars().all(|c| c.is_ascii_digit()) {
+                        c[0].to_owned()
+                    } else {
+                        "[REDACTED REFERENCE]".into()
+                    }
+                })
+                .into_owned();
+            self.removed
+                .insert("commit hashes, branches and issue references");
+        }
+        let masked = mask_environment(&masked, &mut self.removed);
+        static BEARER: OnceLock<Regex> = OnceLock::new();
+        let bearer =
+            BEARER.get_or_init(|| Regex::new(r"(?i)\bBearer[ \t]+[^\s]+").expect("bearer values"));
+        static PATHS: OnceLock<Regex> = OnceLock::new();
+        let paths = PATHS.get_or_init(|| {
+            Regex::new(r#"(?x)["'](?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^"'\r\n]*["']|[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'`]+|(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^\s<>"'`]*"#).expect("private paths")
+        });
+        let mut public = String::new();
+        for line in masked.split_inclusive(['\r', '\n']) {
+            let content_len = line.trim_end_matches(['\r', '\n']).len();
+            let (content, ending) = line.split_at(content_len);
+            let content = bearer.replace_all(content, "[REDACTED]");
+            let hidden = crate::error_ledger::redact_credentials(&content);
+            if hidden != content {
+                self.removed.insert("credentials");
+            }
+            if paths.is_match(&hidden) {
+                self.removed.insert("file paths and branch paths");
+            }
+            public.push_str(&paths.replace_all(&hidden, "[REDACTED PATH]"));
+            public.push_str(ending);
+        }
+        public
+    }
+}
+
+fn mask_environment(text: &str, removed: &mut std::collections::BTreeSet<&'static str>) -> String {
+    use regex::Regex;
     static ENVIRONMENT: OnceLock<Regex> = OnceLock::new();
     let environment = ENVIRONMENT.get_or_init(|| {
-        Regex::new(r#"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*|["'][A-Z_][A-Z0-9_]*["'][ \t]*:\s*)(?P<value>(?:"(?:\\[\s\S]|[^"\\])*"?|'[^']*'?|(?:\\(?:\r\n|[\s\S])?|[^"'\\\r\n])+)+)"#)
-            .expect("feedback environment value pattern")
-    });
-    // Quoted assignments can span physical lines. Mask their complete source
-    // value before the line-scoped credential pass, retaining all line endings.
-    // Treat the rest of an assignment line, including unquoted continuations,
-    // conservatively as part of its value.
-    let masked = environment.replace_all(&masked, |captures: &regex::Captures<'_>| {
-        let mut value = format!("{}[REDACTED]", &captures["key"]);
-        value.extend(
-            captures["value"]
-                .chars()
-                .filter(|c| matches!(c, '\r' | '\n')),
-        );
-        value
-    });
-    static BEARER: OnceLock<Regex> = OnceLock::new();
-    let bearer = BEARER.get_or_init(|| {
-        Regex::new(r"(?i)\bBearer[ \t]+[^\s]+").expect("feedback bearer value pattern")
-    });
-    static PATHS: OnceLock<Regex> = OnceLock::new();
-    let paths = PATHS.get_or_init(|| {
-        // Conservatively hide path-shaped strings, including URLs, because
-        // their public/private visibility cannot be established locally.
-        Regex::new(r#"(?x)["'](?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^"'\r\n]*["']|[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'`]+|(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^\s<>"'`]*"#)
-            .expect("feedback private path pattern")
-    });
+            Regex::new(r#"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*|["'][A-Z_][A-Z0-9_]*["'][ \t]*:\s*)(?P<value>(?:"(?:\\[\s\S]|[^"\\])*"?|'[^']*'?|(?:\\(?:\r\n|[\s\S])?|[^"'\\\r\n])+)+)"#).expect("environment values")
+        });
     let mut public = String::new();
-    // Credential patterns can consume whitespace: never let them cross the
-    // original physical line boundaries, including bare CR and CRLF.
-    for line in masked.split_inclusive(['\r', '\n']) {
-        let content_len = line.trim_end_matches(['\r', '\n']).len();
-        let (content, ending) = line.split_at(content_len);
-        let content = bearer.replace_all(content, "[REDACTED]");
-        let content = crate::error_ledger::redact_credentials(&content);
-        public.push_str(&paths.replace_all(&content, "[REDACTED PATH]"));
-        public.push_str(ending);
+    let mut rest = text;
+    while let Some(c) = environment.captures(rest) {
+        let span = c.get(0).expect("whole assignment");
+        public.push_str(&rest[..span.start()]);
+        let key = c["key"].trim().trim_end_matches('=').trim();
+        let value = c.name("value").expect("assignment value");
+        let token_len = value
+            .as_str()
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ':')))
+            .unwrap_or(value.as_str().len());
+        if diagnostic_key(key) && token_len > 0 {
+            public.push_str(&rest[span.start()..value.start() + token_len]);
+            rest = &rest[value.start() + token_len..];
+            continue;
+        }
+        removed.insert("environment values");
+        if matches!(key, "project_hash" | "project_root" | "active_agents") {
+            public.push_str("[REDACTED PROJECT]");
+        } else {
+            public.push_str(&c["key"]);
+            public.push_str("[REDACTED]");
+        }
+        public.extend(value.as_str().chars().filter(|c| matches!(c, '\r' | '\n')));
+        rest = &rest[span.end()..];
     }
+    public.push_str(rest);
     public
+}
+
+fn diagnostic_key(key: &str) -> bool {
+    matches!(
+        key,
+        "http_status"
+            | "exit_code"
+            | "code"
+            | "reason"
+            | "status"
+            | "state"
+            | "operation"
+            | "launch_route"
+            | "binding_state"
+            | "diagnostic_reason"
+            | "bridge_reason"
+            | "schema_version"
+            | "execution_id"
+            | "generation_id"
+            | "request_id"
+            | "timeout_ns"
+            | "timeout_ms"
+            | "retry_after_ms"
+            | "timestamp"
+    )
+}
+
+fn looks_like_source(text: &str) -> bool {
+    let assignment = text.lines().any(|line| {
+        line.split_once('=').is_some_and(|(key, _)| {
+            let key = key.trim().trim_start_matches('`').trim();
+            !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !diagnostic_key(key)
+        })
+    });
+    assignment
+        || text.contains("()")
+        || text.contains("=>")
+        || text.contains("{\n")
+        || text.contains("{\r\n")
+        || text.lines().any(|line| {
+            [
+                "fn ",
+                "pub fn ",
+                "function ",
+                "const ",
+                "let ",
+                "class ",
+                "def ",
+                "import ",
+            ]
+            .iter()
+            .any(|prefix| line.trim_start().starts_with(prefix))
+        })
 }
 
 /// Unknown identities also require approval. Global/user configuration never
@@ -217,6 +458,11 @@ pub fn requires_approval(project_root: &Path) -> bool {
 
 pub struct FeedbackStore {
     root: PathBuf,
+}
+
+pub enum StoredFeedback {
+    Manual(Box<FeedbackRecord>),
+    Auto(AutoFeedbackRecord),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -246,6 +492,469 @@ impl FeedbackStore {
             ));
         }
         Ok(record)
+    }
+
+    /// A tag is never interpreted as a legacy raw receipt, even if invalid.
+    pub fn read_entry(&self, id: &str) -> io::Result<StoredFeedback> {
+        let bytes = fs::read(self.path(id)?)?;
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid feedback receipt");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if value.get("mode").is_some() {
+            let record: AutoFeedbackRecord =
+                serde_json::from_value(value).map_err(|_| invalid())?;
+            if record.snapshot.id() != id || !record.valid_owned() {
+                return Err(invalid());
+            }
+            Ok(StoredFeedback::Auto(record))
+        } else {
+            let record: FeedbackRecord = serde_json::from_value(value).map_err(|_| invalid())?;
+            if record.id != id {
+                return Err(invalid());
+            }
+            Ok(StoredFeedback::Manual(Box::new(record)))
+        }
+    }
+
+    pub fn read_auto(&self, id: &str) -> io::Result<AutoFeedbackRecord> {
+        match self.read_entry(id)? {
+            StoredFeedback::Auto(record) => Ok(record),
+            StoredFeedback::Manual(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not an automatic feedback receipt",
+            )),
+        }
+    }
+
+    pub fn save_auto(&self, record: &AutoFeedbackRecord) -> io::Result<()> {
+        fs::create_dir_all(&self.root)?;
+        let _gate = self.dispatch_lock(&record.snapshot.id())?;
+        // A legacy caller may have read before a new owner registered. Never
+        // permit an unconditional whole-record write to erase owned metadata.
+        if record.owned.is_some()
+            || (self.path(&record.snapshot.id())?.exists()
+                && self.read_auto(&record.snapshot.id())?.owned.is_some())
+        {
+            return Err(owned_error());
+        }
+        self.write_auto(record)
+    }
+
+    fn write_auto(&self, record: &AutoFeedbackRecord) -> io::Result<()> {
+        if !record.valid_owned() {
+            return Err(owned_error());
+        }
+        fs::create_dir_all(&self.root)?;
+        durable_write(
+            &self.path(&record.snapshot.id())?,
+            &serde_json::to_vec_pretty(record)?,
+        )
+    }
+
+    pub fn submit_auto(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, None, false)
+    }
+
+    /// Unavailable authority permits safe local storage, never a sender. Set
+    /// the initial state inside the intake lock, before any reader sees it.
+    pub fn submit_auto_withheld(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+        reason: AutoReason,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, Some(reason), false)
+    }
+
+    /// Select the owned format only for a newly created receipt. A deduplicated
+    /// legacy receipt is returned unchanged and is never promoted in place.
+    pub fn submit_owned_auto(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, None, true)
+    }
+
+    pub fn submit_owned_auto_withheld(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+        reason: AutoReason,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, Some(reason), true)
+    }
+
+    fn submit_auto_intake(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+        withheld: Option<AutoReason>,
+        owned: bool,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        fs::create_dir_all(self.root.join("fingerprints"))?;
+        let lock = self.open_lock("intake")?;
+        lock.lock_exclusive()?;
+        // No raw fields, source identity, clock or request id enters this key.
+        let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&report)?));
+        let index = self
+            .root
+            .join("fingerprints")
+            .join(format!("auto-{fingerprint}.json"));
+        if index.exists() {
+            let receipt: Receipt = serde_json::from_slice(&fs::read(&index)?).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid automatic feedback index",
+                )
+            })?;
+            // Auto snapshots remain deduplicated in every terminal/uncertain
+            // state. Only explicit retry can restart a known failed attempt.
+            return Ok((self.read_auto(&receipt.id)?, false));
+        }
+        let mut record = AutoFeedbackRecord::new(report, now);
+        if owned {
+            record.owned = Some(OwnedAutoMetadata::pending());
+        }
+        if let Some(reason) = withheld {
+            record.state = FeedbackState::Withheld;
+            record.error = Some(reason);
+        }
+        let _gate = self.dispatch_lock(&record.snapshot.id())?;
+        self.write_auto(&record)?;
+        durable_write(
+            &index,
+            &serde_json::to_vec(&Receipt {
+                id: record.snapshot.id(),
+                created_at: now,
+            })?,
+        )?;
+        Ok((record, true))
+    }
+
+    /// The supervisor retains this lock for the complete attempt lifetime.
+    pub fn try_owner_lock(&self, id: &str) -> io::Result<File> {
+        self.path(id)?;
+        let lock = self.open_lock(&format!("{id}.owner"))?;
+        lock.try_lock_exclusive()?;
+        Ok(lock)
+    }
+
+    /// Caller already owns the owner lock. Sender admission precedes the short
+    /// dispatch gate, so an existing legacy sender cannot be adopted or raced.
+    /// `authorize` must be bounded local policy/liveness/deadline checks only.
+    pub fn begin_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        let _sender = self.try_sender_lock(id)?;
+        self.auto_transaction(id, |record| {
+            if attempt_id.is_nil()
+                || record.state != FeedbackState::Queued
+                || !record.snapshot.report().sendable()
+                || record
+                    .owned
+                    .as_ref()
+                    .ok_or_else(owned_error)?
+                    .attempt
+                    .is_some()
+            {
+                return Err(owned_error());
+            }
+            authorize()?;
+            record.owned.as_mut().ok_or_else(owned_error)?.attempt = Some(OwnedAutoAttempt {
+                id: attempt_id,
+                origin: OwnedAutoOrigin::InheritedCliEnvironment,
+                phase: OwnedAutoPhase::PreDispatch,
+                exit: OwnedExitObservation::Unknown,
+                cleanup: OwnedCleanupObservation::Unknown,
+                reason: None,
+            });
+            record.state = FeedbackState::Sending;
+            record.error = None;
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Linearizes permission to start auth or another remote read. No network
+    /// operation, upstream-lock wait, process discovery or exit wait runs here.
+    pub fn check_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let attempt = owned_attempt(record, attempt_id)?;
+            if attempt.phase != OwnedAutoPhase::PreDispatch
+                || attempt.exit != OwnedExitObservation::Unknown
+                || attempt.cleanup != OwnedCleanupObservation::Unknown
+                || record.state != FeedbackState::Sending
+            {
+                return Err(owned_error());
+            }
+            authorize()
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Cancellation never waits for the sender lock. Acceptance is returned
+    /// only after the durable PreDispatch -> CancelAccepted transition.
+    pub fn cancel_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        reason: OwnedAutoReason,
+    ) -> io::Result<OwnedCancelResult> {
+        self.auto_transaction(id, |record| {
+            owned_attempt(record, attempt_id)?;
+            if matches!(record.state, FeedbackState::Sent | FeedbackState::Uncertain) {
+                return Ok(OwnedCancelResult::TooLateOrUnknown);
+            }
+            let attempt = owned_attempt(record, attempt_id)?;
+            match attempt.phase {
+                OwnedAutoPhase::PreDispatch => {
+                    attempt.phase = OwnedAutoPhase::CancelAccepted;
+                    attempt.reason.get_or_insert(reason);
+                    if record.state != FeedbackState::Sent {
+                        record.state = FeedbackState::Failed;
+                        record.error = Some(AutoReason::PreSubmitFailed);
+                    }
+                    Ok(OwnedCancelResult::Accepted)
+                }
+                // A prior rename may be visible even when its durability
+                // barrier failed. Re-reading it is not a new acceptance witness.
+                OwnedAutoPhase::CancelAccepted => Ok(OwnedCancelResult::TooLateOrUnknown),
+                OwnedAutoPhase::DispatchCommitted => {
+                    attempt.reason.get_or_insert(reason);
+                    if record.state != FeedbackState::Sent {
+                        record.state = FeedbackState::Uncertain;
+                        record.error = Some(AutoReason::RemoteOutcomeUnknown);
+                    }
+                    Ok(OwnedCancelResult::TooLateOrUnknown)
+                }
+            }
+        })
+        .map(|(_, result)| result)
+    }
+
+    /// The caller may enter one Issue/Comment mutation only after this durable
+    /// commit succeeds. It must release the gate before performing HTTP.
+    pub fn commit_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let attempt = owned_attempt(record, attempt_id)?;
+            if attempt.phase != OwnedAutoPhase::PreDispatch
+                || attempt.exit != OwnedExitObservation::Unknown
+                || attempt.cleanup != OwnedCleanupObservation::Unknown
+                || record.state != FeedbackState::Sending
+            {
+                return Err(owned_error());
+            }
+            authorize()?;
+            owned_attempt(record, attempt_id)?.phase = OwnedAutoPhase::DispatchCommitted;
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// A verified remote fact is independent of local cancellation and cleanup.
+    /// Once committed, every unresolved failure stays uncertain and nonretryable.
+    pub fn finish_owned_attempt(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        outcome: Result<u64, AutoReason>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let phase = owned_attempt(record, attempt_id)?.phase;
+            if record.state == FeedbackState::Sent {
+                return Ok(());
+            }
+            match outcome {
+                Ok(number) => {
+                    record.state = FeedbackState::Sent;
+                    record.issue_number = Some(number);
+                    record.error = None;
+                }
+                Err(reason) => {
+                    if record.state == FeedbackState::Uncertain {
+                        return Ok(());
+                    }
+                    record.state = if phase == OwnedAutoPhase::DispatchCommitted
+                        || matches!(
+                            reason,
+                            AutoReason::RemoteOutcomeUnknown | AutoReason::SenderInterrupted
+                        ) {
+                        FeedbackState::Uncertain
+                    } else if matches!(
+                        reason,
+                        AutoReason::PolicyUnavailable
+                            | AutoReason::PolicyRevoked
+                            | AutoReason::InsufficientInformation
+                    ) {
+                        FeedbackState::Withheld
+                    } else {
+                        FeedbackState::Failed
+                    };
+                    record.error = Some(reason);
+                    if phase == OwnedAutoPhase::PreDispatch {
+                        owned_attempt(record, attempt_id)?.phase = OwnedAutoPhase::CancelAccepted;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Only the exact Child/Job owner supplies these observations. Handle close
+    /// or lock disappearance is not an observation, and facts never regress.
+    pub fn observe_owned_exit(
+        &self,
+        id: &str,
+        attempt_id: uuid::Uuid,
+        exit: OwnedExitObservation,
+        cleanup: OwnedCleanupObservation,
+        reason: Option<OwnedAutoReason>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        self.auto_transaction(id, |record| {
+            let attempt = owned_attempt(record, attempt_id)?;
+            if (attempt.exit != OwnedExitObservation::Unknown && attempt.exit != exit)
+                || (attempt.cleanup == OwnedCleanupObservation::Confirmed
+                    && cleanup != OwnedCleanupObservation::Confirmed)
+                || (cleanup == OwnedCleanupObservation::Confirmed
+                    && exit == OwnedExitObservation::Unknown)
+                || (exit == OwnedExitObservation::NotStarted
+                    && attempt.phase == OwnedAutoPhase::DispatchCommitted)
+            {
+                return Err(owned_error());
+            }
+            attempt.exit = exit;
+            attempt.cleanup = cleanup;
+            if reason.is_some() {
+                attempt.reason = reason;
+            }
+            if record.state != FeedbackState::Sent
+                && matches!(
+                    reason,
+                    Some(OwnedAutoReason::ExitDeadline | OwnedAutoReason::CleanupUnobserved)
+                )
+                && (exit == OwnedExitObservation::Unknown
+                    || cleanup == OwnedCleanupObservation::Unknown)
+            {
+                record.state = FeedbackState::Uncertain;
+                record.error = Some(AutoReason::SenderInterrupted);
+            }
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    pub fn retry_owned_auto(
+        &self,
+        id: &str,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<AutoFeedbackRecord> {
+        let _owner = self.try_owner_lock(id)?;
+        let _sender = self.try_sender_lock(id)?;
+        self.auto_transaction(id, |record| {
+            if !matches!(
+                record.state,
+                FeedbackState::Failed | FeedbackState::Withheld
+            ) {
+                return Err(owned_error());
+            }
+            let owned = record.owned.as_ref().ok_or_else(owned_error)?;
+            if let Some(attempt) = &owned.attempt {
+                if attempt.cleanup != OwnedCleanupObservation::Confirmed
+                    || !(attempt.exit == OwnedExitObservation::NotStarted
+                        || (attempt.phase == OwnedAutoPhase::CancelAccepted
+                            && attempt.exit == OwnedExitObservation::Confirmed))
+                {
+                    return Err(owned_error());
+                }
+            }
+            if !record.snapshot.report().sendable() {
+                return Err(owned_error());
+            }
+            authorize()?;
+            record.owned.as_mut().ok_or_else(owned_error)?.attempt = None;
+            record.state = FeedbackState::Queued;
+            record.error = None;
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    /// Losing a lock owner is not proof of child exit. Fence a late startup
+    /// without changing attempt identity or inventing cleanup observations.
+    pub fn reconcile_owned_auto(&self, id: &str) -> io::Result<AutoFeedbackRecord> {
+        let _owner = match self.try_owner_lock(id) {
+            Ok(lock) => lock,
+            Err(error) if lock_busy(&error) => return self.read_auto(id),
+            Err(error) => return Err(error),
+        };
+        let _sender = match self.try_sender_lock(id) {
+            Ok(lock) => lock,
+            Err(error) if lock_busy(&error) => return self.read_auto(id),
+            Err(error) => return Err(error),
+        };
+        self.auto_transaction(id, |record| {
+            let owned = record.owned.as_mut().ok_or_else(owned_error)?;
+            let cleanup_unknown = owned.attempt.as_ref().is_some_and(|attempt| {
+                attempt.exit == OwnedExitObservation::Unknown
+                    || attempt.cleanup == OwnedCleanupObservation::Unknown
+            });
+            if matches!(record.state, FeedbackState::Queued | FeedbackState::Sending)
+                || (matches!(
+                    record.state,
+                    FeedbackState::Failed | FeedbackState::Withheld
+                ) && cleanup_unknown)
+            {
+                record.state = FeedbackState::Uncertain;
+                record.error = Some(AutoReason::SenderInterrupted);
+                if let Some(attempt) = &mut owned.attempt {
+                    attempt
+                        .reason
+                        .get_or_insert(OwnedAutoReason::OwnerUnavailable);
+                }
+            }
+            Ok(())
+        })
+        .map(|(record, ())| record)
+    }
+
+    fn dispatch_lock(&self, id: &str) -> io::Result<File> {
+        self.path(id)?;
+        let lock = self.open_lock(&format!("{id}.dispatch"))?;
+        lock.lock_exclusive()?;
+        Ok(lock)
+    }
+
+    fn auto_transaction<T>(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut AutoFeedbackRecord) -> io::Result<T>,
+    ) -> io::Result<(AutoFeedbackRecord, T)> {
+        let _gate = self.dispatch_lock(id)?;
+        let mut record = self.read_auto(id)?;
+        let original = record.clone();
+        let result = change(&mut record)?;
+        if record != original {
+            self.write_auto(&record)?;
+        }
+        Ok((record, result))
     }
 
     pub fn save(&self, record: &FeedbackRecord) -> io::Result<()> {
@@ -334,6 +1043,30 @@ impl FeedbackStore {
             .write(true)
             .open(self.root.join(format!("{name}.lock")))
     }
+}
+
+fn owned_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid owned feedback transition",
+    )
+}
+
+fn lock_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+fn owned_attempt(
+    record: &mut AutoFeedbackRecord,
+    attempt_id: uuid::Uuid,
+) -> io::Result<&mut OwnedAutoAttempt> {
+    record
+        .owned
+        .as_mut()
+        .and_then(|owned| owned.attempt.as_mut())
+        .filter(|attempt| attempt.id == attempt_id)
+        .ok_or_else(owned_error)
 }
 
 fn durable_write(path: &Path, bytes: &[u8]) -> io::Result<()> {

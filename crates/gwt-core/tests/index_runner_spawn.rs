@@ -20,10 +20,12 @@ fn runner_script() -> PathBuf {
 #[test]
 #[ignore]
 fn search_files_e2e_with_real_e5_auto_builds() {
-    if !runner_python().exists() || !runner_script().exists() {
-        eprintln!("skipping: runner not bootstrapped");
-        return;
-    }
+    assert!(
+        runner_python().is_file() && runner_script().is_file(),
+        "real E5 runtime must be bootstrapped: python={} runner={}",
+        runner_python().display(),
+        runner_script().display()
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
@@ -84,10 +86,12 @@ fn search_files_e2e_with_real_e5_auto_builds() {
 #[test]
 #[ignore]
 fn search_specs_e2e_with_real_e5_auto_builds() {
-    if !runner_python().exists() || !runner_script().exists() {
-        eprintln!("skipping: runner not bootstrapped");
-        return;
-    }
+    assert!(
+        runner_python().is_file() && runner_script().is_file(),
+        "real E5 runtime must be bootstrapped: python={} runner={}",
+        runner_python().display(),
+        runner_script().display()
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");

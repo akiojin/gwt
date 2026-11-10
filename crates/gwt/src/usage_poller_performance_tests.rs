@@ -107,6 +107,14 @@ fn incremental_poll(
 }
 
 fn sorted(mut snapshot: UsageSnapshot) -> UsageSnapshot {
+    // Keep the pre-T17 parser/I/O comparison; optional projections are tested
+    // separately and are absent from the deliberately old full-read baseline.
+    for session in &mut snapshot.sessions {
+        session.provider_session_id = None;
+        session.project_path = None;
+        session.agent_member_id = None;
+        session.telemetry = None;
+    }
     snapshot
         .sessions
         .sort_by(|left, right| left.session_id.cmp(&right.session_id));

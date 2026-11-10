@@ -232,7 +232,7 @@ struct HarnessWorker(sysinfo::Pid, u64);
 impl HarnessWorker {
     fn new(pid: u32) -> Self {
         let pid = sysinfo::Pid::from_u32(pid);
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("initialize test process observation");
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         Self(
             pid,
@@ -246,7 +246,7 @@ impl HarnessWorker {
 
 impl Drop for HarnessWorker {
     fn drop(&mut self) {
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("initialize test process observation");
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.0]), true);
         if let Some(process) = system
             .process(self.0)
@@ -866,6 +866,7 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
         "cold query exceeded 30s: {cold_query_ms}ms"
     );
     assert!(
+        // test-hygiene: allow-wall-clock-deadline This ignored real-model probe measures actual lease plus search responsiveness.
         warm_search_ms <= 5_000,
         "warm lease plus search exceeded 5s: {warm_search_ms}ms"
     );

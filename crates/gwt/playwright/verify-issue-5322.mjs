@@ -2,6 +2,7 @@
 // Build first: cargo build -p gwt --bin gwt --bin gwtd
 // Usage: node crates/gwt/playwright/verify-issue-5322.mjs [Playwright arguments]
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -130,6 +131,7 @@ try {
     for (const name of ["A", "B"]) {
       const project = join(home, `project-${name}`);
       await mkdir(join(project, ".codex"), { recursive: true });
+      await writeFile(join(project, "compose.yaml"), "services:\n  fixture-service:\n    image: busybox:latest\n");
       await finish(start("git", ["init", "-q", "-b", "fixture-main"], env, project));
       await finish(start("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-q", "-m", "fixture"], env, project));
       async function envelope(operation, params = {}) {
@@ -147,9 +149,15 @@ try {
         version: "1.2.3", session_mode: "Normal", runtime_target: "Host", docker_lifecycle_intent: "Connect",
         skip_permissions: false, fast_mode: false, prefer_for: ["type:fix"] },
       { agent_id: "claude", model: "sonnet", reasoning: "medium", session_mode: "Normal", runtime_target: "Host" }];
+      const members = profiles.map(profile => {
+        profile.agent_member_id = randomUUID();
+        return { agent_member_id: profile.agent_member_id, agent_id: profile.agent_id,
+          name: `Settings ${name} ${profile.agent_id}`, enabled: true, created_at: new Date().toISOString() };
+      });
       const preferenceFile = join(preferences, "issue-monitor.json");
       await writeFile(preferenceFile, JSON.stringify({ enabled: false, autonomous_mode: false,
-        max_active_agents: name === "A" ? 1 : 2, max_active_agents_mode: "manual", priority_order: [],
+        max_active_agents: members.length, max_active_agents_mode: "manual", priority_order: [],
+        agent_roster: { schema_version: 1, revision: 1, members },
         terminal_queue_auto_refill: false, terminal_queue_auto_refill_limit: 3,
         allowed_labels: name === "A" ? ["auto-merge"] : ["project-b"], launch_profiles: profiles, launch_profile: profiles[0] }));
       // browser-check-agent-seed-end

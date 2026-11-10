@@ -15,10 +15,9 @@
 // deps:
 // - createNode(tag, className, textContent): shared DOM helper owned by
 //   app.js (also used by Board / settings surfaces).
-// - closeModal(): closes the Add Window preset modal before the wizard
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
-//   the frontendUnits registry and visibleBounds() stay there).
+//   the frontendUnits registry stays there).
 import { createUiStateStore } from "/ui-state-store.js";
 import { createInteractionGuard } from "/interaction-guard.js";
 import { createFocusTrap } from "/focus-trap.js";
@@ -47,7 +46,6 @@ function launchWizardStartMethodIntent(methodKind) {
 
 export function createLaunchWizardSurface({
   createNode,
-  closeModal,
   sendWizardAction,
   requestWorkAdvisory,
 }) {
@@ -242,7 +240,7 @@ export function createLaunchWizardSurface({
         return note;
       }
 
-      // Issue #4079 AC-2: the Issue Monitor Agent Settings form always writes
+      // Issue #4079 AC-2: Issues Agent Settings form always writes
       // candidate 1 of the launch pool, so the backend derives which candidate
       // that replaces and the pool summary the save will produce. Rendering it
       // here is what stops a switch from looking like it did nothing when the
@@ -263,7 +261,7 @@ export function createLaunchWizardSurface({
         return note;
       }
 
-      // Issue #4911: the Issue Monitor settings form repeats the Agent
+      // Issue #4911: Issues settings form repeats the Agent
       // Settings block once per launch candidate, in launch order. The backend
       // owns the list — it holds one editable draft, so only the open set
       // carries the form and the others show what they launch with. Returns
@@ -294,6 +292,7 @@ export function createLaunchWizardSurface({
           const block = createNode("section", "launch-agent-set");
           block.classList.toggle("is-open", isOpen);
           block.dataset.agentId = set.agent_id || "";
+          block.dataset.agentMemberId = set.agent_member_id || "";
           block.setAttribute("aria-label", name);
           const header = createNode("div", "launch-agent-set__header");
           const heading = createNode("div", "launch-agent-set__heading");
@@ -375,7 +374,7 @@ export function createLaunchWizardSurface({
         const note = createNode(
           "div",
           "launch-note launch-agent-sets__order",
-          `Sets launch in this order; the first one starts the next launch. After saving: ${pool.resulting_summary}`,
+          `The first member in the list fixes the launch tool. Only selected members using that tool are tried in order. If none is available, new launches wait; tools never switch automatically. After saving: ${pool.resulting_summary}`,
         );
         note.setAttribute("role", "note");
         parent.appendChild(note);
@@ -750,6 +749,10 @@ export function createLaunchWizardSurface({
         renderWorkAdvisoryPanel();
         wizardAdvisoryTimer = setTimeout(() => {
           wizardAdvisoryTimer = 0;
+          if (!isStartWorkLaunch()) {
+            wizardAdvisoryLoading = false;
+            return;
+          }
           wizardAdvisoryRequestSeq += 1;
           wizardAdvisoryLatestRequestId = wizardAdvisoryRequestSeq;
           requestWorkAdvisory({
@@ -758,6 +761,12 @@ export function createLaunchWizardSurface({
             request_id: wizardAdvisoryRequestSeq,
           });
         }, 280);
+      }
+
+      function resyncWorkAdvisory(replayedRequestIds = []) {
+        if (!isStartWorkLaunch() || !wizardAdvisoryLoading || wizardAdvisoryTimer
+          || replayedRequestIds.includes(wizardAdvisoryLatestRequestId)) return;
+        scheduleWorkAdvisory();
       }
 
       // SPEC-2359 US-80 — apply a duplicate-work advisory result. Ignore stale
@@ -1161,7 +1170,6 @@ export function createLaunchWizardSurface({
         }
 
         syncWizardDraftState();
-        closeModal();
         // Issue #3192 — this derivation runs BEFORE the opening/openError
         // early returns below, so it is reached for generic branch / agent
         // pending states where `launchWizard` is null
@@ -1759,7 +1767,7 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // Issue #4911: in the Issue Monitor settings form the sections below
+        // Issue #4911: in Issues settings form the sections below
         // are one Agent Settings set, so they render inside the open set.
         const setupParent = (
           showSetupForms
@@ -1784,17 +1792,22 @@ export function createLaunchWizardSurface({
               }),
           );
           if (launchWizard.show_agent_settings) {
-            appendChoiceOrSelectField(
-              grid,
-              "Agent",
-              launchWizard.agent_options || [],
-              launchWizard.selected_agent_id,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_agent",
-                  agent_id: value,
-                }),
-            );
+            if (launchWizard.issue_monitor_pool) {
+              const members = [...(launchWizard.agent_member_options || [])];
+              const selected = launchWizard.selected_agent_member_id || "";
+              if (!members.some(member => member.value === selected)) members.push({ value: selected,
+                label: selected ? `${selected} · Unavailable member` : "Select a registered member…" });
+              const memberField = appendSelectField(grid, "Agent", members, selected,
+                value => sendWizardAction({ kind: "set_agent_member", agent_member_id: value }));
+              const explanation = members.find(member => member.value === selected)?.description;
+              if (explanation) memberField.appendChild(createNode("div", "launch-field-help", explanation));
+              const tool = createLaunchField("Tool");
+              tool.appendChild(createNode("div", "launch-note", launchWizard.selected_agent_id || "Unavailable tool"));
+              grid.appendChild(tool);
+            } else {
+              appendChoiceOrSelectField(grid, "Agent", launchWizard.agent_options || [], launchWizard.selected_agent_id,
+                value => sendWizardAction({ kind: "set_agent", agent_id: value }));
+            }
             if (launchWizard.selected_agent_id === "grok") {
               appendTextField(
                 grid,
@@ -1807,8 +1820,9 @@ export function createLaunchWizardSurface({
                     model: value,
                   }),
               );
-            } else if ((launchWizard.model_options || []).length > 0) {
-              appendSelectField(
+            } else if ((launchWizard.model_options || []).length > 0
+              || (launchWizard.selected_agent_id === "codex" && launchWizard.selected_model)) {
+              const modelField = appendSelectField(
                 grid,
                 "Model",
                 launchWizard.model_options || [],
@@ -1819,10 +1833,17 @@ export function createLaunchWizardSurface({
                     model: value,
                   }),
               );
+              if (launchWizard.selected_agent_id === "codex" && launchWizard.selected_model
+                && !(launchWizard.model_options || []).some(option => option.value === launchWizard.selected_model)) {
+                const select = modelField.querySelector("select");
+                const saved = createNode("option", "", `${launchWizard.selected_model} · unavailable`);
+                saved.value = launchWizard.selected_model;
+                saved.disabled = true;
+                select.prepend(saved);
+                select.value = saved.value;
+              }
             }
-            // Issue #3962 AC-5: a saved model that left the agent's catalog
-            // falls back to the default instead of failing the launch. Say so
-            // next to the Model field so the swap is never silent.
+            // Explain restored model status beside the model field.
             if (launchWizard.model_fallback_notice) {
               const fallback = createLaunchField("Model changed", true);
               fallback.appendChild(
@@ -2317,6 +2338,7 @@ export function createLaunchWizardSurface({
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,

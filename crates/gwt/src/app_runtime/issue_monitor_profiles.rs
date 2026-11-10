@@ -78,7 +78,7 @@ impl AppRuntime {
                     &worker_context.project_root, &patches, usage_threshold_percent,
                 )
             })).unwrap_or_else(|_| Err(IssueMonitorControlPublishError::OutcomeUnknown(
-                "Issue Monitor profile save worker panicked; reload settings to inspect the durable state".into(),
+                "Issues profile save worker panicked; reload settings to inspect the durable state".into(),
             )));
             proxy.send(UserEvent::IssueMonitorProfilesSaved(Box::new(
                 IssueMonitorProfilesSaveCompletion {
@@ -93,7 +93,7 @@ impl AppRuntime {
             return self.handle_issue_monitor_profiles_saved(IssueMonitorProfilesSaveCompletion {
                 context, client_id, request_id, ticket,
                 result: Err(IssueMonitorControlPublishError::Rejected(format!(
-                    "could not start Issue Monitor profile save: {error}",
+                    "could not start Issues profile save: {error}",
                 ))),
             });
         }
@@ -112,28 +112,18 @@ impl AppRuntime {
                 .and_then(|deadline| deadline.checked_duration_since(now()))
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| IssueMonitorControlPublishError::OutcomeUnknown(
-                    "Issue Monitor profile save deadline expired; reload settings to inspect the durable state".into(),
+                    "Issues profile save deadline expired; reload settings to inspect the durable state".into(),
                 ))
         };
-        let resolve = |prefs: &gwt::IssueMonitorPrefs| {
-            let pool = prefs.launch_profile_pool();
-            let (profiles, _) = gwt::merge_issue_monitor_profiles_set(
-                &pool,
-                prefs.launch_profile.as_ref().or(pool.first()),
-                patches,
-            );
-            gwt::validate_monitor_profiles_set(&profiles, usage_threshold_percent)
-                .map_err(|error| error.to_string())?;
-            Ok::<_, String>(profiles)
-        };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let profiles = gwt::load_issue_monitor_prefs(&prefs_path)
-            .map_err(|error| error.to_string())
-            .and_then(|prefs| resolve(&prefs))
-            .map_err(IssueMonitorControlPublishError::Rejected)?;
+        let saved = gwt::load_issue_monitor_prefs(&prefs_path)
+            .map_err(|error| IssueMonitorControlPublishError::Rejected(error.to_string()))?;
+        let request =
+            gwt::issue_monitor::IssueMonitorProfilesSetRequest::capture(&saved, patches.to_vec())
+                .map_err(|error| IssueMonitorControlPublishError::Rejected(error.to_string()))?;
         let payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "control",
-            serde_json::json!({"profiles_set": {"profiles": profiles}}),
+            serde_json::json!({"profiles_patch": request}),
             std::process::id(),
         );
         let publication = gwt::daemon_publisher::publish_issue_monitor_control_with_timeout(
@@ -143,22 +133,49 @@ impl AppRuntime {
         );
         let fallback_monitor = match publication {
             Ok(()) => None,
-            Err(error) if error.allows_local_fallback() => Some(
-                Self::commit_local_issue_monitor_authorizing_control_with_timeout(
-                    project_root,
-                    remaining()?,
-                    |monitor| {
-                        // Omitted fields resolve against locked current prefs.
-                        let profiles = resolve(&monitor.prefs())?;
-                        monitor
-                            .advance_effect_authority_epoch()
-                            .ok_or_else(|| "authority epoch exhausted".to_string())?;
-                        monitor.set_launch_profile_pool(profiles);
-                        Ok(())
-                    },
-                )?
-                .0,
-            ),
+            Err(error) if error.allows_local_fallback() => {
+                remaining()?;
+                let (cached_issues, projection_error, now, source_repository) =
+                    Self::load_local_issue_monitor_fallback_projection(project_root);
+                Some(
+                    gwt::try_mutate_issue_monitor_prefs_without_authority_fence(
+                        &prefs_path,
+                        |prefs| {
+                            // Compare and merge the raw disk read set before the
+                            // observer normalizes the legacy saved-head mirror.
+                            let (profiles, _) = request.resolve(prefs)?;
+                            gwt::validate_monitor_profiles_set(&profiles, usage_threshold_percent)?;
+                            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                                gwt::IssueMonitorConfig::default(),
+                                prefs.clone(),
+                            );
+                            monitor.set_source_repository(
+                                source_repository
+                                    .as_ref()
+                                    .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+                            );
+                            monitor.advance_effect_authority_epoch().ok_or_else(|| {
+                                std::io::Error::other("authority epoch exhausted")
+                            })?;
+                            monitor.set_launch_profile_pool(profiles);
+                            Self::apply_local_issue_monitor_fallback_projection(
+                                &mut monitor,
+                                &cached_issues,
+                                projection_error.as_deref(),
+                                &now,
+                            );
+                            *prefs = monitor.prefs();
+                            Ok(monitor)
+                        },
+                    )
+                    .map_err(|error| {
+                        IssueMonitorControlPublishError::Rejected(format!(
+                            "local fallback control commit failed: {error}",
+                        ))
+                    })?
+                    .1,
+                )
+            }
             Err(error) => return Err(error),
         };
         // An ACK means durable commit plus canonical readback, never transport
@@ -167,7 +184,7 @@ impl AppRuntime {
         let profiles = gwt::load_issue_monitor_prefs(&prefs_path)
             .map_err(|error| {
                 IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                    "Issue Monitor profiles committed but readback failed: {error}",
+                    "Issues profiles committed but readback failed: {error}",
                 ))
             })?
             .launch_profile_pool();

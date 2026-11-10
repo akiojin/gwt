@@ -2,7 +2,7 @@
 //!
 //! `<gwt_project_dir>/project-state/pm.json` is the source of truth for
 //! FR-001 (per-project PM singleton), FR-002 (auto-start opt-out), and the
-//! FR-003 restart-backoff bookkeeping. The writer mirrors the Issue Monitor
+//! FR-003 restart-backoff bookkeeping. The writer mirrors Issues
 //! prefs transaction: a stable sibling `.lock` inode serializes cross-process
 //! read-modify-write (GUI and gwtd both write this file), and the
 //! unique-scratch durable atomic write keeps concurrent writers from tearing
@@ -19,6 +19,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this shared value rather than recovering it
+/// out of the persisted `launch_args`.
+pub const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
 /// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
 /// injects into the resident PM must end.
@@ -37,19 +44,24 @@ use sha2::{Digest, Sha256};
 /// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
 /// distinguishable from a dead one without a keepalive line in the
 /// conversation (FR-4).
-/// Issue #3868 AC-3: a red, conflicted, or escalation-due open PR is never a
-/// no-change cycle. SPEC #3835 AC-7 adds the promotable Draft: leaving one
-/// unpromoted is exactly how PR #4507 sat Draft until a human rescued it.
+/// Issue #3431 RPT-F: PR recovery and supervision remain mandatory, while
+/// unchanged material state must not force another Report on every wake.
 /// Kept terse on purpose — this clause rides the PTY wake prompts, which must
 /// stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
-    "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
-     output only if nothing changed and no open PR is CI-RED, CONFLICTED, READY_TO_PROMOTE, or \
-     escalation_due.";
+    "Full supervision continues; submit material changes through `pm.report.post` `submission` \
+     (max 6 summary lines, full details); unchanged report state stays silent while PR/triage work advances.";
 
 /// Physical wake decorations shared by producers and human-prompt classification.
 pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
 pub const PM_AGENT_IDLE_WAKE_PREFIX: &str = "[gwt] Agent idle: ";
+
+/// Canonical periodic instruction shared by delivery and prompt classification.
+/// ASCII punctuation preserves the exact text through Windows terminal input.
+pub const PM_PERIODIC_WAKE_INSTRUCTION: &str =
+    "[gwt] Scheduled supervision tick: reconcile now: read a fresh \
+     `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
+     (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close).";
 
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
@@ -90,7 +102,9 @@ pub const PM_STEERING_CLAUSE: &str =
      more than twice the monitor scan interval), drifting outside its owner Issue's scope, or \
      waiting for its next action, and give the directive through `board.post` with a mention or \
      `pm.message.send` — the ruling channels only; never inject launch or bootstrap instructions \
-     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle.";
+     past Issues. A launch left idle without a directive is never a no-change cycle. \
+     CI-RED or AUTO-MERGE-STALLED PRs (including owners gone before merge) and pending gwt-feedback \
+     triage also require action or escalation before no-change.";
 
 /// Issue #3767 AC-2: the same steering obligation for the two PTY wake prompts.
 /// Kept terse on purpose — those prompts must stay under the 1024-byte PTY
@@ -98,8 +112,9 @@ pub const PM_STEERING_CLAUSE: &str =
 /// carry this line while the Stop-gate continuation and the gwt-pm guidance
 /// carry [`PM_STEERING_CLAUSE`] in full.
 pub const PM_STEERING_WAKE_CLAUSE: &str =
-    "Steer stalled/off-scope/waiting launches (`board.post` mention or `pm.message.send`, never \
-     past the Monitor) before judging no change.";
+    "Steer stalled/off-scope/waiting launches via `board.post` or `pm.message.send` (never past \
+     Issues); act/escalate on CI-RED/AUTO-MERGE-STALLED PRs, gone owners, and pending \
+     gwt-feedback before judging no change.";
 
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +139,7 @@ fn default_auto_start() -> bool {
 
 /// SPEC-3431 FR-026: the agent the PM runs as, chosen per project.
 ///
-/// Deliberately narrower than the Issue Monitor's launch profile. The PM is a
+/// Deliberately narrower than Issues' launch profile. The PM is a
 /// conversational role on the host: it never needs a Docker runtime, a resume
 /// mode, or `--dangerously-skip-permissions`, and offering those knobs would
 /// only let a user misconfigure the one agent that must always come up.
@@ -143,7 +158,7 @@ pub struct PmLaunchProfile {
 /// The agent a project falls back to when nothing is configured.
 ///
 /// A fresh project has no profile, and the PM must still start — this is the
-/// bootstrap trap the Issue Monitor hits when it refuses to launch without
+/// bootstrap trap Issues hits when it refuses to launch without
 /// one. The PM never inherits a profile from unrelated launches for the same
 /// reason: a stale Docker target or exotic model from some other work would
 /// silently become the PM's.
@@ -434,7 +449,10 @@ pub fn pm_autonomous_bootstrap_allowed(worktree: &Path) -> bool {
 }
 
 pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+    // A local-only PM worktree has a different path-fallback hash from its
+    // project, but its canonical store already identifies the receipt owner.
+    pm_worktree_store_dir(repo_path)
+        .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(repo_path))
         .join("project-state/pm-delivery-receipts.jsonl")
 }
 
@@ -444,7 +462,14 @@ pub enum PmDeliveryReceiptStatus {
     Prepared,
     Verified,
     Refused,
+    /// Legacy outcome: absence of acknowledgement was previously ambiguous.
     Ambiguous,
+    /// The bounded attempt ended without an exact target acknowledgement.
+    /// Same-operation readback may still upgrade this observation to Verified.
+    Unconfirmed,
+    /// The original target is unavailable for recovery. This does not prove
+    /// that the prompt never ran; a late exact acknowledgement still wins.
+    Lost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,7 +644,17 @@ fn validated_pm_delivery_operation<'a>(
             {
                 true
             }
-            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Verified,
+            ) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                PmDeliveryReceiptStatus::Lost,
+            ) => true,
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => true,
             _ => false,
         };
         if !transition_is_valid {
@@ -729,10 +764,27 @@ pub fn finish_pm_delivery_receipt(
         {
             match (existing.status, status) {
                 (existing, requested) if existing == requested => return Ok(existing),
-                (PmDeliveryReceiptStatus::Verified, PmDeliveryReceiptStatus::Ambiguous) => {
-                    return Ok(PmDeliveryReceiptStatus::Verified)
-                }
-                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => {}
+                (
+                    PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                ) => return Ok(PmDeliveryReceiptStatus::Lost),
+                (
+                    PmDeliveryReceiptStatus::Verified,
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                ) => return Ok(PmDeliveryReceiptStatus::Verified),
+                (
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Verified,
+                ) => {}
+                (
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                    PmDeliveryReceiptStatus::Lost,
+                ) => {}
+                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -4665,7 +4717,7 @@ pub fn stop_pm_registration_in_repository(
 /// Per-writer-unique scratch path in the same directory as `path` so the
 /// final `rename` stays on one filesystem and is atomic. A fixed scratch name
 /// would let concurrent GUI/gwtd writers truncate the same file and tear the
-/// JSON (see the Issue Monitor prefs writer).
+/// JSON (see Issues prefs writer).
 fn unique_pm_scratch_path(path: &Path) -> PathBuf {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -4718,7 +4770,7 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
         })?;
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
-        // rename (same convention as the Issue Monitor prefs writer).
+        // rename (same convention as Issues prefs writer).
         timed_pm_prefs_stage("pm_prefs.rename", || {
             gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
             fs::rename(&scratch_path, path)?;
@@ -4739,11 +4791,19 @@ fn timed_pm_prefs_stage<T>(
     let remaining_budget_ms = gwt_core::operation_deadline::current()
         .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
     let result = action();
-    tracing::info!(
-        target: "gwt.pm.refresh", stage,
-        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
-        ?remaining_budget_ms, success = result.is_ok(), "PM refresh stage"
-    );
+    if result.is_err() {
+        tracing::warn!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success = false, "PM refresh stage"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.pm.refresh", stage,
+            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ?remaining_budget_ms, success = true, "PM refresh stage"
+        );
+    }
     result
 }
 
@@ -4820,7 +4880,7 @@ pub fn mutate_pm_prefs<T>(
 }
 
 /// Pause only autonomous PM work. Resume re-arms the existing loop once;
-/// registration, auto-start and Issue Monitor state remain intact.
+/// registration, auto-start and Issues state remain intact.
 pub fn set_pm_paused(repo_path: &Path, paused: bool) -> io::Result<PmPrefs> {
     let path = pm_prefs_path_for_repo_path(repo_path);
     with_pm_prefs_lock(&path, || {
@@ -5064,7 +5124,7 @@ pub struct PmStatusReport {
     /// refusal was transient — in both cases Restart is worth offering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_block: Option<PmStartBlock>,
-    /// FR-014: the PM never occupies an Issue Monitor implementation slot.
+    /// FR-014: the PM never occupies an Issues implementation slot.
     /// Always 0; kept explicit so operators can see the accounting rule.
     /// The global resource cap engine itself remains SPEC #3200's
     /// unimplemented FR — this report only exposes the PM bucket.
@@ -5072,7 +5132,7 @@ pub struct PmStatusReport {
     /// FR-014 visibility: resident PM bucket (1 while a PM is registered).
     pub pm_bucket: u32,
     /// FR-009 diagnostic visibility: whether the session asking for this
-    /// report is the registered PM, i.e. whether the asymmetric Issue Monitor
+    /// report is the registered PM, i.e. whether the asymmetric Issues
     /// boundary is lifted for it. `None` when the caller has no ambient
     /// session identity to judge.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5261,7 +5321,7 @@ mod tests {
     #[test]
     fn steering_clauses_name_the_same_channels_and_monitor_boundary() {
         for clause in [PM_STEERING_CLAUSE, PM_STEERING_WAKE_CLAUSE] {
-            for phrase in ["`board.post`", "`pm.message.send`", "Monitor"] {
+            for phrase in ["`board.post`", "`pm.message.send`", "Issues"] {
                 assert!(
                     clause.contains(phrase),
                     "steering clause is missing {phrase}: {clause}"
@@ -5270,6 +5330,34 @@ mod tests {
         }
         assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
         assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    #[test]
+    fn wake_clauses_reconcile_prs_and_feedback_before_no_change() {
+        for clause in [PM_STEERING_CLAUSE, PM_STEERING_WAKE_CLAUSE] {
+            for phrase in ["CI-RED", "AUTO-MERGE-STALLED", "gwt-feedback"] {
+                assert!(
+                    clause.contains(phrase),
+                    "wake clause is missing {phrase}: {clause}"
+                );
+            }
+        }
+        assert!(PM_STEERING_CLAUSE.contains("before no-change"));
+        assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    #[test]
+    fn cycle_reporting_clause_keeps_supervision_without_duplicate_reports() {
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("Full supervision continues"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("material changes"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("`submission`"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("unchanged report state stays silent"));
+        assert!(PM_CYCLE_REPORTING_CLAUSE.contains("PR/triage work advances"));
+        assert!(!PM_CYCLE_REPORTING_CLAUSE.contains("no open PR"));
+        assert!(
+            PM_CYCLE_REPORTING_CLAUSE.len() <= 220,
+            "preserve the wake byte budget"
+        );
     }
 
     /// Issue #3825 AC-1 / AC-4: the terse wake clause and the full Stop-gate
@@ -8346,6 +8434,60 @@ mod tests {
         assert!(!fs::read_to_string(path)
             .expect("receipt file")
             .contains(body));
+    }
+
+    #[test]
+    fn delivery_receipt_target_loss_still_accepts_a_late_exact_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d79135763897".into(),
+            recorded_at: "2026-10-22T00:00:00Z".into(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm".into(),
+            target_window_id: "tab::agent".into(),
+            target_session_id: "agent".into(),
+            body_sha256: pm_delivery_prompt_sha256("one prompt"),
+            reason: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+        let settle = |status, reason| {
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                status,
+                reason,
+            )
+            .unwrap()
+        };
+        settle(
+            PmDeliveryReceiptStatus::Ambiguous,
+            Some("submit_unconfirmed"),
+        );
+        settle(
+            PmDeliveryReceiptStatus::Unconfirmed,
+            Some("submit_unconfirmed"),
+        );
+        // Target loss proves recovery unavailable, not that the turn never ran.
+        let lost: PmDeliveryReceiptStatus = serde_json::from_str("\"lost\"").unwrap();
+        assert_eq!(settle(lost, Some("target_unavailable")), lost);
+        assert_eq!(
+            settle(PmDeliveryReceiptStatus::Verified, None),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            settle(lost, Some("target_unavailable")),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            pm_delivery_receipt_for_operation(&path, &prepared.operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PmDeliveryReceiptStatus::Verified
+        );
     }
 
     #[test]

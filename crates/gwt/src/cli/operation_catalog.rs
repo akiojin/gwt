@@ -34,6 +34,30 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "actions.diagnostic.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.observe",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.policy.add",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.policy.rollback",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.policy.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.diagnostic.request",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.dispatch",
         aliases: &[],
     },
@@ -47,6 +71,18 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "actions.queued",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.add",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.rollback",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.release_policy.status",
         aliases: &[],
     },
     Operation {
@@ -230,6 +266,22 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "fleet.disposition",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.inventory",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.orphan.terminate",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.orphans",
+        aliases: &[],
+    },
+    Operation {
         name: "github.budget",
         aliases: &[],
     },
@@ -408,6 +460,33 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.review-verdict"],
     },
     Operation {
+        name: "issue.monitor.schedule.read",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.schedule.reassign",
+        aliases: &[],
+    },
+    // The source Session acknowledges its own verified saved checkpoint.
+    Operation {
+        name: "issue.monitor.switch.ack",
+        aliases: &[],
+    },
+    // The registered PM may cancel before the captured runtime is stopped.
+    Operation {
+        name: "issue.monitor.switch.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.switch.read",
+        aliases: &[],
+    },
+    // The registered PM requests a checkpointed switch to the next planned Issue.
+    Operation {
+        name: "issue.monitor.switch.request",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.status",
         aliases: &[],
     },
@@ -482,6 +561,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "pane.close",
         aliases: &["pane.stop"],
+    },
+    Operation {
+        name: "pane.health",
+        aliases: &[],
     },
     Operation {
         name: "pane.list",
@@ -568,6 +651,18 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["pm.pane.send"],
     },
     Operation {
+        name: "pm.request_tasks.apply",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.request_tasks.read",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.request_tasks.capture",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status",
         aliases: &[],
     },
@@ -632,10 +727,6 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
-        name: "pr.draft",
-        aliases: &[],
-    },
-    Operation {
         name: "pr.edit",
         aliases: &[],
     },
@@ -669,6 +760,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pr.view",
+        aliases: &[],
+    },
+    Operation {
+        name: "project.execution.choose",
+        aliases: &[],
+    },
+    Operation {
+        name: "project.execution.status",
         aliases: &[],
     },
     Operation {
@@ -792,6 +891,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.project_prune",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.project_scan",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.projection_list",
         aliases: &["workspace.projection-list"],
     },
@@ -818,6 +925,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "workspace.work_prune",
         aliases: &["workspace.work-prune"],
+    },
+    Operation {
+        name: "workspace.work_repair",
+        aliases: &[],
     },
     Operation {
         name: "worktree.gc_build_artifacts",
@@ -908,8 +1019,7 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and
-/// subcommand words rather than operations — `--draft` would otherwise collect
-/// `pr.draft` as a candidate and send the caller to the wrong surface. Only a
+/// subcommand words rather than operations. Only a
 /// dotted name is treated as an attempted operation.
 pub fn unknown_subcommand_message(unknown: &str) -> String {
     let mut message = format!("unknown subcommand: {unknown}");

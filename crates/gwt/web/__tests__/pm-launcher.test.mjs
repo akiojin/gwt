@@ -48,10 +48,18 @@ test("AC-11: opening an Issue never returns PM auxiliary Settings as its detail 
   const start = appJs.indexOf("      function focusOrSpawnPreset(");
   const end = appJs.indexOf("      document.addEventListener", start);
   const document = doc();
+  const windows = [{ id: "pm-settings", preset: "settings", surface_owner: "pm" }], sent = [], focused = [];
   const open = new Function("normalizeSurfacePreset", "document", "CustomEvent", "activeWorkspace",
+    "isSingletonSurfacePreset", "openExistingSurfaceWindow", "windowCatalogModel", "frontendUnits",
     `${appJs.slice(start, end)}; return focusOrSpawnPreset;`)(value => value, document,
-    document.defaultView.CustomEvent, () => ({ windows: [{ id: "pm-settings", preset: "settings", surface_owner: "pm" }] }));
+    document.defaultView.CustomEvent, () => ({ windows }), () => true, data => focused.push(data.id),
+    { update: reducer => reducer({ catalog: { appState: { active_tab_id: "tab" } } }) },
+    { socketTransport: { send: message => sent.push(message) } });
   assert.equal(open("issue"), null);
+  assert.deepEqual(sent, [{ kind: "create_window", preset: "issue" }]);
+  windows.push({ id: "issue", preset: "issue" });
+  assert.equal(open("issue"), "issue");
+  assert.deepEqual(focused, ["issue"]);
 });
 
 test("FR-018: PM launcher は rail の Navigate グループ先頭にある", () => {
@@ -239,7 +247,7 @@ test("FR-019: PM クリックはローカルの camera-focus 経路を使う", (
 
 test("FR-019: 死んだ server-driven center 契約は残さない", () => {
   // center オプションが残っている限り 4 つ目の誤用が生まれる。実際、
-  // PM 以外に Runtime Health と Issue Monitor の Focus も同じ理由で
+  // PM 以外に Runtime Health と Issues の Focus も同じ理由で
   // 効いていなかった。
   assert.doesNotMatch(
     appJs,
@@ -253,14 +261,7 @@ test("FR-019: 死んだ server-driven center 契約は残さない", () => {
   );
 });
 
-test("FR-022: 閉じる確認は PM の停止が自動復帰しないことを明示する", () => {
-  const modal = readFileSync(resolve(here, "../window-close-confirm-modal.js"), "utf8");
-  assert.match(modal, /state\.isPm/, "PM かどうかで文言を分岐する");
-  assert.match(
-    modal,
-    /will not restart on its own/,
-    "クラッシュ時の自動復帰と区別できる文言にする",
-  );
-  // 実際に PM フラグが確認ダイアログへ渡っていること。
-  assert.match(appJs, /isPm:\s*Boolean\(windowData\.is_pm\)/);
+test("PM fixed surface cannot close or restart its resident session (Issue #4777 AC13)", () => {
+  assert.doesNotMatch(appJs, /requestCloseWindow|kind:\s*"close_window"/);
+  assert.match(appJs, /!isAgentWindow \|\| windowData\.is_pm \|\| windowData\.preset === "shell"/);
 });

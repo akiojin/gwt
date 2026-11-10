@@ -35,9 +35,10 @@ test("System replies commit immediately and defer destructive rendering only", (
   assert.match(appSource, /case "system_settings":\s*case "system_settings_updated":\s*applySystemSettingsEvent\(event\);/);
   assert.match(appSource, /case "system_settings_error":\s*applyGlobalUpdateSettings\(event\);\s*applySystemSettingsEvent\(event\);/);
   assert.match(settingsSource, /function applySystemSettingsEvent\(event\) \{\s*systemSettingsModel\.update\(/);
-  assert.match(settingsSource, /systemSettingsModel\.subscribe\(state => state, state => \{\s*renderSystemPanelInAllSettingsWindows\(state\)/);
+  assert.match(settingsSource, /systemSettingsModel\.subscribeFrame\(state => state, state => \{\s*renderSystemPanelInAllSettingsWindows\(state, true\)/);
+  assert.match(settingsSource, /if \(autostartChanged\) renderSystemPanelInAllSettingsWindows\(state\);/);
   assert.match(settingsSource, /onFlush: \(\) => renderSystemPanelInAllSettingsWindows\(\)/);
-  assert.match(settingsSource, /const deferred = systemSettingsInteractionGuard\.defer\(true\);/);
+  assert.match(settingsSource, /deferred \?\?= systemSettingsInteractionGuard\.defer\(true\);/);
   assert.match(settingsSource, /if \(deferred\) renderSystemPanelStatus\(panel, state\);\s*else renderSystemPanel\(panel, state\);/);
 });
 

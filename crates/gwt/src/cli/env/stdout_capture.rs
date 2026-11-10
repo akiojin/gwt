@@ -8,7 +8,7 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
 
 pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
     pub(crate) inner: &'a mut E,
-    pub(crate) stdout: &'a mut Vec<u8>,
+    pub(crate) stdout: &'a mut dyn io::Write,
 }
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
@@ -16,6 +16,25 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn github_repository(&self) -> io::Result<(String, String)> {
         self.inner.github_repository()
+    }
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        self.inner.release_policy_context()
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        self.inner.diagnostic_workflow_context()
+    }
+    fn diagnostic_run_snapshot(&mut self, run_id: u64) -> io::Result<serde_json::Value> {
+        self.inner.diagnostic_run_snapshot(run_id)
+    }
+    fn diagnostic_artifact(&mut self, run_id: u64, artifact_id: u64) -> io::Result<Vec<u8>> {
+        self.inner.diagnostic_artifact(run_id, artifact_id)
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        self.inner.dispatch_diagnostic_workflow(git_ref, inputs)
     }
     fn pm_settings_snapshot(
         &mut self,
@@ -64,12 +83,18 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     }
     fn deliver_feedback(
         &mut self,
-        record: &gwt_core::feedback::FeedbackRecord,
+        record: &gwt_core::feedback::PublicFeedback,
     ) -> Result<u64, gwt_github::client::OwnerMutationError> {
         self.inner.deliver_feedback(record)
     }
     fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
         self.inner.spawn_feedback_worker(id)
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        self.inner.deliver_auto_feedback(snapshot)
     }
 
     fn stdout(&mut self) -> &mut dyn io::Write {
@@ -239,8 +264,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.inner.reply_and_resolve_pr_review_threads(number, body)
+        self.inner
+            .reply_and_resolve_pr_review_threads(number, body, thread_id)
     }
 
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {

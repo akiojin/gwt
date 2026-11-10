@@ -201,11 +201,11 @@ pub struct KnowledgeListItem {
     /// its parent SPEC row. `None` when the body declares no owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_spec: Option<u64>,
-    /// Issue Monitor lifecycle state projected onto this cached Issue row.
+    /// Issues lifecycle state projected onto this cached Issue row.
     /// `None` means no monitor snapshot was joined to the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_state: Option<MonitorInboxState>,
-    /// One-based position in the Issue Monitor queue, when queued.
+    /// One-based position in Issues queue, when queued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_position: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

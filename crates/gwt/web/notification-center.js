@@ -1,7 +1,7 @@
 // SPEC #3206 v2 — notification center: bell + unread badge + history drawer.
 //
 // Every notification the operator can miss (agent completion / attention /
-// Board mention / autonomous Issue Monitor events / surface errors) is
+// Board mention / autonomous Issues events / surface errors) is
 // recorded here regardless of whether a transient toast was shown (FR-011).
 // The center is a pure sink (FR-016): it never decides whether to fire and it
 // never dedups the callers' singleton ids — the history is one row per notice.
@@ -391,13 +391,16 @@ export function createNotificationCenter({
       }
       renderErrorCount(item, existing.count);
     } else {
-      item = record({ kind, level, title: notice.title, message: notice.message, onActivate: notice.onActivate });
+      item = record({ kind, level, title: notice.title, message: notice.message,
+        onActivate: key && typeof notice.onActivate === "function"
+          ? () => surfaceRows.get(key)?.onActivate?.() : notice.onActivate });
       if (!item) return null;
       if (key) {
         item.dataset.errorKey = key;
         surfaceRows.set(key, { item, count: 1 });
       }
     }
+    if (key) surfaceRows.get(key).onActivate = notice.onActivate;
     item.dataset.resolved = "false";
     let details = item.querySelector(".notification-center__details");
     if (notice.details) {
@@ -442,6 +445,18 @@ export function createNotificationCenter({
     }
     existing.item.dataset.resolved = "true";
     unread.delete(existing.item);
+    notifyUnread();
+    return true;
+  }
+
+  /** Remove a keyed notice when its attention target has recovered or closed. */
+  function removeNotice(key) {
+    const existing = key == null ? null : liveSurfaceRow(String(key));
+    if (!existing) return false;
+    existing.item.remove();
+    surfaceRows.delete(String(key));
+    unread.delete(existing.item);
+    syncEmptyState();
     notifyUnread();
     return true;
   }
@@ -539,6 +554,7 @@ export function createNotificationCenter({
     recordSurfaceNotice,
     recordError,
     resolveError,
+    removeNotice,
     open,
     close,
     toggle,

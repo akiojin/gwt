@@ -6,7 +6,7 @@
 //! the hub for a receiver. Daemon-side code paths (Board projection writer,
 //! runtime status aggregator, hook event router) call
 //! [`BroadcastHub::publish`] to fan a single payload out to all subscribers.
-//! Issue Monitor controls are commands rather than notifications, so they use
+//! Issues controls are commands rather than notifications, so they use
 //! a separate single-worker queue. A bounded admission semaphore covers both
 //! queued and in-flight commands; acceptance alone is not an ACK. Each caller
 //! receives a completion receipt that resolves only after the worker commits
@@ -37,7 +37,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semapho
 /// frames (subscribers that do fall behind get a `RecvError::Lagged`).
 pub(super) const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 
-/// Issue Monitor controls are commands whose daemon ACK confirms the exact
+/// Issues controls are commands whose daemon ACK confirms the exact
 /// control transaction was durably committed. Keep them off the lossy
 /// broadcast rings.
 const ISSUE_MONITOR_CONTROL_CAPACITY: usize = 64;
@@ -74,7 +74,9 @@ pub(crate) enum IssueMonitorControlQueueError {
     RecoveryBlocked,
     Closed,
     Rejected,
+    ConfigConflict,
     WaitNotLaunched,
+    ScanAlreadyInFlight,
     Busy,
 }
 
@@ -86,9 +88,11 @@ impl IssueMonitorControlQueueError {
             }
             Self::Closed => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CLOSED_ERROR,
             Self::Rejected => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_REJECTED_ERROR,
+            Self::ConfigConflict => crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR,
             Self::WaitNotLaunched => {
-                "issue monitor control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
+                "Issues control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
             }
+            Self::ScanAlreadyInFlight => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
             Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
         }
     }
@@ -153,7 +157,7 @@ impl IssueMonitorControlRequest {
     }
 }
 
-/// Runtime notification registry plus the dedicated Issue Monitor command
+/// Runtime notification registry plus the dedicated Issues command
 /// queue, shared by all per-connection tasks.
 ///
 /// Cheap to clone via [`Arc`] — internal mutation is guarded by a
@@ -209,7 +213,7 @@ impl BroadcastHub {
         self.issue_monitor_materializers.load(Ordering::SeqCst)
     }
 
-    /// Claim the sole lossless Issue Monitor control receiver. Until the
+    /// Claim the sole lossless Issues control receiver. Until the
     /// worker calls this, publishers fail closed instead of ACKing a command
     /// that no active worker has accepted.
     pub(crate) fn take_issue_monitor_control_receiver(
@@ -222,7 +226,7 @@ impl BroadcastHub {
             .issue_monitor_controls
             .receiver
             .lock()
-            .expect("Issue Monitor control receiver mutex poisoned")
+            .expect("Issues control receiver mutex poisoned")
             .take()?;
         self.issue_monitor_controls
             .state
@@ -234,7 +238,7 @@ impl BroadcastHub {
         self.issue_monitor_controls
             .receiver
             .lock()
-            .expect("Issue Monitor control receiver mutex poisoned")
+            .expect("Issues control receiver mutex poisoned")
             .take();
         self.issue_monitor_controls
             .state
@@ -248,7 +252,7 @@ impl BroadcastHub {
         *self
             .issue_monitor_status
             .lock()
-            .expect("Issue Monitor status mutex poisoned") = None;
+            .expect("Issues status mutex poisoned") = None;
     }
 
     /// Replace the daemon-owned atomic projection consumed by agent status
@@ -258,7 +262,7 @@ impl BroadcastHub {
         *self
             .issue_monitor_status
             .lock()
-            .expect("Issue Monitor status mutex poisoned") = Some(status);
+            .expect("Issues status mutex poisoned") = Some(status);
     }
 
     /// Read the latest projection from a ready or recovery-blocked worker.
@@ -273,7 +277,7 @@ impl BroadcastHub {
         }
         self.issue_monitor_status
             .lock()
-            .expect("Issue Monitor status mutex poisoned")
+            .expect("Issues status mutex poisoned")
             .clone()
     }
 
@@ -581,7 +585,7 @@ mod tests {
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
-            .expect("single issue monitor worker receiver");
+            .expect("single Issues worker receiver");
         let mut receipts = Vec::with_capacity(ISSUE_MONITOR_CONTROL_CAPACITY);
         for seq in 0..ISSUE_MONITOR_CONTROL_CAPACITY {
             receipts.push(

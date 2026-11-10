@@ -66,6 +66,12 @@ impl IssueMonitorUrgentGrant {
 }
 
 impl IssueMonitorUrgentQueue {
+    /// Value-CAS token for all saved urgent state, independent of normal queues.
+    pub(crate) fn observation_token(&self) -> String {
+        let saved = serde_json::to_vec(self).expect("saved urgent queue serializes");
+        format!("urgent-v1:{:x}", Sha256::digest(saved))
+    }
+
     pub fn projection(
         &self,
         queue: &IssueMonitorTerminalQueue,

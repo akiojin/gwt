@@ -118,24 +118,28 @@ Blocking items: <N>
 
 ## Step 7: Reply to ALL reviewer comments and resolve threads (mandatory)
 
-> **CRITICAL:** Every unresolved review thread MUST receive a reply before resolution.
+> **CRITICAL:** Every unresolved review thread MUST be addressed before resolution.
 
 - For each unresolved thread:
   - Addressed: "Fixed: <what was done in commit abc1234>."
   - Not addressed: "Not addressed: <reason>."
-- Use JSON operation `pr.review_threads.reply_and_resolve` with coverage for ALL threads.
-- Script validates completeness; rejects if any thread missing.
+- Use JSON operation `pr.review_threads.reply_and_resolve` once per thread,
+  always specifying `thread_id` for an individual response.
+- Omitting `thread_id` processes all unresolved threads with the same `body`.
+  Existing identical replies are not repeated, and outdated threads are
+  resolved without a new reply.
+- Re-check unresolved threads after the calls to verify that all were handled.
 - Requires `Repository Permissions > Contents: Read and Write`.
 - Resolve threads after code fix is pushed. Do not wait for CI.
 - GraphQL only for thread operations. If rate-limited, back off and retry.
 
-### `--reply-and-resolve` JSON format
+### Targeted reply format
+
+`body` contains plain text reply content. JSON array bodies are rejected.
+Send one envelope per thread:
 
 ```json
-[
-  {"threadId": "PRRT_xxx123", "body": "Fixed: refactored the method as suggested."},
-  {"threadId": "PRRT_xxx456", "body": "Not addressed: this is intentional because ..."}
-]
+{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"thread_id":"PRRT_xxx123","body":"Fixed: refactored the method as suggested."}}
 ```
 
 ## Step 8: Notify reviewers (mandatory)
@@ -152,7 +156,7 @@ Blocking items: <N>
 - CI pending/queued --> check at most 3 times with JSON operation `pr.checks`, waiting no more than 30 seconds between checks.
 - If checks are still pending after the bounded checks, post JSON operation
   `board.post` with `params.kind:"status"` or `params.kind:"handoff"`, the PR
-  number, pending check names, and resume command. For autonomous / Issue Monitor
+  number, pending check names, and resume command. For autonomous / Issues
   launches, declare `issue.monitor.wait` with the explicit owner Issue number
   in `params.number`, `reason`, and `resume_condition`. Keep the execution Active
   and auto-merge enabled; resume bounded checks when CI progresses and clear
@@ -200,7 +204,7 @@ Blocking items: <N>
 {"schema_version":1,"operation":"pr.checks","params":{"number":123}}
 {"schema_version":1,"operation":"pr.reviews","params":{"number":123}}
 {"schema_version":1,"operation":"pr.review_threads","params":{"number":123}}
-{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"body":"[{\"threadId\":\"PRRT_xxx123\",\"body\":\"Fixed: ...\"}]"}}
+{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"thread_id":"PRRT_xxx123","body":"Fixed: ..."}}
 {"schema_version":1,"operation":"pr.comment","params":{"number":123,"body":"<summary comment>"}}
 ```
 

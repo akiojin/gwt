@@ -12,18 +12,11 @@ export function isAgentKanbanPlacement(windowData) {
   return windowData?.placement?.kind === "agent_kanban";
 }
 
-// SPEC-3671 FR-004: the single seam that answers "is this window drawn on the
-// canvas?". Callers that ask about Kanban *lane membership* (board_id / lane_id)
-// keep using `isAgentKanbanPlacement()`; callers that decide canvas rendering use
-// this predicate so a new off-canvas placement only has to be added here.
-export function isOffCanvasPlacement(windowData) {
+// A contained terminal is mounted by its Issue preview or Kanban card host.
+// This describes terminal ownership, independent of window coordinates.
+export function isContainedPlacement(windowData) {
   const kind = windowData?.placement?.kind;
   return kind === "agent_kanban" || kind === "issue_preview";
-}
-
-function isCanvasPlacement(windowData) {
-  const kind = windowData?.placement?.kind;
-  return !kind || kind === "canvas";
 }
 
 function isAgentWindow(windowData) {
@@ -34,8 +27,7 @@ export function isAgentKanbanEligible(windowData) {
   return Boolean(
     windowData?.id &&
       isAgentWindow(windowData) &&
-      !windowData.tab_group_id &&
-      isCanvasPlacement(windowData),
+      !isContainedPlacement(windowData),
   );
 }
 
@@ -78,11 +70,10 @@ export function moveAgentKanbanCardMessage(id, boardId, laneId, order) {
   };
 }
 
-export function undockAgentWindowMessage(id, geometry) {
+export function undockAgentWindowMessage(id) {
   return {
     kind: "undock_agent_window",
     id,
-    geometry,
   };
 }
 
@@ -194,7 +185,6 @@ export function createAgentKanbanSurface({
   send,
   onLaunchAgent,
   onUndockAgent,
-  visibleBounds,
   windowDisplayTitle,
   windowRoleBadgeLabel,
 }) {
@@ -337,7 +327,7 @@ export function createAgentKanbanSurface({
     const issueNumber = Number(windowData.linked_issue_number);
     const existingIssueWindow = () => Number.isInteger(issueNumber) && issueNumber > 0
       ? (activeWorkspace?.()?.windows || []).find(candidate => candidate.id !== windowData.id
-        && isAgentWindow(candidate) && isCanvasPlacement(candidate)
+        && isAgentWindow(candidate) && !isContainedPlacement(candidate)
         && Number(candidate.linked_issue_number) === issueNumber)
       : null;
     const focusesExisting = Boolean(existingIssueWindow());
@@ -355,7 +345,7 @@ export function createAgentKanbanSurface({
         onUndockAgent?.(existing.id);
         return;
       }
-      send?.(undockAgentWindowMessage(windowData.id, undockGeometry(windowData)));
+      send?.(undockAgentWindowMessage(windowData.id));
       onUndockAgent?.(windowData.id);
     });
     actions.append(collapse, undock);
@@ -408,24 +398,6 @@ export function createAgentKanbanSurface({
     } else if (isAgentKanbanEligible(windowData)) {
       send?.(placeAgentWindowMessage(id, target.boardId, target.laneId, target.order));
     }
-  }
-
-  function undockGeometry(windowData) {
-    if (windowData?.geometry) {
-      return {
-        x: Number(windowData.geometry.x) || 0,
-        y: Number(windowData.geometry.y) || 0,
-        width: Number(windowData.geometry.width) || 720,
-        height: Number(windowData.geometry.height) || 420,
-      };
-    }
-    const bounds = visibleBounds?.() || { x: 0, y: 0 };
-    return {
-      x: (Number(bounds.x) || 0) + 32,
-      y: (Number(bounds.y) || 0) + 32,
-      width: 720,
-      height: 420,
-    };
   }
 
   return { mount };

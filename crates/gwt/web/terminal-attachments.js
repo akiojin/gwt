@@ -127,8 +127,8 @@ export function createTerminalAttachments({
       });
 
       function ensureAttachmentProgressSurface(windowId) {
-        const terminalHost = terminalMap.get(windowId)?.terminalContainer?.parentElement;
-        const host = terminalHost?.dataset.agentId === windowId
+        const terminalHost = terminalMap.get(windowId)?.terminalContainer;
+        const host = terminalHost?.dataset.windowId === windowId
           ? terminalHost : workspaceWindowElement(windowId) || document.body;
         let surface = host.querySelector(".attachment-progress");
         if (surface) {
@@ -619,14 +619,15 @@ export function createTerminalAttachments({
           return false;
         });
 
-        terminalRoot.addEventListener("mousedown", handleMouseDown);
+        // xterm stops forced-selection mousedown from bubbling in mouse mode.
+        terminalRoot.addEventListener("mousedown", handleMouseDown, true);
         window.addEventListener("mousemove", handleMouseMove, true);
         window.addEventListener("mouseup", handleMouseUp, true);
         window.addEventListener("blur", handleWindowBlur);
 
         return () => {
           terminal.attachCustomKeyEventHandler(() => true);
-          terminalRoot.removeEventListener("mousedown", handleMouseDown);
+          terminalRoot.removeEventListener("mousedown", handleMouseDown, true);
           window.removeEventListener("mousemove", handleMouseMove, true);
           window.removeEventListener("mouseup", handleMouseUp, true);
           window.removeEventListener("blur", handleWindowBlur);
@@ -707,6 +708,8 @@ export function createTerminalAttachments({
           document,
           window,
           terminalRoot,
+          hasSelection: () => terminal.hasSelection(),
+          copySelection: () => copyTerminalSelection(windowId),
           readClipboardText: readNavigatorClipboardText,
           readClipboardItems: readNavigatorClipboardItems,
           supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
@@ -731,9 +734,9 @@ export function createTerminalAttachments({
       }
 
       function attachmentWindowIdFromElement(element) {
-        const tile = element?.closest?.(".agent-tile[data-agent-id]");
-        if (tile) {
-          return tile.closest(".agents-surface--preview") ? null : tile.dataset.agentId;
+        const full = element?.closest?.(".works-full");
+        if (full && !full.hidden && !full.closest(".works-surface--preview")) {
+          return full.querySelector(".works-terminal[data-window-id]")?.dataset.windowId || null;
         }
         return element?.closest?.(".workspace-window")?.dataset?.id || null;
       }

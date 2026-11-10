@@ -113,6 +113,15 @@ impl AgentId {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }
 
+    /// Whether gwt has a verified initial-task argv adapter for Monitor launches.
+    /// Unknown/custom CLIs stay out of unattended rotation until one is supplied.
+    pub fn supports_monitor_initial_prompt(&self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCode | Self::Codex | Self::GrokBuild | Self::Hermes
+        )
+    }
+
     /// Whether this agent supports selecting an upstream provider at launch
     /// (Hermes `--provider`). SPEC-3152.
     pub fn supports_provider_selection(&self) -> bool {
@@ -455,7 +464,7 @@ pub enum SessionMode {
 /// stamped onto the durable Session record at launch instead of being
 /// inferred later from ambient environment variables. `GWT_AUTONOMOUS_EXECUTION`
 /// is set only when the project opted into unattended autonomous mode, so an
-/// Issue Monitor launch made while that preference reads false used to
+/// Issues launch made while that preference reads false used to
 /// classify itself as human-driven and then stall waiting for a human who was
 /// never there (#3777, #3697).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,7 +475,7 @@ pub enum LaunchRoute {
     /// keeps every pre-#4217 session on the human-gated behavior.
     #[default]
     Manual,
-    /// The Issue Monitor claimed the owner Issue and launched this session
+    /// Issues claimed the owner Issue and launched this session
     /// with nobody watching.
     Autonomous,
 }

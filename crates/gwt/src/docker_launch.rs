@@ -1,4 +1,22 @@
-use super::*;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+use crate::launch_runtime::{
+    ensure_docker_launch_runtime_ready_for_runtime, install_launch_gwt_bin_env, same_worktree_path,
+};
+use crate::DockerWizardContext;
+
+pub(crate) const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
+const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
+const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerBundleMounts {
+    host_gwt: PathBuf,
+    host_gwtd: PathBuf,
+}
 
 const DOCKER_GWT_OVERRIDE_HEADER: &str =
     "# Auto-generated docker-compose override for gwt bundle mounting";
@@ -39,12 +57,12 @@ pub fn detect_wizard_docker_context_and_status(
 
 #[derive(Debug, Clone)]
 pub struct DockerLaunchPlan {
-    pub(crate) compose_files: Vec<PathBuf>,
-    pub(crate) compose_file: PathBuf,
+    pub compose_files: Vec<PathBuf>,
+    pub compose_file: PathBuf,
     pub(crate) user_override_file: PathBuf,
     pub(crate) managed_override_file: PathBuf,
-    pub(crate) service: String,
-    pub(crate) container_cwd: String,
+    pub service: String,
+    pub container_cwd: String,
 }
 
 /// Immutable Docker identity resolved for one launch. Every operation that
@@ -72,15 +90,15 @@ impl DockerLaunchBinding {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn capture_for_test(
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    pub fn capture_for_test(
         runtime: gwt_docker::detect::ResolvedContainerRuntime,
         launch: DockerLaunchPlan,
     ) -> Self {
         Self::capture(runtime, launch)
     }
 
-    pub(crate) fn runtime(&self) -> &gwt_docker::detect::ResolvedContainerRuntime {
+    pub fn runtime(&self) -> &gwt_docker::detect::ResolvedContainerRuntime {
         &self.runtime
     }
 
@@ -92,7 +110,7 @@ impl DockerLaunchBinding {
         &self.service
     }
 
-    pub(crate) fn container_cwd(&self) -> &str {
+    pub fn container_cwd(&self) -> &str {
         &self.container_cwd
     }
 }
@@ -111,9 +129,9 @@ pub struct PackageRunnerProgram {
 
 #[derive(Debug, Clone, Default)]
 pub struct DevContainerLaunchDefaults {
-    pub(crate) service: Option<String>,
-    pub(crate) workspace_folder: Option<String>,
-    pub(crate) compose_files: Vec<PathBuf>,
+    pub service: Option<String>,
+    pub workspace_folder: Option<String>,
+    pub compose_files: Vec<PathBuf>,
 }
 
 impl DockerLaunchPlan {
@@ -178,7 +196,7 @@ pub fn resolve_docker_agent_program_with_binding(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 pub fn resolved_test_docker_runtime(
     directory: &Path,
 ) -> gwt_docker::detect::ResolvedContainerRuntime {
@@ -406,7 +424,7 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 pub fn docker_bundle_override_content(
     service: &str,
     bundle: &DockerBundleMounts,
@@ -896,7 +914,7 @@ pub fn docker_compose_files_for_launch(
     Ok(compose_files)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-gh-guard"))]
 pub fn docker_compose_file_for_launch(
     project_root: &Path,
     files: &gwt_docker::DockerFiles,
@@ -1167,7 +1185,7 @@ fi
     #[cfg(unix)]
     #[test]
     fn docker_trust_executor_uses_the_runtime_pinned_by_the_binding() {
-        let _env_lock = crate::env_test_lock()
+        let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1217,7 +1235,7 @@ fi
     #[cfg(unix)]
     #[test]
     fn docker_agent_program_probe_uses_the_runtime_pinned_by_the_binding() {
-        let _env_lock = crate::env_test_lock()
+        let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");

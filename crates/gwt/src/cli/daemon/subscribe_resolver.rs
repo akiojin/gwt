@@ -1197,7 +1197,18 @@ mod tests {
             )
             .await
             .expect("stale socket must not create ambiguity");
-            assert_eq!(resolved, live);
+            let published: DaemonEndpoint = serde_json::from_slice(
+                &fs::read(live_scope.endpoint_path(&fixture.gwt_home)).unwrap(),
+            )
+            .unwrap();
+            assert!(published.project_transport_url.is_some());
+            assert_eq!(
+                resolved,
+                DaemonEndpoint {
+                    project_transport_url: published.project_transport_url,
+                    ..live
+                }
+            );
 
             server_handle.abort();
             let _ = server_handle.await;

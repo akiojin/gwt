@@ -28,8 +28,7 @@ use gwt_core::{
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
 
 use super::{
-    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset,
+    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -243,9 +242,8 @@ impl AppRuntime {
         client_id: &str,
         id: &str,
         origin_session_id: &str,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let (tab_id, board_geometry) = match self.board_surface_context(id) {
+        let tab_id = match self.board_surface_context(id) {
             Ok(context) => context,
             Err(message) => return board_error(client_id, id, message),
         };
@@ -260,7 +258,7 @@ impl AppRuntime {
             .find(|(_, session)| session.session_id == origin_session_id)
             .map(|(window_id, _)| window_id.clone());
         if let Some(window_id) = live_window_id {
-            let events = self.focus_window_events(&window_id, bounds);
+            let events = self.focus_window_events(&window_id);
             return if events.is_empty() {
                 board_error(
                     client_id,
@@ -276,7 +274,7 @@ impl AppRuntime {
             Ok(config) => config,
             Err(message) => return board_error(client_id, id, message),
         };
-        match self.spawn_agent_window(&tab_id, config, bounds.unwrap_or(board_geometry), None) {
+        match self.spawn_agent_window(&tab_id, config, None) {
             Ok(events) => events,
             Err(message) => board_error(client_id, id, message),
         }
@@ -345,7 +343,7 @@ impl AppRuntime {
         Ok(config)
     }
 
-    fn board_surface_context(&self, id: &str) -> Result<(String, WindowGeometry), String> {
+    fn board_surface_context(&self, id: &str) -> Result<String, String> {
         let address = self
             .window_lookup
             .get(id)
@@ -360,7 +358,7 @@ impl AppRuntime {
         if window.preset != WindowPreset::Board {
             return Err("Window is not a Board surface".to_string());
         }
-        Ok((address.tab_id.clone(), window.geometry.clone()))
+        Ok(address.tab_id.clone())
     }
 
     pub(crate) fn record_workspace_board_milestone_event(
@@ -752,6 +750,7 @@ impl AppRuntime {
             context,
             mut events,
             milestone,
+            decision_notifications,
         } = refreshed;
         if !context
             .as_ref()
@@ -759,10 +758,13 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        let context = context.as_ref().expect("current Board project context");
+        for notification in decision_notifications {
+            self.notify_board_decision(context, notification);
+        }
         events.retain(|event| match &event.event {
             BackendEvent::BoardEntries { id, .. } => {
-                self.project_key_for_window(id)
-                    == context.as_ref().map(|context| &context.project_key)
+                self.project_key_for_window(id) == Some(&context.project_key)
             }
             _ => false,
         });
@@ -772,6 +774,34 @@ impl AppRuntime {
             );
         }
         events
+    }
+
+    /// Board notifications have internal authority to send only this fixed
+    /// pointer to a saved decision. They never grant an agent PM input rights
+    /// or turn the decision's untrusted body into a privileged prompt.
+    fn notify_board_decision(
+        &self,
+        context: &super::ProjectContext,
+        notification: BoardDecisionNotification,
+    ) {
+        let root = context.project_root.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().map_err(|error| error.to_string())
+                .and_then(|executor| executor.block_on(async {
+                    let client = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
+                        &root, &gwt_core::paths::gwt_home(),
+                    ).await?;
+                    client.command(gwt::project_runtime::events::OwnerCommand::NotifyBoardDecision {
+                        entry_id: notification.entry_id, session_id: notification.session_id,
+                    }).await
+                }));
+            if let Err(error) = result {
+                tracing::warn!(%error, "project owner declined Board notification");
+            }
+        }) {
+            tracing::warn!(%error, "Board notification worker unavailable");
+        }
     }
 
     #[cfg(test)]
@@ -813,6 +843,14 @@ pub(crate) struct BoardProjectionRefreshed {
     /// The Workspace projection after the latest post was recorded as a Work
     /// milestone, when it resolved to one.
     pub(crate) milestone: Option<(PathBuf, workspace_projection::WorkspaceProjection)>,
+    /// Saved decision pointers, independent of whether any Board window is open.
+    pub(crate) decision_notifications: Vec<BoardDecisionNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoardDecisionNotification {
+    entry_id: String,
+    session_id: String,
 }
 
 /// Scoped Board views of one project, by Board window, kept between refreshes
@@ -836,6 +874,24 @@ pub(crate) fn run_board_projection_refresh(
     let Ok(snapshot) = gwt::board_provider::load_snapshot(&job.project_root) else {
         return (refreshed, views);
     };
+    refreshed.decision_notifications = snapshot
+        .board
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == BoardEntryKind::Decision)
+        .flat_map(|entry| {
+            entry
+                .mentions
+                .iter()
+                .filter(|mention| {
+                    mention.target_kind == coordination::BoardMentionTargetKind::Session
+                })
+                .map(|mention| BoardDecisionNotification {
+                    entry_id: entry.id.clone(),
+                    session_id: mention.target.clone(),
+                })
+        })
+        .collect();
     for window in job.windows {
         let scope = if window.all_view {
             coordination::BoardAudienceScope::All
@@ -963,9 +1019,33 @@ fn persist_workspace_board_milestone(
     project_root: &Path,
     entry: &coordination::BoardEntry,
 ) -> gwt_core::Result<(workspace_projection::WorkspaceProjection, bool)> {
-    workspace_projection::transact_workspace_state(
+    let projection = workspace_projection::load_or_default_workspace_projection(project_root)?;
+    let work_items = workspace_projection::load_or_synthesize_workspace_work_items(project_root)?;
+    let work_event_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+        &projection,
+        &work_items,
+        entry,
+    )
+    .and_then(|event| event.execution_container?.worktree_path)
+    .unwrap_or_else(|| project_root.to_path_buf());
+    workspace_projection::transact_workspace_state_for_work_event_root_with_preflight(
         project_root,
+        &work_event_root,
         |projection, work_items, _work_items_persisted| {
+            let current_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+                projection, work_items, entry,
+            )
+            .and_then(|event| event.execution_container?.worktree_path)
+            .unwrap_or_else(|| project_root.to_path_buf());
+            if current_root != work_event_root {
+                return Err(gwt_core::error::GwtError::Other(
+                    "Board milestone Worktree assignment changed; retry with current state".into(),
+                ));
+            }
+            Ok(())
+        },
+        |projection, work_items, _work_items_persisted| {
+            // The locked preflight rejects changed roots before migration writes.
             let Some(event) = workspace_projection::resolve_workspace_work_event_from_board_entry(
                 projection, work_items, entry,
             ) else {

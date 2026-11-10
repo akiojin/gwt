@@ -5,8 +5,8 @@ it by atomically replacing the `active.json` pointer. The live store is
 never reset in place: kill / crash / disk full at any boundary leaves the
 previous healthy generation searchable, and an incomplete generation is
 never exposed to readers. Legacy stores stay readable and lazily migrate on
-the next update (AS-17); abandoned generations older than 24 hours are the
-only GC target.
+the next update (AS-17). Issue #6728 retains only the active and previous
+completed generations and reclaims orphan file-index staging.
 """
 
 from __future__ import annotations
@@ -427,35 +427,51 @@ class GenerationStoreTests(unittest.TestCase):
         self.assertTrue(status["healthy"], status)
         self.assertEqual(status["document_count"], 3, status)
 
-    def test_abandoned_generations_are_gc_only_after_24_hours(self):
+    def test_publish_keeps_only_active_and_previous_generations(self):
         project = _make_project(self.base, 3)
         baseline = self._build(project)
         self.assertTrue(baseline.get("ok"), baseline)
 
         pointer = runner.active_pointer_path(self._db_path())
         generations_root = pointer.parent
-        old_abandoned = generations_root / "gen-old-abandoned"
+        previous = json.loads(pointer.read_text(encoding="utf-8"))["generation"]
+        old_abandoned = generations_root / "gen-1-1"
         old_abandoned.mkdir()
         (old_abandoned / "chroma.sqlite3").write_text("old", encoding="utf-8")
         stale_time = time.time() - 25 * 3600
         os.utime(old_abandoned, (stale_time, stale_time))
-        fresh_abandoned = generations_root / "gen-fresh-abandoned"
+        fresh_abandoned = generations_root / "gen-2-2"
         fresh_abandoned.mkdir()
         (fresh_abandoned / "chroma.sqlite3").write_text("fresh", encoding="utf-8")
+        unknown = generations_root / "operator-notes"
+        unknown.mkdir()
 
-        result = self._build(project)
+        real_gc = runner._gc_abandoned_generations
+
+        def collect_under_lock(gen_root, keep):
+            self.assertFalse(_exclusive_lock_available(self._db_path() / runner.LOCK_FILENAME))
+            return real_gc(gen_root, keep)
+
+        with mock.patch.object(runner, "_gc_abandoned_generations", side_effect=collect_under_lock):
+            result = self._build(project)
         self.assertTrue(result.get("ok"), result)
 
         self.assertFalse(
             old_abandoned.exists(),
-            "generations abandoned for more than 24h must be garbage collected",
+            "unreferenced generations must be garbage collected",
         )
-        self.assertTrue(
+        self.assertFalse(
             fresh_abandoned.exists(),
-            "recently abandoned generations must be retained (crash recovery)",
+            "publish must not retain extra generations for 24 hours",
         )
         active = json.loads(pointer.read_text(encoding="utf-8"))
         self.assertTrue((generations_root / active["generation"]).exists())
+        self.assertTrue((generations_root / previous).exists())
+        self.assertTrue(unknown.is_dir(), "unknown directories are not generations")
+        self.assertEqual(
+            {entry.name for entry in generations_root.glob("gen-*")},
+            {active["generation"], previous},
+        )
 
 
 class Phase71WorktreeViewPublicationTests(unittest.TestCase):
@@ -1407,6 +1423,27 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertLess(events.index("artifact:overlay:done"), events.index("head:replace"))
         self.assertLess(events.index("view:verified"), events.index("head:replace"))
 
+    def test_shared_file_records_sync_parent_entries_before_artifact_publication(self):
+        events = []
+        real_publish = runner._durably_replace_file_index_v2_directory
+
+        def published(staging, target):
+            events.append(("publish", target))
+            return real_publish(staging, target)
+
+        with mock.patch.object(runner, "_fsync_directory", side_effect=lambda path: events.append(("sync", path))):
+            with mock.patch.object(runner, "_durably_replace_file_index_v2_directory", side_effect=published):
+                result = self._build()
+        self.assertTrue(result.get("ok"), result)
+        v2_root = runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+        base_dir = v2_root / "bases" / result["base_generation_id"]
+        descriptor = runner._read_artifact_descriptor(base_dir)
+        store = runner._file_artifact_store(base_dir, descriptor)
+        before_publish = events[:events.index(("publish", base_dir))]
+        parents = [store, store.parent, store.parent.parent, store.parent.parent.parent, v2_root]
+        indices = [before_publish.index(("sync", path)) for path in parents]
+        self.assertEqual(indices, sorted(indices))
+
     @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
     def test_directory_artifact_publish_fsyncs_tree_and_parent_around_replace(self):
         publish = getattr(
@@ -1568,6 +1605,48 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(OSError, "injected marker unlink failure"):
                 runner._clear_file_index_v2_recovery_marker(marker)
+
+    def test_artifact_failure_closes_clients_before_staging_cleanup(self):
+        client = mock.Mock()
+        real_remove = runner.shutil.rmtree
+
+        def open_store(store, _collection):
+            Path(store).mkdir(parents=True, exist_ok=True)
+            return client, mock.Mock()
+
+        def remove_after_close(path, **kwargs):
+            if ".staging-" in Path(path).name and Path(path).is_dir():
+                self.assertTrue(client.close.called, "SQLite must close before deletion")
+            return real_remove(path, **kwargs)
+
+        with mock.patch.object(
+            runner, "_make_file_index_v2_collection", side_effect=open_store
+        ), mock.patch.object(
+            runner, "_resolve_record_vector_batch",
+            side_effect=RuntimeError("injected artifact failure"),
+        ), mock.patch.object(runner.shutil, "rmtree", side_effect=remove_after_close):
+            with self.assertRaisesRegex(RuntimeError, "injected artifact failure"):
+                self._build()
+        self.assertEqual(list(self.db_root.rglob("*.staging-*")), [])
+
+    def test_verified_artifact_reuse_reclaims_its_orphan_staging(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, baseline["base_generation_id"], db_root=self.db_root
+        )
+        orphan = base_dir.with_name(f".{base_dir.name}.staging-1-1")
+        orphan.mkdir()
+        (orphan / "partial-store").write_bytes(b"interrupted writer")
+        unrelated = base_dir.with_name(".other.staging-1-1")
+        unrelated.mkdir()
+
+        with mock.patch.object(runner, "_make_file_index_v2_collection") as create:
+            result = self._build()
+        self.assertTrue(result.get("ok"), result)
+        create.assert_not_called()
+        self.assertFalse(orphan.exists(), "warm reuse must also reclaim dead staging")
+        self.assertTrue(unrelated.is_dir(), "another artifact owns its staging")
 
     def test_overlay_failure_after_new_base_keeps_old_pinned_view(self):
         baseline = self._build()

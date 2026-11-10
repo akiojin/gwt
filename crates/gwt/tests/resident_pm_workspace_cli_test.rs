@@ -247,7 +247,7 @@ fn created_work_id(response: &Value) -> String {
         .expect("workspace.create must report the Work id")
 }
 
-const CREATE_ENVELOPE: &str = r#"{"schema_version":1,"operation":"workspace.create","params":{"agent_session":"resident-pm-cli-session","purpose":"常駐 PM 運用","current_focus":"Issue Monitor の照合"}}"#;
+const CREATE_ENVELOPE: &str = r#"{"schema_version":1,"operation":"workspace.create","params":{"agent_session":"resident-pm-cli-session","purpose":"常駐 PM 運用","current_focus":"Issues の照合"}}"#;
 
 #[test]
 fn resident_pm_updates_its_work_from_a_detached_worktree() {
@@ -313,6 +313,10 @@ fn detached_worktree_update_is_refused_without_a_matching_pm_registration() {
     // AC-6: the refusal names the detached HEAD, the missing registration, and
     // both recovery routes.
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("network error:"),
+        "Issue #3623: a detached HEAD refusal is not a network failure: {stderr}"
+    );
     for expected in [
         "detached HEAD",
         "resident PM",

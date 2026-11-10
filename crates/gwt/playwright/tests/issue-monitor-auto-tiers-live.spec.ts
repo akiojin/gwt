@@ -39,9 +39,9 @@ async function isolatedCli() {
   };
 }
 
-test.describe("Issue Monitor automatic tiers", () => {
+test.describe("Issues automatic tiers", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
-  // The real disabled Monitor fallback can spend up to 60 seconds scanning.
+  // The real disabled Issues fallback can spend up to 60 seconds scanning.
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
@@ -64,9 +64,11 @@ test.describe("Issue Monitor automatic tiers", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const issueWindows = page.locator('.workspace-window[data-preset="settings"]');
+      const issueWindows = page.locator('.workspace-window[data-preset="issue"]');
       let windowId = await issueWindows.count() ? await issueWindows.first().getAttribute("data-id") : null;
       const createdWindow = !windowId;
+      const settingsWindows = page.locator('.workspace-window[data-preset="settings"]');
+      const createdSettings = !(await settingsWindows.count());
       if (!windowId) {
         await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue", bounds: { x: 60, y: 50, width: 1040, height: 820 } });
         await expect(issueWindows.first()).toBeVisible();
@@ -74,7 +76,7 @@ test.describe("Issue Monitor automatic tiers", () => {
       }
       try {
         // Opening the Issue surface requests its status. A second explicit
-        // request queues another full scan on a fresh disabled Monitor.
+        // request queues another full scan on a fresh disabled Issues.
         const status = await page.waitForFunction(() => {
           const frame = ((window as any).__gwtPlaywrightMessages ?? []).find((entry: any) =>
             entry.payload.kind === "issue_monitor_status"
@@ -99,8 +101,9 @@ test.describe("Issue Monitor automatic tiers", () => {
         const issues = settingsWindow.locator('[data-settings-panel="issues"]');
         await expect(issues).toBeVisible();
         await expect(settingsWindow).toHaveCount(1);
-        await expect(issues.locator(".settings-issues-options")).toHaveAttribute("open", "");
-        await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue(String(status.max_active_agents));
+        await expect(settingsWindow.locator(".issue-bridge-root")).toHaveCount(0);
+        await expect(issues.getByLabel("Max active", { exact: true })).toHaveCount(0);
+        await expect(issues.locator('[data-action="monitor-autonomous"]')).toBeVisible();
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await page.screenshot({ path: join(CHECK_HOME, `auto-tiers-${testInfo.project.name}.png`), fullPage: true });
         const after = cli("issue.monitor.status");
@@ -108,6 +111,14 @@ test.describe("Issue Monitor automatic tiers", () => {
         expect(after.autonomous_mode).toBe(false);
         expect(after.active_launches).toEqual([]);
       } finally {
+        if (!page.isClosed() && (createdWindow || createdSettings)) {
+          await page.locator('button[data-surface="agents"]').click();
+          if (createdSettings) {
+            for (const id of await settingsWindows.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")))) {
+              await sendLiveGwtEvent(page, { kind: "close_window", id });
+            }
+          }
+        }
         if (createdWindow && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
       expect(errors).toEqual([]);

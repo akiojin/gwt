@@ -57,6 +57,7 @@ test.describe("Supported Agents version layout (isolated live backend)", () => {
       // assets and every other protocol frame use the checkout's real backend.
       // Replace late server snapshots too, so detection cannot overwrite it.
       let catalogRequests = 0;
+      const requests: Record<string, unknown>[] = [];
       await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
         const server = socket.connectToServer();
         socket.onMessage(message => {
@@ -64,11 +65,13 @@ test.describe("Supported Agents version layout (isolated live backend)", () => {
           if (payload?.kind === "list_supported_agents") {
             catalogRequests += 1;
             socket.send(JSON.stringify(snapshot));
+          } else if (["maintain_supported_agent", "set_agent_auto_update"].includes(payload?.kind)) {
+            requests.push(payload);
           } else server.send(message);
         });
         server.onMessage(message => {
           const payload = typeof message === "string" ? JSON.parse(message) : null;
-          socket.send(payload?.kind === "supported_agent_list" ? JSON.stringify(snapshot) : message);
+          if (!["supported_agent_list", "supported_agent_maintenance"].includes(payload?.kind)) socket.send(message);
         });
       });
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
@@ -150,6 +153,70 @@ test.describe("Supported Agents version layout (isolated live backend)", () => {
       await info.attach(`supported-agents-layout-${theme}`, {
         body: JSON.stringify(layout, null, 2), contentType: "application/json",
       });
+      const automatic = panel.getByRole("checkbox", { name: "Automatically update agents" });
+      await automatic.focus();
+      await panel.hover();
+      for (const suspendRaf of [false, true]) {
+        const result = await panel.evaluate(async (panel, { snapshot, suspendRaf }) => {
+          const before = panel.innerHTML;
+          const automatic = panel.querySelector<HTMLInputElement>('[aria-label="Automatically update agents"]')!;
+          const originalRaf = window.requestAnimationFrame;
+          if (suspendRaf) window.requestAnimationFrame = () => 0;
+          let renders = 0;
+          let observer: MutationObserver | undefined;
+          let timer: ReturnType<typeof setTimeout>;
+          const started = performance.now();
+          try {
+            const rendered = new Promise<void>((resolve, reject) => {
+              observer = new MutationObserver(records => {
+                renders += records.flatMap(record => [...record.addedNodes])
+                  .filter(node => node instanceof HTMLTableElement).length;
+                if (panel.querySelector('[data-agent-id="codex"] td:nth-child(3)')?.textContent === "0.162.50") resolve();
+              });
+              observer.observe(panel, { childList: true });
+              timer = setTimeout(() => reject(new Error("Supported Agents frame exceeded one second")), 1000);
+            });
+            for (let index = 1; index <= 50; index++) {
+              window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+                ...snapshot, agents: snapshot.agents.map(agent => agent.id === "codex"
+                  ? { ...agent, installed_version: `codex-cli 0.162.${index}` } : agent),
+              } }));
+            }
+            const unchangedBeforeFrame = panel.innerHTML === before;
+            automatic.checked = true;
+            automatic.dispatchEvent(new Event("change", { bubbles: true }));
+            await rendered;
+            return { unchangedBeforeFrame, renders, elapsed: performance.now() - started,
+              checked: automatic.checked, sameCheckbox: panel.querySelector('[aria-label="Automatically update agents"]') === automatic,
+              focused: document.activeElement === automatic, hovered: panel.matches(":hover") };
+          } finally {
+            clearTimeout(timer!);
+            observer?.disconnect();
+            window.requestAnimationFrame = originalRaf;
+          }
+        }, { snapshot, suspendRaf });
+        expect(result).toMatchObject({ unchangedBeforeFrame: true, renders: 1, checked: true,
+          sameCheckbox: true, focused: true, hovered: true });
+        expect(result.elapsed).toBeLessThan(1000);
+        await info.attach(suspendRaf ? "supported-agents-fallback" : "supported-agents-frame", {
+          body: JSON.stringify(result), contentType: "application/json",
+        });
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "supported_agent_maintenance", agent_id: "", pending: false, success: false, message: "Fixture save denied",
+        } })));
+        await expect(automatic).not.toBeChecked();
+        await expect(panel.getByRole("alert")).toContainText("Fixture save denied");
+      }
+      await expect.poll(() => requests.filter(request => request.kind === "set_agent_auto_update"))
+        .toEqual([{ kind: "set_agent_auto_update", enabled: true }, { kind: "set_agent_auto_update", enabled: true }]);
+      await install.click();
+      await expect(install).toBeDisabled();
+      await expect(automatic).toBeDisabled();
+      await expect.poll(() => requests.filter(request => request.kind === "maintain_supported_agent"))
+        .toEqual([{ kind: "maintain_supported_agent", agent_id: "agy", action: "install" }]);
+      await page.evaluate(snapshot => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: snapshot })), snapshot);
+      await expect(install).toBeEnabled();
+      await expect(automatic).not.toBeChecked();
       const screenshot = info.outputPath(`supported-agents-versions-${theme}.png`);
       await settings.screenshot({ path: screenshot });
       await info.attach(`supported-agents-versions-${theme}`, { path: screenshot, contentType: "image/png" });

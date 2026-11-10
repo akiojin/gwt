@@ -55,7 +55,7 @@ impl ActiveDispatch {
 fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) -> std::io::Result<()> {
     let detected_at = Utc::now();
     let pid = sysinfo::Pid::from_u32(std::process::id());
-    let mut system = System::new();
+    let mut system = System::new().map_err(std::io::Error::other)?;
     let refresh = ProcessRefreshKind::nothing()
         .with_memory()
         .with_cpu()

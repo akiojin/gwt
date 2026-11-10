@@ -91,6 +91,69 @@ fn close_request(value: serde_json::Value) -> FrontendEvent {
     serde_json::from_value(value).expect("Close Project protocol")
 }
 
+fn explicit_close_choice(preview: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind":"confirm_close_project", "token":preview["token"], "choice":"continue",
+        "operation_id":uuid::Uuid::new_v4().to_string(),
+        "expected_policy_revision":preview["policy_revision"],
+        "expected_view_set_revision":preview["view_set_revision"]
+    })
+}
+
+fn complete_close_choice(
+    runtime: &mut AppRuntime,
+    context: &super::ProjectContext,
+    client: &str,
+    scope: &super::ClientScope,
+    confirm: serde_json::Value,
+) -> Vec<OutboundEvent> {
+    let closing_receipts = runtime
+        .project_state(context)
+        .unwrap()
+        .project_views
+        .previews[client]
+        .view_receipts
+        .clone();
+    let operation_id = confirm["operation_id"].as_str().unwrap().to_owned();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(runtime
+        .handle_frontend_event_in_scope(client.into(), close_request(confirm), scope)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the valid choice reaches the physical executor boundary"
+    );
+    // This unit covers scope/nonce handling. Owner tests and headed E2E cover
+    // the actual transaction; drive its correlated completion without a daemon.
+    let observed = gwt::project_execution_policy::observation(&context.project_root)
+        .unwrap()
+        .unwrap();
+    gwt_core::project_execution_policy::choose(
+        &context.project_root,
+        &observed.close_intents[&operation_id].request,
+    )
+    .unwrap();
+    gwt_core::project_execution_policy::record_effect(
+        &context.project_root,
+        &operation_id,
+        gwt_core::project_execution_policy::EffectState::Confirmed,
+        None,
+    )
+    .unwrap();
+    let status = runtime.project_execution_status(context, None);
+    runtime.project_execution_choice_completed(
+        super::project_execution_policy::ProjectExecutionChoiceCompleted {
+            context: context.clone(),
+            client_id: client.into(),
+            operation_id,
+            closing_receipts,
+            result: Ok(serde_json::json!({"status":status})),
+        },
+    )
+}
+
 #[test]
 fn close_project_authorization_is_client_scoped_single_use_and_generation_bound() {
     let temp = tempdir().unwrap();
@@ -116,9 +179,9 @@ fn close_project_authorization_is_client_scoped_single_use_and_generation_bound(
     assert!(matches!(&events[0].target, DispatchTarget::Client(id) if id == "hub"));
     assert_eq!(body["running_agents"], serde_json::json!([]));
     let token = body["token"].clone();
-    let confirm = serde_json::json!({"kind":"confirm_close_project", "token":token});
-    let mut forged = token.clone();
-    forged["nonce"] = "forged".into();
+    let confirm = explicit_close_choice(&body);
+    let mut forged = confirm.clone();
+    forged["token"]["nonce"] = "forged".into();
     for (client, scope, request) in [
         ("other", super::ClientScope::Hub, confirm.clone()),
         (
@@ -131,11 +194,7 @@ fn close_project_authorization_is_client_scoped_single_use_and_generation_bound(
             super::ClientScope::Project(b.project_key.clone()),
             preview.clone(),
         ),
-        (
-            "hub",
-            super::ClientScope::Hub,
-            serde_json::json!({"kind":"confirm_close_project", "token": forged}),
-        ),
+        ("hub", super::ClientScope::Hub, forged),
     ] {
         let errors =
             runtime.handle_frontend_event_in_scope(client.into(), close_request(request), &scope);
@@ -187,23 +246,56 @@ fn close_project_authorization_is_client_scoped_single_use_and_generation_bound(
         serde_json::to_value(&errors[0].event).unwrap()["kind"],
         "close_project_error"
     );
+    // The reopened incarnation needs its own accepted view fixture before
+    // testing its positive close; the old generation's receipt is gone.
+    let current = runtime.project_context("a").unwrap();
+    runtime
+        .project_state_mut(&current)
+        .unwrap()
+        .project_views
+        .seed_fixture_view(gwt::project_execution_policy::ActualViewReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            accepted_at: chrono::Utc::now(),
+            admitted_policy_revision: 0,
+        });
+    assert_eq!(
+        runtime
+            .project_state(&current)
+            .unwrap()
+            .project_views
+            .view_count(),
+        1
+    );
     let events = runtime.handle_frontend_event_in_scope(
         "hub".into(),
         close_request(preview),
         &super::ClientScope::Hub,
     );
-    let token = serde_json::to_value(&events[0].event).unwrap()["token"].clone();
-    let confirm = serde_json::json!({"kind":"confirm_close_project", "token":token});
-    let events = runtime.handle_frontend_event_in_scope(
-        "hub".into(),
-        close_request(confirm.clone()),
+    let confirm = explicit_close_choice(&serde_json::to_value(&events[0].event).unwrap());
+    let current = runtime.project_context("a").unwrap();
+    let events = complete_close_choice(
+        &mut runtime,
+        &current,
+        "hub",
         &super::ClientScope::Hub,
+        confirm.clone(),
     );
-    assert!(runtime.project_context("a").is_none());
+    assert_eq!(
+        runtime
+            .project_state(&current)
+            .unwrap()
+            .project_views
+            .view_count(),
+        0
+    );
+    assert!(
+        runtime.project_context("a").is_some(),
+        "closing views preserves the backend context"
+    );
     assert_eq!(runtime.project_context("b"), Some(b));
     assert!(events.iter().any(
-        |event| matches!(&event.target, DispatchTarget::Project(key) if key == &a.project_key)
-            && serde_json::to_value(&event.event).unwrap()["kind"] == "project_closed"
+        |event| matches!(&event.target, DispatchTarget::Client(client) if client == "fixture-browser")
+            && serde_json::to_value(&event.event).unwrap()["kind"] == "project_view_closed"
     ));
     assert!(events
         .iter()
@@ -241,14 +333,23 @@ fn close_project_preview_reports_running_agents_and_project_confirmation_is_allo
         serde_json::json!({"kind":"preview_close_project", "project_key":context.project_key.to_string()}),
     );
     assert!(crate::hub_frontend_event_allowed(&preview));
-    let events = runtime.handle_frontend_event_in_scope("a-client".into(), preview, &scope);
+    let events = runtime.handle_frontend_event_in_scope("fixture-browser".into(), preview, &scope);
     let body = serde_json::to_value(&events[0].event).unwrap();
     assert_eq!(body["running_agents"].as_array().unwrap().len(), 1);
-    let confirm =
-        close_request(serde_json::json!({"kind":"confirm_close_project", "token":body["token"]}));
-    assert!(crate::hub_frontend_event_allowed(&confirm));
-    runtime.handle_frontend_event_in_scope("a-client".into(), confirm, &scope);
-    assert!(runtime.project_context("a").is_none());
+    let confirm = explicit_close_choice(&body);
+    assert!(crate::hub_frontend_event_allowed(&close_request(
+        confirm.clone()
+    )));
+    complete_close_choice(&mut runtime, &context, "fixture-browser", &scope, confirm);
+    assert_eq!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .project_views
+            .view_count(),
+        0
+    );
+    assert!(runtime.project_context("a").is_some());
 }
 
 #[test]
@@ -259,6 +360,8 @@ fn close_project_reopen_registers_restored_windows_without_changing_other_projec
     let root_b = temp.path().join("b");
     fs::create_dir_all(&root_a).unwrap();
     fs::create_dir_all(&root_b).unwrap();
+    let _owner_a = owner_fixture_block_on(production_owner_fixture(&root_a));
+    let _owner_b = owner_fixture_block_on(production_owner_fixture(&root_b));
     let tabs = vec![
         sample_project_tab_with_window_at(
             "a",

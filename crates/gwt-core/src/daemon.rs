@@ -390,9 +390,20 @@ fn ensure_private_dir(dir: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Residency requested by the launcher. Legacy/explicit starts remain resident.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonStartIntent {
+    #[default]
+    Standalone,
+    GuiManaged,
+}
+
 /// Persisted daemon endpoint metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonEndpoint {
+    #[serde(default)]
+    pub startup_intent: DaemonStartIntent,
     pub protocol_version: u32,
     pub daemon_version: String,
     pub scope: RuntimeScope,
@@ -400,6 +411,8 @@ pub struct DaemonEndpoint {
     pub bind: String,
     pub auth_token: String,
     pub updated_at_unix_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_transport_url: Option<String>,
 }
 
 impl DaemonEndpoint {
@@ -411,6 +424,7 @@ impl DaemonEndpoint {
         daemon_version: String,
     ) -> Self {
         Self {
+            startup_intent: DaemonStartIntent::Standalone,
             protocol_version: DAEMON_PROTOCOL_VERSION,
             daemon_version,
             scope,
@@ -418,6 +432,7 @@ impl DaemonEndpoint {
             bind,
             auth_token,
             updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            project_transport_url: None,
         }
     }
 
@@ -494,7 +509,7 @@ pub enum ClientFrame {
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
     Subscribe { channels: Vec<String> },
-    /// Subscribe as the GUI process that materializes Issue Monitor launch
+    /// Subscribe as the GUI process that materializes Issues launch
     /// deliveries. Unlike [`Self::Subscribe`], the daemon binds a presence
     /// lease to this IPC connection and releases it on disconnect.
     SubscribeMaterializer { channels: Vec<String> },
@@ -614,7 +629,7 @@ pub struct DaemonStatus {
     /// asking for the status snapshot.
     #[serde(default)]
     pub connections: usize,
-    /// Latest atomic Issue Monitor projection owned by this daemon. Older
+    /// Latest atomic Issues projection owned by this daemon. Older
     /// daemons omit it; clients must not treat a missing projection from a live
     /// daemon as permission to reconstruct runtime state from stale cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]

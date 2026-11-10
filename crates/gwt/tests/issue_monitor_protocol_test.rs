@@ -4,6 +4,41 @@ use gwt::{
 };
 
 #[test]
+fn repository_labels_requests_support_cached_and_explicit_refresh_reads() {
+    for refresh in [false, true] {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "get_repository_labels", "refresh": refresh,
+        }));
+        assert!(
+            event.is_ok(),
+            "repository label request must decode: {event:?}"
+        );
+    }
+}
+
+#[test]
+fn repository_labels_reply_preserves_color_and_stale_error() {
+    let reply = BackendEvent::RepositoryLabels {
+        project_root: "/project".into(),
+        labels: vec![gwt::issue_cache::RepositoryLabel {
+            name: "backend".into(),
+            color: "123abc".into(),
+        }],
+        loaded: true,
+        error: Some("offline".into()),
+    };
+    assert_eq!(reply.delivery_policy().kind, "repository_labels");
+    assert_eq!(
+        format!("{:?}", reply.delivery_policy().backpressure),
+        "ClientScopedSnapshot"
+    );
+    let value = serde_json::to_value(reply).unwrap();
+    assert_eq!(value["labels"][0]["color"], "123abc");
+    assert_eq!(value["loaded"], true);
+    assert_eq!(value["error"], "offline");
+}
+
+#[test]
 fn agent_capacity_override_wire_accepts_auto_and_rejects_non_positive() {
     let automatic = serde_json::json!({
         "kind": "set_issue_monitor_max_active_agents",
@@ -254,6 +289,9 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            agent_roster_capacity: None,
+            agent_roster_revision: None,
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -284,6 +322,8 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             update_drain_release: None,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -335,6 +375,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
 #[test]
 fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let item = IssueMonitorInboxItem {
+        dependency: None,
         issue: IssueMonitorIssue {
             author_login: None,
             number: 42,
@@ -404,9 +445,14 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
 fn backend_exclusion_states_and_reason_use_stable_wire_names() {
     for (state, wire_state) in [
         (MonitorInboxState::NotReady, "not_ready"),
-        (MonitorInboxState::HoldExcluded, "hold_excluded"),
+        (MonitorInboxState::SourceExcluded, "source_excluded"),
+        (
+            MonitorInboxState::BlockedByDependency,
+            "blocked_by_dependency",
+        ),
     ] {
         let item = IssueMonitorInboxItem {
+            dependency: None,
             issue: IssueMonitorIssue {
                 author_login: None,
                 number: 42,
@@ -427,12 +473,35 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
             launched_window_id: None,
             launch_plan: None,
             error_message: None,
-            exclusion_reason: Some("matched label: hold".to_string()),
+            exclusion_reason: Some("Untrusted source; PM triage required".to_string()),
         };
 
-        let value = serde_json::to_value(item).expect("serialize excluded inbox item");
+        let mut value = serde_json::to_value(item).expect("serialize excluded inbox item");
+        if state == MonitorInboxState::BlockedByDependency {
+            value["dependency"] = serde_json::json!({
+                "blocked_by": [{ "number": 44 }],
+                "cycle": true,
+                "bundle_with": []
+            });
+            value["exclusion_reason"] = serde_json::json!(
+                "Blocked by #44; Dependency cycle detected; cyclic dependencies ignored"
+            );
+            let decoded: IssueMonitorInboxItem =
+                serde_json::from_value(value.clone()).expect("decode dependency projection");
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+            assert_eq!(value["dependency"]["blocked_by"][0]["number"], 44);
+            assert_eq!(value["dependency"]["cycle"], true);
+            assert_eq!(value["dependency"]["bundle_with"], serde_json::json!([]));
+        }
         assert_eq!(value["state"], wire_state);
-        assert_eq!(value["exclusion_reason"], "matched label: hold");
+        assert_eq!(
+            value["exclusion_reason"],
+            if state == MonitorInboxState::BlockedByDependency {
+                "Blocked by #44; Dependency cycle detected; cyclic dependencies ignored"
+            } else {
+                "Untrusted source; PM triage required"
+            }
+        );
     }
 }
 
@@ -475,10 +544,10 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         has_unknown_phase: false,
         is_spec: false,
         parent_spec: None,
-        monitor_state: Some(MonitorInboxState::HoldExcluded),
+        monitor_state: Some(MonitorInboxState::SourceExcluded),
         queue_position: Some(3),
         queued_by: None,
-        exclusion_reason: Some("matched label: hold".to_string()),
+        exclusion_reason: Some("Untrusted source; PM triage required".to_string()),
         related_work_refs: vec![gwt::KnowledgeWorkRefView {
             id: "work-42".to_string(),
             branch: Some("work/issue-42".to_string()),
@@ -488,9 +557,12 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
     };
     let value = serde_json::to_value(projected).expect("serialize projected knowledge item");
     assert_eq!(value["state"], "open");
-    assert_eq!(value["monitor_state"], "hold_excluded");
+    assert_eq!(value["monitor_state"], "source_excluded");
     assert_eq!(value["queue_position"], 3);
-    assert_eq!(value["exclusion_reason"], "matched label: hold");
+    assert_eq!(
+        value["exclusion_reason"],
+        "Untrusted source; PM triage required"
+    );
     assert_eq!(value["related_work_refs"][0]["id"], "work-42");
     assert_eq!(value["related_work_refs"][0]["branch"], "work/issue-42");
 }

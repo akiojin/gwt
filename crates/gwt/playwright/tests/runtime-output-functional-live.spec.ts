@@ -1,4 +1,5 @@
 /** #5379 delivery slice: real PTY output and screen restore, not latency acceptance. */
+import { randomUUID } from "node:crypto";
 import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -35,8 +36,13 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
       const id = pane.id;
       await expect.poll(async () => (await receipts()).some(receipt => receipt.session === pane!.session_id),
         { timeout: 60_000 }).toBe(true);
-      await page.locator('.op-rail__surface[data-surface="agents"]').click();
-      const tile = page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + id + '"]');
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      const row = page.locator('.work-row[data-window-id="' + id + '"]');
+      await expect(row.locator(".terminal-text-preview")).toBeVisible();
+      await row.getByRole("button", { name: "Open terminal", exact: true }).click();
+      const tile = page.locator('.works-full .works-terminal[data-window-id="' + id + '"]');
       await expect(tile.locator(".xterm-rows")).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await expect.poll(() => buffer(page, id), { timeout: 30_000 }).toContain("GWT5379_READY 0");
@@ -65,7 +71,10 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
 
       // A new WebSocket must receive a fresh authoritative PTY snapshot, not the old browser buffer.
       await page.reload();
-      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      await row.getByRole("button", { name: "Open terminal", exact: true }).click();
       await expect(tile.locator(".xterm-rows")).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages.some((entry: any) =>
@@ -83,7 +92,7 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
       await rm(barrier, { force: true });
       if (pane) {
         await sendLiveGwtEvent(page, { kind: "close_window", id: pane.id });
-        await expect(page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + pane.id + '"]'))
+        await expect(page.locator('.work-row[data-window-id="' + pane.id + '"]'))
           .toHaveCount(0, { timeout: 60_000 });
       }
     }
@@ -106,7 +115,25 @@ async function receipts(): Promise<any[]> {
   }));
 }
 
+// Register the fixed-tool member before using the normal Project Add Agent route.
 async function launch(page: Page, branch: string): Promise<{ id: string; session_id: string }> {
+  const rosterRequest = async (action: unknown, expectedRevision: number | null = null) => {
+    const requestId = randomUUID();
+    await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision, request_id: requestId });
+    const reply = await page.waitForFunction(requestId => {
+      const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.payload.request_id === requestId && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind));
+      return message?.payload || null;
+    }, requestId, { timeout: 30_000 }).then(handle => handle.jsonValue());
+    expect(reply.kind, reply.message ?? "workload roster reply").toBe("agent_roster");
+    expect(reply.roster.error, "workload member preparation").toBeFalsy();
+    return reply.roster;
+  };
+  let roster = await rosterRequest({ kind: "read" });
+  const available = () => roster.members.some((member: any) =>
+    member.agent_id === AGENT && member.enabled && !member.assignment);
+  if (!available()) roster = await rosterRequest({ kind: "add", agent_id: AGENT }, roster.revision);
+  expect(available(), "normally allocated command-tool member").toBe(true);
   const request = async (detail: unknown, requireOpen = false) => {
     const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
     await sendLiveGwtEvent(page, detail);

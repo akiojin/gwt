@@ -1,0 +1,70 @@
+   Compiling gwt-core v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-core)
+   Compiling gwt-git v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-git)
+   Compiling gwt-skills v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-skills)
+   Compiling gwt-docker v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-docker)
+   Compiling gwt-terminal v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-terminal)
+   Compiling gwt-clipboard v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-clipboard)
+   Compiling gwt-github v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-github)
+   Compiling gwt-agent v9.155.2 (E:\gwt\work\issue-5561\crates\gwt-agent)
+   Compiling gwt v9.155.2 (E:\gwt\work\issue-5561\crates\gwt)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 38s
+     Running unittests src\main.rs (target\debug\deps\gwt-cd7f209d695cd546.exe)
+
+running 54 tests
+test work_events_ingest::tests::project_ingest_coalesces_bursts_and_releases_failed_workers ... ok
+test work_events_ingest::tests::pending_source_metadata_shares_alias_text_and_round_trips ... ok
+test work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations ... ok
+test work_events_ingest::tests::missing_event_store_still_rejects_a_non_directory_managed_parent ... ok
+test work_events_ingest::tests::legacy_home_state_prevents_ingest_rebuild_from_readable_events ... ok
+test work_events_ingest::tests::scanned_source_fingerprints_do_not_retain_source_paths ... ok
+test work_events_ingest::tests::ingest_reads_worktree_sources_from_the_startup_inventory ... ok
+test work_events_ingest::tests::shard_validation_rejects_digest_in_wrong_bucket ... ok
+test work_events_ingest::tests::shared_ref_blob_validates_and_decodes_once_per_oid_and_path ... ok
+test work_events_ingest::tests::source_fingerprint_invalidates_pre_deterministic_duplicate_cache_entries ... ok
+test work_events_ingest::tests::local_source_discovery_ignores_only_recognized_writer_temp_residue ... ok
+test work_events_ingest::tests::ingest_dual_reads_local_legacy_and_canonical_shards_exactly_once ... ok
+test work_events_ingest::tests::ingest_reads_bucketed_local_shard ... ok
+test work_events_ingest::tests::rebuild_discovers_bucketed_shard_created_after_initial_scan ... ok
+test work_events_ingest::tests::first_run_empty_source_set_preserves_existing_projection ... ok
+test work_events_ingest::tests::rebuild_reuses_prelock_reads_and_still_folds_shards_published_before_the_lock ... ok
+test work_events_ingest::tests::incomplete_event_schema_shard_defers_rebuild_and_preserves_projection ... ok
+test work_events_ingest::tests::validated_local_payloads_share_only_identical_bytes ... ok
+test work_events_ingest::tests::changed_legacy_log_is_read_on_the_next_pass ... ok
+test work_events_ingest::tests::invalid_shard_defers_rebuild_and_preserves_existing_projection ... ok
+test work_events_ingest::tests::missing_local_gwt_parent_removes_previously_tracked_source ... ok
+test work_events_ingest::tests::worktree_group_discovery_is_lazy_between_worktrees ... ok
+test work_events_ingest::tests::worktree_sources_share_one_container_allocation_per_group ... ok
+test work_events_ingest::tests::ingest_folds_all_sources_globally_before_resolving_session_owner ... ok
+test work_events_ingest::tests::missing_projection_rebuilds_from_machine_local_log_without_shared_sources ... ok
+test work_events_ingest::tests::rebuild_records_local_lifecycle_created_after_source_discovery ... ok
+test work_events_ingest::tests::corrupt_projection_is_not_rebuilt_after_local_lifecycle_disappears_before_lock ... ok
+test work_events_ingest::tests::missing_local_work_parent_removes_previously_tracked_source ... ok
+test work_events_ingest::tests::rebuild_reloads_local_shared_source_after_discovery_before_taking_lock ... ok
+test work_events_ingest::tests::future_opaque_event_shard_is_source_valid_and_skipped ... ok
+test work_events_ingest::tests::appended_local_lifecycle_event_recovers_when_projection_save_was_missed ... ok
+test work_events_ingest::tests::issue_5335_shared_source_intake_recovers_local_close_appended_after_discovery ... ok
+test work_events_ingest::tests::corrupt_projection_is_not_rebuilt_after_a_known_source_disappears ... ok
+test work_events_ingest::tests::projection_parse_failure_requires_rebuild_with_current_version_and_fingerprints ... ok
+test work_events_ingest::tests::detached_containerless_source_rebuilds_once_then_is_fingerprint_current ... ok
+test work_events_ingest::tests::legacy_flat_intake_state_migrates_without_rebuild ... ok
+test work_events_ingest::tests::unreadable_current_state_prevents_startup_ingest_writes ... ok
+test work_events_ingest::tests::shard_source_list_fingerprint_rebuilds_after_deletion ... ok
+test work_events_ingest::tests::ingest_restores_shard_committed_only_on_fetched_origin_ref ... ok
+test work_events_ingest::tests::tracked_source_list_rebuilds_after_local_legacy_source_deletion ... ok
+test work_events_ingest::tests::ingest_restores_skeleton_from_worktree_fs_and_origin_ref ... ok
+test work_events_ingest::tests::origin_ref_discovery_ignores_recognized_writer_temp_residue ... ok
+test work_events_ingest::tests::unchanged_pass_does_not_read_immutable_local_shard_bytes ... ok
+test work_events_ingest::tests::valid_incompatible_projection_does_not_rebuild_or_advance_intake_state ... ok
+test work_events_ingest::tests::incremental_state_matches_a_full_rederivation ... ok
+test work_events_ingest::tests::version_mismatch_rebuilds_polluted_projection_with_local_close_state ... ok
+test work_events_ingest::tests::unchanged_pass_does_not_read_legacy_log_bytes ... ok
+test work_events_ingest::tests::nested_ref_shard_defers_rebuild_without_mutating_projection_or_state ... ok
+test work_events_ingest::tests::missing_close_proof_rebuilds_current_intake_from_complete_history ... ok
+test work_events_ingest::tests::ingest_reprocesses_old_raw_fingerprint_state_without_inventing_source_container ... ok
+test work_events_ingest::tests::version_rebuild_defers_when_one_discovered_source_is_unreadable ... ok
+test work_events_ingest::tests::unchanged_groups_are_neither_rederived_nor_rewritten ... ok
+test work_events_ingest::tests::version_rebuild_replaces_stale_source_state_so_restored_source_is_ingested ... ok
+test work_events_ingest::tests::tracked_source_list_rebuilds_after_origin_legacy_ref_deletion ... ok
+
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 2017 filtered out; finished in 17.85s
+

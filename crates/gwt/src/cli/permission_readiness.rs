@@ -246,7 +246,7 @@ pub fn record_prompt_regression(
 /// Build the gate decision for a launch whose permission mode cannot be
 /// honored, without writing anything.
 ///
-/// Split from [`block_launch_if_unready`] so the Issue Monitor can ask the
+/// Split from [`block_launch_if_unready`] so Issues can ask the
 /// same question about a launch it has not started — and must not start — in a
 /// worktree it may not even have materialized yet (Issue #4544 AC-2).
 #[must_use]
@@ -324,15 +324,34 @@ pub fn block_launch_if_unready(
     let Some(record) = pre_launch_block(owner_kind, owner_number, session_id, decision) else {
         return Ok(());
     };
-    capture_self_improvement(worktree, &record);
     // Best effort: the refusal is the contract, and a store that cannot be
     // written must not turn a refused launch into an accepted one.
-    if let Err(error) =
-        crate::cli::trusted_store::with_write_lease(worktree, || save(worktree, &record))
-    {
+    if let Err(error) = record_pre_launch_block(worktree, &record) {
         tracing::warn!(%error, owner = owner_number, "could not record the permission readiness block");
     }
     Err(format!("launch refused: {}", record.describe()))
+}
+
+/// Persist and read back this exact refusal. A failed audit cannot claim that
+/// its recovery record was confirmed; the launch remains refused either way.
+pub fn record_pre_launch_block(
+    worktree: &Path,
+    record: &PermissionReadinessRecord,
+) -> io::Result<()> {
+    if record.kind != PermissionReadinessKind::PreLaunchBlock || !record.integrity_ok() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid pre-launch refusal",
+        ));
+    }
+    capture_self_improvement(worktree, record);
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        save(worktree, record)?;
+        if load(worktree)?.as_ref() != Some(record) {
+            return Err(io::Error::other("permission refusal readback changed"));
+        }
+        Ok(())
+    })
 }
 
 /// Append a work-notes memory entry for a block the machine caused.
@@ -389,7 +408,7 @@ pub fn settlement_refusal(worktree: &Path) -> Option<String> {
 
 /// The same refusal, addressed by owner rather than by worktree.
 ///
-/// The Issue Monitor scans from the project root, so it never holds the work
+/// Issues scans from the project root, so it never holds the work
 /// worktree's path. The owner generation ledger does — `diagnose_owner` is
 /// repository-scoped and reports the holder worktree — and that is the only
 /// way Deliver and merge can consult a record written in a different

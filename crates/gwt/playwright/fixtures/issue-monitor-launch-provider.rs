@@ -7,6 +7,93 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn rest_issue(issue: &serde_json::Value) -> serde_json::Value {
+    let mut issue = issue.clone();
+    issue["state"] = serde_json::json!("open");
+    issue["updated_at"] = issue["updatedAt"].clone();
+    issue["html_url"] = issue["url"].clone();
+    issue["user"] = serde_json::json!({"login":"fixture"});
+    issue
+}
+
+fn rest_read(path: &str, issues: &serde_json::Value) -> Option<serde_json::Value> {
+    let path = path.trim_start_matches('/').split('?').next()?;
+    let route = path
+        .strip_prefix("repos/fixture/launch-perf/")
+        .or_else(|| path.strip_prefix("repos/{owner}/{repo}/"))?;
+    let parts = route.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["issues"] => Some(serde_json::Value::Array(
+            issues.as_array()?.iter().map(rest_issue).collect(),
+        )),
+        ["issues", number] => issues
+            .as_array()?
+            .iter()
+            .find(|issue| issue["number"].as_u64() == number.parse().ok())
+            .map(rest_issue),
+        ["issues", number, "comments"] => {
+            let issue = issues
+                .as_array()?
+                .iter()
+                .find(|issue| issue["number"].as_u64() == number.parse().ok())?;
+            Some(serde_json::Value::Array(
+                issue["comments"]
+                    .as_array()?
+                    .iter()
+                    .map(|comment| {
+                        serde_json::json!({
+                            "id":comment["databaseId"], "body":comment["body"],
+                            "created_at":comment["createdAt"], "updated_at":comment["updatedAt"],
+                            "user":{"login":"fixture"}
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        ["pulls"] | ["commits"] => Some(serde_json::json!([])),
+        _ => None,
+    }
+}
+
+fn graphql_read(args: &[String], issues: &serde_json::Value) -> Option<serde_json::Value> {
+    let field = |key: &str| {
+        args.windows(2)
+            .filter(|pair| ["-f", "--raw-field", "-F", "--field"].contains(&pair[0].as_str()))
+            .find_map(|pair| pair[1].strip_prefix(key))
+    };
+    let query = field("query=")?;
+    if !query.trim_start().starts_with("query(")
+        || query
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .any(|word| word == "mutation")
+        || !query.contains("timelineItems(")
+        || field("owner=") != Some("fixture")
+        || field("repo=") != Some("launch-perf")
+    {
+        return None;
+    }
+    let mut repository = serde_json::Map::new();
+    for issue in issues.as_array()? {
+        let number = issue["number"].as_u64()?;
+        let alias = format!("i{number}");
+        if query.contains(&format!("{alias}: issue(number: {number})")) {
+            repository.insert(
+                alias,
+                serde_json::json!({
+                    "timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
+                }),
+            );
+        }
+    }
+    if repository.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({"data":{
+        "repository":repository,
+        "rateLimit":{"cost":1,"remaining":5000,"resetAt":"2099-01-01T00:00:00Z","nodeCount":0}
+    }}))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap();
@@ -65,7 +152,19 @@ fn main() {
                     .iter()
                     .any(|a| ["--method", "-X"].contains(&a.as_str())) =>
             {
-                serde_json::json!([])
+                let result = if args.get(1).map(String::as_str) == Some("graphql") {
+                    graphql_read(&args, &issues)
+                } else {
+                    args.get(1).and_then(|path| rest_read(path, &issues))
+                };
+                let Some(result) = result else {
+                    eprintln!("unsupported offline gh read endpoint");
+                    std::process::exit(64);
+                };
+                if args.iter().any(|arg| arg == "--include") {
+                    print!("HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
+                }
+                result
             }
             _ => {
                 eprintln!("unsupported offline gh command");
@@ -77,6 +176,11 @@ fn main() {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("codex-cli 0.116.0");
+        return;
+    }
+    // The configuration preflight runs before a provider Session exists.
+    if args.windows(2).any(|pair| pair == ["features", "list"]) {
+        println!("shell_tool\tstable\ttrue");
         return;
     }
     let session = std::env::var("GWT_SESSION_ID").unwrap();
@@ -174,11 +278,13 @@ fn main() {
     }
     let journal_drained = drained();
     // Hook output may contain launch-scoped credentials; retain success only.
+    let hook_pending = home.join(format!("hook-{session}.tmp"));
     std::fs::write(
-        home.join(format!("hook-{session}.json")),
+        &hook_pending,
         serde_json::json!({"success":journal_drained,"cli_success":cli_success,"journal_drained":journal_drained}).to_string(),
     )
     .unwrap();
+    std::fs::rename(hook_pending, home.join(format!("hook-{session}.json"))).unwrap();
     println!("FIXTURE_SESSION_START_COMPLETE {session}");
     loop {
         std::thread::sleep(Duration::from_secs(1));

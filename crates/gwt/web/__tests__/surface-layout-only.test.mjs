@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { createUiStateStore } from "../ui-state-store.js";
 
@@ -18,11 +18,24 @@ test("all window navigation uses the rail layout without a canvas fallback", () 
   assert.match(app, /splitSurfaces\.showWindow\(windowId\)/);
 });
 
+test("surface navigation and launches carry no world coordinates or canvas visibility rules", () => {
+  const modules = readdirSync(new URL("..", import.meta.url))
+    .filter(name => name.endsWith(".js"));
+  for (const name of modules) {
+    const source = readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /\b(?:isOffCanvasPlacement|isCanvasPlacement|visibleBounds|getResumeBounds)\b/,
+      `${name} must use surface ownership and containment without world bounds`);
+  }
+  assert.doesNotMatch(app, /viewport:\s*\{\s*x:/);
+  assert.doesNotMatch(app, /visibleWindowData|raiseWindowElementLocally|numericZIndex|style\.zIndex/);
+});
 
-test("pending window navigation wins over initial catalog restoration", () => {
-  const start = app.indexOf("      let initialSurfaceTabId = null;");
+
+test("initial navigation honors pending choices and containment owners", () => {
+  const flags = app.match(/      let initialSurfaceTabId = null;\n      let initialSurfaceSelected = false;\n/)?.[0];
+  const start = app.indexOf("      windowCatalogModel.subscribe(model => model.catalog, catalog => {");
   const end = app.indexOf("      // SPEC-2356 — keyboard equivalent", start);
-  assert.ok(start >= 0 && end > start, "expected the initial catalog subscription");
+  assert.ok(flags && start >= 0 && end > start, "expected the initial catalog subscription and flags");
   const model = createUiStateStore({
     catalog: { appState: { active_tab_id: null, tabs: [] }, focusedId: null, version: 0 },
     pendingSurface: null,
@@ -37,8 +50,8 @@ test("pending window navigation wins over initial catalog restoration", () => {
   const activeWindows = catalog => catalog.appState.tabs
     .find(tab => tab.id === catalog.appState.active_tab_id)?.workspace.windows || [];
   new Function("windowCatalogModel", "catalogActiveWindows", "windowMap", "requestWindowFrame", "frameWindow",
-    app.slice(start, end))(model, activeWindows,
-    new Map([["requested-log", {}], ["restored-pm", {}]]), frame, frame);
+    flags + app.slice(start, end))(model, activeWindows,
+    new Map([["requested-log", {}], ["restored-pm", {}], ["issues-2", {}], ["preview-2", {}]]), frame, frame);
 
   model.update(state => ({ ...state,
     pendingSurface: { tabId: "A", preset: "logs", surfaceOwner: null },
@@ -50,4 +63,13 @@ test("pending window navigation wins over initial catalog restoration", () => {
   assert.deepEqual(routed, ["requested-log"], "the requested target must survive synchronous restore notifications");
   model.update(state => ({ ...state, catalog: { ...state.catalog, version: 2 } }));
   assert.deepEqual(routed, ["requested-log"], "later metadata must not replay initial restoration");
+  model.update(state => ({ ...state, catalog: {
+    appState: { active_tab_id: "B", tabs: [{ id: "B", workspace: { windows: [
+      { id: "issues-2", preset: "settings", z_index: 10 },
+      { id: "preview-2", preset: "agent", z_index: 200,
+        placement: { kind: "issue_preview", issue_window_id: "issues-2", issue_number: 4777 } },
+    ] } }] }, focusedId: null, version: 3,
+  } }));
+  assert.deepEqual(routed, ["requested-log", "issues-2"],
+    "restoring an inline agent must select its owning surface without opening an Agent tab");
 });

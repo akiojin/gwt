@@ -219,50 +219,18 @@ test("Operator shell keeps the Command Rail always visible with no reveal state 
   }
 });
 
-test("FR-047 (anshin): MISSION cell shows done/total and converges to complete", async () => {
+test("Issue #3340 AS-03: runtime counts never render MISSION completion", async () => {
   const { applyTelemetryCounts } = await importOperatorShell();
   assert.equal(typeof applyTelemetryCounts, "function");
   const { document } = parseHTML(html);
 
-  const missionCell = () =>
-    document.querySelector(".op-status-strip__cell--mission");
-  const missionValue = () => document.getElementById("op-strip-mission");
-
-  // In-progress mission: 2 of 5 agents done.
-  applyTelemetryCounts(document, { done: 2, agents: 5 });
-  assert.equal(missionValue()?.textContent, "2/5");
-  assert.equal(
-    missionCell()?.classList.contains("op-status-strip__cell--complete"),
-    false,
-    "in-progress mission must not be marked complete",
-  );
-
-  // No agents: the cell collapses to the em dash placeholder.
-  applyTelemetryCounts(document, { agents: 0 });
-  assert.equal(missionValue()?.textContent, "—");
-  assert.equal(
-    missionCell()?.classList.contains("op-status-strip__cell--complete"),
-    false,
-    "an empty fleet is not a converged mission",
-  );
-
-  // Full convergence: every agent done flips the positive complete state.
-  applyTelemetryCounts(document, { done: 4, agents: 4 });
-  assert.equal(missionValue()?.textContent, "4/4");
-  assert.equal(
-    missionCell()?.classList.contains("op-status-strip__cell--complete"),
-    true,
-    "all agents done marks the mission complete",
-  );
-
-  // Regressing away from convergence clears the complete state again.
-  applyTelemetryCounts(document, { done: 1, agents: 4 });
-  assert.equal(missionValue()?.textContent, "1/4");
-  assert.equal(
-    missionCell()?.classList.contains("op-status-strip__cell--complete"),
-    false,
-    "dropping below full convergence removes the complete state",
-  );
+  applyTelemetryCounts(document, { running: 2, idle: 1, waiting: 1, error: 1, branches: 4, done: 5, agents: 5 });
+  assert.ok(!document.getElementById("op-strip-mission"), "no MISSION value");
+  assert.ok(!document.querySelector(".op-status-strip__cell--mission, .op-status-strip__cell--complete"), "no completion cell");
+  for (const [id, value] of Object.entries({ running: "2", idle: "1", waiting: "1", error: "1", branches: "4" })) {
+    assert.equal(document.getElementById(`op-strip-${id}`).textContent, value);
+  }
+  assert.ok(document.getElementById("op-briefing"), "Mission Briefing remains available");
 });
 
 test("Runtime health renderer updates severity-first compact PERF values", async () => {
@@ -885,4 +853,34 @@ test("Issue #3884 AC-3: RUNNING cell breaks out inline-terminal agents", async (
   // Counts that omit the breakdown (legacy callers) keep the slot hidden.
   applyTelemetryCounts(document, { running: 2 });
   assert.equal(inline()?.hidden, true);
+});
+
+// AC-5: the project owner lane is independent of the browser connection.
+test("project health renders its immutable latest frame without changing ONLINE", async () => {
+  const { subscribeProjectOwnerHealth } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const unsubscribe = subscribeProjectOwnerHealth(document, model);
+  const cell = document.querySelector("[data-project-owner-health]");
+  const initial = cell.dataset.state;
+  const health = { state: "degraded", detail: "Project connection lost" };
+  model.update(() => health);
+  health.state = "healthy";
+  assert.equal(cell.dataset.state, initial, "receive only commits immutable data until the display frame");
+  const flush = () => { const pending = [...frames]; frames.clear(); pending.forEach(callback => callback()); };
+  flush();
+  assert.equal(cell.dataset.state, "degraded");
+  assert.match(cell.textContent, /unavailable/i);
+  assert.equal(cell.title, "Project connection lost");
+  assert.equal(document.querySelector('[data-role="connection-label"]').textContent, "ONLINE");
+  model.update(() => ({ state: "healthy", detail: null }));
+  flush();
+  assert.equal(cell.dataset.state, "healthy");
+  assert.match(cell.textContent, /ready/i);
+  model.update(() => ({ state: "degraded" }));
+  unsubscribe();
+  assert.equal(frames.size, 0, "unmount cancels the pending frame");
 });

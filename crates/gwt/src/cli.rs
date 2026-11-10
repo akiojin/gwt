@@ -23,6 +23,11 @@ pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
 mod feedback;
+mod feedback_owner_bootstrap;
+#[cfg(any(windows, test))]
+mod feedback_supervisor;
+mod fleet;
+mod fleet_disposition;
 mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
@@ -46,6 +51,7 @@ mod plan;
 mod pm;
 pub mod pm_authorization;
 mod pr;
+mod project_execution_policy;
 mod provider_reset;
 pub(crate) mod register;
 mod release;
@@ -69,7 +75,26 @@ pub(crate) mod worktree_gc;
 
 use std::{io, path::PathBuf};
 
-pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
+/// Private fixed-binary feedback roles run before normal CLI initialization.
+/// Invalid frames and unsupported platforms fail without diagnostics or hooks.
+pub fn run_feedback_private_role(argv: &[String]) -> Option<i32> {
+    match argv.get(1).map(String::as_str)? {
+        "--gwt-feedback-supervisor" | "--gwt-feedback-sender" => {
+            #[cfg(windows)]
+            {
+                feedback_owner_bootstrap::clear_git_selectors_for_private_role();
+                Some(feedback_supervisor::run(argv))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(1)
+            }
+        }
+        _ => None,
+    }
+}
+
+pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget, ReleasePolicyContext};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use completion_pr::CompletionPrCandidate;
@@ -88,6 +113,7 @@ pub use pr::types::{
 };
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
+pub use workspace::WorkspaceCommand;
 
 /// Dispatch already-read stdin through the standard JSON envelope path.
 pub fn dispatch_json_input<E: CliEnv>(env: &mut E, prog: &str, input: &str) -> i32 {
@@ -133,6 +159,7 @@ pub enum CliCommand {
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    Fleet(fleet_disposition::FleetCommand),
     /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` read operations.
     Perf(perf::PerfCommand),
     /// SPEC-3431: `pm.*` PM agent diagnostics.
@@ -150,7 +177,9 @@ pub enum CliCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonCommand {
     /// `daemon.start` — bootstrap and serve the runtime daemon.
-    Start,
+    Start {
+        startup_intent: gwt_core::daemon::DaemonStartIntent,
+    },
     /// `daemon.status` — print whether a daemon is registered for cwd scope.
     Status,
     /// `daemon.subscribe` — connect to the running daemon,
@@ -165,89 +194,6 @@ pub enum DaemonCommand {
         /// SPEC-3431 FR-025: bound the read so an unattended caller can run
         /// subscribe → reconcile in a loop without an external supervisor.
         timeout_seconds: Option<u64>,
-    },
-}
-
-/// SPEC-2359 command model for `workspace.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkspaceCommand {
-    /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
-    EventsReconcile { reference: String, dry_run: bool },
-    /// Ask the authenticated Host to close one eligible Work record.
-    Close { work_id: String, close_kind: String },
-    /// Read the outcome of one update without contacting or mutating the Host.
-    Receipt { operation_id: String },
-    /// `workspace.update` — update Workspace current projection and journal.
-    Update {
-        title: Option<String>,
-        status: Option<String>,
-        status_text: Option<String>,
-        summary: Option<String>,
-        progress_summary: Option<String>,
-        next_action: Option<String>,
-        owner: Option<String>,
-        agent_session: Option<String>,
-        current_focus: Option<String>,
-        title_summary: Option<String>,
-    },
-    /// `workspace.candidates` — list join candidates.
-    Candidates { agent_session: String },
-    /// `workspace.join`.
-    Join {
-        agent_session: String,
-        workspace_id: String,
-        current_focus: Option<String>,
-        title_summary: Option<String>,
-    },
-    /// `workspace.create`.
-    Create {
-        agent_session: String,
-        title_summary: String,
-        current_focus: Option<String>,
-        spec: Option<u64>,
-        issue: Option<u64>,
-        split_from: Option<String>,
-        boundary: Option<String>,
-    },
-    /// `workspace.ensure`.
-    Ensure {
-        agent_session: String,
-        title_summary: String,
-        current_focus: Option<String>,
-        spec: Option<u64>,
-        issue: Option<u64>,
-        topic: Option<String>,
-        boundary: Option<String>,
-    },
-    /// SPEC-2359 US-41: `workspace.projection_list` —
-    /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
-    /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
-    ProjectionList { stale: bool, all: bool },
-    /// SPEC-2359 US-41: `workspace.projection_prune` —
-    /// archive / delete stale Workspace projections (FR-153, FR-154).
-    ProjectionPrune { dry_run: bool, ids: Vec<String> },
-    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
-    /// fold project stores that a pre-#3466 build split apart back into the
-    /// repository's canonical store.
-    ///
-    /// The dry run reports the plan and issues its `manifest_hash`; applying
-    /// requires that hash back *and* the recorded dry run that issued it, so a
-    /// store nobody reviewed can never be moved. `project_root` names the
-    /// project explicitly; authority still comes from the ambient Session.
-    StoreConsolidate {
-        project_root: Option<PathBuf>,
-        dry_run: bool,
-        manifest_hash: Option<String>,
-    },
-    /// Issue #3448: settle incomplete Works whose owner Issue is already
-    /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
-    /// reports the plan without emitting close events. `project_root` targets
-    /// a project other than the current one (the GUI opens the layout root,
-    /// which resolves to a different store than a linked worktree — #3466).
-    WorkPrune {
-        dry_run: bool,
-        ids: Vec<String>,
-        project_root: Option<String>,
     },
 }
 
@@ -266,6 +212,7 @@ pub enum HookCommand {
     },
     /// `hook.doctor` — managed hook health projection with optional repair.
     Doctor {
+        purpose: Option<hook::health::HookDoctorPurpose>,
         runtime_state_path: Option<PathBuf>,
         profile_path: Option<PathBuf>,
         expected_hook_bin: Option<String>,
@@ -312,6 +259,8 @@ pub enum WorkflowCommand {
 pub enum PaneCommand {
     /// `pane.list`.
     List,
+    /// Read-only health census, independent of GUI dispatch.
+    Health { id: Option<String> },
     /// Assign the authenticated producing Session's own stable Agent name.
     Name { candidate: String },
     /// `pane.read`.
@@ -335,6 +284,7 @@ pub enum PaneCommand {
         project_root: Option<String>,
         id: String,
         text: String,
+        operation_id: Option<String>,
     },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
@@ -637,7 +587,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     inner: env,
                     stdout: &mut hook_stdout,
                 };
-                hook::run_hook(&mut capture, &name, &rest)?
+                hook::collect_daemon_hook(&mut capture, &name, &rest)?
             };
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
@@ -649,7 +599,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     inner: env,
                     stdout: &mut hook_stdout,
                 };
-                hook::run_daemon_hook(&mut capture, &name, &rest)?
+                hook::collect_daemon_hook(&mut capture, &name, &rest)?
             };
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
@@ -675,25 +625,18 @@ pub(crate) fn run_collect<E: CliEnv>(
             0
         }
         CliCommand::Hook(HookCommand::Doctor {
+            purpose,
             runtime_state_path,
             profile_path,
             expected_hook_bin,
             repair,
         }) => {
-            // Browser-check must use the same default as launch/self-heal;
-            // choosing a separate bare name invalidates shared-root trust.
-            let managed_hook_bin =
-                crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
-            let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
-            let repair = if repair {
-                Some(
-                    hook::health::repair_managed_hook_configs(env.repo_path())
-                        .map_err(io_as_api_error)?,
-                )
+            let worktree = if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
+                gwt_core::paths::resolve_current_worktree_root(env.repo_path())
             } else {
-                None
+                env.repo_path().to_path_buf()
             };
-            let mut input = hook::health::ManagedHookHealthInput::new(env.repo_path());
+            let mut input = hook::health::ManagedHookHealthInput::new(&worktree);
             if let Some(path) = runtime_state_path {
                 input = input.with_runtime_state_path(path);
             }
@@ -703,18 +646,8 @@ pub(crate) fn run_collect<E: CliEnv>(
             if let Some(bin) = expected_hook_bin {
                 input = input.with_expected_hook_bin(bin);
             }
-            let mut health = hook::health::read_managed_hook_health(&input);
-            hook::append_codex_trust_health_for_doctor(&input, &mut health);
-            let payload = serde_json::json!({
-                "managed_hook_bin": managed_hook_bin,
-                "repair_writer": repair.as_ref().map(|_| serde_json::json!({
-                    "pid": std::process::id(),
-                    "executable": std::env::current_exe().ok(),
-                })),
-                "repair": repair,
-                "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
-                "health": health,
-            });
+            let payload =
+                hook::health::read_hook_doctor(&input, repair, purpose).map_err(io_as_api_error)?;
             out.push_str(&serde_json::to_string_pretty(&payload).map_err(serde_as_api_error)?);
             out.push('\n');
             0
@@ -740,6 +673,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Fleet(inner) => fleet_disposition::run(env, inner, &mut out)?,
         CliCommand::ProviderReset(inner) => provider_reset::run(env, inner, &mut out)?,
         CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
         CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
@@ -750,6 +684,16 @@ pub(crate) fn run_collect<E: CliEnv>(
 }
 
 pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
+    let cmd = match cmd {
+        CliCommand::Hook(
+            HookCommand::Run { name, rest } | HookCommand::InternalDaemon { name, rest },
+        ) => {
+            // Completion means delivery to the actual protocol sink, not to
+            // run_collect's intermediate buffer.
+            return hook::run_daemon_hook(env, &name, &rest);
+        }
+        other => other,
+    };
     let (code, out) = run_collect(env, cmd)?;
     env.stdout()
         .write_all(out.as_bytes())

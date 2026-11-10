@@ -19,6 +19,14 @@ path = "src/main.rs"
 name = "gwtd"
 path = "src/bin/gwtd.rs"
 
+[[bin]]
+name = "gwt-mobile-coordinator"
+path = "src/bin/gwt-mobile-coordinator.rs"
+
+[[bin]]
+name = "gwt-mobile-host"
+path = "src/bin/gwt-mobile-host.rs"
+
 [[test]]
 name = "ci_contracts"
 path = "tests/suites/ci_contracts_test.rs"
@@ -74,10 +82,10 @@ gwt-skills.workspace = true
 gwt-terminal.workspace = true
 tracing.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_yaml.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
@@ -100,7 +108,10 @@ quick-xml = "0.42.0"
 rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true
+ring = "0.17"
+subtle = "2.6"
 hex.workspace = true
+zip.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 pulldown-cmark.workspace = true
@@ -131,7 +142,8 @@ block2 = "0.6"
 dispatch2 = "0.3"
 mac-usernotifications = "0.3.1"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSButton", "NSButtonCell", "NSControl", "NSGraphics", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSScrollView", "NSText", "NSTextContainer", "NSTextView", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
@@ -139,7 +151,7 @@ winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rfd = { version = "0.17", features = ["common-controls-v6"] }
-windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-registry = "0.100"
 windows-result = "0.100"
 
@@ -154,7 +166,7 @@ gtk = "0.18"
 # dev-dependency below so integration-test binaries are covered too; the
 # arming ctor additionally requires debug_assertions, so a release build can
 # never ship armed even under --all-features.
-test-gh-guard = ["dep:ctor"]
+test-gh-guard = ["dep:ctor", "gwt-core/test-support"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

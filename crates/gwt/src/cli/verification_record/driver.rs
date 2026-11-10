@@ -8,6 +8,27 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+const WINDOWS_ARTIFACT_LOCK_RECOVERY: &str = "\nWindows artifact lock: a running process may be holding Cargo's gwtd.exe output open. Identify the holder and stop it only if it is your own process. Run `cargo build -p gwt --bin gwtd` without a manual verification lease, then invoke verify.run from a SHA256-verified copy of that checkout build outside all Cargo target directories.\n";
+
+pub(super) fn relink_failure_hint(exit_code: i32, output: &str) -> &'static str {
+    if cfg!(windows)
+        && exit_code != 0
+        && ["(os error 5)", "(os error 32)", "(os error 33)"]
+            .iter()
+            .any(|code| output.contains(code))
+        && output.lines().any(|line| {
+            line.split_once("failed to remove file ")
+                .map(|(_, path)| path.trim().trim_matches(['`', '\'', '"']))
+                .and_then(|path| path.rsplit(['\\', '/']).next())
+                .is_some_and(|file| file.eq_ignore_ascii_case("gwtd.exe"))
+        })
+    {
+        WINDOWS_ARTIFACT_LOCK_RECOVERY
+    } else {
+        ""
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriverProvenance {
     pub original_path: PathBuf,
@@ -161,10 +182,18 @@ fn artifact_io<T>(
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
                     .join(" -> ");
+                let recovery = if cfg!(windows)
+                    && operation == "rename"
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                {
+                    WINDOWS_ARTIFACT_LOCK_RECOVERY
+                } else {
+                    ""
+                };
                 return Err(io::Error::new(
                     error.kind(),
                     format!(
-                        "verification driver {operation} {paths} failed after {attempts} attempt(s): {error}"
+                        "verification driver {operation} {paths} failed after {attempts} attempt(s): {error}{recovery}"
                     ),
                 ));
             }
@@ -323,8 +352,67 @@ mod tests {
             message.contains(&fixed_root.display().to_string()),
             "{message}"
         );
+        assert!(message.contains("running process"), "{message}");
+        assert!(
+            message.contains("cargo build -p gwt --bin gwtd"),
+            "{message}"
+        );
+        assert!(message.contains("SHA256"), "{message}");
         assert_eq!(std::fs::read(&artifact).unwrap(), b"driver");
         drop(lock);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn artifact_access_denied_explains_recovery() {
+        let error = artifact_io("rename", &[Path::new("target/debug/gwtd.exe")], || {
+            Err::<(), _>(io::Error::from_raw_os_error(5))
+        })
+        .unwrap_err();
+        let message = error.to_string();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(message.contains("os error 5"), "{message}");
+        assert!(message.contains("running process"), "{message}");
+        assert!(
+            message.contains("cargo build -p gwt --bin gwtd"),
+            "{message}"
+        );
+        assert!(message.contains("SHA256"), "{message}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relink_failure_records_recovery_without_changing_the_result() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        for (exit, file, expected) in [
+            (7, "GWTD.EXE", true),
+            (0, "gwtd.exe", false),
+            (7, "other-gwtd.exe", false),
+        ] {
+            let command = format!(
+                r#"powershell.exe -NoProfile -NonInteractive -Command "Write-Output 'error: failed to remove file target/debug/{file}'; Write-Output 'Caused by: Access is denied. (os error 5)'; exit {exit}""#
+            );
+            let (record, transcript) =
+                super::super::run_verification(dir.path(), "driver-diagnostic", &[command])
+                    .unwrap();
+            assert_eq!(record.commands[0].exit_code, exit, "{transcript}");
+            assert_eq!(record.all_passed, exit == 0, "{transcript}");
+            assert_eq!(
+                transcript.contains("running process"),
+                expected,
+                "{transcript}"
+            );
+            assert_eq!(
+                record.commands[0].output_tail.contains("SHA256"),
+                expected,
+                "{transcript}"
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -386,6 +474,7 @@ mod tests {
         assert_eq!(attempts, 1);
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("copy from -> to"));
+        assert!(!error.to_string().contains("running process"));
     }
 
     #[test]

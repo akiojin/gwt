@@ -1,0 +1,13 @@
+{
+  "source_files": {
+    "crates/gwt/src/usage_poller.rs": "8c4baba9693f7866a1cc1182697bb10662a7a1e8c3ea818f571081537493494f",
+    "crates/gwt-core/src/index/path_policy.rs": "cce878463b91533f088c3593797590767d63c737d7f25c74cfb40e8ed01541a5",
+    "crates/gwt/src/session_inventory.rs": "01d1fb1a14904822fe914494a6a92489f5a11bd6b3ac634469c4d1d93aa0cc4b",
+    "crates/gwt/src/process.rs": "32eecee3f2db15da2ec72aa0cf6c482c0da774319f1333e6901282433d3d1861",
+    "crates/gwt/src/monitor_duplicate_runtime.rs": "97e852f58b6559f170b396cb91b2a889e626cb867bfd00c232ac86c7ef7ff80b"
+  },
+  "name": "R2",
+  "recorded_at": "2026-11-04T18:25:56.4291903Z",
+  "head": "bcf777ed432df9fd96dc5dd9c13d01ec859d7ea2",
+  "lifetime_git_blob": "3775f23335d919fe6df38856b77836d0310358e4"
+}

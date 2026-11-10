@@ -273,7 +273,8 @@ pub struct RefreshIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RefreshTargetState {
-    /// Background dirty intent waiting for its quiet deadline.
+    /// Background intent waiting for its quiet deadline. No deadline means
+    /// the failed input is stopped until a source change or urgent request.
     Quiet,
     /// Runnable now (promoted or quiet deadline reached).
     Queued,
@@ -575,6 +576,7 @@ impl RefreshBroker {
 
     fn coalesce(&self, mut record: TargetRecord, intent: &RefreshIntent, now: u64) -> TargetRecord {
         let newer = intent.desired_epoch > record.desired_epoch;
+        let source_changed = newer && record.desired_snapshot != intent.desired_snapshot;
         if newer {
             record.desired_epoch = intent.desired_epoch;
             record.desired_snapshot = intent.desired_snapshot.clone();
@@ -596,9 +598,10 @@ impl RefreshBroker {
                 if urgent {
                     record.state = RefreshTargetState::Queued;
                     record.quiet_deadline_millis = None;
-                } else if newer {
+                } else if newer && (record.quiet_deadline_millis.is_some() || source_changed) {
                     // Every later dirty event resets the full quiet period; a
-                    // delayed older epoch leaves the deadline untouched.
+                    // stopped input requires an actual source change, not a
+                    // replay with a newer epoch.
                     record.quiet_deadline_millis = Some(now.saturating_add(self.quiet_millis()));
                 }
             }
@@ -701,6 +704,11 @@ impl RefreshBroker {
             Err(error) if is_contended(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
+        let mut host_lock = PendingHostLock {
+            file: Some(host_lock),
+        };
+        #[cfg(test)]
+        tests::observe_acquired_host_lock(host_lock.file.as_ref().expect("acquired host lock"));
         let now = self.now_millis();
         let background_not_before = read_background_rest(&self.root)?;
         let mut candidates: Vec<(String, TargetRecord)> = self
@@ -779,7 +787,7 @@ impl RefreshBroker {
                         stem,
                         intent,
                         owner_lock: Some(owner_lock),
-                        host_lock: Some(host_lock),
+                        host_lock: host_lock.file.take(),
                         claimed_at_millis: now,
                         settled: false,
                     }));
@@ -916,6 +924,11 @@ pub struct RefreshClaim {
     settled: bool,
 }
 
+enum ClaimSettlement {
+    Complete,
+    Pending { error: Option<String>, retry: bool },
+}
+
 impl std::fmt::Debug for RefreshClaim {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RefreshClaim")
@@ -938,17 +951,29 @@ impl RefreshClaim {
     /// Mark the claimed epoch complete. A newer epoch that arrived during
     /// the run becomes the single retained follow-up.
     pub fn complete(mut self) -> BrokerResult<()> {
-        self.settle(None)
+        self.settle(ClaimSettlement::Complete)
     }
 
-    /// Mark the run failed. The target returns to quiet so a later dirty
-    /// event or manual intent retries it; the message is kept for
-    /// diagnostics.
+    /// Keep checkpointed work pending for the next quiet admission without
+    /// completing its epoch or treating cooperative yield as a failure.
+    pub fn defer(mut self) -> BrokerResult<()> {
+        self.settle(ClaimSettlement::Pending {
+            error: None,
+            retry: true,
+        })
+    }
+
+    /// Stop automatic retries of this failed input, retaining the diagnostic.
+    /// A changed source or explicit request restores admission. A newer input
+    /// already submitted during this claim remains eligible.
     pub fn fail(mut self, message: impl Into<String>) -> BrokerResult<()> {
-        self.settle(Some(message.into()))
+        self.settle(ClaimSettlement::Pending {
+            error: Some(message.into()),
+            retry: false,
+        })
     }
 
-    fn settle(&mut self, error: Option<String>) -> BrokerResult<()> {
+    fn settle(&mut self, outcome: ClaimSettlement) -> BrokerResult<()> {
         let quiet_millis = u64::try_from(self.quiet_period.as_millis()).unwrap_or(u64::MAX);
         let record_path = self
             .root
@@ -983,8 +1008,8 @@ impl RefreshClaim {
                 .unwrap_or(self.intent.desired_epoch);
             record.running = None;
             record.updated_at_millis = now;
-            match error {
-                None => {
+            match outcome {
+                ClaimSettlement::Complete => {
                     record.completed_epoch = Some(running_epoch);
                     record.last_error = None;
                     let follow_up =
@@ -1005,10 +1030,17 @@ impl RefreshClaim {
                         record.priority = JobPriority::Background;
                     }
                 }
-                Some(message) => {
-                    record.last_error = Some(message);
-                    record.state = RefreshTargetState::Quiet;
-                    record.quiet_deadline_millis = Some(now.saturating_add(quiet_millis));
+                ClaimSettlement::Pending { error, retry } => {
+                    record.last_error = error;
+                    if is_urgent(record.priority) {
+                        record.state = RefreshTargetState::Queued;
+                        record.quiet_deadline_millis = None;
+                    } else {
+                        record.state = RefreshTargetState::Quiet;
+                        record.quiet_deadline_millis = (retry
+                            || record.desired_snapshot != self.intent.desired_snapshot)
+                            .then_some(now.saturating_add(quiet_millis));
+                    }
                 }
             }
             write_json_atomic(&record_path, &record)?;
@@ -1028,9 +1060,24 @@ impl RefreshClaim {
 impl Drop for RefreshClaim {
     fn drop(&mut self) {
         if !self.settled {
-            let _ = self.settle(Some(
-                "refresh owner released the claim without settling".to_string(),
-            ));
+            let _ = self.settle(ClaimSettlement::Pending {
+                error: Some("refresh owner released the claim without settling".to_string()),
+                retry: true,
+            });
+        }
+    }
+}
+
+/// An acquired host lock that has not been transferred into a claim.
+struct PendingHostLock {
+    file: Option<File>,
+}
+
+impl Drop for PendingHostLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            // Closing one handle does not retire a lock retained by an alias.
+            let _ = fs2::FileExt::unlock(file);
         }
     }
 }
@@ -1094,6 +1141,20 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    type AcquiredHostLockHook = Box<dyn FnOnce(&File)>;
+
+    thread_local! {
+        static ACQUIRED_HOST_LOCK_HOOK: std::cell::RefCell<Option<AcquiredHostLockHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn observe_acquired_host_lock(file: &File) {
+        let hook = ACQUIRED_HOST_LOCK_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(file);
+        }
+    }
 
     impl RefreshBrokerClock for AtomicU64 {
         fn now_millis(&self) -> u64 {
@@ -1169,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_run_returns_to_quiet_and_keeps_the_error() {
+    fn failed_run_stops_unchanged_input_until_source_change_or_explicit_request() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let clock = Arc::new(AtomicU64::new(10_000));
         let broker = RefreshBroker::open_with_clock(
@@ -1192,8 +1253,60 @@ mod tests {
         assert_eq!(state.completed_epoch(), None);
         assert_eq!(state.last_error(), Some("runner exploded"));
         assert!(broker.claim_next().expect("claim during rest").is_none());
-        clock.store(12_000, Ordering::SeqCst);
-        assert!(broker.claim_next().expect("claim again").is_some());
+        clock.store(86_412_000, Ordering::SeqCst);
+        let broker =
+            RefreshBroker::open_with_clock(tmp.path().join("broker"), Duration::ZERO, clock)
+                .expect("reopen");
+        assert!(broker
+            .claim_next()
+            .expect("unchanged after a day")
+            .is_none());
+        let mut replay = intent(target.clone(), 2, JobPriority::Background);
+        replay.desired_snapshot = "snapshot-1".to_string();
+        broker.submit(replay).expect("same input with newer epoch");
+        assert!(broker.claim_next().expect("unchanged replay").is_none());
+        broker
+            .submit(intent(target.clone(), 3, JobPriority::Background))
+            .expect("changed source");
+        broker
+            .claim_next()
+            .expect("claim")
+            .expect("changed input resumes")
+            .fail("failed again")
+            .expect("fail");
+        broker
+            .submit(intent(target, 3, JobPriority::ManualRebuild))
+            .expect("explicit request");
+        assert!(broker.claim_next().expect("claim").is_some());
+    }
+
+    #[test]
+    fn failure_preserves_a_new_input_received_during_the_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().to_path_buf(),
+            Duration::ZERO,
+            Arc::new(AtomicU64::new(10_000)),
+        )
+        .expect("broker");
+        let target = RefreshTarget::base("repo", [RefreshScope::Issues]);
+        broker
+            .submit(intent(target.clone(), 1, JobPriority::Background))
+            .expect("submit");
+        let claim = broker.claim_next().expect("claim").expect("claimable");
+        broker
+            .submit(intent(target, 2, JobPriority::Background))
+            .expect("new input");
+        claim.fail("REPAIR_STOPPED").expect("fail");
+        assert_eq!(
+            broker
+                .claim_next()
+                .expect("claim")
+                .expect("new input survives")
+                .intent()
+                .desired_epoch,
+            2
+        );
     }
 
     #[test]
@@ -1222,6 +1335,65 @@ mod tests {
         assert!(broker.claim_next().expect("reclaim during rest").is_none());
         clock.store(12_000, Ordering::SeqCst);
         assert!(broker.claim_next().expect("reclaim").is_some());
+    }
+
+    #[test]
+    fn idle_claim_releases_host_lock_with_a_retained_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let clock = Arc::new(AtomicU64::new(10_000));
+        let broker = RefreshBroker::open_with_clock(
+            tmp.path().join("broker"),
+            Duration::ZERO,
+            clock.clone(),
+        )
+        .expect("open broker");
+        for repo in ["repo-a", "repo-b"] {
+            broker
+                .submit(intent(
+                    RefreshTarget::base(repo, [RefreshScope::Files]),
+                    1,
+                    JobPriority::Background,
+                ))
+                .expect("submit repo");
+        }
+        let first = broker.claim_next().expect("claim").expect("first repo");
+        clock.store(56_000, Ordering::SeqCst);
+        first.complete().expect("complete first repo");
+
+        let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
+        ACQUIRED_HOST_LOCK_HOOK.with(|hook| {
+            let retained = std::rc::Rc::clone(&retained);
+            *hook.borrow_mut() = Some(Box::new(move |file| {
+                // Retain the actual acquisition's open file description without
+                // assuming any historical child process inherited this handle.
+                *retained.borrow_mut() = Some(file.try_clone().expect("clone host lock"));
+            }));
+        });
+        assert!(broker.claim_next().expect("claim during rest").is_none());
+        assert!(retained.borrow().is_some(), "the acquisition hook ran");
+        let probe = open_lock_file(&broker.root.join(HOST_OWNER_LOCK_NAME)).expect("open probe");
+        fs2::FileExt::try_lock_exclusive(&probe)
+            .expect("idle return must retire the host lock even with a retained alias");
+        fs2::FileExt::unlock(&probe).expect("unlock probe");
+
+        clock.store(101_000, Ordering::SeqCst);
+        assert!(broker.claim_next().expect("claim before rest").is_none());
+        clock.store(102_000, Ordering::SeqCst);
+        let successor = broker
+            .claim_next()
+            .expect("claim after rest")
+            .expect("second repo");
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).expect_err("successor holds host lock")
+        ));
+        drop(retained.borrow_mut().take());
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe)
+                .expect_err("retired alias drop must preserve successor")
+        ));
+        successor.complete().expect("complete successor");
+        fs2::FileExt::try_lock_exclusive(&probe).expect("settled successor releases host lock");
+        fs2::FileExt::unlock(&probe).expect("unlock final probe");
     }
 
     #[test]

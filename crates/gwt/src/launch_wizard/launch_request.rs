@@ -192,6 +192,11 @@ impl LaunchWizardState {
         let mut config = builder.build();
         if long_initial_prompt {
             config.pending_initial_prompt = config.args.pop();
+        } else if !initial_prompt.is_empty() {
+            // Keep the raw task in the builder for permission/entrypoint provenance,
+            // then materialize its provider-specific transport in the final argv.
+            let prompt = config.args.pop().expect("initial prompt added above");
+            config.append_initial_prompt(prompt);
         }
         if let Some(reasoning_level) = self.reasoning_level_for_launch() {
             config.reasoning_level = Some(reasoning_level.to_string());
@@ -243,7 +248,7 @@ impl LaunchWizardState {
 
     /// Issue #4079 AC-2: the launch profile this wizard would save right now.
     ///
-    /// The Issue Monitor Agent Settings form previews its own effect on the
+    /// Issues Agent Settings form previews its own effect on the
     /// candidate pool, and it must preview the exact profile the save writes —
     /// so it reads it through the same builder the save uses. `None` when the
     /// current selection is not a launchable agent target.
@@ -727,7 +732,7 @@ mod tests {
         assert!(config.skip_permissions);
     }
 
-    /// AC-6: the Issue Monitor identifies itself after the config is built,
+    /// AC-6: Issues identifies itself after the config is built,
     /// and the re-decision describes the launch that actually ships.
     #[test]
     fn recording_the_launch_source_after_build_redecides_the_permission_mode() {
@@ -902,14 +907,14 @@ mod tests {
     }
 
     /// Issue #4228 AC-2: the reported reproduction, end to end. A Codex launch
-    /// with Fast Mode writes the Issue Monitor head profile; the operator then
+    /// with Fast Mode writes Issues head profile; the operator then
     /// switches that profile's agent to Claude; the Monitor opens the wizard
     /// from the saved profile and launches. The resulting Claude `LaunchConfig`
     /// must not carry Fast Mode.
     #[test]
     fn issue_monitor_profile_switched_to_claude_launches_without_fast_mode() {
         // Step 1-2 of the reported reproduction: a Codex launch with Fast Mode
-        // writes the Issue Monitor head profile.
+        // writes Issues head profile.
         let codex_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .fast_mode(true)
             .build();
@@ -935,7 +940,7 @@ mod tests {
             .expect("head profile");
         assert_eq!(stuck.agent_id, "claude");
 
-        // Step 4: the Issue Monitor opens the wizard from the saved head
+        // Step 4: Issues opens the wizard from the saved head
         // profile and launches.
         let previous_profiles = LaunchWizardPreviousProfiles::from_profile(Some(stuck.into()));
         let mut state = LaunchWizardState::open_with_previous_profiles(
@@ -1125,6 +1130,42 @@ mod tests {
                 assert_eq!(config.windows_shell, None);
             }
             other => panic!("expected shell launch request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hermes_initial_prompt_uses_query_for_inline_and_file_backed_tasks() {
+        let worktree = tempdir().unwrap();
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: None,
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-6868"), "work/issue-6868"),
+            options,
+            Vec::new(),
+        );
+        state.set_agent_id("hermes");
+        for prompt in ["$gwt-execute #6868".to_string(), "task\n".repeat(1_000)] {
+            state.initial_prompt = prompt.clone();
+            let mut config = state.build_launch_config().unwrap();
+            let file = crate::launch_runtime::prepare_initial_prompt(&mut config, worktree.path())
+                .unwrap();
+            assert_eq!(config.args[config.args.len() - 2], "--query");
+            assert_eq!(
+                config.args.iter().filter(|arg| *arg == "--query").count(),
+                1
+            );
+            if let Some(file) = file {
+                assert_eq!(std::fs::read_to_string(&*file).unwrap(), prompt);
+                assert!(config.args.last().unwrap().contains(file.to_str().unwrap()));
+            } else {
+                assert_eq!(config.args.last(), Some(&prompt));
+            }
         }
     }
 

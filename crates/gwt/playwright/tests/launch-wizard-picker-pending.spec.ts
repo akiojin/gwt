@@ -20,7 +20,7 @@ test("live wizard state and open errors retain interaction deferral and local re
   await gotoLiveGwt(page, base, { enableTestBridge: true });
   await expect(page.locator("html")).toHaveAttribute("data-theme",
     testInfo.project.name.includes("light") ? "light" : "dark");
-  const trigger = page.locator("#window-list-button");
+  const trigger = page.locator("#op-palette-button");
   await expect(trigger).toBeEnabled();
   await trigger.focus();
   await expect(trigger).toBeFocused();
@@ -114,6 +114,7 @@ test("live work advisory results preserve the prompt and ignore stale responses"
           return;
         }
         if (message.kind === "launch_wizard_action") return;
+        if (message.kind === "frontend_ready" && (window as any).__advisoryReconnecting) return;
       }
       return send.call(this, data);
     };
@@ -121,7 +122,7 @@ test("live work advisory results preserve the prompt and ignore stale responses"
   await gotoLiveGwt(page, base, { enableTestBridge: true });
   const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await expect(page.locator("#window-list-button")).toBeEnabled();
+  await expect(page.locator("#op-palette-button")).toBeEnabled();
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
     detail: { kind: "launch_wizard_state", wizard: {
       title: "Register work", show_branch_controls: false,
@@ -143,11 +144,26 @@ test("live work advisory results preserve the prompt and ignore stale responses"
   await expect.poll(() => page.evaluate(() =>
     (window as any).__advisoryRequests.at(-1)?.request_id ?? 0,
   )).toBeGreaterThan(0);
+  const firstRequestId = await page.evaluate(() => (window as any).__advisoryRequests.at(-1).request_id);
+  await page.evaluate(() => {
+    // Retain the controlled wizard view while exercising the native project socket.
+    (window as any).__advisoryReconnecting = true;
+    const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+      candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has("repo_hash"));
+    if (!socket) throw new Error("project socket not found");
+    socket.close();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__advisoryRequests.length)).toBe(2);
+  const recoveredRequestId = await page.evaluate(() => (window as any).__advisoryRequests.at(-1).request_id);
+  expect(recoveredRequestId).toBeGreaterThan(firstRequestId);
   const reply = async (requestId: number, results: unknown[]) => page.evaluate(({ requestId, results }) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
       detail: { kind: "work_advisory_result", request_id: requestId, results },
     }));
   }, { requestId, results });
+  await reply(firstRequestId, [{ title: "Lost connection response" }]);
+  await expect(panel).toContainText("Searching related work");
+  await expect(panel).not.toContainText("Lost connection response");
   await reply(10, [{ scope: "specs", title: "<img src=x onerror=alert(1)>", subtitle: "Shared state" }]);
   await expect(panel).toContainText("<img src=x onerror=alert(1)>");
   await expect(panel.locator("img")).toHaveCount(0);

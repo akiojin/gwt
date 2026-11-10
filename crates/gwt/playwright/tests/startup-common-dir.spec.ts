@@ -14,7 +14,7 @@ const control = join(checkout, `target/startup-common-dir-control${suffix}`);
 const treatment = join(checkout, `target/debug/gwt${suffix}`);
 
 // Isolate launch authority and credentials as well as HOME. These fixtures do
-// not call providers, GitHub, or the host's Issue Monitor.
+// not call providers, GitHub, or the host's Issues.
 function isolatedEnvironment(home: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {

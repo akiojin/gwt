@@ -50,6 +50,7 @@ mod tests {
 
     fn profile(agent_id: &str) -> IssueMonitorLaunchProfile {
         IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -473,6 +474,7 @@ mod tests {
             account_id: Some("acct".to_string()),
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 gwt_core::usage::WindowKind::Weekly,
                 100.0,

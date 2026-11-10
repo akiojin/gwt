@@ -5,6 +5,7 @@
 // rendering cannot grow separate mutation paths.
 
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
 
 const DEFAULT_LOOP_INTERVAL_SECS = 60;
@@ -114,7 +115,7 @@ function agentLabel(state, agentId) {
   return match ? match.name : agentId;
 }
 
-export function createPmSettingsPanel({ document, send, confirm, scheduleFrame } = {}) {
+export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, executionModel, projectTitle } = {}) {
   if (!document) throw new TypeError("createPmSettingsPanel requires a document");
   const dispatch = typeof send === "function" ? send : () => {};
   const ask = typeof confirm === "function"
@@ -136,6 +137,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame }
   function releaseMount(container) {
     const view = mounts.get(container);
     view?.unsubscribe?.();
+    view?.releaseExecution?.();
     view?.explanations.dispose();
     mounts.delete(container);
   }
@@ -170,7 +172,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame }
     view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
     view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
     setControlExplanation(view.autonomyStatus,
-      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.`, "pm-autonomy-status");
+      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.`, "pm-autonomy-status");
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -296,6 +298,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame }
     const section = el("div", "settings-section");
     const heading = el("h3", "settings-section-heading", "Project Manager");
     section.appendChild(heading);
+    const releaseExecution = executionModel ? mountProjectExecutionStatus(section, executionModel, { projectTitle }) : null;
 
     const runningLine = el("p", "settings-status");
     runningLine.dataset.role = "pm-running-as";
@@ -311,7 +314,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame }
     pauseToggle.dataset.role = "pm-pause-toggle";
     section.appendChild(pauseToggle);
     section.appendChild(el("p", "settings-help",
-      "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged."));
+      "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged."));
 
     const pendingChip = el(
       "p",
@@ -390,7 +393,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame }
 
     for (const [control, text, key] of [
       [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
-      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.", "pm-pause-toggle"],
+      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.", "pm-pause-toggle"],
       [pendingChip, PROFILE_HELP, "pm-pending-chip"],
       [agentSelect, PROFILE_HELP, "pm-agent-select"],
       [modelInput, PROFILE_HELP, "pm-model-input"],
@@ -402,6 +405,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame }
     const explanations = bindControlExplanations({ document, root: container, id: `pm-control-explanation-${intervalError.id}` });
 
     const view = {
+      releaseExecution,
       agentSelect,
       autoStartInput,
       autonomyStatus,

@@ -152,8 +152,9 @@ fn fetch_issue_page_with_cache(
     now: chrono::DateTime<chrono::Utc>,
     fetch: impl FnOnce() -> std::result::Result<String, String>,
 ) -> std::result::Result<String, String> {
-    // Queue membership and payloads remain authoritative on every scan.
-    if path.contains("labels=gwt-queued") {
+    // Queue membership and payloads remain authoritative on every control-driven
+    // scan. A timer-driven scan (Issue #6877 AC-2) accepts its read max age.
+    if path.contains("labels=gwt-queued") && crate::gh_rest::monitor_read_max_age_secs().is_none() {
         return fetch();
     }
     crate::gh_rest::cached_list_response_with(cache_dir, path, now, fetch)
@@ -578,7 +579,7 @@ mod tests {
         );
     }
 
-    /// SPEC #4093 AC-3: the Issue Monitor's candidate list is a REST read
+    /// SPEC #4093 AC-3: Issues' candidate list is a REST read
     /// (`gh api repos/{owner}/{repo}/issues`), never `gh issue list` (GraphQL),
     /// and one read spends at most the page budget.
     #[test]

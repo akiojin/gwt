@@ -12,7 +12,7 @@
 //! The record is machine-local, repo-scoped state:
 //! `~/.gwt/projects/<repo-hash>/operability/issue-<owner>.json`. Writes are
 //! best-effort from the `issue.spec.edit` success path (a ledger failure
-//! must not fail a verified write); unresolvable repo hashes (non-git dirs)
+//! must not fail a committed write); unresolvable repo hashes (non-git dirs)
 //! skip persistence.
 //!
 //! Follow-ups (T-274 full): phase-slice binding, payload/token budgets,
@@ -28,7 +28,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Per-section operability facts from one verified write.
+/// Per-section operability facts from one committed write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SectionOperability {
     pub bytes: usize,
@@ -42,8 +42,8 @@ pub struct SectionOperability {
     /// sha256 of the canonical section content.
     pub sha256: String,
     pub largest_part_bytes: usize,
-    /// The write path readback-verified the content (the multipart writer
-    /// rolls back unverified writes, so persisted records are verified).
+    /// The final readback verified the content. False when cleanup or final
+    /// confirmation failed after the commit point (Issue #4838).
     pub readback_verified: bool,
     pub written_at: DateTime<Utc>,
 }
@@ -84,7 +84,7 @@ pub fn load(repo_path: &Path, owner_number: u64) -> io::Result<Option<ArtifactOp
     }
 }
 
-/// Merge one verified write receipt into the owner's ledger. Best-effort
+/// Merge one committed write receipt into the owner's ledger. Best-effort
 /// no-op in degenerate mode.
 pub fn record_write(
     repo_path: &Path,
@@ -98,7 +98,7 @@ pub fn record_write(
     let mut record = match load(repo_path, owner_number) {
         Ok(Some(record)) => record,
         // Absent or unreadable ledgers restart cleanly — the ledger mirrors
-        // verified remote writes, so rebuilding from now-on is safe.
+        // committed remote writes, so rebuilding from now-on is safe.
         _ => ArtifactOperabilityRecord {
             owner_number,
             sections: BTreeMap::new(),
@@ -114,7 +114,7 @@ pub fn record_write(
             comment_ids: receipt.comment_ids.clone(),
             sha256: receipt.sha256.clone(),
             largest_part_bytes: receipt.largest_part_bytes,
-            readback_verified: true,
+            readback_verified: receipt.verification_error.is_none(),
             written_at: Utc::now(),
         },
     );
@@ -125,7 +125,7 @@ pub fn record_write(
 }
 
 /// Best-effort wrapper for the `issue.spec.edit` success path: a ledger
-/// failure is logged, never surfaced (the remote write is already verified).
+/// failure is logged, never surfaced (the remote write is already committed).
 pub fn record_write_best_effort(
     repo_path: &Path,
     owner_number: u64,
@@ -155,6 +155,7 @@ mod tests {
             location: if parts == 0 { "body" } else { "comments" }.to_string(),
             comment_ids: (0..parts as u64).map(|i| 100 + i).collect(),
             largest_part_bytes: if parts <= 1 { bytes } else { bytes / parts + 1 },
+            verification_error: None,
         }
     }
 
@@ -184,11 +185,14 @@ mod tests {
         assert_eq!(record.sections["spec"].location, "body");
 
         // Rewriting a section replaces its entry.
-        record_write(dir.path(), 3248, "tasks", &receipt(95_000, 3)).unwrap();
+        let mut unverified = receipt(95_000, 3);
+        unverified.verification_error = Some("final fetch failed".into());
+        record_write(dir.path(), 3248, "tasks", &unverified).unwrap();
         let record = load(dir.path(), 3248).unwrap().unwrap();
         assert_eq!(record.sections.len(), 2);
         assert_eq!(record.sections["tasks"].parts, 3);
         assert_eq!(record.sections["tasks"].sha256, "hash-95000");
+        assert!(!record.sections["tasks"].readback_verified);
 
         // Owners do not share ledgers.
         assert_eq!(load(dir.path(), 9999).unwrap(), None);

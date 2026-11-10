@@ -64,6 +64,11 @@ impl<T: Default> JsonlCache<T> {
         self.files.retain(|path, _| keep(path));
     }
 
+    /// Inspect the frozen result of an earlier read without observing new bytes.
+    pub(crate) fn cached(&self, path: &Path) -> Option<&T> {
+        self.files.get(path).map(|cached| &cached.value)
+    }
+
     pub(crate) fn bytes_read(&self) -> u64 {
         self.bytes_read
     }

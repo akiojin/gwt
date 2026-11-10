@@ -292,6 +292,17 @@ struct ContainerRuntimeProgram {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostRunnerProbeKind {
     Direct,
+    CodexConfig,
+}
+
+impl HostRunnerProbeKind {
+    /// Deadline the production probe gives this kind of check.
+    pub fn probe_deadline(self) -> Duration {
+        match self {
+            Self::Direct => DIRECT_RUNNER_PROBE_TIMEOUT,
+            Self::CodexConfig => CODEX_CONFIG_PREFLIGHT_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,11 +392,27 @@ impl HostRunnerProbeOutcome {
     }
 }
 
-const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for the installed-runner health probe. Windows `npm` shims for
+/// Codex take over five seconds to answer `--version` on loaded hosts, so a
+/// healthy runner must not be rejected for being slow (#6276); a runner that
+/// is still silent at this deadline keeps failing closed.
+pub const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Stable phrase for transient launch failures that Issue Monitor retries.
+/// Deadline for the Codex configuration preflight (`codex features list`).
+/// A timeout there is already inconclusive and the launch continues, so a
+/// long wait only spends the launch's window-creation budget on slow hosts
+/// (#6299). Only the installed-runner version probe keeps the longer deadline.
+pub const CODEX_CONFIG_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Stable phrase for transient launch failures that Issues retries.
 pub const TRANSIENT_LAUNCH_RETRY_HINT: &str =
     "gwt retries this launch automatically without spending an attempt";
+
+pub const CODEX_CONFIG_PREFLIGHT_FAILURE_PREFIX: &str = "codex_config_preflight:";
+
+pub fn is_codex_config_preflight_failure(message: &str) -> bool {
+    message.contains(CODEX_CONFIG_PREFLIGHT_FAILURE_PREFIX)
+}
 
 /// Classify automatic-retry diagnostics and concurrent remote-ref races.
 pub fn is_transient_launch_failure(message: &str) -> bool {
@@ -769,7 +796,23 @@ pub fn resolve_launch_worktree_request(
 pub fn resolve_host_runner_health_checked(
     config: &mut LaunchConfig,
 ) -> Result<HostRunnerHealthReport, String> {
-    resolve_host_runner_health_checked_with_probe(config, probe_host_runner_outcome)
+    resolve_host_runner_health_checked_with_probe(
+        config,
+        |kind, command, args, env_vars, remove_env, cwd| {
+            direct_runner_probe_cache().probe(
+                Instant::now(),
+                HostRunnerProbeCall {
+                    kind,
+                    command,
+                    args,
+                    env_vars,
+                    remove_env,
+                    cwd,
+                },
+                probe_host_runner_outcome,
+            )
+        },
+    )
 }
 
 #[doc(hidden)]
@@ -830,6 +873,12 @@ where
     let report = HostRunnerHealthReport {
         version_output: strict_semver_probe_evidence(&outcome),
     };
+    check_codex_config_with_probe(
+        config,
+        direct_command.as_deref().expect("successful runner probe"),
+        report.version_output.as_deref(),
+        &mut probe,
+    )?;
     if config.agent_id == AgentId::ClaudeCode
         && config.reasoning_level.as_deref() == Some("ultracode")
         && !report
@@ -845,6 +894,136 @@ where
     config.command = direct_command.expect("successful probe has a resolved command");
     config.tool_version = report.version_output.clone();
     Ok(report)
+}
+
+/// Ask the selected CLI to load its configuration without launching an agent.
+/// Docker configuration belongs to the container, never the host account.
+pub fn check_codex_config(config: &LaunchConfig) -> Result<(), String> {
+    if config.agent_id != AgentId::Codex || config.runtime_target != LaunchRuntimeTarget::Host {
+        return Ok(());
+    }
+    let Some(command) = crate::launch::resolve_direct_runner_with_effective_env(
+        &config.command,
+        &config.env_vars,
+        &config.remove_env,
+        config.working_dir.as_deref(),
+    ) else {
+        // Missing executables are diagnosed by the existing runner health check.
+        return Ok(());
+    };
+    check_codex_config_with_probe(
+        config,
+        &command,
+        config.tool_version.as_deref(),
+        &mut probe_host_runner_outcome,
+    )
+}
+
+fn check_codex_config_with_probe(
+    config: &LaunchConfig,
+    command: &str,
+    version: Option<&str>,
+    probe: &mut impl FnMut(
+        HostRunnerProbeKind,
+        &str,
+        Vec<String>,
+        &HashMap<String, String>,
+        &[String],
+        Option<PathBuf>,
+    ) -> HostRunnerProbeOutcome,
+) -> Result<(), String> {
+    if config.agent_id != AgentId::Codex || config.runtime_target != LaunchRuntimeTarget::Host {
+        return Ok(());
+    }
+    let mut args = Vec::new();
+    let mut launch_args = config.args.iter();
+    while let Some(arg) = launch_args.next() {
+        if ["--config", "-c", "--profile", "-p", "--enable", "--disable"].contains(&arg.as_str()) {
+            args.push(arg.clone());
+            if let Some(value) = launch_args.next() {
+                args.push(value.clone());
+            }
+        } else if ["--config=", "--profile=", "--enable=", "--disable="]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
+        {
+            args.push(arg.clone());
+        }
+    }
+    args.extend(["features".into(), "list".into()]);
+    let outcome = probe(
+        HostRunnerProbeKind::CodexConfig,
+        command,
+        args,
+        &config.env_vars,
+        &config.remove_env,
+        config.working_dir.clone(),
+    );
+    if outcome.success {
+        return Ok(());
+    }
+    if outcome.timed_out || outcome.error.is_some() {
+        tracing::warn!(
+            timed_out = outcome.timed_out,
+            "Codex configuration preflight was inconclusive; continuing launch"
+        );
+        return Ok(());
+    }
+    let version = version.map(str::to_owned).or_else(|| {
+        let outcome = probe(
+            HostRunnerProbeKind::Direct,
+            command,
+            vec!["--version".into()],
+            &config.env_vars,
+            &config.remove_env,
+            config.working_dir.clone(),
+        );
+        strict_semver_probe_evidence(&outcome)
+    });
+    let environment = codex_config_probe_environment(&config.env_vars, &config.remove_env);
+    let path = environment
+        .iter()
+        .find(|(key, value)| {
+            !value.is_empty()
+                && if cfg!(windows) {
+                    key.eq_ignore_ascii_case("CODEX_HOME")
+                } else {
+                    key.as_str() == "CODEX_HOME"
+                }
+        })
+        .map(|(_, value)| {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                config.working_dir.clone().unwrap_or_default().join(path)
+            }
+            .join("config.toml")
+            .display()
+            .to_string()
+        })
+        .unwrap_or_else(|| "~/.codex/config.toml".to_string());
+    Err(format!("{CODEX_CONFIG_PREFLIGHT_FAILURE_PREFIX} Codex CLI {} could not load configuration ({path}). {}\nNext: run `codex doctor` with the same CODEX_HOME and fix the reported config error, or update Codex if the setting requires a newer CLI; relaunch after repair. {TRANSIENT_LAUNCH_RETRY_HINT}.", version.as_deref().unwrap_or("unknown"), outcome.diagnostic(&config.env_vars)))
+}
+
+fn codex_config_probe_environment(
+    env_vars: &HashMap<String, String>,
+    remove_env: &[String],
+) -> HashMap<String, String> {
+    let mut environment = crate::environment::host_process_env();
+    let same_key = |left: &str, right: &str| {
+        if cfg!(windows) {
+            left.eq_ignore_ascii_case(right)
+        } else {
+            left == right
+        }
+    };
+    environment.retain(|key, _| !remove_env.iter().any(|removed| same_key(key, removed)));
+    for (key, value) in env_vars {
+        environment.retain(|existing, _| !same_key(existing, key));
+        environment.insert(key.clone(), value.clone());
+    }
+    environment
 }
 
 pub fn install_launch_gwt_bin_env(
@@ -1101,9 +1280,115 @@ fn probe_host_runner_outcome(
         env_vars,
         remove_env,
         cwd,
-        DIRECT_RUNNER_PROBE_TIMEOUT,
+        kind.probe_deadline(),
         Duration::from_millis(50),
     )
+}
+
+/// How long a successful installed-runner version probe is reused for the
+/// same executable. On a loaded Windows host `codex --version` alone can
+/// exceed the probe deadline, so re-probing an unchanged runner on every
+/// launch turns a healthy runner into a failed launch (#6299).
+const DIRECT_RUNNER_PROBE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Identity of a resolved runner executable: a replaced or updated file gets
+/// a new modification time or size and is probed again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DirectRunnerFingerprint {
+    command: String,
+    args: Vec<String>,
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+impl DirectRunnerFingerprint {
+    fn of(command: &str, args: &[String]) -> Option<Self> {
+        let metadata = std::fs::metadata(command).ok()?;
+        metadata.is_file().then_some(())?;
+        Some(Self {
+            command: command.to_string(),
+            args: args.to_vec(),
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+}
+
+struct HostRunnerProbeCall<'a> {
+    kind: HostRunnerProbeKind,
+    command: &'a str,
+    args: Vec<String>,
+    env_vars: &'a HashMap<String, String>,
+    remove_env: &'a [String],
+    cwd: Option<PathBuf>,
+}
+
+/// Process-wide reuse of successful Direct probes only. A runner with no
+/// recent success is still probed, so a hanging first probe keeps failing
+/// closed (SPEC-3864); failures are never cached.
+#[derive(Default)]
+struct DirectRunnerProbeCache {
+    entries: Mutex<HashMap<DirectRunnerFingerprint, (Instant, HostRunnerProbeOutcome)>>,
+}
+
+impl DirectRunnerProbeCache {
+    fn probe(
+        &self,
+        now: Instant,
+        call: HostRunnerProbeCall<'_>,
+        probe: impl FnOnce(
+            HostRunnerProbeKind,
+            &str,
+            Vec<String>,
+            &HashMap<String, String>,
+            &[String],
+            Option<PathBuf>,
+        ) -> HostRunnerProbeOutcome,
+    ) -> HostRunnerProbeOutcome {
+        let key = (call.kind == HostRunnerProbeKind::Direct)
+            .then(|| DirectRunnerFingerprint::of(call.command, &call.args))
+            .flatten();
+        if let Some(key) = key.as_ref() {
+            let entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((probed_at, outcome)) = entries.get(key) {
+                if now.saturating_duration_since(*probed_at) < DIRECT_RUNNER_PROBE_CACHE_TTL {
+                    tracing::debug!(
+                        command = call.command,
+                        "reusing a recent successful direct runner health probe"
+                    );
+                    return outcome.clone();
+                }
+            }
+        }
+        let outcome = probe(
+            call.kind,
+            call.command,
+            call.args,
+            call.env_vars,
+            call.remove_env,
+            call.cwd,
+        );
+        if let Some(key) = key {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if outcome.success {
+                entries.insert(key, (now, outcome.clone()));
+            } else {
+                entries.remove(&key);
+            }
+        }
+        outcome
+    }
+}
+
+fn direct_runner_probe_cache() -> &'static DirectRunnerProbeCache {
+    static CACHE: std::sync::OnceLock<DirectRunnerProbeCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(DirectRunnerProbeCache::default)
 }
 
 #[doc(hidden)]
@@ -1373,7 +1658,13 @@ fn probe_host_runner_bounded_with_hub(
     let mut request = gwt_core::process::ProcessPlanRequest::new(command)
         .args(&args)
         .inherit_env(false);
-    for (key, value) in runner_probe_environment(env_vars, remove_env) {
+    let environment = match kind {
+        HostRunnerProbeKind::Direct => runner_probe_environment(env_vars, remove_env),
+        HostRunnerProbeKind::CodexConfig => codex_config_probe_environment(env_vars, remove_env),
+    };
+    let mut redaction_environment = env_vars.clone();
+    for (key, value) in environment {
+        redaction_environment.insert(key.clone(), value.clone());
         request = request.env(key, value);
     }
     if let Some(cwd) = cwd {
@@ -1424,7 +1715,7 @@ fn probe_host_runner_bounded_with_hub(
         .unwrap_or(start);
     let outcome = run_runner_probe_in_isolated_runtime(
         process,
-        env_vars,
+        &redaction_environment,
         execution_deadline,
         operation_deadline,
         poll_interval,
@@ -1452,8 +1743,11 @@ fn probe_host_runner_bounded_with_hub(
     outcome
 }
 
-fn runner_probe_trace_label(_kind: HostRunnerProbeKind) -> &'static str {
-    "direct runner health probe"
+fn runner_probe_trace_label(kind: HostRunnerProbeKind) -> &'static str {
+    match kind {
+        HostRunnerProbeKind::Direct => "direct runner health probe",
+        HostRunnerProbeKind::CodexConfig => "Codex configuration preflight",
+    }
 }
 
 fn run_runner_probe_in_isolated_runtime(
@@ -3189,10 +3483,10 @@ mod tests {
             .expect("persisted Session");
         let probes = probes.lock().expect("probe records");
 
-        assert_eq!(
-            probes.as_slice(),
-            &[(expected.clone(), vec!["--version".to_string()])]
-        );
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0], (expected.clone(), vec!["--version".to_string()]));
+        assert_eq!(probes[1].0, expected);
+        assert!(probes[1].1.ends_with(&["features".into(), "list".into()]));
         assert_eq!(prepared.process_launch.command, expected);
         assert_eq!(prepared.session.launch_command, expected);
         assert_eq!(persisted.launch_command, expected);
@@ -3285,7 +3579,7 @@ mod tests {
 
         assert_eq!(prepared.process_launch.args, original_args);
         let probes = probes.lock().expect("probe records");
-        assert_eq!(probes.len(), 1);
+        assert_eq!(probes.len(), 2);
         assert_eq!(prepared.process_launch.command, probes[0].0);
         assert!(command_matches_runner(
             &prepared.process_launch.command,
@@ -3295,6 +3589,183 @@ mod tests {
             assert_eq!(prepared.process_launch.command, original_command);
         }
         assert_eq!(probes[0].1, vec!["--version".to_string()]);
+    }
+
+    #[test]
+    fn codex_config_preflight_reports_cli_error_before_session_persistence() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        let codex_home = temp.path().join("codex-home");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&codex_home).unwrap();
+        let config_path = codex_home.join("config.toml");
+        fs::write(
+            &config_path,
+            "[features.context_management]\nexperimental_mode = true\n",
+        )
+        .unwrap();
+        let mut config = sample_direct_codex_launch_config(&worktree);
+        config.args.clear();
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), codex_home.display().to_string());
+        let expected_path = config_path.display().to_string();
+        let runner = temp
+            .path()
+            .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        #[cfg(windows)]
+        let script = r#"@echo off
+if "%~1"=="--version" (
+  echo codex-cli 0.148.0
+  exit /b 0
+)
+if not "%~1 %~2"=="features list" exit /b 2
+findstr /L /C:"[features.context_management]" "%CODEX_HOME%\config.toml" >nul
+if errorlevel 1 exit /b 0
+echo invalid type: map, expected a boolean in features 1>&2
+exit /b 1
+"#;
+        #[cfg(not(windows))]
+        let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'codex-cli 0.148.0\n'; exit 0; fi
+[ "$1 $2" = 'features list' ] || exit 2
+if grep -Fq '[features.context_management]' "$CODEX_HOME/config.toml"; then
+  printf 'invalid type: map, expected a boolean in features\n' >&2
+  exit 1
+fi
+"#;
+        #[cfg(windows)]
+        fs::write(&runner, script.replace('\n', "\r\n")).unwrap();
+        #[cfg(unix)]
+        gwt_core::test_support::write_executable_script(&runner, script).unwrap();
+        config.command = runner.display().to_string();
+        // This regression observes completed fixture output, not the production
+        // deadline. Leave headroom for Windows process startup under CI load.
+        let fixture_probe = |kind,
+                             command: &str,
+                             args,
+                             env: &HashMap<String, String>,
+                             remove_env: &[String],
+                             cwd| {
+            probe_host_runner_with_timeout(
+                kind,
+                command,
+                args,
+                env,
+                remove_env,
+                cwd,
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+        };
+        let probe: Box<HostRunnerProbe> = Box::new(fixture_probe);
+        let valid_config = config.clone();
+        let Err(error) = prepare_test_launch(&worktree, &sessions, config, probe) else {
+            panic!("an installed version alone cannot prove config loads");
+        };
+        for expected in [
+            "codex_config_preflight:",
+            "invalid type: map, expected a boolean",
+            "features",
+            "0.148.0",
+            "codex doctor",
+            &expected_path,
+        ] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
+        assert!(
+            !sessions.exists(),
+            "invalid config must not create a Session"
+        );
+        fs::write(&config_path, "[features]\nexperimental_mode = true\n").unwrap();
+        check_codex_config_with_probe(
+            &valid_config,
+            &valid_config.command,
+            Some("0.148.0"),
+            &mut { fixture_probe },
+        )
+        .expect("repaired configuration must be readmitted");
+    }
+
+    #[test]
+    fn codex_config_preflight_does_not_reject_inconclusive_probes() {
+        let temp = tempdir().unwrap();
+        let config = sample_direct_codex_launch_config(temp.path());
+        for outcome in [
+            HostRunnerProbeOutcome {
+                timed_out: true,
+                exit_code: None,
+                ..HostRunnerProbeOutcome::failure_with_stderr("")
+            },
+            HostRunnerProbeOutcome::unresolved("process could not start"),
+        ] {
+            let result = check_codex_config_with_probe(
+                &config,
+                &config.command,
+                Some("0.148.0"),
+                &mut |_, _, _, _, _, _| outcome.clone(),
+            );
+            assert!(
+                result.is_ok(),
+                "inconclusive probe rejected launch: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_config_preflight_preserves_effective_codex_home() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("isolated-codex");
+        let env = HashMap::from([("CODEX_HOME".to_string(), root.display().to_string())]);
+        assert_eq!(
+            codex_config_probe_environment(&env, &[]).get("CODEX_HOME"),
+            env.get("CODEX_HOME")
+        );
+    }
+
+    #[test]
+    fn codex_config_preflight_redacts_inherited_environment_values() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let secret = "codex-config-inherited-sentinel-4153";
+        let _secret = gwt_core::test_support::ScopedEnvVar::set("GWT4153_INHERITED_VALUE", secret);
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd",
+                vec![
+                    "/C".into(),
+                    "echo %GWT4153_INHERITED_VALUE% 1>&2 & exit /b 1".into(),
+                ],
+            )
+        } else {
+            (
+                "sh",
+                vec![
+                    "-c".into(),
+                    "printf '%s\\n' \"$GWT4153_INHERITED_VALUE\" >&2; exit 1".into(),
+                ],
+            )
+        };
+        let outcome = probe_host_runner_with_timeout(
+            HostRunnerProbeKind::CodexConfig,
+            command,
+            args,
+            &HashMap::new(),
+            &[],
+            None,
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+        );
+        assert!(
+            outcome.stderr.contains(gwt_core::process_console::REDACTED),
+            "CLI stderr must remain observable"
+        );
+        assert!(
+            !outcome.stderr.contains(secret),
+            "inherited values must be redacted"
+        );
     }
 
     #[test]
@@ -3475,7 +3946,7 @@ mod tests {
         )
         .expect("healthy direct runner");
 
-        assert_eq!(probe_calls, 1);
+        assert_eq!(probe_calls, 2);
         let version_output = report.version_output.expect("version output evidence");
         assert_eq!(version_output, "0.133.0");
         assert_eq!(config.tool_version.as_deref(), Some("0.133.0"));
@@ -3505,6 +3976,137 @@ mod tests {
         assert_eq!(config.tool_version, original.tool_version);
     }
 
+    fn cache_probe_call<'a>(
+        kind: HostRunnerProbeKind,
+        command: &'a str,
+        env_vars: &'a HashMap<String, String>,
+    ) -> HostRunnerProbeCall<'a> {
+        HostRunnerProbeCall {
+            kind,
+            command,
+            args: vec!["--version".into()],
+            env_vars,
+            remove_env: &[],
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn direct_runner_probe_cache_reuses_a_recent_success_for_the_same_runner() {
+        // #6299: a loaded host must not re-run a slow `--version` for an
+        // unchanged runner that was just proven healthy.
+        let temp = tempdir().expect("tempdir");
+        let runner = temp.path().join("codex");
+        fs::write(&runner, "runner v1").expect("write runner");
+        let command = runner.display().to_string();
+        let env = HashMap::new();
+        let cache = DirectRunnerProbeCache::default();
+        let probes = std::cell::Cell::new(0);
+        let healthy = |_: HostRunnerProbeKind,
+                       _: &str,
+                       _: Vec<String>,
+                       _: &HashMap<String, String>,
+                       _: &[String],
+                       _: Option<PathBuf>| {
+            probes.set(probes.get() + 1);
+            HostRunnerProbeOutcome {
+                stdout: "codex-cli 0.164.0".into(),
+                ..HostRunnerProbeOutcome::success()
+            }
+        };
+        let probed_at = Instant::now();
+
+        let first = cache.probe(
+            probed_at,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        let reused = cache.probe(
+            probed_at,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        assert_eq!(probes.get(), 1);
+        assert_eq!(reused, first);
+
+        let expired = probed_at + DIRECT_RUNNER_PROBE_CACHE_TTL;
+        cache.probe(
+            expired,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        assert_eq!(probes.get(), 2, "an expired success is probed again");
+
+        fs::write(&runner, "runner v2 replaced").expect("replace runner");
+        cache.probe(
+            expired,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        assert_eq!(probes.get(), 3, "a changed runner file is probed again");
+    }
+
+    #[test]
+    fn direct_runner_probe_cache_never_reuses_failures_or_config_preflights() {
+        let temp = tempdir().expect("tempdir");
+        let runner = temp.path().join("codex");
+        fs::write(&runner, "runner").expect("write runner");
+        let command = runner.display().to_string();
+        let env = HashMap::new();
+        let cache = DirectRunnerProbeCache::default();
+        let probes = std::cell::Cell::new(0);
+        let probed_at = Instant::now();
+        let hanging = |_: HostRunnerProbeKind,
+                       _: &str,
+                       _: Vec<String>,
+                       _: &HashMap<String, String>,
+                       _: &[String],
+                       _: Option<PathBuf>| {
+            probes.set(probes.get() + 1);
+            HostRunnerProbeOutcome {
+                success: false,
+                timed_out: true,
+                ..HostRunnerProbeOutcome::success()
+            }
+        };
+        for _ in 0..2 {
+            let outcome = cache.probe(
+                probed_at,
+                cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+                hanging,
+            );
+            assert!(!outcome.success, "a hanging runner keeps failing closed");
+        }
+        assert_eq!(probes.get(), 2);
+
+        for _ in 0..2 {
+            cache.probe(
+                probed_at,
+                cache_probe_call(HostRunnerProbeKind::CodexConfig, &command, &env),
+                |_, _, _, _, _, _| {
+                    probes.set(probes.get() + 1);
+                    HostRunnerProbeOutcome::success()
+                },
+            );
+        }
+        assert_eq!(probes.get(), 4, "configuration preflights are not cached");
+    }
+
+    #[test]
+    fn codex_config_preflight_uses_its_own_short_deadline() {
+        // #6299: an inconclusive preflight must not spend the Direct probe's
+        // slow-host deadline; the Direct probe keeps it (#6276).
+        assert_eq!(
+            HostRunnerProbeKind::Direct.probe_deadline(),
+            DIRECT_RUNNER_PROBE_TIMEOUT
+        );
+        assert_eq!(
+            HostRunnerProbeKind::CodexConfig.probe_deadline(),
+            CODEX_CONFIG_PREFLIGHT_TIMEOUT
+        );
+        assert!(CODEX_CONFIG_PREFLIGHT_TIMEOUT < DIRECT_RUNNER_PROBE_TIMEOUT);
+    }
+
     #[cfg(unix)]
     #[test]
     fn public_prepare_bounds_a_hanging_direct_runner_probe() {
@@ -3517,7 +4119,7 @@ mod tests {
         // SPEC-3864: Antigravity has no runtime package route, so a hanging
         // direct runner cannot be rescued by a bunx/npx fallback.
         let direct = temp.path().join("agy");
-        fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
+        fs::write(&direct, "#!/bin/sh\nsleep 60\nexit 1\n").expect("write hanging runner");
         fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
             .expect("chmod hanging runner");
         let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
@@ -3530,10 +4132,39 @@ mod tests {
 
         assert!(result.is_err(), "hanging direct runner must fail closed");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(7),
-            "direct runner health must honor the five-second deadline: {:?}",
+            started.elapsed() < DIRECT_RUNNER_PROBE_TIMEOUT + std::time::Duration::from_secs(5),
+            "direct runner health must honor the probe deadline: {:?}",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_prepare_admits_a_slow_but_healthy_direct_runner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // #6276: a runner that answers `--version` after the old five-second
+        // deadline is healthy and must launch on slow hosts.
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        let direct = temp.path().join("codex");
+        fs::write(&direct, "#!/bin/sh\nsleep 6\necho 'codex-cli 0.164.0'\n")
+            .expect("write slow runner");
+        fs::set_permissions(&direct, fs::Permissions::from_mode(0o755)).expect("chmod slow runner");
+        config.command = direct.display().to_string();
+
+        let report = resolve_host_runner_health_checked_with_probe(
+            &mut config,
+            |kind, command, args, env, remove_env, cwd| match kind {
+                HostRunnerProbeKind::Direct => {
+                    probe_host_runner_outcome(kind, command, args, env, remove_env, cwd)
+                }
+                HostRunnerProbeKind::CodexConfig => HostRunnerProbeOutcome::success(),
+            },
+        )
+        .expect("slow healthy runner must be admitted");
+
+        assert_eq!(report.version_output.as_deref(), Some("0.164.0"));
     }
 
     #[test]

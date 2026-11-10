@@ -129,6 +129,15 @@ pub(super) const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the ag
 Board recently; no additional completed-status post is required before stopping. If Work \
 current state changed, update it with a `workspace.update` JSON envelope and `params.purpose` for Agent/window title bars.";
 
+pub(super) const AUTONOMOUS_STOP_REMINDER: &str = "Board Post Reminder (Stop, autonomous): \
+Do not stop to wait for a PM reply on a reversible, in-scope decision. Record \
+`PM default ruling (override available): <choice and rationale>` on the Board and continue. \
+After receiving a Board ruling, resume implementation, verification, PR, or settlement \
+without another `pm.message.send`; do not say ready for the next instruction. \
+Stop for a decision only at irreversible decisions or `needs_human` boundaries. \
+Keep permission and delivery gates; declare temporary admission or CI waits with \
+`issue.monitor.wait` and resume when the condition clears.";
+
 pub(super) const TERMINAL_SETTLEMENT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
 The Work lifecycle is in terminal delivery settlement. Keep coordination and blocker handoff on the Board, but do not append another tracked Work-state event. Finish in this order: final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. When the final event is the only bookkeeping change, use a scoped Conventional Commit with the exact `chore(work):` prefix.";
@@ -149,7 +158,7 @@ You are this project's resident PM. Your operating contract is the `gwt-pm` skil
 \n\
 Report to the user in conversation, at milestones, as a digest (`needs_human` and fatal failures immediately). Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
 \n\
-Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past the Issue Monitor.\n\
+Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past Issues.\n\
 \n\
 Every cycle, also read `unlanded_branches` from `pr.list` and take stock: each row is work that is committed but has no PR carrying it. Relaunch the owner Issue or rule the branch archived — a row that survives a cycle unaddressed is an escalation, not a no-change cycle.";
 

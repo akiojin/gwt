@@ -97,13 +97,23 @@ def configure_qos_threads(qos: str, *, single_query: bool = False) -> None:
 
 
 def _lower_process_priority() -> None:
-    if os.name == "nt":  # pragma: no cover - Windows-only branch
+    if os.name == "nt":
         try:
             import ctypes
+            from ctypes import wintypes
 
-            below_normal_priority_class = 0x00004000
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ctypes.windll.kernel32.SetPriorityClass(handle, below_normal_priority_class)
+            kernel = ctypes.windll.kernel32
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.SetPriorityClass.restype = wintypes.BOOL
+            handle = kernel.GetCurrentProcess()
+            # CPU priority alone leaves Chroma's disk I/O at normal priority.
+            # Enter resource background mode before loading model/Chroma so
+            # their worker threads also inherit the lower I/O priority.
+            kernel.SetPriorityClass(handle, 0x00100000)  # BACKGROUND_BEGIN
+            # Background mode resets the CPU class to Normal. Restore the
+            # FR-385 class while retaining background I/O; also covers failure.
+            kernel.SetPriorityClass(handle, 0x00004000)  # Below Normal
         except Exception:
             pass
     else:
@@ -1388,6 +1398,13 @@ V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
 ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
+# Issue #6979: an Issue refresh publishes a small delta generation over an
+# immutable base instead of copying every unchanged record into a new store.
+# The delta is compacted into a new base once it outgrows this bound.
+ISSUE_DELTA_FILENAME = "delta.json"
+ISSUE_BASE_MANIFEST_FILENAME = "base-manifest.json"
+ISSUE_DELTA_MIN_RECORDS = 128
+ISSUE_DELTA_MAX_FRACTION = 0.05
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
@@ -1395,7 +1412,8 @@ V2_WORKS_COLLECTION = "works"
 V2_REPORTS_COLLECTION = "reports"
 
 FILE_INDEX_V2_LAYOUT_VERSION = 2
-FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2"
+FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2-records"
+FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL = "file-index-v2"
 FILE_INDEX_V2_MODEL_ID = "intfloat/multilingual-e5-base"
 FILE_INDEX_V2_MODEL_REVISION = "d128750597153bb5987e10b1c3493a34e5a4502a"
 FILE_INDEX_V2_COMPATIBILITY_FIELDS = (
@@ -1596,7 +1614,9 @@ def _validated_file_index_descriptor(descriptor: Any) -> Dict[str, Any]:
         raise ValueError("invalid file-index-v2 compatibility descriptor")
     if descriptor.get("layout_version") != FILE_INDEX_V2_LAYOUT_VERSION:
         raise ValueError("unsupported file-index-v2 layout version")
-    if descriptor.get("writer_protocol") != FILE_INDEX_V2_WRITER_PROTOCOL:
+    if descriptor.get("writer_protocol") not in {
+        FILE_INDEX_V2_WRITER_PROTOCOL, FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL
+    }:
         raise ValueError("unsupported file-index-v2 writer protocol")
     return descriptor
 
@@ -1783,6 +1803,7 @@ def _file_index_v2_pin(
         "protected_paths": [
             "bases",
             "cas",
+            "record-stores",
             f"worktrees/{safe_worktree_hash}",
         ],
         "owner_pid": os.getpid(),
@@ -2109,8 +2130,9 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     retained = _SEARCH_WORKER_READ_CLIENTS
     cache_key = None
     # Closing the last Chroma client stops its System. Issue indexing always
-    # publishes a new generation. Other repo scopes update the active store
-    # in place, so retaining their readers would keep stale query vectors.
+    # publishes a new generation (base or delta, both immutable). Other repo
+    # scopes update the active store in place, so retaining their readers
+    # would keep stale query vectors.
     if (
         retained is not None
         and db_path.parent.name.endswith(GENERATIONS_DIR_SUFFIX)
@@ -2118,7 +2140,8 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
         and collection_name == V2_ISSUES_COLLECTION
     ):
         db_path = db_path.resolve()
-        cache_key = (db_path.parent, collection_name)
+        layer = "delta" if (db_path / ISSUE_DELTA_FILENAME).is_file() else "base"
+        cache_key = (db_path.parent, collection_name, layer)
         cached = retained.pop(cache_key, None)
         if cached is not None:
             if cached[0] == db_path:
@@ -3063,9 +3086,8 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> None:
-    """Publish a verified immutable directory before a durable head names it."""
-    for current_root, _directories, filenames in os.walk(staging, topdown=False):
+def _fsync_file_index_v2_directory(path: Path) -> None:
+    for current_root, _directories, filenames in os.walk(path, topdown=False):
         current = Path(current_root)
         for filename in filenames:
             # Windows rejects fsync on a read-only handle (EBADF), so open
@@ -3073,6 +3095,11 @@ def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> Non
             with (current / filename).open("r+b") as artifact:
                 os.fsync(artifact.fileno())
         _fsync_directory(current)
+
+
+def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> None:
+    """Publish a verified immutable directory before a durable head names it."""
+    _fsync_file_index_v2_directory(staging)
     target.parent.mkdir(parents=True, exist_ok=True)
     _replace_staging_generation(staging, target)
     _fsync_directory(target.parent)
@@ -3311,6 +3338,111 @@ def _plan_file_index_v2_overlay(
     }
 
 
+def _uses_file_record_pool(descriptor: Dict[str, Any]) -> bool:
+    return descriptor["compatibility"]["writer_protocol"] == FILE_INDEX_V2_WRITER_PROTOCOL
+
+
+def _file_artifact_store(artifact_dir: Path, descriptor: Dict[str, Any]) -> Path:
+    if not _uses_file_record_pool(descriptor):
+        return artifact_dir / "store"
+    v2_root = artifact_dir.parent.parent if descriptor["kind"] == "base" else artifact_dir.parents[3]
+    contract_id = _sha256_json(_semantic_file_index_contract(descriptor["compatibility"]))
+    return v2_root / "record-stores" / FILE_INDEX_V2_WRITER_PROTOCOL / contract_id / "store"
+
+
+def _file_record_id(entry: Dict[str, Any]) -> str:
+    # Git-vs-filesystem provenance does not change the persisted document.
+    return _sha256_json({key: value for key, value in entry.items() if key != "source_object"})
+
+
+def _file_member_ids(entries: Sequence[Dict[str, Any]], scope: str) -> List[str]:
+    return [_file_record_id(entry) for entry in entries if entry["scope"] == scope]
+
+
+def _file_members_exist(collection, ids: Sequence[str]) -> bool:
+    for start in range(0, len(ids), FILE_INDEX_V2_VECTOR_BATCH):
+        batch = list(ids[start:start + FILE_INDEX_V2_VECTOR_BATCH])
+        if set(collection.get(ids=batch, include=[])["ids"]) != set(batch):
+            return False
+    return True
+
+
+def _prune_file_record_pool(v2_root: Path) -> int:
+    """Prune at most one batch, with no live reader or writer and exact marks.
+
+    Retain all completed manifests, including previous Views and generations
+    awaiting Rust GC. The registry lock fences new pins; a live per-pin lock
+    prevents collection even when that pin's diagnostic marker is unreadable.
+    """
+    pools_root = v2_root / "record-stores" / FILE_INDEX_V2_WRITER_PROTOCOL
+    if not pools_root.is_dir():
+        return 0
+    leases_root = v2_root / "leases"
+    try:
+        with acquire_lock(leases_root, exclusive=True, blocking=False):
+            for pin in leases_root.iterdir():
+                if pin.is_dir():
+                    with acquire_lock(pin, exclusive=True, blocking=False):
+                        pass
+            marks: Dict[str, Dict[str, set[str]]] = {}
+            containers = [v2_root / "bases"]
+            worktrees = v2_root / "worktrees"
+            if worktrees.is_dir():
+                containers.extend(path / "overlays" for path in worktrees.iterdir() if path.is_dir())
+            for container in containers:
+                if not container.is_dir():
+                    continue
+                for artifact in container.iterdir():
+                    if not artifact.is_dir() or artifact.name.startswith("."):
+                        continue
+                    descriptor = _read_artifact_descriptor(artifact)
+                    if descriptor is None or not _is_exact_file_index_v2_compatibility(descriptor.get("compatibility")):
+                        return 0
+                    base = container.name == "bases"
+                    if (set(descriptor) != (_BASE_DESCRIPTOR_FIELDS if base else _OVERLAY_DESCRIPTOR_FIELDS)
+                            or descriptor.get("schema_version") != 1
+                            or descriptor.get("kind") != ("base" if base else "overlay")):
+                        return 0
+                    if not _uses_file_record_pool(descriptor):
+                        continue
+                    if any(descriptor[field]["store"] != "records"
+                           for field in ("files_generation", "files_docs_generation")):
+                        return 0
+                    manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
+                    entries = manifest["entries"]
+                    if (_manifest_entries_digest_from_file(artifact / "manifest.json")
+                            != descriptor["manifest_digest"]
+                            or _validated_file_index_v2_manifest_scope_paths(entries) is None
+                            or _file_index_v2_artifact_generation_id(descriptor, entries) != artifact.name):
+                        return 0
+                    pool_id = _file_artifact_store(artifact, descriptor).parent.name
+                    pool_marks = marks.setdefault(pool_id, {"files": set(), "files-docs": set()})
+                    for scope in pool_marks:
+                        pool_marks[scope].update(_file_member_ids(entries, scope))
+            for pool in pools_root.iterdir():
+                if not pool.is_dir() or pool.is_symlink() or not _is_sha256(pool.name):
+                    continue
+                for scope, collection_name in (
+                    ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
+                ):
+                    client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
+                    try:
+                        retained = marks.get(pool.name, {}).get(scope, set())
+                        for offset in range(0, collection.count(), FILE_INDEX_V2_VECTOR_BATCH):
+                            ids = collection.get(limit=FILE_INDEX_V2_VECTOR_BATCH, offset=offset, include=[])["ids"]
+                            unused = [record_id for record_id in ids if record_id not in retained]
+                            if unused:
+                                collection.delete(ids=unused)
+                                return len(unused)
+                    finally:
+                        _close_chroma_client(client)
+    except Exception:
+        # Cleanup cannot invalidate a completed refresh. Contention, malformed
+        # membership or a failed store open withholds deletion until next time.
+        return 0
+    return 0
+
+
 def _manifest_entries_digest_from_file(path: Path) -> Optional[str]:
     """Hash canonical manifest entries with constant auxiliary memory."""
     prefix = b'{"entries":'
@@ -3342,7 +3474,7 @@ def _artifact_pair_metadata_is_verified(
     records: Sequence[Dict[str, Any]],
     descriptor_identity: Dict[str, Any],
 ) -> bool:
-    store = artifact_dir / "store"
+    store = _file_artifact_store(artifact_dir, descriptor_identity)
     existing_descriptor = _read_artifact_descriptor(artifact_dir)
     dynamic_fields = {"manifest_digest", "created_at", "verified_at"}
     expected_fields = set(descriptor_identity) | dynamic_fields
@@ -3377,6 +3509,15 @@ def _artifact_pair_metadata_is_verified(
         != manifest_digest
     ):
         return False
+    pooled = _uses_file_record_pool(descriptor_identity)
+    entries = []
+    if pooled:
+        try:
+            entries = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))["entries"]
+        except (OSError, ValueError, KeyError):
+            return False
+        if _validated_file_index_v2_manifest_scope_paths(entries) is None:
+            return False
     for bucket, collection_name in (
         ("code", V2_FILES_CODE_COLLECTION),
         ("docs", V2_FILES_DOCS_COLLECTION),
@@ -3389,7 +3530,12 @@ def _artifact_pair_metadata_is_verified(
                 expected_count = sum(
                     record["bucket"] == bucket for record in records
                 )
-                if _safe_collection_count(collection) != expected_count:
+                if pooled:
+                    scope = "files" if bucket == "code" else "files-docs"
+                    ids = _file_member_ids(entries, scope)
+                    if len(ids) != expected_count or not _file_members_exist(collection, ids):
+                        return False
+                elif _safe_collection_count(collection) != expected_count:
                     return False
             finally:
                 _close_chroma_client(client)
@@ -3413,7 +3559,8 @@ def _staged_artifact_vectors_are_verified(
         )
     ):
         return False
-    store = artifact_dir / "store"
+    store = _file_artifact_store(artifact_dir, descriptor_identity)
+    pooled = _uses_file_record_pool(descriptor_identity)
     embedding_contract = _embedding_contract(descriptor_identity["compatibility"])
     expected_dimension = _expected_file_index_vector_dimension(
         descriptor_identity["compatibility"]
@@ -3447,7 +3594,7 @@ def _staged_artifact_vectors_are_verified(
                     expected_vectors.append(vector)
                 collection = opened[bucket][1]
                 stored = collection.get(
-                    ids=[records[index]["path"] for index in selected],
+                    ids=[_file_record_id(manifest_entries[index]) if pooled else records[index]["path"] for index in selected],
                     include=["documents", "metadatas", "embeddings"],
                 )
                 stored_ids = list(stored.get("ids") or [])
@@ -3474,7 +3621,8 @@ def _staged_artifact_vectors_are_verified(
                 for index, expected_vector in zip(selected, expected_vectors):
                     record = records[index]
                     manifest_entry = manifest_entries[index]
-                    stored_record = stored_by_id.get(record["path"])
+                    record_id = _file_record_id(manifest_entry) if pooled else record["path"]
+                    stored_record = stored_by_id.get(record_id)
                     if stored_record is None:
                         return False
                     document, metadata, embedding = stored_record
@@ -3523,15 +3671,24 @@ def _materialize_file_artifact_pair(
     hit instead of re-embedding it. A yielded build publishes nothing — the
     caller must not materialize a View from a partial artifact.
     """
-    if _artifact_pair_metadata_is_verified(
-        artifact_dir, records, descriptor_identity
-    ):
-        if on_checkpoint is not None:
-            on_checkpoint(len(records))
-        return 0, len(records), False
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
-    with acquire_lock(lock_dir, exclusive=True):
+    pooled = _uses_file_record_pool(descriptor_identity)
+    pool_lock = (
+        acquire_lock(_file_artifact_store(artifact_dir, descriptor_identity).parent, exclusive=True)
+        if pooled else contextlib.nullcontext()
+    )
+    with acquire_lock(lock_dir, exclusive=True), pool_lock:
+        # This artifact's writer lock also proves any previous staging writer
+        # has exited, including when the completed artifact is already reusable.
+        staging_pattern = rf"\.{re.escape(artifact_dir.name)}\.staging-\d+-\d+"
+        for candidate in artifact_dir.parent.iterdir():
+            if (
+                re.fullmatch(staging_pattern, candidate.name)
+                and candidate.is_dir()
+                and not candidate.is_symlink()
+            ):
+                shutil.rmtree(candidate, ignore_errors=True)
         if _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
@@ -3549,7 +3706,7 @@ def _materialize_file_artifact_pair(
             f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
         )
         shutil.rmtree(staging, ignore_errors=True)
-        store = staging / "store"
+        store = _file_artifact_store(staging, descriptor_identity)
         manifest_entries: List[Dict[str, Any]] = []
         computed = 0
         hits = 0
@@ -3599,17 +3756,40 @@ def _materialize_file_artifact_pair(
                 )
                 for bucket in ("code", "docs"):
                     selected = [
-                        (record, vector)
-                        for record, vector in zip(batch_records, vectors)
+                        (record, vector, entry)
+                        for record, vector, entry in zip(batch_records, vectors, manifest_entries[start:stop])
                         if record["bucket"] == bucket
                     ]
                     if not selected:
                         continue
+                    if pooled:
+                        stored = opened[bucket][1].get(
+                            ids=[_file_record_id(entry) for _, _, entry in selected],
+                            include=["documents", "metadatas", "embeddings"],
+                        )
+                        raw_vectors = stored.get("embeddings")
+                        stored_records = dict(zip(
+                            stored["ids"], zip(
+                                stored.get("documents") or [],
+                                stored.get("metadatas") or [],
+                                list(raw_vectors) if raw_vectors is not None else [],
+                            )
+                        ))
+                        missing = []
+                        for record, vector, entry in selected:
+                            previous = stored_records.get(_file_record_id(entry))
+                            if (previous is None or previous[0] != record["document"]
+                                    or previous[1] != record["metadata"]
+                                    or not _chroma_vector_matches_cas(previous[2], vector)):
+                                missing.append((record, vector, entry))
+                        selected = missing
+                    if not selected:
+                        continue
                     opened[bucket][1].upsert(
-                        ids=[record["path"] for record, _ in selected],
-                        embeddings=[list(vector) for _, vector in selected],
-                        documents=[record["document"] for record, _ in selected],
-                        metadatas=[record["metadata"] for record, _ in selected],
+                        ids=[_file_record_id(entry) if pooled else record["path"] for record, _, entry in selected],
+                        embeddings=[list(vector) for _, vector, _ in selected],
+                        documents=[record["document"] for record, _, _ in selected],
+                        metadatas=[record["metadata"] for record, _, _ in selected],
                     )
                 # FR-418: hand the heavy lease back at the checkpoint boundary
                 # when an interactive search is queued behind this build. Only
@@ -3633,13 +3813,17 @@ def _materialize_file_artifact_pair(
                     for client, _ in opened.values():
                         _close_chroma_client(client)
                     opened.clear()
-                    shutil.rmtree(staging, ignore_errors=True)
                     return computed, hits, True
             for bucket in ("code", "docs"):
                 expected_count = sum(
                     record["bucket"] == bucket for record in records
                 )
-                if _safe_collection_count(opened[bucket][1]) != expected_count:
+                scope = "files" if bucket == "code" else "files-docs"
+                valid = (
+                    _file_members_exist(opened[bucket][1], _file_member_ids(manifest_entries, scope))
+                    if pooled else _safe_collection_count(opened[bucket][1]) == expected_count
+                )
+                if not valid:
                     raise RuntimeError(
                         f"file-index-v2 {bucket} collection count mismatch"
                     )
@@ -3668,14 +3852,18 @@ def _materialize_file_artifact_pair(
                 cas_root,
             ):
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
+            if pooled:
+                _fsync_file_index_v2_directory(store)
+                for parent in list(store.parents)[:4]:
+                    _fsync_directory(parent)
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
         finally:
             for client, _ in opened.values():
                 _close_chroma_client(client)
+            # Windows cannot delete SQLite files while Chroma owns their handles.
+            # A process kill or delayed native close is retried under the next lock.
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 _BASE_DESCRIPTOR_FIELDS = {
@@ -3784,7 +3972,10 @@ def _is_exact_file_index_v2_compatibility(value: Any) -> bool:
 
 
 def _is_generation_reference(value: Any, collection: str) -> bool:
-    return value == {"store": "store", "collection": collection}
+    return value in (
+        {"store": "store", "collection": collection},
+        {"store": "records", "collection": collection},
+    )
 
 
 def _is_sorted_unique_string_list(value: Any) -> bool:
@@ -3933,6 +4124,10 @@ def _load_verified_file_index_v2_artifact(
         ):
             return None
 
+    expected_store = "records" if _uses_file_record_pool(descriptor) else "store"
+    if any(descriptor[field]["store"] != expected_store for field in ("files_generation", "files_docs_generation")):
+        return None
+
     manifest_path = artifact_dir / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -3970,10 +4165,15 @@ def _load_verified_file_index_v2_artifact(
     ):
         try:
             client, collection = _open_file_index_v2_collection(
-                artifact_dir / "store", collection_name
+                _file_artifact_store(artifact_dir, descriptor), collection_name
             )
             try:
-                if _safe_collection_count(collection) != manifest_counts[scope]:
+                valid = (
+                    _file_members_exist(collection, _file_member_ids(entries, scope))
+                    if _uses_file_record_pool(descriptor)
+                    else _safe_collection_count(collection) == manifest_counts[scope]
+                )
+                if not valid:
                     return None
             finally:
                 _close_chroma_client(client)
@@ -4444,7 +4644,6 @@ STAGING_DIR_SUFFIX = ".staging"
 CONTINUATION_FILENAME = "continuation.json"
 GENERATIONS_DIR_SUFFIX = ".gen"
 ACTIVE_POINTER_FILENAME = "active.json"
-GENERATION_GC_SECONDS = 24 * 3600
 
 
 def _staging_dir_for(db_path: Path) -> Path:
@@ -4498,6 +4697,81 @@ def resolve_active_store(db_path: Path) -> Path:
     return db_path
 
 
+def _issue_delta_state(db_path: Path) -> Optional[Dict[str, Any]]:
+    """The active Issue delta layered over the base generation, if any.
+
+    An unreadable delta yields None: readers then serve the base alone, whose
+    count disagrees with the Issue meta, so health reports a repair.
+    """
+    pointer = _read_active_pointer(db_path)
+    if pointer is None or not isinstance(pointer.get("delta"), str):
+        return None
+    store = generations_root(db_path) / pointer["delta"]
+    try:
+        payload = json.loads((store / ISSUE_DELTA_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("base_generation") != pointer.get("generation")
+        or not isinstance(payload.get("shadowed"), list)
+    ):
+        return None
+    return {
+        "store": store,
+        "generation": pointer["delta"],
+        "base_generation": pointer["generation"],
+        "shadowed": frozenset(str(record_id) for record_id in payload["shadowed"]),
+    }
+
+
+def _active_store_layers(db_path: Path) -> List[tuple]:
+    """`(store, hidden_ids)` layers readers combine, base first."""
+    base = resolve_active_store(db_path)
+    delta = _issue_delta_state(db_path)
+    if delta is None:
+        return [(base, frozenset())]
+    return [(base, delta["shadowed"]), (delta["store"], frozenset())]
+
+
+def _issue_base_hashes(db_path: Path) -> Optional[Dict[str, str]]:
+    """Content hashes of the records stored in the active base generation."""
+    pointer = _read_active_pointer(db_path)
+    if pointer is None:
+        return None
+    path = generations_root(db_path) / pointer["generation"] / ISSUE_BASE_MANIFEST_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
+    ):
+        return None
+    return payload
+
+
+def _plan_issue_delta(db_path: Path, new_hashes: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Plan a delta over the active base, or None when a new base is due."""
+    pointer = _read_active_pointer(db_path)
+    base_hashes = _issue_base_hashes(db_path)
+    if pointer is None or base_hashes is None:
+        return None
+    changed = {
+        record_id for record_id, content_hash in new_hashes.items()
+        if base_hashes.get(record_id) != content_hash
+    }
+    deleted = set(base_hashes) - set(new_hashes)
+    limit = max(ISSUE_DELTA_MIN_RECORDS, int(len(base_hashes) * ISSUE_DELTA_MAX_FRACTION))
+    if len(changed) + len(deleted) > limit:
+        return None
+    return {
+        "base_generation": pointer["generation"],
+        "changed": changed,
+        "shadowed": sorted((changed & set(base_hashes)) | deleted),
+    }
+
+
 def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
     """Documents in the store readers currently resolve to, or None when that
     cannot be determined.
@@ -4509,13 +4783,7 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
     if not (store / "chroma.sqlite3").exists():
         return None
     try:
-        client, collection = _open_chroma_collection(
-            store, _scope_collection_name(scope)
-        )
-        try:
-            return _safe_collection_count(collection)
-        finally:
-            _close_chroma_client(client)
+        return _layered_document_count(db_path, scope)
     except Exception:
         return None
 
@@ -4546,13 +4814,18 @@ def _publish_generation(
     document_count: int,
     source_fingerprint: Optional[str] = None,
     after_publish=None,
+    delta_of: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Atomically publish `staging` as the new active generation (FR-390).
 
+    With `delta_of`, `staging` is an Issue delta (#6979): the pointer keeps
+    `delta_of` as its base generation and layers the new directory over it.
+    `document_count` is then the logical count readers see.
+
     Under the exclusive target lock: rename the staging store into an
     immutable generation directory, atomically replace `active.json`, clean
-    the legacy in-place store (lazy migration), and GC generations that have
-    been abandoned for more than 24 hours (keeping the previous active one).
+    the legacy in-place store (lazy migration), and GC all completed generations
+    except the active and previous ones.
     Any OS failure returns a typed `PUBLISH_FAILED` payload — the previous
     active generation stays untouched.
 
@@ -4591,7 +4864,8 @@ def _publish_generation(
                     (generation_dir / residue).unlink()
             pointer_payload = {
                 "schema_version": INDEX_SCHEMA_VERSION,
-                "generation": generation_name,
+                "generation": delta_of or generation_name,
+                **({"delta": generation_name} if delta_of else {}),
                 "scope": scope,
                 "document_count": document_count,
                 "published_at": _now_utc().isoformat(),
@@ -4619,7 +4893,9 @@ def _publish_generation(
                 gen_root,
                 keep={
                     generation_name,
+                    delta_of,
                     previous.get("generation") if previous else None,
+                    previous.get("delta") if previous else None,
                 },
             )
     except OSError as error:
@@ -4634,27 +4910,26 @@ def _publish_generation(
 
 
 def _gc_abandoned_generations(gen_root: Path, keep: set) -> None:
-    """Remove generation directories abandoned for more than 24 hours.
+    """Retain only the active and previous completed generations.
 
-    The active and previous generations are always kept; recently abandoned
-    directories are retained so a crashed build can be inspected / resumed.
+    The caller holds the exclusive logical store lock, excluding live readers.
+    Unknown directories are not completed generations and remain untouched.
     Deletion failures (e.g. Windows open handles) are ignored — the next
     publish retries.
     """
-    now = time.time()
     try:
         entries = list(gen_root.iterdir())
     except OSError:
         return
     for entry in entries:
-        if not entry.is_dir() or entry.name in keep:
+        if (
+            not re.fullmatch(r"gen-\d+-\d+", entry.name)
+            or not entry.is_dir()
+            or entry.is_symlink()
+            or entry.name in keep
+        ):
             continue
-        try:
-            abandoned_for = now - entry.stat().st_mtime
-        except OSError:  # pragma: no cover - entry vanished mid-scan
-            continue
-        if abandoned_for > GENERATION_GC_SECONDS:
-            shutil.rmtree(entry, ignore_errors=True)
+        shutil.rmtree(entry, ignore_errors=True)
 
 
 def _looks_like_chroma_segment(name: str) -> bool:
@@ -4879,7 +5154,7 @@ def _action_index_files_protocol_v2(
         "migration",
         db_root,
     ):
-        return _action_index_files_protocol_v2_pinned(
+        result = _action_index_files_protocol_v2_pinned(
             project_root,
             repo_hash,
             worktree_hash,
@@ -4888,6 +5163,9 @@ def _action_index_files_protocol_v2(
             compatibility_descriptor,
             qos=qos,
         )
+    if result.get("published") or result.get("already_active"):
+        _prune_file_record_pool(resolve_file_index_v2_root(repo_hash, db_root=db_root))
+    return result
 
 
 def _action_index_files_protocol_v2_pinned(
@@ -4978,12 +5256,13 @@ def _action_index_files_protocol_v2_pinned(
         "files": sum(record["bucket"] == "code" for record in overlay_records),
         "files-docs": sum(record["bucket"] == "docs" for record in overlay_records),
     }
+    artifact_store = "records" if descriptor["writer_protocol"] == FILE_INDEX_V2_WRITER_PROTOCOL else "store"
     files_generation = {
-        "store": "store",
+        "store": artifact_store,
         "collection": V2_FILES_CODE_COLLECTION,
     }
     files_docs_generation = {
-        "store": "store",
+        "store": artifact_store,
         "collection": V2_FILES_DOCS_COLLECTION,
     }
     base_descriptor_identity = {
@@ -5273,44 +5552,50 @@ def _copy_unchanged_records(
 ) -> int:
     """FR-391: copy records whose content hash is unchanged from the previous
     verified generation into the staging store, reusing their embeddings."""
-    prev_entries = read_manifest(db_path, scope=scope)
-    prev_hashes = {
-        entry.get("path"): entry.get("content_hash") for entry in prev_entries
-    }
-    unchanged = [
-        rel
-        for rel, content_hash in new_hashes.items()
-        if content_hash and prev_hashes.get(rel) == content_hash
-    ]
-    if not unchanged:
-        return 0
-    prev_store = resolve_active_store(db_path)
-    if not (prev_store / "chroma.sqlite3").exists():
-        return 0
     copied = 0
     try:
         with acquire_lock(db_path, exclusive=False):
-            client, previous = _open_chroma_collection(prev_store, collection_name)
-            try:
-                batch = 64
-                for start in range(0, len(unchanged), batch):
-                    ids = unchanged[start : start + batch]
-                    got = previous.get(
-                        ids=ids, include=["embeddings", "documents", "metadatas"]
-                    )
-                    got_ids = got.get("ids") or []
-                    embeddings = got.get("embeddings")
-                    if not got_ids or embeddings is None:  # pragma: no cover - store drift
-                        continue
-                    staging_collection.upsert(
-                        ids=list(got_ids),
-                        embeddings=[list(vector) for vector in embeddings],
-                        documents=got.get("documents"),
-                        metadatas=got.get("metadatas"),
-                    )
-                    copied += len(got_ids)
-            finally:
-                _close_chroma_client(client)
+            prev_entries = read_manifest(db_path, scope=scope)
+            prev_hashes = {
+                entry.get("path"): entry.get("content_hash") for entry in prev_entries
+            }
+            unchanged = [
+                rel
+                for rel, content_hash in new_hashes.items()
+                if content_hash and prev_hashes.get(rel) == content_hash
+            ]
+            if not unchanged:
+                return 0
+            # Newest layer first: a record in the Issue delta supersedes its
+            # shadowed base copy.
+            for prev_store, hidden in reversed(_active_store_layers(db_path)):
+                ids_left = [record_id for record_id in unchanged if record_id not in hidden]
+                if not ids_left or not (prev_store / "chroma.sqlite3").exists():
+                    continue
+                client, previous = _open_chroma_collection(prev_store, collection_name)
+                try:
+                    found: set = set()
+                    batch = 64
+                    for start in range(0, len(ids_left), batch):
+                        ids = ids_left[start : start + batch]
+                        got = previous.get(
+                            ids=ids, include=["embeddings", "documents", "metadatas"]
+                        )
+                        got_ids = got.get("ids") or []
+                        embeddings = got.get("embeddings")
+                        if not got_ids or embeddings is None:  # pragma: no cover - store drift
+                            continue
+                        staging_collection.upsert(
+                            ids=list(got_ids),
+                            embeddings=[list(vector) for vector in embeddings],
+                            documents=got.get("documents"),
+                            metadatas=got.get("metadatas"),
+                        )
+                        copied += len(got_ids)
+                        found.update(got_ids)
+                finally:
+                    _close_chroma_client(client)
+                unchanged = [record_id for record_id in unchanged if record_id not in found]
     except Exception:
         # Reuse is an optimization: whatever was not copied is re-embedded.
         return copied
@@ -6130,6 +6415,167 @@ def action_index_memory_v2(
     )
 
 
+def _report_fields(value: Any, required: set[str], optional: set[str] = frozenset()) -> None:
+    if not isinstance(value, dict) or not required <= value.keys() <= required | optional:
+        raise ValueError("invalid versioned PM report fields")
+
+
+def _report_json_object(pairs: list[tuple[str, Any]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate PM report JSON field")
+        value[key] = item
+    return value
+
+
+def _validate_report_summary(summary: Any) -> None:
+    _report_fields(summary, {"result"}, {"impact", "owner", "next_action", "decision"})
+    values = [summary["result"]]
+    values.extend(summary[field] for field in ("impact", "owner", "next_action") if summary.get(field) is not None)
+    decision = summary.get("decision")
+    if decision is not None:
+        _report_fields(decision, {"question", "recommendation", "reason", "options"})
+        if not isinstance(decision["options"], list) or not 2 <= len(decision["options"]) <= 3:
+            raise ValueError("invalid PM report decision options")
+        values.extend([decision["question"], decision["recommendation"], decision["reason"], *decision["options"]])
+    if any(not isinstance(value, str) or not value.strip() or len(value) > 240
+           or any(ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u2028\u2029" for char in value) for value in values):
+        raise ValueError("invalid PM report summary")
+
+
+def _validate_report_text(value: Any) -> None:
+    if not isinstance(value.get("details"), str) or not isinstance(value.get("refs", []), list) or any(
+        not isinstance(ref, str) or not ref.strip() or len(ref.encode("utf-8")) > 2048
+        or any(ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u2028\u2029" for char in ref)
+        for ref in value.get("refs", [])
+    ):
+        raise ValueError("invalid PM report details or refs")
+    _validate_report_summary(value.get("summary"))
+
+
+def _report_submission_size(submission: dict) -> int:
+    """Measure validated input as Rust's compact typed JSON, without changing it."""
+    def summary(value: dict) -> dict:
+        return {**dict.fromkeys(("impact", "owner", "next_action", "decision")), **value}
+
+    def timestamp(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        seconds, nanoseconds = _parse_rfc3339_instant(value)
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        instant = epoch + datetime.timedelta(seconds=seconds)
+        base = instant.isoformat(timespec="seconds").removesuffix("+00:00")
+        # Chrono's Serde serializer uses UTC Z and AutoSi (0/3/6/9 digits).
+        if nanoseconds == 0:
+            return base + "Z"
+        digits = 3 if nanoseconds % 1_000_000 == 0 else 6 if nanoseconds % 1_000 == 0 else 9
+        return base + "." + f"{nanoseconds:09d}"[:digits] + "Z"
+
+    wire = {**submission, "events": [],
+            "digest": summary(submission["digest"]) if submission.get("digest") is not None else None}
+    for event in submission["events"]:
+        action = event["state"].get("action")
+        state = {**event["state"], "milestone_id": event["state"].get("milestone_id"),
+                 "action": {**action, "deadline": timestamp(action.get("deadline"))} if action is not None else None}
+        wire["events"].append({
+            **event, "state": state, "summary": summary(event["summary"]),
+            "refs": event.get("refs", []), "observed_at": timestamp(event.get("observed_at")),
+        })
+    return len(json.dumps(wire, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def _versioned_report_cards(envelope: Any, requests: set[str]) -> list[dict]:
+    """Check the journal wire and project saved cards, without rerunning posting policy."""
+    _report_fields(envelope, {"journal_schema", "payload", "payload_sha256"})
+    payload = envelope["payload"]
+    if (type(envelope["journal_schema"]) is not int or envelope["journal_schema"] != 2
+            or not isinstance(payload, str) or not isinstance(envelope["payload_sha256"], str)
+            or hashlib.sha256(payload.encode("utf-8")).hexdigest() != envelope["payload_sha256"]):
+        raise ValueError("invalid or unsupported PM report journal envelope")
+    transaction = json.loads(payload, parse_constant=_reject_non_json_constant, object_pairs_hook=_report_json_object)
+    _report_fields(transaction, {"submission", "receipt"})
+    submission, receipt = transaction["submission"], transaction["receipt"]
+    _report_fields(submission, {"schema_version", "request_id", "events"}, {"digest"})
+    _report_fields(receipt, {"schema_version", "request_id", "created_at", "decisions", "reports"})
+    request_id = submission["request_id"]
+    if (type(submission["schema_version"]) is not int or submission["schema_version"] != 1
+            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1
+            or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", request_id)
+            or receipt["request_id"] != request_id or request_id in requests
+            or not isinstance(receipt["created_at"], str)):
+        raise ValueError("invalid PM report submission or receipt identity")
+    _parse_rfc3339_instant(receipt["created_at"])
+    events, decisions, cards = submission["events"], receipt["decisions"], receipt["reports"]
+    if (not isinstance(events, list) or not 1 <= len(events) <= 32
+            or not isinstance(decisions, list) or len(decisions) != len(events) or not isinstance(cards, list)):
+        raise ValueError("invalid PM report transaction lists")
+    if submission.get("digest") is not None:
+        _validate_report_summary(submission["digest"])
+    event_keys, referenced = set(), set()
+    for event, decision in zip(events, decisions):
+        _report_fields(event, {"episode_id", "event_id", "expected_revision", "kind", "state", "summary", "details"}, {"refs", "observed_at"})
+        _report_fields(decision, {"episode_id", "event_id", "revision", "reason", "report_id"})
+        key = event["episode_id"], event["event_id"]
+        if (any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", value) for value in key)
+                or key in event_keys or key != (decision["episode_id"], decision["event_id"])
+                or type(event["expected_revision"]) is not int or not 0 <= event["expected_revision"] < (1 << 53) - 1
+                or type(decision["revision"]) is not int or not 1 <= decision["revision"] <= (1 << 53) - 1
+                or event["kind"] not in ("progress", "decision", "blocker")
+                or decision["reason"] not in ("unchanged", "immediate", "first", "changed", "resolved", "recurrence")
+                or decision["revision"] != event["expected_revision"] + int(decision["reason"] != "unchanged")):
+            raise ValueError("invalid PM report event or decision")
+        event_keys.add(key)
+        state = event["state"]
+        _report_fields(state, {"status", "severity", "impact"}, {"action", "milestone_id"})
+        if (state["status"] not in ("active", "waiting", "completed", "resolved", "unknown")
+                or state["severity"] not in ("routine", "important", "fatal", "blackout", "needs_human", "stale_unknown")
+                or state["impact"] not in ("none", "local", "project", "service", "data_loss")):
+            raise ValueError("invalid PM report material state")
+        action = state.get("action")
+        if action is not None:
+            _report_fields(action, {"id", "kind"}, {"deadline"})
+            if action["kind"] not in ("monitor", "retry", "respond", "decide", "intervene"):
+                raise ValueError("invalid PM report action")
+            if action.get("deadline") is not None:
+                if not isinstance(action["deadline"], str):
+                    raise ValueError("invalid PM report action deadline")
+                _parse_rfc3339_instant(action["deadline"])
+        for identity in (state.get("milestone_id"), action["id"] if action else None):
+            if identity is not None and (not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", identity)):
+                raise ValueError("invalid PM report material identity")
+        if event.get("observed_at") is not None:
+            if not isinstance(event["observed_at"], str):
+                raise ValueError("invalid PM report observation timestamp")
+            _parse_rfc3339_instant(event["observed_at"])
+        _validate_report_text(event)
+        if len(event["details"].encode("utf-8")) > 64 * 1024 or len(event.get("refs", [])) > 16:
+            raise ValueError("PM report event exceeds details or refs limit")
+        report_id = decision["report_id"]
+        if (decision["reason"] == "unchanged") != (report_id is None):
+            raise ValueError("invalid suppressed PM report decision")
+        if report_id is not None:
+            if not isinstance(report_id, str) or not report_id:
+                raise ValueError("invalid PM report reference")
+            referenced.add(report_id)
+    if _report_submission_size(submission) > 256 * 1024:
+        raise ValueError("PM report submission exceeds 256 KiB")
+    card_ids = set()
+    for card in cards:
+        _report_fields(card, {"id", "kind", "body", "created_at", "structured"}, {"question"})
+        if (not isinstance(card["id"], str) or not card["id"] or card["id"] in card_ids
+                or card["kind"] not in ("progress", "decision", "blocker") or card.get("question") is not None
+                or card["created_at"] != receipt["created_at"]):
+            raise ValueError("invalid versioned PM report card")
+        card_ids.add(card["id"])
+        _report_fields(card["structured"], {"summary", "details", "refs"})
+        _validate_report_text(card["structured"])
+    if card_ids != referenced:
+        raise ValueError("PM report receipt references do not match saved cards")
+    requests.add(request_id)
+    return cards
+
+
 def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Read posted Reports and instruction-backed Q&A for this project only.
 
@@ -6153,32 +6599,42 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
             if text and not text.endswith("\n"):
                 raise ValueError("incomplete PM report record (missing newline)")
             seen = set()
+            requests = set()
             for line in text.split("\n"):
                 if not line.strip():
                     continue
-                report = json.loads(line, parse_constant=_reject_non_json_constant)
-                if (
-                    not isinstance(report, dict)
-                    or any(not isinstance(report.get(field), str) for field in (
-                        "id", "kind", "body", "created_at"
-                    ))
-                    or not report["id"] or report["id"] in seen
-                    or report["kind"] not in {"progress", "decision", "blocker", "qa"}
-                    or (report.get("question") is not None and not isinstance(report["question"], str))
-                ):
-                    raise ValueError("invalid PM report record")
-                if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
-                    raise ValueError("PM report timestamp requires timezone")
-                seen.add(report["id"])
-                report["source"] = "pm_report"
-                report["issue_numbers"] = sorted({
-                    int(number) for prefix, number in re.findall(
-                        r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
-                        f"{report.get('question') or ''}\n{report['body']}",
-                        flags=re.IGNORECASE,
-                    ) if prefix.lower() in {"#", "/issues/"}
-                })
-                reports.append(report)
+                row = json.loads(line, parse_constant=_reject_non_json_constant, object_pairs_hook=_report_json_object)
+                cards = _versioned_report_cards(row, requests) if isinstance(row, dict) and "journal_schema" in row else [row]
+                for report in cards:
+                    if (
+                        not isinstance(report, dict)
+                        or any(not isinstance(report.get(field), str) for field in (
+                            "id", "kind", "body", "created_at"
+                        ))
+                        or not report["id"] or report["id"] in seen
+                        or report["kind"] not in ("progress", "decision", "blocker", "qa")
+                        or (report.get("question") is not None and not isinstance(report["question"], str))
+                    ):
+                        raise ValueError("invalid PM report record")
+                    if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
+                        raise ValueError("PM report timestamp requires timezone")
+                    structured = report.get("structured")
+                    detail_text = ""
+                    if structured is not None:
+                        _report_fields(structured, {"summary", "details", "refs"})
+                        _validate_report_text(structured)
+                        detail_text = "\n".join([structured["details"], *structured["refs"]])
+                    seen.add(report["id"])
+                    report["source"] = "pm_report"
+                    report["detail_document"] = detail_text
+                    report["issue_numbers"] = sorted({
+                        int(number) for prefix, number in re.findall(
+                            r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
+                            f"{report.get('question') or ''}\n{report['body']}\n{detail_text}",
+                            flags=re.IGNORECASE,
+                        ) if prefix.lower() in {"#", "/issues/"}
+                    })
+                    reports.append(report)
             entries.append({
                 "path": str(source), "mtime": int(source.stat().st_mtime),
                 "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
@@ -6205,7 +6661,7 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
                 report["kind"], report["created_at"], question, body,
                 " ".join(f"#{number}" for number in report["issue_numbers"]),
                 report.get("instruction_document", ""),
-            ]),
+            ] + ([report["detail_document"]] if report.get("detail_document") else [])),
             "metadata": {
                 "report_id": report["id"], "source": report["source"],
                 "kind": report["kind"], "report_type": "qa" if report["kind"] == "qa" else "digest",
@@ -7482,14 +7938,55 @@ def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
         return False, 0
     try:
         with acquire_lock(db_path, exclusive=False):
-            store = resolve_active_store(db_path)
-            client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
-            try:
-                return True, int(collection.count())
-            finally:
-                _close_chroma_client(client)
+            return True, _layered_document_count(db_path, scope)
     except Exception:
         return False, 0
+
+
+def _layered_document_count(db_path: Path, scope: str) -> int:
+    """Documents visible through the active layers. Caller holds a lock."""
+    total = 0
+    for store, hidden in _active_store_layers(db_path):
+        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
+        try:
+            total += int(collection.count())
+            if hidden:
+                total -= len(collection.get(ids=sorted(hidden), include=[])["ids"])
+        finally:
+            _close_chroma_client(client)
+    return total
+
+
+def _query_active_layers(
+    db_path: Path,
+    scope: str,
+    query: str,
+    fetch_n: int,
+    query_embedding: Optional[List[float]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Query every active layer and merge by distance. Caller holds a lock.
+
+    Base records shadowed by the Issue delta are over-fetched and dropped so
+    a changed or deleted Issue never surfaces with its stale base vector.
+    """
+    items: List[Dict[str, Any]] = []
+    count = 0
+    layers = _active_store_layers(db_path)
+    for store, hidden in layers:
+        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
+        try:
+            count += _safe_collection_count(collection) - len(hidden)
+            found = _search_collection_v2(
+                collection, query, fetch_n + len(hidden),
+                query_embedding=query_embedding, **_scope_record_filter(scope),
+            )
+        finally:
+            _close_chroma_client(client)
+        items.extend(item for item in found if item["id"] not in hidden)
+    if len(layers) > 1:
+        items.sort(key=lambda item: float("inf") if item.get("distance") is None else item["distance"])
+        items = items[:fetch_n]
+    return items, max(count, 0)
 
 
 def _scope_status_v2(
@@ -7855,6 +8352,18 @@ def _index_issues_v2_locked(
         mode = "full"
     new_entries = [{"path": record["id"],
                     "content_hash": _record_source_fingerprint([record])} for record in records]
+    new_hashes = {entry["path"]: entry["content_hash"] for entry in new_entries}
+    delta_plan = _plan_issue_delta(db_path, new_hashes) if mode == "incremental" else None
+    # Stage only what the new generation holds: the delta's changed records,
+    # or every record for a new base.
+    staged_records = (
+        [record for record in records if record["id"] in delta_plan["changed"]]
+        if delta_plan is not None else records
+    )
+    staging_fingerprint = (
+        f"{fingerprint}:delta:{delta_plan['base_generation']}"
+        if delta_plan is not None else fingerprint
+    )
 
     # Persist before staging. The held build lock distinguishes a live build
     # from an orphan left by process death. Normal yield/success clear it.
@@ -7872,13 +8381,13 @@ def _index_issues_v2_locked(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(records)
+    total = len(staged_records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
     if continuation is not None and (
         continuation.get("scope") != "issues"
-        or continuation.get("fingerprint") != fingerprint
+        or continuation.get("fingerprint") != staging_fingerprint
         or repair
     ):
         # The Issue cache moved since the parked build: restart staging.
@@ -7897,7 +8406,8 @@ def _index_issues_v2_locked(
                 staged_ids: set = set()
                 if continuation is None and mode == "incremental":
                     _copy_unchanged_records(db_path, "issues", collection, V2_ISSUES_COLLECTION,
-                                            {entry["path"]: entry["content_hash"] for entry in new_entries})
+                                            {record["id"]: new_hashes[record["id"]]
+                                             for record in staged_records})
                     staged_ids = set(collection.get().get("ids") or [])
                 if continuation is not None:
                     try:
@@ -7905,7 +8415,7 @@ def _index_issues_v2_locked(
                     except Exception:  # pragma: no cover - defensive chroma fallback
                         staged_ids = set()
                 pending: List[Dict[str, Any]] = [
-                    record for record in records if record["id"] not in staged_ids
+                    record for record in staged_records if record["id"] not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
                 _write_heavy_progress(
@@ -7925,7 +8435,7 @@ def _index_issues_v2_locked(
                     _write_continuation(
                         continuation_path,
                         scope="issues",
-                        fingerprint=fingerprint,
+                        fingerprint=staging_fingerprint,
                         done=done,
                         total=total,
                     )
@@ -8022,12 +8532,28 @@ def _index_issues_v2_locked(
             publication_error = error
 
     try:
+        # The layer descriptor travels inside the generation directory: a
+        # delta names its base and the base records it hides; a base records
+        # its content hashes so the next refresh can plan a delta over it.
+        if delta_plan is not None:
+            layer_name, layer_payload = ISSUE_DELTA_FILENAME, {
+                "schema_version": 1,
+                "base_generation": delta_plan["base_generation"],
+                "shadowed": delta_plan["shadowed"],
+                "document_count": staged_count,
+            }
+        else:
+            layer_name, layer_payload = ISSUE_BASE_MANIFEST_FILENAME, new_hashes
+        (staging / layer_name).write_text(
+            json.dumps(layer_payload, sort_keys=True, ensure_ascii=True), encoding="utf-8"
+        )
         publish = _publish_generation(
             db_path,
             staging,
             scope="issues",
             document_count=len(records),
             after_publish=_commit_issue_meta,
+            delta_of=delta_plan["base_generation"] if delta_plan is not None else None,
         )
         if publication_error is not None:
             raise publication_error
@@ -8043,8 +8569,8 @@ def _index_issues_v2_locked(
             allow_empty and published_health.get("reason") == "empty_corpus"
         ):
             actual = published_health.get("document_count", 0)
-            error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
-            return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
+            error_code = "COUNT_MISMATCH" if actual != len(records) else "INDEX_UNHEALTHY"
+            return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, len(records))
     except Exception as error:
         return _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total, error=str(error))
 
@@ -8161,15 +8687,20 @@ def _search_collection_v2(
     n_results: int,
     query_embedding: Optional[List[float]] = None,
     where: Optional[Dict[str, Any]] = None,
+    ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    if ids == []:
+        return []
     try:
         count = collection.count()
     except Exception:
         return []
     if count == 0:
         return []
-    actual_n = min(n_results, count)
+    actual_n = min(n_results, count, len(ids) if ids is not None else count)
     filters = {"where": where} if where is not None else {}
+    if ids is not None:
+        filters["ids"] = ids
     if query_embedding is not None:
         # Phase 70 AS-2: reuse one query embedding across every scope in a
         # batch request instead of re-encoding per scope.
@@ -8587,14 +9118,8 @@ def action_search_v2(
         emit_progress({"phase": "complete", "scope": scope, "total": build.get("indexed", 0)})
 
     with acquire_lock(db_path, exclusive=False):
-        store = resolve_active_store(db_path)
-        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
-        try:
-            collection_count = _safe_collection_count(collection)
-            fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(collection, query, fetch_n, **_scope_record_filter(scope))
-        finally:
-            _close_chroma_client(client)
+        fetch_n = _search_fetch_count(scope, n_results, match_mode)
+        items, collection_count = _query_active_layers(db_path, scope, query, fetch_n)
 
     # Issue #2979: an issues/specs search whose corpus is empty *because the
     # source issue cache was never populated for this repo-hash* must not
@@ -8820,6 +9345,8 @@ def _file_index_v2_view_contract_kind(descriptor: Any) -> str:
 
 def _file_index_v2_reader_compatible(compatibility: Dict[str, Any]) -> bool:
     expected = default_file_index_compatibility()
+    if compatibility.get("writer_protocol") == FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL:
+        expected["writer_protocol"] = FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL
     if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
         # The deterministic test runtime deliberately uses compact vectors;
         # every other semantic field remains reader-pinned.
@@ -8910,6 +9437,16 @@ def _inspect_file_index_v2_view(
             "reason": "overlay_descriptor_missing",
             "corrupt_component": overlay_dir,
         }
+    base_descriptor = _read_artifact_descriptor(base_dir)
+    memberships = {}
+    for role, artifact_dir, artifact_descriptor in (
+        ("base", base_dir, base_descriptor), ("overlay", overlay_dir, overlay_descriptor)
+    ):
+        if _uses_file_record_pool(artifact_descriptor):
+            entries = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))["entries"]
+            memberships[role + "_members"] = {
+                scope: _file_member_ids(entries, scope) for scope in ("files", "files-docs")
+            }
     return {
         "kind": "compatible",
         "view": {
@@ -8917,8 +9454,9 @@ def _inspect_file_index_v2_view(
             "view_dir": view_dir,
             "compatibility": descriptor["compatibility"],
             "visible_counts": descriptor["visible_counts"],
-            "base_store": base_dir / "store",
-            "overlay_store": overlay_dir / "store",
+            "base_store": _file_artifact_store(base_dir, base_descriptor),
+            "overlay_store": _file_artifact_store(overlay_dir, overlay_descriptor),
+            **memberships,
             "files_shadow": frozenset(overlay_descriptor["files_shadow"]),
             "files_docs_shadow": frozenset(
                 overlay_descriptor["files_docs_shadow"]
@@ -9209,6 +9747,8 @@ def _search_file_index_v2_scope(
         pinned_view["tombstones"]
     )
     target = max(1, _search_fetch_count(scope, n_results, match_mode))
+    base_members = pinned_view.get("base_members", {}).get(scope)
+    overlay_members = pinned_view.get("overlay_members", {}).get(scope)
     overlay_client = None
     base_client = None
     try:
@@ -9222,11 +9762,14 @@ def _search_file_index_v2_scope(
         # a query failure, never an empty result or a legacy-health fallback.
         int(overlay_collection.count())
         base_count = int(base_collection.count())
+        if base_members is not None:
+            base_count = len(base_members)
         overlay_items = _search_collection_v2(
             overlay_collection,
             query,
             target,
             query_embedding=query_embedding,
+            **({"ids": overlay_members} if overlay_members is not None else {}),
         )
         base_fetch = target
         ranked: List[Dict[str, Any]] = list(overlay_items)
@@ -9236,6 +9779,7 @@ def _search_file_index_v2_scope(
                 query,
                 base_fetch,
                 query_embedding=query_embedding,
+                **({"ids": base_members} if base_members is not None else {}),
             )
             visible_base = [
                 item
@@ -9267,6 +9811,10 @@ def _search_file_index_v2_scope(
         if overlay_client is not None:
             _close_chroma_client(overlay_client)
 
+    # Storage hashes select immutable members; term matching keeps the public
+    # file identity so an opaque hash can never become searchable text.
+    for item in ranked:
+        item["id"] = _file_index_v2_item_path(item)
     strict_items, suggestion_items = _apply_match_mode(ranked, query, match_mode)
     payload = {
         "results": _format_scope_results(scope, strict_items, n_results),
@@ -9292,16 +9840,10 @@ def _search_scope_collection(
     """Query one verified scope store (no health gating, no auto-build)."""
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     with acquire_lock(db_path, exclusive=False):
-        store = resolve_active_store(db_path)
-        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
-        try:
-            fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(
-                collection, query, fetch_n, query_embedding=query_embedding,
-                **_scope_record_filter(scope),
-            )
-        finally:
-            _close_chroma_client(client)
+        fetch_n = _search_fetch_count(scope, n_results, match_mode)
+        items, _ = _query_active_layers(
+            db_path, scope, query, fetch_n, query_embedding=query_embedding
+        )
     strict_items, suggestion_items = _apply_match_mode(items, query, match_mode)
     payload = {
         _scope_result_key(scope): _format_scope_results(scope, strict_items, n_results),

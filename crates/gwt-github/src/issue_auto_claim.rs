@@ -85,7 +85,7 @@ impl ClaimPayload {
 pub fn render_claim_comment(claim: &ClaimComment) -> String {
     let payload =
         serde_json::to_string_pretty(&ClaimPayload::from(claim)).expect("claim payload serializes");
-    format!("{CLAIM_BEGIN}\n```json\n{payload}\n```\n{CLAIM_END}\n\nManaged by gwt Issue Monitor.")
+    format!("{CLAIM_BEGIN}\n```json\n{payload}\n```\n{CLAIM_END}\n\nManaged by gwt Issues.")
 }
 
 pub fn parse_claim_comment(
@@ -245,6 +245,27 @@ pub fn acquire_claim_mutation<C: IssueClient + ?Sized>(
     let mut own_claim = claim;
     own_claim.comment_id = Some(created.id);
     resolve_claim_after_mutation(client, issue_number, own_claim, now)
+}
+
+/// Reconcile an earlier acquisition using only readback. A missing or losing
+/// exact claim remains unknown; observing it never refreshes or terminalizes it.
+pub fn observe_claim_acquisition<C: IssueClient + ?Sized>(
+    client: &C,
+    issue_number: IssueNumber,
+    requested: &ClaimComment,
+    now: &str,
+) -> OwnerMutationResult<ClaimAcquireOutcome> {
+    let claims =
+        fetch_claims(client, issue_number).map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
+    match classify_claim_resolution(&claims, requested, issue_number, now) {
+        ClaimResolution::Acquired(claim) => Ok(ClaimAcquireOutcome::Acquired(claim)),
+        ClaimResolution::Blocked(claim) => Ok(ClaimAcquireOutcome::Blocked(claim)),
+        ClaimResolution::Lost(_) | ClaimResolution::NoWinner => {
+            Err(OwnerMutationError::RemoteOutcomeUnknown(
+                ApiError::Unexpected("claim acquisition is not confirmed by readback".into()),
+            ))
+        }
+    }
 }
 
 /// Renew an existing Active claim after the caller proves its execution is live.

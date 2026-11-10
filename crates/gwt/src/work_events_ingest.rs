@@ -47,7 +47,8 @@ const SOURCE_LIST: &str = "source-list:v1";
 
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
-const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v10-legacy-log-metadata-cache";
+const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str =
+    "source-context-v11-source-relative-event-containers";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -154,14 +155,74 @@ impl WorkEventsIngestSummary {
 
 #[derive(Debug)]
 struct PendingWorkEventsSource {
-    key: String,
-    fingerprint: String,
+    key: SourceKey,
+    fingerprint: [u8; 32],
     content: Arc<str>,
     container: Option<Arc<WorkspaceExecutionContainerRef>>,
     reload_from_worktree: bool,
 }
 
-type SourceFingerprints = Vec<(String, String)>;
+/// The same event shard appears in many worktree/ref groups. Keep the exact
+/// group and suffix independently so those aliases can share their text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SourceKey {
+    group: Arc<str>,
+    suffix: Arc<str>,
+}
+
+impl SourceKey {
+    fn capture(key: &str, parts: &mut HashSet<Arc<str>>) -> Self {
+        let (group, suffix) = Self::split(key).expect("generated Work source key has its group");
+        let mut intern = |part: &str| {
+            if let Some(existing) = parts.get(part) {
+                return Arc::clone(existing);
+            }
+            let shared: Arc<str> = Arc::from(part);
+            parts.insert(Arc::clone(&shared));
+            shared
+        };
+        Self {
+            group: intern(group),
+            suffix: intern(suffix),
+        }
+    }
+
+    fn split(key: &str) -> Option<(&str, &str)> {
+        let group = source_group(key);
+        Some((group, key.strip_prefix(group)?))
+    }
+
+    fn parts(&self) -> (&str, &str) {
+        (&self.group, &self.suffix)
+    }
+
+    fn restore(&self) -> String {
+        let mut key = String::with_capacity(self.group.len() + self.suffix.len());
+        key.push_str(&self.group);
+        key.push_str(&self.suffix);
+        key
+    }
+}
+
+/// Only freshly derived SHA-256 values enter this representation. Persisted
+/// fingerprints remain arbitrary strings at the existing store boundary.
+fn compact_source_fingerprint(fingerprint: &str) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(fingerprint, &mut bytes).expect("derived source fingerprint is SHA-256");
+    bytes
+}
+
+fn restore_source_fingerprint(fingerprint: &[u8; 32]) -> String {
+    hex::encode(fingerprint)
+}
+
+fn source_fingerprint_matches(fingerprint: &[u8; 32], stored: &str) -> bool {
+    let mut encoded = [0; 64];
+    hex::encode_to_slice(fingerprint, &mut encoded).expect("SHA-256 hex buffer has fixed size");
+    stored.as_bytes() == encoded
+}
+
+type SourceFingerprints = Vec<(SourceKey, [u8; 32])>;
 type ReloadedWorkEventsSources = (Vec<SharedWorkEventsSource>, SourceFingerprints);
 
 #[cfg(test)]
@@ -364,6 +425,7 @@ fn work_event_source_kind_for_ref_path(path: &str) -> gwt_core::Result<WorkEvent
 fn load_pending_sources_for_rebuild(
     pending_sources: Vec<PendingWorkEventsSource>,
     worktree_entries: &[gwt::worktree_inventory::WorktreeEntry],
+    source_key_parts: &mut HashSet<Arc<str>>,
 ) -> gwt_core::Result<ReloadedWorkEventsSources> {
     let mut contents = Vec::with_capacity(pending_sources.len());
     let mut fingerprints = Vec::with_capacity(pending_sources.len());
@@ -398,8 +460,11 @@ fn load_pending_sources_for_rebuild(
             // The scan took metadata before this content read: a write racing
             // the read leaves the older fingerprint behind, so the next pass
             // reads the source again.
-            let fingerprint = source_fingerprint(&source.metadata, source.container.as_deref());
-            let key = source.key();
+            let fingerprint = compact_source_fingerprint(&source_fingerprint(
+                &source.metadata,
+                source.container.as_deref(),
+            ));
+            let key = SourceKey::capture(&source.key(), source_key_parts);
             let cached = prelock_reads
                 .remove(&key)
                 .filter(|(previous, _)| previous == &fingerprint)
@@ -552,7 +617,30 @@ where
     phases.mark("state_load");
     let projection_requires_rebuild =
         match gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path) {
-            Ok(Some(_)) => false,
+            Ok(Some(_)) => {
+                let close_path = work_items_path.with_file_name("work-events-closed.jsonl");
+                match gwt_core::workspace_projection::workspace_close_projection_needs_rebuild(
+                    work_items_path,
+                    &close_path,
+                ) {
+                    Ok(false) => false,
+                    Ok(true) => {
+                        summary.load_error = Some(gwt_core::WorkspaceStateLoadError {
+                            path: work_items_path.with_extension("close-proofs.json"),
+                            kind: gwt_core::WorkspaceStateLoadErrorKind::Malformed,
+                            message:
+                                "close projection proof requires a complete Work event rebuild"
+                                    .into(),
+                        });
+                        true
+                    }
+                    Err(error) => {
+                        summary.load_error =
+                            Some(crate::workspace_state_load_error(project_root, error));
+                        return summary;
+                    }
+                }
+            }
             Ok(None) => true,
             Err(error) => {
                 let error = crate::workspace_state_load_error(project_root, error);
@@ -568,6 +656,7 @@ where
     let mut rebuild_required = projection_requires_rebuild
         || !store.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
     let mut pending_sources = Vec::new();
+    let mut source_key_parts = HashSet::new();
     let mut source_discovery_failed = false;
     // Issue #4397: the state is kept per source group (one per worktree, one
     // per origin ref). A group whose snapshot matches the stored one is
@@ -641,10 +730,15 @@ where
             if !rebuild_required && !new_local_keys.contains(key) {
                 continue;
             }
-            let fingerprint = discovered
-                .get(key)
-                .cloned()
-                .unwrap_or_else(|| source_fingerprint_in_context(&source.metadata, &group.context));
+            let fingerprint = discovered.get(key).map_or_else(
+                || {
+                    compact_source_fingerprint(&source_fingerprint_in_context(
+                        &source.metadata,
+                        &group.context,
+                    ))
+                },
+                |fingerprint| compact_source_fingerprint(fingerprint),
+            );
             before_source_read(&source.events_path);
             let content = match read_shared_work_event_source(
                 &source.events_path,
@@ -659,7 +753,7 @@ where
                 }
             };
             pending_sources.push(PendingWorkEventsSource {
-                key: key.clone(),
+                key: SourceKey::capture(key, &mut source_key_parts),
                 fingerprint,
                 content,
                 container: source.container.clone(),
@@ -806,8 +900,8 @@ where
                                 }
                             };
                             pending_sources.push(PendingWorkEventsSource {
-                                key,
-                                fingerprint,
+                                key: SourceKey::capture(&key, &mut source_key_parts),
+                                fingerprint: compact_source_fingerprint(&fingerprint),
                                 content,
                                 container: scan.container.clone(),
                                 reload_from_worktree: false,
@@ -877,12 +971,13 @@ where
 
     if let Some(error) = summary.load_error.as_mut() {
         // Healthy projections can reflect intentional source deletion. A
-        // corrupt projection cannot prove what a missing or truncated source
-        // held, so retain its bytes unless every previously recorded source
-        // is still available unchanged. Newly discovered sources may be added.
+        // damaged projection or close proof cannot prove what a missing or
+        // truncated source held, so retain its bytes unless every previously
+        // recorded source is still available unchanged. Newly discovered
+        // sources may be added.
         let available = pending_sources
             .iter()
-            .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
+            .map(|source| (source.key.parts(), &source.fingerprint))
             .collect::<HashMap<_, _>>();
         let known_groups = store
             .group_names()
@@ -892,7 +987,9 @@ where
         let shared_incomplete = known_groups.iter().any(|group| {
             store.group_sources(group).is_none_or(|sources| {
                 sources.iter().any(|(key, fingerprint)| {
-                    available.get(key.as_str()).copied() != Some(fingerprint.as_str())
+                    !SourceKey::split(key)
+                        .and_then(|key| available.get(&key))
+                        .is_some_and(|current| source_fingerprint_matches(current, fingerprint))
                 })
             })
         });
@@ -938,16 +1035,17 @@ where
         rebuild_work_events_with_shared_loader(
             work_items_path,
             || {
-                // Only malformed recovery needs both generations for comparison.
+                // Projection/proof recovery needs both generations for comparison.
                 let expected_sources = summary.load_error.as_ref().map(|_| {
                     pending_sources
                         .iter()
-                        .map(|source| (source.key.clone(), source.fingerprint.clone()))
+                        .map(|source| (source.key.clone(), source.fingerprint))
                         .collect::<SourceFingerprints>()
                 });
                 let loaded = load_pending_sources_for_rebuild(
                     std::mem::take(&mut pending_sources),
                     worktree_entries,
+                    &mut source_key_parts,
                 )?;
                 if let Some((error, expected_sources)) =
                     summary.load_error.as_ref().zip(expected_sources.as_ref())
@@ -957,12 +1055,11 @@ where
                     let available = loaded
                         .1
                         .iter()
-                        .map(|(key, value)| (key, value))
+                        .map(|(key, value)| (key.parts(), value))
                         .collect::<HashMap<_, _>>();
-                    if expected_sources
-                        .iter()
-                        .any(|(key, fingerprint)| available.get(key).copied() != Some(fingerprint))
-                    {
+                    if expected_sources.iter().any(|(key, fingerprint)| {
+                        available.get(&key.parts()).copied() != Some(fingerprint)
+                    }) {
                         let mut error = error.clone();
                         error.message.push_str(
                             "; recovery refused: an event source disappeared or changed before intake",
@@ -990,6 +1087,7 @@ where
                 Ok(loaded)
             },
             close_path.as_deref(),
+            summary.load_error.is_some(),
         )
     } else {
         // A close writer can append successfully and fail to save Works while
@@ -1014,13 +1112,14 @@ where
                 report,
                 pending_sources
                     .iter()
-                    .map(|source| (source.key.clone(), source.fingerprint.clone()))
+                    .map(|source| (source.key.clone(), source.fingerprint))
                     .collect(),
                 local_fingerprint,
             )
         })
     };
     drop(pending_sources);
+    drop(source_key_parts);
     phases.mark("intake");
     match intake {
         Ok((report, shared_fingerprints, local_fingerprint)) => {
@@ -1135,12 +1234,12 @@ fn group_additions<'a>(
 fn record_scanned_groups(
     store: &mut WorkEventsIntakeStore,
     scanned_groups: &BTreeMap<String, ScannedGroup>,
-    ingested: &[(String, String)],
+    ingested: &[(SourceKey, [u8; 32])],
 ) {
-    let mut ingested_by_group = HashMap::<&str, Vec<&(String, String)>>::new();
+    let mut ingested_by_group = HashMap::<&str, Vec<&(SourceKey, [u8; 32])>>::new();
     for source in ingested {
         ingested_by_group
-            .entry(source_group(&source.0))
+            .entry(&source.0.group)
             .or_default()
             .push(source);
     }
@@ -1154,7 +1253,7 @@ fn record_scanned_groups(
         let mut updated = (!additions.is_empty()).then(|| previous.clone());
         if let Some(sources) = updated.as_mut() {
             for (key, fingerprint) in additions {
-                sources.insert(key.clone(), fingerprint.clone());
+                sources.insert(key.restore(), restore_source_fingerprint(fingerprint));
             }
         }
         let sources = updated.as_ref().unwrap_or(previous);
@@ -1184,13 +1283,15 @@ fn record_rebuilt_groups(
     store: &mut WorkEventsIntakeStore,
     discovered_groups: &BTreeMap<String, (String, bool)>,
     scanned_groups: &BTreeMap<String, ScannedGroup>,
-    ingested: Vec<(String, String)>,
+    ingested: SourceFingerprints,
 ) {
     store.clear();
     let mut groups = BTreeMap::<String, BTreeMap<String, String>>::new();
     for (key, fingerprint) in ingested {
-        let group = source_group(&key).to_owned();
-        groups.entry(group).or_default().insert(key, fingerprint);
+        groups
+            .entry(key.group.to_string())
+            .or_default()
+            .insert(key.restore(), restore_source_fingerprint(&fingerprint));
     }
     for name in discovered_groups.keys() {
         groups.entry(name.clone()).or_default();
@@ -1397,15 +1498,13 @@ fn worktree_event_sources(
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
     let mut sources = Vec::new();
     for entry in entries {
-        let container = entry.branch.clone().map(|branch| {
-            Arc::new(WorkspaceExecutionContainerRef {
-                branch: Some(branch),
-                worktree_path: Some(entry.path.clone()),
-                pr_number: None,
-                pr_url: None,
-                pr_state: None,
-            })
-        });
+        let container = Some(Arc::new(WorkspaceExecutionContainerRef {
+            branch: entry.branch.clone(),
+            worktree_path: Some(entry.path.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }));
         let legacy_path = entry.path.join(EVENTS_TREE_PATH);
         match std::fs::symlink_metadata(&legacy_path) {
             Ok(metadata) => sources.push(WorkEventsSource {
@@ -1627,10 +1726,15 @@ mod tests {
 
     #[test]
     fn rebuild_loader_transfers_ref_source_allocations() {
-        let key = "ref:refs/remotes/origin/main:.gwt/work/events.jsonl".to_string();
-        let fingerprint = "validated-ref-fingerprint".to_string();
-        let key_allocation = key.as_ptr();
-        let fingerprint_allocation = fingerprint.as_ptr();
+        let mut parts = HashSet::new();
+        let key = SourceKey::capture(
+            "ref:refs/remotes/origin/main:.gwt/work/events.jsonl",
+            &mut parts,
+        );
+        let fingerprint =
+            compact_source_fingerprint(&source_fingerprint_in_context("raw", "context"));
+        let group_allocation = Arc::clone(&key.group);
+        let suffix_allocation = Arc::clone(&key.suffix);
         let pending = vec![PendingWorkEventsSource {
             key,
             fingerprint,
@@ -1639,12 +1743,48 @@ mod tests {
             reload_from_worktree: false,
         }];
 
-        let (contents, fingerprints) = load_pending_sources_for_rebuild(pending, &[]).unwrap();
+        let (contents, fingerprints) =
+            load_pending_sources_for_rebuild(pending, &[], &mut parts).unwrap();
 
         assert_eq!(contents.len(), 1);
         assert_eq!(fingerprints.len(), 1);
-        assert_eq!(fingerprints[0].0.as_ptr(), key_allocation);
-        assert_eq!(fingerprints[0].1.as_ptr(), fingerprint_allocation);
+        assert!(Arc::ptr_eq(&fingerprints[0].0.group, &group_allocation));
+        assert!(Arc::ptr_eq(&fingerprints[0].0.suffix, &suffix_allocation));
+        assert_eq!(fingerprints[0].1, fingerprint);
+    }
+
+    #[test]
+    fn pending_source_metadata_shares_alias_text_and_round_trips() {
+        let mut parts = HashSet::new();
+        let first_key = r"worktree:C:\repo\one\.gwt\work\events\ab\abcd.jsonl";
+        let second_key = r"worktree:C:\repo\two\.gwt\work\events\ab\abcd.jsonl";
+        let first = SourceKey::capture(first_key, &mut parts);
+        let second = SourceKey::capture(second_key, &mut parts);
+        let repeated = SourceKey::capture(first_key, &mut parts);
+        assert!(
+            Arc::ptr_eq(&first.suffix, &second.suffix),
+            "aliases must share the shard suffix"
+        );
+        assert!(
+            Arc::ptr_eq(&first.group, &repeated.group),
+            "sources must share the group prefix"
+        );
+        assert_eq!(first.restore(), first_key);
+        assert_eq!(second.restore(), second_key);
+        let ref_key = "ref:refs/remotes/origin/topic:.gwt/work/events/ab/abcd.jsonl";
+        assert_eq!(SourceKey::capture(ref_key, &mut parts).restore(), ref_key);
+        let original = source_fingerprint_in_context("raw", "context");
+        let compact = compact_source_fingerprint(&original);
+        assert_eq!(restore_source_fingerprint(&compact), original);
+        assert!(source_fingerprint_matches(&compact, &original));
+        assert!(!source_fingerprint_matches(
+            &compact,
+            &original.to_uppercase()
+        ));
+        assert!(!source_fingerprint_matches(
+            &compact,
+            "legacy-arbitrary-fingerprint"
+        ));
     }
 
     #[test]
@@ -3655,6 +3795,122 @@ mod tests {
         assert!(result.load_error.is_some());
         assert_eq!(std::fs::read(&works).unwrap(), corrupt);
         assert_eq!(load_work_events_intake_state(&state), intake_before);
+    }
+
+    #[test]
+    fn missing_close_proof_rebuilds_current_intake_from_complete_history() {
+        use gwt_core::workspace_projection::{
+            load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
+            MAX_INLINE_WORK_EVENTS,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let events = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-11-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut shared = vec![WorkEvent::new(WorkEventKind::Start, "closed-work", start)];
+        for index in 0..=MAX_INLINE_WORK_EVENTS {
+            shared.push(WorkEvent::new(
+                WorkEventKind::Update,
+                "closed-work",
+                start + chrono::Duration::seconds(index as i64 + 2),
+            ));
+        }
+        let shared_bytes = shared
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        std::fs::write(&events, &shared_bytes).unwrap();
+        let works = temp.path().join("state/works.json");
+        let state = temp.path().join("state/work-events-intake.json");
+        let closes = temp.path().join("state/work-events-closed.jsonl");
+        std::fs::create_dir_all(closes.parent().unwrap()).unwrap();
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            "closed-work",
+            start + chrono::Duration::seconds(1),
+        );
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        let close_bytes = format!("{}\n", serde_json::to_string(&done).unwrap());
+        std::fs::write(&closes, &close_bytes).unwrap();
+        assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+        let current = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert!(current.work_items[0]
+            .events
+            .iter()
+            .all(|event| event.id != done.id));
+        assert!(!ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
+
+        let proof = works.with_extension("close-proofs.json");
+        std::fs::remove_file(&proof).unwrap();
+        let works_before = std::fs::read(&works).unwrap();
+        let state_before = intake_state_files(&state);
+        // Missing known history is not permission to replace a valid Work.
+        let saved_events = temp.path().join("saved-events.jsonl");
+        std::fs::rename(&events, &saved_events).unwrap();
+        let refused = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(!refused.projection_rebuilt, "{refused:?}");
+        assert!(refused.load_error.is_some(), "{refused:?}");
+        assert_eq!(std::fs::read(&works).unwrap(), works_before);
+        assert_eq!(intake_state_files(&state), state_before);
+        assert!(!proof.exists());
+        std::fs::rename(&saved_events, &events).unwrap();
+
+        let repaired = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(repaired.projection_rebuilt, "{repaired:?}");
+        assert!(repaired.load_error.is_none(), "{repaired:?}");
+        let restored = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.work_items[0].status_category,
+            WorkspaceStatusCategory::Done
+        );
+        assert_eq!(restored.work_items[0].completed_at, Some(done.updated_at));
+        assert!(proof.is_file());
+        assert_eq!(std::fs::read_to_string(&events).unwrap(), shared_bytes);
+        assert_eq!(std::fs::read_to_string(&closes).unwrap(), close_bytes);
+        let no_op = ingest_project_work_events_paths(&repo, &works, &state);
+        assert!(!no_op.projection_rebuilt, "{no_op:?}");
+        assert_eq!(no_op.sources_ingested, 0);
+
+        // A proof lost after admission must not be replaced by either a
+        // partial incremental fold or a rebuild selected by source deletion.
+        for delete_source in [false, true] {
+            let works_before = std::fs::read(&works).unwrap();
+            let state_before = intake_state_files(&state);
+            if delete_source {
+                std::fs::rename(&events, &saved_events).unwrap();
+            } else {
+                write_shard(&repo, "pending-proof-event", "pending-work");
+            }
+            let raced =
+                ingest_project_work_events_paths_with_before_intake(&repo, &works, &state, || {
+                    std::fs::remove_file(&proof).unwrap()
+                });
+            assert_eq!(
+                raced.sources_ingested, 0,
+                "delete={delete_source}: {raced:?}"
+            );
+            assert_eq!(std::fs::read(&works).unwrap(), works_before);
+            assert_eq!(intake_state_files(&state), state_before);
+            assert!(!proof.exists());
+            if delete_source {
+                std::fs::rename(&saved_events, &events).unwrap();
+            }
+            let retry = ingest_project_work_events_paths(&repo, &works, &state);
+            assert!(retry.projection_rebuilt, "{retry:?}");
+            assert!(retry.load_error.is_none(), "{retry:?}");
+            assert_eq!(std::fs::read_to_string(&closes).unwrap(), close_bytes);
+        }
     }
 
     #[test]

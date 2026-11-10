@@ -25,6 +25,46 @@ fn parse(agent: AgentId, records: &[Value]) -> PmConversationSnapshot {
 }
 
 #[test]
+fn native_record_excerpts_project_only_visible_conversation_text() {
+    for (agent, fixture, user_id, assistant_id, user_text) in [
+        (
+            AgentId::ClaudeCode,
+            include_bytes!("fixtures/claude-chat.jsonl").as_slice(),
+            "claude-human",
+            "claude-answer",
+            "Human question",
+        ),
+        (
+            AgentId::Codex,
+            include_bytes!("fixtures/codex-chat.jsonl").as_slice(),
+            "codex-human",
+            "codex-answer",
+            "Human question\nAdditional context",
+        ),
+    ] {
+        let result = parse_native(&agent, fixture, "conversation", Path::new("/work/project"));
+        assert_eq!(result.availability, PmConversationAvailability::Ready);
+        assert_eq!(result.conversation_id.as_deref(), Some("conversation"));
+        assert_eq!(
+            result.messages,
+            vec![
+                PmConversationMessage {
+                    id: user_id.into(),
+                    role: PmConversationRole::User,
+                    text: user_text.into(),
+                },
+                PmConversationMessage {
+                    id: assistant_id.into(),
+                    role: PmConversationRole::Assistant,
+                    text: "Assistant reply".into(),
+                },
+            ],
+            "{agent:?} must exclude internal records while preserving text block order"
+        );
+    }
+}
+
+#[test]
 fn claude_keeps_text_and_ignores_tools_meta_and_silent_cycles() {
     let mut meta = claude_message("meta", "user", json!("hidden reminder"));
     meta["isMeta"] = json!(true);
@@ -101,6 +141,27 @@ fn codex_uses_response_items_only_and_deduplicates_item_ids() {
 }
 
 #[test]
+fn codex_excludes_explicit_nonhuman_origins() {
+    let row = json!({"type":"response_item","payload":{"type":"message","id":"human",
+        "role":"user","origin":{"kind":"human"},"content":[{"type":"input_text","text":"A real question"}]}});
+    let mut outer = row.clone();
+    outer["payload"]["id"] = json!("outer-automation");
+    outer["origin"] = json!({"kind":"task-notification"});
+    let mut inner = row.clone();
+    inner["payload"]["id"] = json!("inner-automation");
+    inner["payload"]["origin"] = json!({"kind":"task-notification"});
+    let result = parse(AgentId::Codex, &[codex_meta(), row, outer, inner]);
+    assert_eq!(
+        result
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["human"]
+    );
+}
+
+#[test]
 fn metadata_identity_is_required_before_text_is_disclosed() {
     let mut wrong = codex_meta();
     wrong["payload"]["id"] = json!("foreign");
@@ -141,6 +202,9 @@ fn missing_conversation_and_unsupported_provider_have_explicit_states() {
 #[test]
 fn known_internal_prompts_are_hidden_without_erasing_human_mentions() {
     let wake = format!("[gwt] Scheduled supervision tick: reconcile now — read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close). {} {} {}", crate::pm_registry::PM_STEERING_WAKE_CLAUSE, crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE, crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE);
+    let portable_wake = format!("[gwt] Scheduled supervision tick: reconcile now: read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close). {} {} {}", crate::pm_registry::PM_STEERING_WAKE_CLAUSE, crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE, crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE);
+    let quoted_wake = format!("Explain this notification: {portable_wake}");
+    let mixed_wake = format!("{portable_wake}\nこれは何を意味しますか？");
     let delivery = crate::pm_registry::protected_pm_delivery_prompt(
         "00000000-0000-4000-8000-000000000001",
         "injected",
@@ -151,8 +215,11 @@ fn known_internal_prompts_are_hidden_without_erasing_human_mentions() {
         &[
             claude_message("bootstrap", "user", json!("$gwt-pm")),
             claude_message("wake", "user", json!(wake)),
+            claude_message("portable-wake", "user", json!(portable_wake)),
             claude_message("delivery", "user", json!(delivery)),
             claude_message("human", "user", json!("[gwt] please explain this prefix")),
+            claude_message("quoted-wake", "user", json!(quoted_wake)),
+            claude_message("mixed-wake", "user", json!(mixed_wake)),
         ],
     );
     assert_eq!(
@@ -161,7 +228,11 @@ fn known_internal_prompts_are_hidden_without_erasing_human_mentions() {
             .iter()
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>(),
-        ["[gwt] please explain this prefix"]
+        [
+            "[gwt] please explain this prefix",
+            quoted_wake.as_str(),
+            mixed_wake.as_str(),
+        ]
     );
 }
 

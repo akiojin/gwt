@@ -65,7 +65,7 @@ const GROK_COMMON_EFFORTS = [
   "max",
 ];
 
-function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
+function fixture({ confirmAnswer = true, mounts = 1, executionModel } = {}) {
   const { document } = parseHTML(html);
   document.getElementById("pm-settings-panel")?.remove();
   const sent = [];
@@ -78,6 +78,7 @@ function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   };
   const panel = createPmSettingsPanel({
     document,
+    executionModel, projectTitle: "Alpha",
     scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
     send: (event) => sent.push(event),
     confirm: (message) => {
@@ -176,7 +177,7 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   panel.applyStatus(RUNNING_STATUS);
   const view = views[0];
   for (const [role, meaning] of [
-    ["pm-autonomy-status", /coordination.*Issue Monitor/i],
+    ["pm-autonomy-status", /coordination.*Issues/i],
     ["pm-pause-toggle", /keeping the Project Manager available/i],
     ["pm-agent-select", /after restart/i], ["pm-model-input", /after restart/i],
     ["pm-effort-select", /after restart/i], ["pm-loop-interval", /Minimum: 10 seconds/i],
@@ -617,7 +618,7 @@ test("#3812 AC-5: Pause/Resume is unavailable before project hydration", () => {
   assert.deepEqual(sent, []);
 });
 
-test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Monitor", () => {
+test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Issues", () => {
   const { document, views, sent, panel } = fixture({ mounts: 2 });
   panel.applyStatus({ ...RUNNING_STATUS, is_running: false, paused: false });
   const toggle = required(views[0], '[data-role="pm-pause-toggle"]');
@@ -879,4 +880,15 @@ test("FR-132: app owns one controller and applies pm_status to it", () => {
 test("FR-132: command palette exposes the pm-settings command", () => {
   assert.match(operatorShellJs, /id: "pm-settings"/);
   assert.match(appJs, /case "pm-settings":[\s\S]{0,320}return;/);
+});
+
+
+test("PM settings shows the selected project execution separately from profile defaults", async () => {
+  const { createProjectExecutionPolicyModel } = await import('../project-execution-policy-model.js');
+  const policy = createProjectExecutionPolicyModel('alpha');
+  const { views, sent } = fixture({ executionModel: policy.model, mounts: 2 });
+  for (const view of views) assert.match(view.querySelector('[data-project-execution-status]')?.textContent || '', /Alpha.*Unknown/);
+  policy.applyStatus({ project_key: 'alpha', generation: 1, revision: 2, choice: 'continue', effective_state: 'waiting', start_reason: 'user_continue', observed_at: '2026-11-03T10:00:00Z' });
+  for (const view of views) assert.match(view.querySelector('[data-project-execution-status]').textContent, /Waiting.*Continue/);
+  assert.deepEqual(sent, []);
 });

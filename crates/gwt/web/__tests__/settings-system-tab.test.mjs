@@ -16,8 +16,9 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
-import { setControlExplanation } from "../control-explanations.js";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -57,18 +58,26 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
-function createSettingsHarness({ scheduleFrame } = {}) {
+function createSettingsHarness({ scheduleFrame, onSend, activeProjectTab = () => ({ project_root: "/projects/A", title: "Project A" }) } = {}) {
   const { document, window } = parseHTML("<html><body><main></main></body></html>");
   const sent = [];
-  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const frameScheduler = scheduleFrame || (callback => { frames.add(callback); return () => frames.delete(callback); });
+  const rosterModel = createUiStateStore({ revision: 1, members: [
+    { member_id: "member-codex", name: "Codex member", agent_id: "codex", enabled: true },
+    { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
+  ] }, { scheduleFrame: frameScheduler });
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason,
   );
   const surface = factory({
-    scheduleFrame,
-    send: message => sent.push(message),
+    scheduleFrame: frameScheduler,
+    rosterModel,
+    send: message => { const result = onSend?.(message); sent.push(message); return result; },
     createNode(tag, className, text) {
       const node = document.createElement(tag);
       if (className) node.className = className;
@@ -76,18 +85,187 @@ function createSettingsHarness({ scheduleFrame } = {}) {
       return node;
     },
     focusWindowLocally() {},
-    activeProjectTab: () => ({ project_root: "/projects/A", title: "Project A" }),
+    activeProjectTab,
     focusOrSpawnPreset() {}, renderUsagePanel() {},
     indexStatusByProjectRoot: new Map(), pmSettingsPanel: { mount() {} },
     mountIssues(_windowData, host) {
-      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>';
     },
   });
   const body = document.querySelector("main");
-  return { surface, body, document, window, sent };
+  return { surface, body, document, window, sent, flush };
 }
 
-test("Custom Agent replies commit immutable snapshots shared by all mounts and candidates", () => {
+test("Hook Center is a project Settings tab that starts a read-only audit on selection", () => {
+  const { surface, body, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const tab = body.querySelector('[data-settings-tab="hooks"]');
+  assert.ok(tab, "Hook Center tab must be available in project Settings");
+  assert.equal(tab.textContent, "Hook Center");
+  assert.equal(body.querySelector('[data-action="repair-managed-hooks"]').disabled, true, "regeneration requires a successful audit");
+  assert.equal(sent.filter(message => message.kind === "get_hook_doctor").length, 0);
+  tab.click();
+  const requests = sent.filter(message => message.kind === "get_hook_doctor");
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0], { kind: "get_hook_doctor", request_id: 1, repair: false });
+});
+
+test("Hook Center correlates immutable replies and keeps repair explicit through errors and retry", () => {
+  const { surface, body, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  body.querySelector('[data-settings-tab="hooks"]').click();
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  const requests = () => sent.filter(message => message.kind === "get_hook_doctor");
+  const initial = surface.hookDoctorModel.read();
+  for (const event of [
+    { project_root: "/projects/B", request_id: 1 },
+    { project_root: "/projects/A", request_id: 99 },
+  ]) surface.applyHookDoctorEvent({ kind: "hook_doctor", ...event, report: { health: { status: "ready" } }, error: null });
+  assert.equal(surface.hookDoctorModel.read(), initial, "foreign and stale replies are ignored");
+  assert.match(panel.textContent, /Loading hook audit/);
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 1, report: null, error: "Audit unavailable" });
+  flush();
+  assert.equal(panel.querySelector('[role="alert"]').textContent, "Audit unavailable");
+  assert.equal(panel.querySelector('[data-action="repair-managed-hooks"]').disabled, true);
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 2, repair: false });
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 1, report: { health: { status: "ready" } }, error: null });
+  const report = { health: { status: "needs_attention" }, repair: null, repair_plan: { automatic: ["regenerate_managed_provider_configs"] } };
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 2, report, error: null });
+  report.health.status = "ready";
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].report.health.status, "needs_attention");
+  assert.equal(initial["/projects/A"].pending, true);
+  assert.ok(Object.isFrozen(surface.hookDoctorModel.read()["/projects/A"].report.health));
+  flush();
+  assert.match(panel.textContent, /Needs attention/);
+  const staleRepair = panel.querySelector('[data-action="repair-managed-hooks"]');
+  assert.equal(staleRepair.disabled, false, "a successful audit with no bad config permits regeneration");
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 3,
+    report: { ...report, configuration_audit: { configs: [{ state: "unreadable", path: "/projects/A/.claude/settings.local.json" }] } }, error: null });
+  staleRepair.click();
+  assert.equal(requests().length, 3, "send rechecks the latest model while the enabled DOM awaits its frame");
+  flush();
+  assert.equal(panel.querySelector('[data-action="repair-managed-hooks"]').disabled, true);
+  assert.equal(panel.querySelector('[data-action="refresh-hook-audit"]').disabled, false);
+  assert.match(panel.textContent, /Fix the listed invalid or unreadable configuration, then refresh before regenerating\./);
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 4, report, error: null });
+  flush();
+  const repair = panel.querySelector('[data-action="repair-managed-hooks"]');
+  assert.equal(repair.disabled, false, "a fresh successful audit re-enables regeneration");
+  repair.click();
+  repair.click();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 5, repair: true });
+  assert.equal(requests().length, 5, "pending repair cannot be sent twice");
+  flush();
+  assert.equal(panel.querySelector('[data-action="repair-managed-hooks"]').disabled, true);
+  assert.match(panel.textContent, /Regenerating managed hook configuration/);
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 5, report: { ...report, repair: { repaired: true } }, error: null });
+  flush();
+  assert.match(panel.textContent, /Managed configuration regenerated/);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "regenerated");
+  panel.querySelector('[data-action="refresh-hook-audit"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 6, report, error: null });
+  flush();
+  assert.match(panel.textContent, /Latest audit: Read-only/);
+  assert.match(panel.textContent, /Last repair: Managed configuration regenerated/);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "regenerated", "a later audit preserves the confirmed repair outcome");
+  assert.match(panel.textContent, /Trust registration and a new agent session require separate verification/);
+});
+
+test("Hook Center unavailable repair send clears pending and reports its unconfirmed outcome", () => {
+  const { surface, body, flush } = createSettingsHarness({ onSend: message => message.kind === "get_hook_doctor" && message.repair ? "unavailable" : "sent" });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  body.querySelector('[data-settings-tab="hooks"]').click();
+  surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id: 1,
+    report: { health: { status: "ready" }, repair: null }, error: null });
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  panel.querySelector('[data-action="repair-managed-hooks"]').click();
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, false);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "unknown");
+  flush();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Reconnect and refresh/);
+  assert.match(panel.textContent, /will not be retried automatically/);
+  assert.equal(panel.querySelector('[data-action="refresh-hook-audit"]').disabled, false);
+});
+
+test("Hook Center has no audit or repair authority without an active project", () => {
+  const { surface, body, sent, flush } = createSettingsHarness({ activeProjectTab: () => null });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  body.querySelector('[data-settings-tab="hooks"]').click();
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  assert.match(panel.textContent, /Open a project to audit managed hooks/);
+  assert.ok([...panel.querySelectorAll("button")].every(button => button.disabled));
+  assert.equal(sent.filter(message => message.kind === "get_hook_doctor").length, 0);
+});
+
+test("Hook Center reconnect recovers pending reads independently of mounted views without replaying repairs", () => {
+  const { surface, body, document, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const hooks = body.querySelector('[data-settings-tab="hooks"]');
+  const system = body.querySelector('[data-settings-tab="system"]');
+  const requests = () => sent.filter(message => message.kind === "get_hook_doctor");
+  const reply = (request_id, report) => surface.applyHookDoctorEvent({ kind: "hook_doctor", project_root: "/projects/A", request_id, report, error: null });
+  hooks.click();
+  system.click();
+  assert.equal(typeof surface.resyncHookDoctor, "function", "normal reconnect has a scoped Hook Doctor recovery entry point");
+  surface.resyncHookDoctor();
+  assert.deepEqual(requests(), [
+    { kind: "get_hook_doctor", request_id: 1, repair: false },
+    { kind: "get_hook_doctor", request_id: 2, repair: false },
+  ], "a lost pending audit is replaced even while its tab is hidden");
+  reply(1, { health: { status: "degraded" } });
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, true);
+  hooks.click();
+  assert.equal(requests().length, 2, "reopening waits for the new read instead of becoming stuck on the old request");
+  reply(2, { health: { status: "ready" }, repair: null });
+  flush();
+  const panel = body.querySelector('[data-settings-panel="hooks"]');
+  panel.querySelector('[data-action="repair-managed-hooks"]').click();
+  system.click();
+  surface.resyncSettings();
+  assert.deepEqual(requests().slice(-2), [
+    { kind: "get_hook_doctor", request_id: 3, repair: true },
+    { kind: "get_hook_doctor", request_id: 4, repair: false },
+  ]);
+  reply(3, { repair: { repaired: true } });
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, true, "stale repair success is ignored");
+  reply(4, { health: { status: "ready" }, repair: null });
+  flush();
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, false);
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "unknown");
+  assert.match(panel.textContent, /Last repair: Outcome unknown/);
+  assert.match(panel.textContent, /Latest audit: Read-only/);
+  assert.doesNotMatch(panel.textContent, /No repair requested/);
+  hooks.click();
+  assert.equal(requests().at(-1).request_id, 5);
+  body.remove();
+  surface.resyncHookDoctor();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 6, repair: false },
+    "ordinary reconnect recovers pending reads after Settings closes");
+  surface.resyncSettings();
+  assert.deepEqual(requests().at(-1), { kind: "get_hook_doctor", request_id: 7, repair: false },
+    "forced reconnect also recovers pending reads without a mounted Settings view");
+  const reopened = document.createElement("main");
+  document.body.appendChild(reopened);
+  surface.renderSettingsWindow(reopened, { id: "settings-reopened", title: "Settings" });
+  reopened.querySelector('[data-settings-tab="hooks"]').click();
+  assert.equal(requests().length, 7, "reopened view waits for the replacement request");
+  reply(5, { health: { status: "degraded" } });
+  reply(6, { health: { status: "degraded" } });
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].pending, true);
+  reply(7, { health: { status: "ready" }, repair: null });
+  flush();
+  assert.equal(reopened.querySelector('[data-settings-panel="hooks"]').dataset.hookAuditStatus, "loaded");
+  assert.equal(surface.hookDoctorModel.read()["/projects/A"].lastRepairOutcome, "unknown", "read recovery and reopening cannot clear an unconfirmed repair");
+  assert.match(reopened.textContent, /Last repair: Outcome unknown/);
+});
+
+test("Custom Agent replies commit immutable snapshots shared by all mounts and registration catalogs", () => {
   const frames = new Set();
   const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
   const { surface, body, document, sent } = createSettingsHarness({ scheduleFrame(callback) {
@@ -102,8 +280,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
   const initial = surface.customAgentsModel.read();
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "unavailable", message: "Catalog unavailable" });
-  assert.ok(body.querySelector('[data-settings-candidates] option[value="codex"]'),
-    "a failed first custom-agent read must unblock the known built-in catalog");
+  assert.ok(body.querySelector('[data-settings-candidates] option[value="member-codex"]'),
+    "registered candidate identities do not wait for a CLI catalog read");
   const agent = { id: "fixture-cli", display_name: "Fixture CLI", command: "fixture", env: { TOKEN: "***REDACTED***" } };
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [agent] });
   const loaded = surface.customAgentsModel.read();
@@ -115,7 +293,7 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   flush();
   for (const host of [body, second]) {
     assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Fixture CLI/);
-    assert.ok(host.querySelector('[data-settings-candidates] option[value="fixture-cli"]'));
+    assert.ok(host.querySelector('[data-settings-candidates] option[value="member-custom"]'));
   }
   const scrolls = [body, second].map(host => host.querySelector('[data-role="settings-scroll"]'));
   const renders = [0, 0];
@@ -132,8 +310,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
     ] });
   }
   assert.equal(surface.customAgentsModel.read().catalog.agents[0].display_name, "Burst 49");
-  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Burst 49/,
-    "candidate controls retain their synchronous catalog contract");
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Custom member/,
+    "candidate names remain registered identities while CLI display metadata changes");
   assert.deepEqual(renders, [0, 0], "only the Custom Agents list waits for the frame");
   assert.equal(frames.size, 1, "the burst reserves one frame");
   flush();
@@ -153,15 +331,33 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   assert.equal(draft.value, "unsaved-draft");
   assert.equal(sent.filter(message => message.kind === "list_custom_agents").length, reads + 2);
   assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, 0);
-  body.querySelector('[aria-label="Cancel environment editing"]').click();
-  body.querySelector('[aria-label="Edit agent environment"]').click();
-  body.querySelector('[aria-label="Environment value"]').value = "saved-value";
+  const refreshed = { ...surface.customAgentsModel.read().catalog.agents[0],
+    display_name: "Refreshed CLI", command: "new-fixture", default_args: ["--fresh"] };
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [refreshed] });
+  assert.equal(surface.customAgentsModel.read().catalog.agents[0].command, "new-fixture");
+  flush();
+  assert.equal(body.querySelector('[aria-label="Environment value"]') === draft, true,
+    "catalog replies retain the live environment editor until the user settles it");
+  assert.equal(draft.isConnected, true);
+  assert.equal(draft.value, "unsaved-draft");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "unavailable", message: "Refresh unavailable" });
+  flush();
+  assert.equal(body.querySelector('[aria-label="Environment value"]') === draft, true);
+  assert.equal(draft.value, "unsaved-draft");
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Refresh unavailable/,
+    "an open editor must not hide current status feedback");
+  assert.equal(body.querySelector('[data-role="custom-agent-status"] .mock-label').style.color,
+    "var(--color-state-blocked)", "status feedback uses the shared Operator state token");
+  draft.value = "saved-value";
   body.querySelector('[aria-label="Save environment changes"]').click();
   assert.equal(body.querySelector('[aria-label="Save environment changes"]') === null, true,
     "saving closes the editor synchronously before a second click can resend it");
   const saves = sent.filter(message => message.kind === "update_custom_agent");
   assert.equal(saves.length, 1);
   assert.equal(saves[0].agent.env.TOKEN, "saved-value");
+  assert.equal(saves[0].agent.display_name, "Refreshed CLI");
+  assert.equal(saves[0].agent.command, "new-fixture");
+  assert.deepEqual(saves[0].agent.default_args, ["--fresh"]);
   body.querySelector('[aria-label="Edit agent environment"]').click();
   const nextDraft = body.querySelector('[aria-label="Environment value"]');
   nextDraft.value = "fresh-unsaved-draft";
@@ -169,6 +365,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   assert.equal(nextDraft.isConnected, true, "an already rendered save snapshot cannot replace a reopened editor");
   assert.equal(nextDraft.value, "fresh-unsaved-draft");
   body.querySelector('[aria-label="Cancel environment editing"]').click();
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Refreshed CLI/,
+    "cancel renders the latest saved catalog");
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI", env: {} } });
   assert.equal(loaded.catalog.agents[0].display_name, "Fixture CLI", "past snapshot stays immutable");
   assert.equal(surface.customAgentsModel.read().catalog.agents.length, 1, "save replaces the existing agent");
@@ -182,9 +380,17 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   }
   const detachedText = second.textContent;
   second.remove();
+  body.querySelector('[aria-label="Edit agent environment"]').click();
+  const savesBeforeRemoval = sent.filter(message => message.kind === "update_custom_agent").length;
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "fixture-cli" });
+  body.querySelector('[aria-label="Save environment changes"]').click();
+  assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, savesBeforeRemoval,
+    "a save racing the removal reply cannot recreate a missing agent");
+  assert.equal(body.querySelector('[aria-label="Save environment changes"]'), null);
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /no longer available/);
   assert.equal(second.textContent, detachedText, "detached mount is no longer rendered");
-  assert.equal(body.querySelector('[data-settings-candidates] option[value="fixture-cli"]'), null);
+  assert.ok(body.querySelector('[data-settings-candidates] option[value="member-custom"]'),
+    "removing a CLI catalog entry does not replace or remove its registered member");
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
   assert.equal(surface.customAgentsModel.read().catalog.loading, false);
   const reopened = document.createElement("main");
@@ -332,11 +538,12 @@ test("Update status batches snapshots while toggles and failed-save rollback rem
   flush();
   assert.deepEqual(renders, [1, 0], "detached and unrelated mounts are not rendered");
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
-  assert.equal(frames.size, 0, "another Settings store does not schedule update status");
+  flush();
+  assert.deepEqual(renders, [1, 0], "another Settings store does not render update status");
 });
 
 test("System replies advance one immutable snapshot for all mounts, including while guarded", () => {
-  const { surface, body, document } = createSettingsHarness();
+  const { surface, body, document, flush } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const second = document.createElement("main");
   document.body.appendChild(second);
@@ -344,6 +551,7 @@ test("System replies advance one immutable snapshot for all mounts, including wh
   const initial = surface.systemSettingsModel.read();
   const resource = { enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2 };
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "en", board_provider: "slack", agent_resource: resource });
+  flush();
   const loaded = surface.systemSettingsModel.read();
   resource.build_jobs = 99;
   assert.equal(loaded.agentResource.buildJobs, 2, "wire objects cannot mutate committed state");
@@ -355,8 +563,10 @@ test("System replies advance one immutable snapshot for all mounts, including wh
   const select = body.querySelector('[id$="-settings-system-language"]');
   surface.systemSettingsInteractionGuard.activate();
   surface.applySystemSettingsEvent({ kind: "system_settings_updated", language: "ja", codex_trust_managed_hooks: false });
+  flush();
   surface.applyAutostartStatus({ enabled: true });
   surface.applyBoardAuthStatus({ slack: true });
+  flush();
   assert.equal(surface.systemSettingsModel.read().language, "ja", "guard delays DOM only");
   assert.equal(body.querySelector('[id$="-settings-system-language"]'), select);
   assert.equal(body.querySelector('[id$="-settings-system-codex-hooks"]').checked, true);
@@ -369,16 +579,94 @@ test("System replies advance one immutable snapshot for all mounts, including wh
   const detached = second.innerHTML;
   second.remove();
   surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied" });
+  flush();
   assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied");
   assert.equal(second.innerHTML, detached, "removed mounts no longer render");
 });
 
+test("System snapshots batch each mounted panel while local controls and autostart stay synchronous", () => {
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document, window } = createSettingsHarness({
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+    onSend(message) {
+      if (message.kind === "update_autostart") {
+        for (const host of [body, second]) assert.equal(host.querySelector('[id$="-settings-system-autostart"]').disabled, true);
+      }
+    },
+  });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "second", title: "Settings" });
+  surface.applyAutostartStatus({ enabled: false });
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "en" });
+  surface.resyncSettings();
+  flush();
+  const initial = surface.systemSettingsModel.read();
+  const panels = [body, second].map(host => host.querySelector('[data-system-settings-content]'));
+  const statuses = panels.map(panel => panel.querySelector('[data-role="system-settings-status"]'));
+  const draws = [0, 0];
+  let prototype = statuses[0];
+  while (!Object.hasOwn(prototype, "textContent")) prototype = Object.getPrototypeOf(prototype);
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, "textContent");
+  statuses.forEach((status, index) => Object.defineProperty(status, "textContent", {
+    get() { return descriptor.get.call(this); },
+    set(value) { draws[index]++; descriptor.set.call(this, value); },
+  }));
+  for (let index = 1; index <= 50; index++) {
+    surface.applySystemSettingsEvent({ kind: "system_settings", language: index === 50 ? "ja" : "en",
+      agent_resource: { build_jobs: index },
+    });
+  }
+  assert.equal(surface.systemSettingsModel.read().agentResource.buildJobs, 50);
+  assert.equal(initial.language, "en");
+  assert.equal(initial.agentResource.buildJobs, null);
+  assert.deepEqual(draws, [0, 0], "scalar patches must wait for the frame too");
+  assert.equal(frames.size, 1);
+  const late = document.createElement("main");
+  document.body.appendChild(late);
+  surface.renderSettingsWindow(late, { id: "late", title: "Settings" });
+  assert.equal(late.querySelector('[id$="-settings-system-agent-build-jobs"]').value, "50");
+  const lateNode = late.querySelector("[data-system-settings-content]").firstChild;
+  flush();
+  assert.equal(late.querySelector("[data-system-settings-content]").firstChild, lateNode);
+  assert.deepEqual(draws, [1, 1]);
+  for (const panel of panels) assert.equal(panel.querySelector('[id$="-settings-system-agent-build-jobs"]').value, "50");
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  flush();
+  assert.deepEqual(draws, [1, 1], "an unrelated store does not render System");
+  const resource = body.querySelector('[id$="-settings-system-agent-resource-enabled"]');
+  resource.checked = false;
+  resource.dispatchEvent(new window.Event("change"));
+  assert.equal(body.querySelector('[id$="-settings-system-agent-build-jobs"]').disabled, true);
+  const syncDraws = [...draws];
+  flush();
+  assert.deepEqual(draws, syncDraws, "a frame does not repeat a synchronous local render");
+  surface.applyAutostartStatus({ enabled: false });
+  const autostart = body.querySelector('[id$="-settings-system-autostart"]');
+  autostart.checked = true;
+  autostart.dispatchEvent(new window.Event("change"));
+  surface.applyAutostartError({ message: "Rejected" });
+  assert.equal(autostart.checked, false);
+  assert.equal(autostart.disabled, false);
+  assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent, "Rejected");
+  const restoredDraws = [...draws];
+  flush();
+  assert.deepEqual(draws, restoredDraws);
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "en" });
+  second.remove();
+  flush();
+  assert.equal(draws[1], restoredDraws[1], "a detached mount is not rendered");
+});
+
 test("System local resource edits use current model values and preserve wire validation", () => {
-  const { surface, body, window, sent } = createSettingsHarness();
+  const { surface, body, window, sent, flush } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja", agent_resource: {
     enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2,
   } });
+  flush();
   const previous = surface.systemSettingsModel.read();
   const jobs = body.querySelector('[id$="-settings-system-agent-build-jobs"]');
   const trust = body.querySelector('[id$="-settings-system-codex-hooks"]');
@@ -392,6 +680,7 @@ test("System local resource edits use current model values and preserve wire val
   } });
   assert.equal(previous.agentResource.buildJobs, 2);
   surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied while focused" });
+  flush();
   assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied while focused");
   surface.systemSettingsInteractionGuard.release();
   assert.ok(body.querySelector('[id$="-settings-system-codex-hooks"]') === trust,
@@ -409,14 +698,16 @@ test("System local resource edits use current model values and preserve wire val
 });
 
 test("Board auth snapshots jointly render Settings and survive guarded System refreshes", () => {
-  const { surface, body, document } = createSettingsHarness();
+  const { surface, body, document, flush } = createSettingsHarness();
   surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
+  flush();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const second = document.createElement("main");
   document.body.appendChild(second);
   surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
   const previous = surface.systemSettingsModel.read();
   surface.applyBoardAuthStatus({ slack: true, slack_client_id: "client-a", message: "Connected" });
+  flush();
   const signedIn = surface.systemSettingsModel.read();
   assert.ok(Object.isFrozen(signedIn.boardConfig));
   assert.equal(previous.boardAuth.slack, false, "later replies cannot mutate earlier snapshots");
@@ -426,7 +717,9 @@ test("Board auth snapshots jointly render Settings and survive guarded System re
   }
   surface.systemSettingsInteractionGuard.activate();
   surface.applySystemSettingsEvent({ kind: "system_settings_updated", language: "ja" });
+  flush();
   surface.applyBoardAuthStatus({ slack: false, slack_client_id: "client-b" });
+  flush();
   assert.equal(surface.systemSettingsModel.read().boardAuth.slack, false,
     "the shared model updates while a dropdown is open");
   assert.equal(body.querySelector(".board-auth-status").dataset.signedIn, "true");
@@ -440,6 +733,7 @@ test("Board auth snapshots jointly render Settings and survive guarded System re
   }
   second.remove();
   surface.applyBoardAuthStatus({ slack: true });
+  flush();
   assert.equal(second.querySelector(".board-auth-status").dataset.signedIn, "false",
     "detached mounts are removed from the subscription");
 });
@@ -514,7 +808,8 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   surface.resyncSettings();
   assert.deepEqual(sent, [
-    { kind: "list_issue_monitor" }, { kind: "get_issue_monitor_profiles" },
+    { kind: "list_issue_monitor" }, { kind: "get_repository_labels", refresh: false }, { kind: "get_issue_monitor_profiles" },
+    { kind: "agent_roster", action: { kind: "read" }, expected_revision: null },
     { kind: "list_supported_agents" }, { kind: "get_system_settings" },
     { kind: "get_update_settings" }, { kind: "get_board_auth_status" },
     { kind: "get_autostart_status" }, { kind: "list_custom_agents" },
@@ -526,11 +821,11 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   body.remove();
   surface.resyncSettings();
-  assert.deepEqual(sent, [], "detached Settings must not trigger read probes");
+  assert.deepEqual(sent, [{ kind: "get_system_settings" }], "only shared Works presentation settings are read without a Settings mount");
 });
 
 test("Issue #5531: recovered System snapshots preserve unsaved provider and OAuth inputs", () => {
-  const { surface, body, window } = createSettingsHarness();
+  const { surface, body, window, flush } = createSettingsHarness();
   surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const secret = body.querySelector('input[type="password"]');
@@ -541,6 +836,7 @@ test("Issue #5531: recovered System snapshots preserve unsaved provider and OAut
   port.dispatchEvent(new window.Event("input", { bubbles: true }));
   surface.resyncSettings();
   surface.applyBoardAuthStatus({ oauth_redirect_port: 8765 });
+  flush();
   assert.equal(body.querySelector('input[type="password"]'), secret);
   assert.equal(secret.value, "unsaved-secret");
   assert.equal(body.querySelector(".board-oauth-port-form input"), port);
@@ -706,7 +1002,9 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   retry.checked = true;
   const rendersBeforeRetry = renders;
   retry.dispatchEvent(new Event("change"));
-  assert.equal(renders, rendersBeforeRetry, "a local toggle waits for an authoritative reply before rendering");
+  assert.equal(renders, rendersBeforeRetry + 1, "synchronous model subscribers see the local draft");
+  assert.equal(supportedAgentsModel.read().autoUpdate, false, "confirmed settings wait for the backend");
+  assert.equal(supportedAgentsModel.read().autoUpdateDraft, true);
   assert.equal(retry.checked, true);
   handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.ok(!panel.querySelector('[role="alert"]'), "a successful retry clears the prior setting-save error");
@@ -721,6 +1019,91 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.match(panel.querySelector('[data-agent-id="grok"]').textContent, /Latest/);
   assert.equal(panel.querySelector('[aria-label="Update Grok Build"]'), null);
+});
+
+test("Supported Agents batches catalogs while local operations and authoritative recovery stay current", () => {
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document, window, sent } = createSettingsHarness({
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+    onSend(message) {
+      if (message.kind === "maintain_supported_agent") {
+        for (const host of [body, second]) {
+          assert.equal(host.querySelector('[aria-label="Install OpenCode"]').disabled, true,
+            "all mounts disable maintenance actions before sending");
+        }
+      }
+    },
+  });
+  surface.renderSettingsWindow(body, { id: "supported-first", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "supported-second", title: "Settings" });
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [] });
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  const agents = [{ id: "opencode", name: "OpenCode", installed: false, install_supported: true }];
+  surface.applySupportedAgentList({ agents, auto_update: false });
+  flush();
+  const panels = [body, second].map(host => host.querySelector('[data-settings-panel="supported-agents"]'));
+  const tables = panels.map(panel => panel.querySelector("table"));
+  const draws = [0, 0];
+  panels.forEach((panel, index) => {
+    const append = panel.appendChild.bind(panel);
+    panel.appendChild = node => { if (node.tagName === "TABLE") draws[index]++; return append(node); };
+  });
+  for (let index = 0; index < 50; index++) {
+    surface.applySupportedAgentList({ agents: [{ ...agents[0], name: `OpenCode ${index}` }], auto_update: false });
+  }
+  assert.deepEqual(draws, [0, 0], "catalog burst leaves DOM unchanged until the frame");
+  assert.equal(panels[0].querySelector("table"), tables[0]);
+  assert.equal(frames.size, 1);
+  assert.equal(surface.supportedAgentsModel.read().agents[0].name, "OpenCode 49",
+    "registration catalog readers observe the latest immutable tool snapshot before paint");
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Codex member/,
+    "candidate membership stays independent of provider catalog metadata");
+  // The pending snapshot must not overwrite a later local checkbox edit.
+  const automatic = panels[0].querySelector('[aria-label="Automatically update agents"]');
+  automatic.checked = true;
+  automatic.dispatchEvent(new window.Event("change"));
+  assert.deepEqual(draws, [0, 0], "local toggle commits without synchronous DOM reconstruction");
+  flush();
+  assert.deepEqual(draws, [1, 1]);
+  for (const panel of panels) {
+    assert.match(panel.textContent, /OpenCode 49/);
+    assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
+  }
+  assert.equal(panels[0].querySelector('[aria-label="Automatically update agents"]'), automatic);
+  surface.applySupportedAgentMaintenance({ agent_id: "", pending: false, success: false, message: "Save denied" });
+  flush();
+  assert.equal(automatic.checked, false, "global failure alone rolls back the unconfirmed toggle");
+  assert.match(panels[0].querySelector('[role="alert"]').textContent, /Save denied/);
+  surface.applySupportedAgentList({ agents, auto_update: false });
+  // A late mount draws current state synchronously and does not skip pending siblings.
+  const late = document.createElement("main");
+  document.body.appendChild(late);
+  surface.renderSettingsWindow(late, { id: "supported-late", title: "Settings" });
+  const lateTable = late.querySelector('[data-settings-panel="supported-agents"] table');
+  assert.match(lateTable.textContent, /OpenCode/);
+  flush();
+  assert.equal(late.querySelector('[data-settings-panel="supported-agents"] table'), lateTable);
+  assert.equal(panels[0].querySelector('[role="alert"]'), null);
+  panels[0].querySelector('[aria-label="Install OpenCode"]').click();
+  const before = [...draws];
+  flush();
+  assert.deepEqual(draws, before, "the frame skips the snapshot already rendered before maintenance send");
+  assert.deepEqual(sent.filter(message => message.kind === "maintain_supported_agent"), [
+    { kind: "maintain_supported_agent", agent_id: "opencode", action: "install" },
+  ]);
+  second.remove();
+  const detachedDraws = draws[1];
+  surface.applySupportedAgentList({ agents, auto_update: true });
+  flush();
+  assert.equal(draws[1], detachedDraws);
+  assert.equal(automatic.checked, true);
+  const beforeUnrelated = [...draws];
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
+  flush();
+  assert.deepEqual(draws, beforeUnrelated);
 });
 
 test("Supported Agents uses the shared Settings tab and refreshes from its backend snapshot", () => {
@@ -843,7 +1226,8 @@ test("Settings keeps grouped navigation beside a flexible content pane", () => {
   assert.match(tabsBlock[1], /overflow-y:\s*auto/);
   assert.match(componentsCss, /\.settings-layout\s*\{[^}]*grid-template-columns:[^}]*minmax\(0, 1fr\)/);
   assert.match(componentsCss, /\.settings-field\s*\{[^}]*align-items:\s*center/);
-  assert.match(componentsCss, /\.settings-issues-options\[open\]\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /\.settings-body\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /@media\s*\(max-width:\s*600px\)[\s\S]*?\.settings-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
 });
 
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {
@@ -1528,4 +1912,39 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
 test("app.js delegates complete System events to the shared model (#3813)", () => {
   assert.match(appSource, /case "system_settings":\s*case "system_settings_updated":\s*applySystemSettingsEvent\(event\);/);
   assert.match(settingsSource, /agentResource: normalizeAgentResource\(event\.agent_resource, state\.agentResource\)/);
+});
+
+
+test("Works output lines use the System writer and keep invalid or rejected drafts out of the shared setting", () => {
+  const { surface, body, window, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const input = () => body.querySelector('[aria-label="Works output lines"]');
+  assert.ok(input(), "System settings exposes the saved Works line count");
+  assert.equal(input().value, "3");
+  assert.equal(input().getAttribute("min"), "3"); assert.equal(input().getAttribute("max"), "10"); assert.equal(input().getAttribute("step"), "1");
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" }); flush();
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 3);
+  input().value = "5"; input().dispatchEvent(new window.Event("change"));
+  assert.deepEqual(sent.at(-1), { kind: "update_system_settings", language: "ja", works_preview_lines: 5 });
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 3, "only saved backend values reach Works");
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated", works_preview_lines: 5 }); flush();
+  assert.equal(input().value, "5");
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+  const count = sent.length;
+  for (const invalid of ["", "2", "11", "4.5"]) {
+    input().value = invalid; input().dispatchEvent(new window.Event("change")); flush();
+    assert.equal(sent.length, count);
+    assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+    assert.match(body.textContent, /whole number from 3 to 10/);
+  }
+  input().value = "10"; input().dispatchEvent(new window.Event("change"));
+  surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Storage unavailable" }); flush();
+  assert.equal(input().value, "5"); assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+  assert.match(body.textContent, /Storage unavailable/);
+});
+
+test("Works loads its saved output line count on reconnect without a Settings mount", () => {
+  const { surface, sent } = createSettingsHarness();
+  surface.resyncSettings();
+  assert.deepEqual(sent, [{ kind: "get_system_settings" }]);
 });

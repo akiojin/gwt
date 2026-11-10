@@ -264,6 +264,7 @@ mod tests {
             account_id: Some("acct".to_string()),
             account_label: Some("someone@example.com".to_string()),
             plan: Some("pro".to_string()),
+            extra_usage: None,
             windows: vec![UsageWindow::new(
                 WindowKind::Weekly,
                 100.0,

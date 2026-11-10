@@ -79,6 +79,8 @@ pub enum IssueCommand {
     },
     SpecRepair {
         number: u64,
+        /// Explicit orphan artifact comments whose payload should be archived.
+        archive_comments: Vec<u64>,
     },
     /// Issue #4541: run the deterministic SPEC artifact lint and, unless
     /// `snapshot` is off, finalize the Intake Inspection Snapshot with the
@@ -169,7 +171,7 @@ pub enum IssueCommand {
         body: String,
     },
     /// SPEC #3200 Option A: an independent-review agent reports its verdict for a
-    /// reviewed SHA. Published to the Issue Monitor daemon control channel, where
+    /// reviewed SHA. Published to Issues daemon control channel, where
     /// the daemon (trusted) re-judges it against the launch-time criteria.
     MonitorReviewVerdict {
         issue_number: u64,
@@ -182,17 +184,33 @@ pub enum IssueCommand {
     MonitorPriorityMove {
         project_root: Option<std::path::PathBuf>,
         expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         number: u64,
         position: IssueMonitorPriorityPosition,
     },
     MonitorPrioritySet {
         project_root: Option<std::path::PathBuf>,
         expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         issue_numbers: Vec<u64>,
     },
     MonitorQueueList {
         project_root: Option<std::path::PathBuf>,
         terminal: Option<String>,
+    },
+    MonitorSchedule {
+        project_root: Option<std::path::PathBuf>,
+        action: crate::issue_monitor::AgentScheduleAction,
+    },
+    MonitorSwitch {
+        project_root: Option<std::path::PathBuf>,
+        action: crate::issue_monitor::AgentSwitchAction,
+    },
+    MonitorSwitchAck {
+        operation_id: String,
+        head: String,
+        work_id: String,
+        board_entry_id: String,
     },
     MonitorQueuePush {
         project_root: Option<std::path::PathBuf>,
@@ -204,6 +222,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         expected_queue_order: Option<Vec<u64>>,
         issue_numbers: Vec<u64>,
+        all_terminals: bool,
     },
     MonitorQueueMove {
         project_root: Option<std::path::PathBuf>,
@@ -213,19 +232,23 @@ pub enum IssueCommand {
     },
     MonitorQueueAutoRefill {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         enabled: bool,
         limit: usize,
     },
     MonitorQueueUrgentLimit {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         limit: usize,
     },
     MonitorQueueDemote {
         project_root: Option<std::path::PathBuf>,
+        expected_urgent_queue_token: Option<String>,
         number: u64,
     },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
@@ -248,6 +271,7 @@ pub enum IssueCommand {
     /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent).
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
+        expected_profiles_token: Option<String>,
         /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
         /// saved candidate's value instead of resetting to `Default`.
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
@@ -260,12 +284,14 @@ pub enum IssueCommand {
     /// Configure automatic launch selection; omitted tiers restore defaults.
     MonitorTiersSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         auto: bool,
         tiers: Option<Vec<Vec<crate::IssueMonitorLaunchProfile>>>,
     },
     /// Persist a non-decreasing tier override for one Issue.
     MonitorTierSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         number: u64,
         tier: u8,
     },
@@ -275,6 +301,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         expected_priority_order: Option<Vec<u64>>,
+        expected_queue_order: Option<Vec<u64>>,
     },
     /// SPEC-3431 FR-033: the PM's stop instruction — revoke one launch's
     /// authority and slot without requeueing or relaunching it.
@@ -344,7 +371,7 @@ pub enum IssueCommand {
         reason: String,
     },
     /// Issue #3844: a launched agent declares (or clears) that it is waiting,
-    /// so the Issue Monitor does not mistake the silence for a stall. `number`
+    /// so Issues does not mistake the silence for a stall. `number`
     /// defaults to the launch context's owner Issue.
     MonitorWait {
         project_root: Option<std::path::PathBuf>,
@@ -436,9 +463,6 @@ pub enum PrCommand {
     Ready {
         number: u64,
     },
-    Draft {
-        number: u64,
-    },
     Close {
         number: u64,
         comment: Option<String>,
@@ -470,6 +494,7 @@ pub enum PrCommand {
     ReviewThreadsReplyAndResolveBody {
         number: u64,
         body: String,
+        thread_id: Option<String>,
     },
     Checks {
         number: u64,

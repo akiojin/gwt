@@ -63,6 +63,11 @@ fn first_inline_code(line: &str) -> &str {
 }
 
 #[cfg(unix)]
+fn browser_preflight(result: &str) -> serde_json::Value {
+    serde_json::json!({"schema_version":1,"result":result,"context":"current","normal_completion":"normal","convergence":"converged","reasons":[],"diagnostics":[]})
+}
+
+#[cfg(unix)]
 fn browser_check_shell_block(name: &str) -> String {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
@@ -157,9 +162,9 @@ fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
     for provider in [".claude", ".codex"] {
         let skills_root = dir.path().join(provider).join("skills");
         // A clean checkout has no runtime-generated coordination guidance.
-        let generated_board = skills_root.join("gwt-coordination/references/board.md");
-        if generated_board.exists() {
-            fs::remove_file(generated_board).expect("exclude locally generated guidance");
+        let generated = skills_root.join("gwt-coordination");
+        if generated.exists() {
+            fs::remove_dir_all(generated).expect("exclude locally generated guidance");
         }
         for entry in fs::read_dir(&skills_root).expect("distributed skills") {
             let skill_dir = entry.expect("skill entry").path();
@@ -429,7 +434,7 @@ fn browser_check_embedded_seed_disables_automatic_agents() {
         .filter(|line| line.trim_start().starts_with('{'))
         .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
         .collect();
-    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs.len(), 2, "seed both PM and Issues preferences");
     assert_eq!(prefs[0]["settings"]["auto_start"], false);
     assert_eq!(prefs[1]["enabled"], false);
     assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);
@@ -547,6 +552,30 @@ fn browser_check_authority_fails_closed_when_materialization_resolver_fails() {
 
 #[cfg(unix)]
 #[test]
+fn browser_check_keeps_current_source_separate_from_target_and_retained_history() {
+    for name in ["hook-repair", "hook-audit"] {
+        let block = browser_check_shell_block(name);
+        assert!(
+            !block.contains("browser-check-missing-runtime-state"),
+            "{name}: a missing target runtime is not source evidence"
+        );
+        assert!(
+            block.contains("managed_browser"),
+            "{name}: use the typed doctor purpose"
+        );
+        assert!(
+            block.contains(".preflight.result"),
+            "{name}: consume typed readiness"
+        );
+        assert!(
+            !block.contains("state=fail-open"),
+            "{name}: retained strings do not authorize readiness"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn browser_check_repairs_exact_hook_fallback_before_launch() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -555,7 +584,7 @@ fn browser_check_repairs_exact_hook_fallback_before_launch() {
     let capture = dir.path().join("capture.txt");
     fs::write(
         &fake_gwtd,
-        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"healthy\\\",\\\"issues\\\":[]}}\"}'\n",
+        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
     )
     .expect("write fake gwtd");
     fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
@@ -569,6 +598,7 @@ fn browser_check_repairs_exact_hook_fallback_before_launch() {
         .env("CHECKOUT_GWTD", &fake_gwtd)
         .env("CHECK_HOOK_BIN", "gwtd")
         .env("CAPTURE", &capture)
+        .env("DOCTOR_RESPONSE", serde_json::json!({"ok":true,"output":serde_json::json!({"health":{"status":"ready","issues":[]},"preflight":browser_preflight("proceed")}).to_string()}).to_string())
         .env("GWT_BIN_PATH", "/stale/target/debug/gwtd")
         .output()
         .expect("run hook repair block");
@@ -585,6 +615,8 @@ fn browser_check_repairs_exact_hook_fallback_before_launch() {
     let request = captured.lines().skip(2).collect::<Vec<_>>().join("\n");
     let request: serde_json::Value = serde_json::from_str(&request).expect("doctor request JSON");
     assert_eq!(request["operation"], "hook.doctor");
+    assert_eq!(request["params"]["purpose"], "managed_browser");
+    assert!(request["params"].get("runtime_state_path").is_none());
     assert_eq!(request["params"]["repair"], true);
     assert_eq!(request["params"]["expected_hook_bin"], "gwtd");
 }
@@ -860,11 +892,10 @@ fn browser_check_gates_allow_only_fail_open_hook_failures() {
             "issues": [issue],
         });
         for gate in ["hook-repair", "hook-audit"] {
-            let evidence = if gate == "hook-repair" {
-                serde_json::json!({"health": health})
-            } else {
-                health.clone()
-            };
+            let evidence = serde_json::json!({
+                "health": health,
+                "preflight": browser_preflight(if state == "fail-open" { "proceed" } else { "blocked" }),
+            });
             let response = serde_json::json!({"ok": true, "output": evidence.to_string()});
             let output = hidden_command("bash")
                 .args(["-c", &browser_check_shell_block(gate)])
@@ -885,6 +916,49 @@ fn browser_check_gates_allow_only_fail_open_hook_failures() {
             if state != "fail-open" {
                 assert!(stderr.contains(&format!("state={state}")), "{stderr}");
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_rejects_old_partial_and_contradictory_typed_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = dir.path().join("gwtd");
+    fs::write(
+        &daemon,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&daemon, fs::Permissions::from_mode(0o755)).unwrap();
+    for preflight in [
+        serde_json::Value::Null,
+        serde_json::json!({"result":"proceed"}),
+        {
+            let mut p = browser_preflight("proceed");
+            p["diagnostics"] = serde_json::json!([{"id":"failure", "classification":"unresolved"}]);
+            p
+        },
+        {
+            let mut p = browser_preflight("proceed");
+            p["diagnostics"] =
+                serde_json::json!([{"id":"failure", "classification":"unattributed"}]);
+            p
+        },
+    ] {
+        for gate in ["hook-repair", "hook-audit"] {
+            let response = serde_json::json!({"ok":true,"output":serde_json::json!({"health":{"status":"needs_attention","issues":["managed hook failure: retained state=recovered"]},"preflight":preflight}).to_string()});
+            let result = hidden_command("bash")
+                .args(["-c", &browser_check_shell_block(gate)])
+                .env("REPO_ROOT", dir.path())
+                .env("CHECK_HOME", dir.path())
+                .env("CHECKOUT_GWTD", &daemon)
+                .env("CHECK_HOOK_BIN", "gwtd")
+                .env("DOCTOR_RESPONSE", response.to_string())
+                .output()
+                .unwrap();
+            assert!(!result.status.success(), "{gate}: {preflight}");
         }
     }
 }
@@ -1268,15 +1342,15 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
-        // Issue #4396: the guidance told agents to disable auto-merge without
-        // naming a way to do it, and the `pr.merge` it named did not exist. An
-        // agent that followed the text stopped and escalated to a PM who had no
-        // such operation either. Name the hold route, not just the requirement.
+        // Issue #4326 AC-D2/D4/D6: generated delivery instructions must agree
+        // with the supported Ready-only operations and optional human check.
         assert!(
             content.contains("gwtd has no merge operation")
-                && content.contains("An explicit owner-requested hold uses `pr.draft`")
-                && content.contains("Resume with `pr.ready`"),
-            "generated guidance must name `pr.draft` as the route that holds a merge"
+                && content.contains("Draft PRs are prohibited")
+                && content.contains("User Verification Result is optional")
+                && content.contains("owner explicitly requests")
+                && !content.contains("pr.draft"),
+            "generated guidance must prohibit Draft and require human verification only on owner request"
         );
         assert!(
             content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
@@ -1353,6 +1427,61 @@ fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
         assert!(ownership.contains("In-scope root-cause fixes follow that contract"));
         assert!(ownership.contains("first apply the launch-route authority below"));
     }
+}
+
+#[test]
+fn materialized_issue_relationship_output_contract_is_shared_by_both_callers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+
+    let mut contracts = Vec::new();
+    for provider in [".claude", ".codex"] {
+        let skills = dir.path().join(provider).join("skills");
+        let work = fs::read_to_string(skills.join("gwt-coordination/references/work.md"))
+            .expect("materialized Work guidance");
+        let contract = markdown_block(
+            &work,
+            "## Issue relationship markers",
+            Some("## Git environment"),
+        );
+        for required in [
+            "| `bundled-required` | Primary | `Bundle-with: #701` |",
+            "| `dependent-follow-up` | Dependent | `Blocked-by: #700` |",
+            "| `reference-only` | Neither | No marker |",
+            "outside Markdown fences and HTML comments",
+            "positive, unique Issue numbers",
+            "`issue.edit`",
+            "`issue.spec.edit`",
+            "`issue.spec.section`",
+            "do not grant execution or mutation authority",
+        ] {
+            assert!(
+                contract.contains(required),
+                "{provider}: missing {required}"
+            );
+        }
+        for caller in [
+            "gwt-register-issue/references/workflow.md",
+            "gwt-discussion/references/state-lifecycle.md",
+        ] {
+            let path = skills.join(caller);
+            let text = fs::read_to_string(&path).expect("materialized caller");
+            for required in [
+                "`Issue relationship markers`",
+                "generated `gwt-coordination`",
+                "`references/work.md`",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "{provider}/{caller}: missing {required}"
+                );
+            }
+        }
+        contracts.push(contract.to_string());
+    }
+    assert_eq!(contracts[0], contracts[1], "provider contract parity");
 }
 
 #[test]

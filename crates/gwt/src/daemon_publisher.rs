@@ -18,7 +18,7 @@
 //!
 //! Connect, publish, and ack are each bounded by `timeout` (default
 //! 200 ms per stage, so the worst-case wall time is ~600 ms across
-//! the three stages). Generic notifications remain best-effort. Issue Monitor
+//! the three stages). Generic notifications remain best-effort. Issues
 //! controls use a stricter typed path: after a live endpoint establishes daemon
 //! authority, connection/send/receipt uncertainty never authorizes a local
 //! fallback writer.
@@ -53,6 +53,18 @@ use crate::runtime_daemon_events::{
 /// simplicity. Callers needing a different budget should use
 /// [`publish_event_with_timeout`].
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Normal controls keep the hot-path default; outcome fixtures may pin it.
+pub const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new("ISSUE_MONITOR_CONTROL", DEFAULT_TIMEOUT);
+
+/// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
+/// this incidental budget explicitly; production still gets five seconds.
+pub const DURABLE_ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new(
+        "DURABLE_ISSUE_MONITOR_CONTROL",
+        Duration::from_secs(5),
+    );
 
 const ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CACHED_PROJECT_ROOTS: usize = 32;
@@ -168,7 +180,7 @@ pub fn publish_event(project_root: &Path, channel: &str, payload: Value) -> Resu
     publish_event_with_timeout(project_root, channel, payload, DEFAULT_TIMEOUT)
 }
 
-/// Publish an Issue Monitor command with an outcome classification that lets
+/// Publish an Issues command with an outcome classification that lets
 /// the GUI distinguish a definitely-unsent transport failure from an
 /// ambiguous or explicitly rejected command. Only the former may use the
 /// local single-writer fallback.
@@ -176,7 +188,11 @@ pub fn publish_issue_monitor_control(
     project_root: &Path,
     payload: Value,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control_with_timeout(project_root, payload, DEFAULT_TIMEOUT)
+    publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
+    )
 }
 
 /// Publish a durable command from a CLI or background worker. These callers
@@ -186,7 +202,11 @@ pub fn publish_durable_issue_monitor_control(
     project_root: &Path,
     payload: Value,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control_with_timeout(project_root, payload, Duration::from_secs(5))
+    publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
+    )
 }
 
 /// Use a bounded custom budget for controls outside the GUI hot path.
@@ -207,6 +227,7 @@ pub fn publish_issue_monitor_control_with_timeout(
 enum EndpointAbsenceEvidence {
     Missing,
     DefinitelyDead,
+    Unavailable(String),
     Uncertain(String),
 }
 
@@ -219,7 +240,7 @@ fn authority_owned_endpoint(
     let daemon_dir = requested_scope.daemon_dir(gwt_home);
     let entries = std::fs::read_dir(&daemon_dir).map_err(|error| {
         format!(
-            "Issue Monitor authority fence pid {} endpoint directory {} is unavailable: {error}",
+            "Issues authority fence pid {} endpoint directory {} is unavailable: {error}",
             fence.pid,
             daemon_dir.display()
         )
@@ -256,15 +277,23 @@ fn authority_owned_endpoint(
             || endpoint.scope.repo_hash != requested_scope.repo_hash
             || endpoint.scope.target != requested_scope.target
             || endpoint.scope.endpoint_path(gwt_home) != path
-            || !endpoint.is_usable(&endpoint.scope, DAEMON_PROTOCOL_VERSION, is_process_alive)
         {
+            continue;
+        }
+        if endpoint.protocol_version != DAEMON_PROTOCOL_VERSION {
+            return Err(format!(
+                "incompatible daemon protocol: actual={}, expected={DAEMON_PROTOCOL_VERSION}; use a compatible gwtd build before retrying",
+                endpoint.protocol_version
+            ));
+        }
+        if !endpoint.is_usable(&endpoint.scope, DAEMON_PROTOCOL_VERSION, is_process_alive) {
             continue;
         }
         matches.push(endpoint);
     }
     if !unreadable.is_empty() {
         return Err(format!(
-            "Issue Monitor authority fence pid {} cannot prove a unique endpoint in {}; unreadable endpoint evidence: {}",
+            "Issues authority fence pid {} cannot prove a unique endpoint in {}; unreadable endpoint evidence: {}",
             fence.pid,
             daemon_dir.display(),
             unreadable.join(" | ")
@@ -282,7 +311,7 @@ fn authority_owned_endpoint(
                 .map(|socket| crate::cli::daemon::transport::bind_is_present(&socket.path))
                 .unwrap_or(false);
             Err(format!(
-                "Issue Monitor authority fence pid {} has no usable endpoint in {} \
+                "Issues authority fence pid {} has no usable endpoint in {} \
                  (diagnosis: fence pid alive={}, descriptor json present={}, \
                  socket present={}; a live fence-holding daemon rewrites its missing \
                  descriptor within seconds — retry, and restart the GWT app if this \
@@ -295,7 +324,7 @@ fn authority_owned_endpoint(
             ))
         }
         count => Err(format!(
-            "Issue Monitor authority fence pid {} matched {count} endpoints in {}",
+            "Issues authority fence pid {} matched {count} endpoints in {}",
             fence.pid,
             daemon_dir.display()
         )),
@@ -310,7 +339,7 @@ enum AuthorityResolutionPurpose {
 
 enum ProjectAuthorityResolution {
     Missing,
-    Live(DaemonEndpoint),
+    Live(Box<DaemonEndpoint>),
     Recover,
 }
 
@@ -325,10 +354,10 @@ pub(crate) fn resolve_live_project_authority(
         is_process_alive,
         AuthorityResolutionPurpose::Route,
     )? {
-        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(endpoint)),
+        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(*endpoint)),
         ProjectAuthorityResolution::Missing => Ok(None),
         ProjectAuthorityResolution::Recover => {
-            Err("Issue Monitor authority fence retains pending crash recovery".to_string())
+            Err("Issues authority fence retains pending crash recovery".to_string())
         }
     }
 }
@@ -366,6 +395,7 @@ fn resolve_project_authority(
                     return authority_owned_endpoint(gwt_home, scope, fence, &|pid| {
                         is_process_alive(pid)
                     })
+                    .map(Box::new)
                     .map(ProjectAuthorityResolution::Live);
                 }
                 Err(error) => {
@@ -380,6 +410,7 @@ fn resolve_project_authority(
         crate::IssueMonitorAuthorityFenceState::Missing => Ok(ProjectAuthorityResolution::Missing),
         crate::IssueMonitorAuthorityFenceState::Active(fence) if is_process_alive(fence.pid) => {
             authority_owned_endpoint(gwt_home, scope, &fence, &|pid| is_process_alive(pid))
+                .map(Box::new)
                 .map(ProjectAuthorityResolution::Live)
         }
         crate::IssueMonitorAuthorityFenceState::Active(_)
@@ -391,7 +422,7 @@ fn resolve_project_authority(
                     Ok(ProjectAuthorityResolution::Missing)
                 }
                 AuthorityResolutionPurpose::Route => {
-                    Err("Issue Monitor authority fence retains pending crash recovery".to_string())
+                    Err("Issues authority fence retains pending crash recovery".to_string())
                 }
             }
         }
@@ -414,6 +445,7 @@ pub(crate) fn resolve_project_daemon_bootstrap(
         AuthorityResolutionPurpose::RecoverUnderLease,
     )? {
         ProjectAuthorityResolution::Live(endpoint) => {
+            let endpoint = *endpoint;
             return Ok(
                 if expected_version.is_some_and(|version| endpoint.daemon_version != version) {
                     DaemonBootstrapAction::RetireStaleVersion { endpoint }
@@ -460,10 +492,12 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     project_root: &Path,
     is_process_alive: &impl Fn(u32) -> bool,
 ) -> Result<Option<DaemonEndpoint>, IssueMonitorControlPublishError> {
-    use IssueMonitorControlPublishError::OutcomeUnknown;
+    use IssueMonitorControlPublishError::{OutcomeUnknown, TransportUnavailable};
 
+    // Discovery failures have not sent a control. The local writer must still
+    // recheck the authority fence under the prefs lock before committing.
     let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
-        .map_err(|error| OutcomeUnknown(format!("scope resolution failed: {error}")))?;
+        .map_err(|error| TransportUnavailable(format!("scope resolution failed: {error}")))?;
     let gwt_home = paths::gwt_home();
     if let Some(endpoint) = resolve_live_project_authority(&gwt_home, &scope, is_process_alive)
         .map_err(OutcomeUnknown)?
@@ -476,7 +510,7 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     let action = resolve_bootstrap_action(&gwt_home, &scope, DAEMON_PROTOCOL_VERSION, |pid| {
         is_process_alive(pid)
     })
-    .map_err(|error| OutcomeUnknown(format!("bootstrap resolve failed: {error}")))?;
+    .map_err(|error| TransportUnavailable(format!("bootstrap resolve failed: {error}")))?;
     match action {
         DaemonBootstrapAction::Reuse(endpoint) => Ok(Some(endpoint)),
         // Issue #4038: version-agnostic resolution never yields this arm; a
@@ -486,6 +520,7 @@ fn resolve_issue_monitor_endpoint_with_liveness(
         )),
         DaemonBootstrapAction::Spawn { .. } => match absence_evidence {
             EndpointAbsenceEvidence::Missing | EndpointAbsenceEvidence::DefinitelyDead => Ok(None),
+            EndpointAbsenceEvidence::Unavailable(reason) => Err(TransportUnavailable(reason)),
             EndpointAbsenceEvidence::Uncertain(reason) => Err(OutcomeUnknown(reason)),
         },
     }
@@ -501,7 +536,7 @@ fn endpoint_absence_evidence(
             return EndpointAbsenceEvidence::Missing;
         }
         Err(error) => {
-            return EndpointAbsenceEvidence::Uncertain(format!(
+            return EndpointAbsenceEvidence::Unavailable(format!(
                 "endpoint evidence is unreadable: {error}"
             ));
         }
@@ -509,13 +544,18 @@ fn endpoint_absence_evidence(
     let endpoint = match serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&payload) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            return EndpointAbsenceEvidence::Uncertain(format!(
+            return EndpointAbsenceEvidence::Unavailable(format!(
                 "endpoint evidence is malformed: {error}"
             ));
         }
     };
     if endpoint.pid > 0 && !is_process_alive(endpoint.pid) {
         EndpointAbsenceEvidence::DefinitelyDead
+    } else if endpoint.protocol_version != DAEMON_PROTOCOL_VERSION {
+        EndpointAbsenceEvidence::Uncertain(format!(
+            "incompatible daemon protocol: actual={}, expected={DAEMON_PROTOCOL_VERSION}; use a compatible gwtd build before retrying",
+            endpoint.protocol_version
+        ))
     } else {
         EndpointAbsenceEvidence::Uncertain(format!(
             "live endpoint mismatch or invalid endpoint metadata for pid {}",
@@ -584,7 +624,7 @@ pub fn publish_issue_monitor_window_snapshot_with_timeout(
     )
 }
 
-/// Read the daemon-owned atomic Issue Monitor projection. `Ok(None)` means no
+/// Read the daemon-owned atomic Issues projection. `Ok(None)` means no
 /// live daemon has authority and callers may use their offline cache fallback.
 /// A live daemon without a projection is an ambiguous read and fails closed.
 pub fn read_issue_monitor_status(
@@ -671,7 +711,7 @@ fn read_issue_monitor_status_from_endpoint(
             .map_err(OutcomeUnknown)?;
         match response {
             DaemonFrame::Status(status) => status.issue_monitor.ok_or_else(|| {
-                OutcomeUnknown("live daemon omitted Issue Monitor status projection".to_string())
+                OutcomeUnknown("live daemon omitted Issues status projection".to_string())
             }),
             DaemonFrame::Error { message } => Err(Rejected(message)),
             other => Err(OutcomeUnknown(format!(
@@ -841,6 +881,50 @@ use crate::process::is_process_alive as is_alive;
 #[cfg(test)]
 mod issue_monitor_status_tests {
     #[test]
+    fn issue_4193_monitor_status_reports_incompatible_protocol_versions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let project = temp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let scope =
+            super::RuntimeScope::from_project_root(&project, super::RuntimeTarget::Host).unwrap();
+        let mut endpoint = super::DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            "unused-incompatible-bind".into(),
+            "token".into(),
+            "test-daemon".into(),
+        );
+        for (actual, fenced) in [
+            (super::DAEMON_PROTOCOL_VERSION - 1, false),
+            (super::DAEMON_PROTOCOL_VERSION + 1, true),
+        ] {
+            endpoint.protocol_version = actual;
+            gwt_core::daemon::persist_endpoint(
+                &scope.endpoint_path(&super::paths::gwt_home()),
+                &endpoint,
+            )
+            .unwrap();
+            if fenced {
+                crate::persist_issue_monitor_authority_fence(
+                    &crate::issue_monitor_prefs_path_for_repo_path(&project),
+                    &crate::IssueMonitorAuthorityFence::current_process(),
+                )
+                .unwrap();
+            }
+            let error =
+                super::read_issue_monitor_status(&project).expect_err("incompatible protocol");
+            assert!(!error.allows_local_fallback());
+            let message = error.to_string();
+            assert!(message.contains(&format!("actual={actual}")), "{message}");
+            assert!(
+                message.contains(&format!("expected={}", super::DAEMON_PROTOCOL_VERSION)),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
     fn issue_5694_blocked_status_reports_authority_cause_and_recovery_without_fallback() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
@@ -886,7 +970,7 @@ mod window_snapshot_publish_tests {
     use crate::runtime_daemon_events::IssueMonitorControlPublishError;
 
     /// Without a daemon the publish must report a real transport outcome. A
-    /// platform where it silently does nothing leaves the Issue Monitor's idle
+    /// platform where it silently does nothing leaves Issues' idle
     /// classifier blind and its slots leaked (Issue #4131 AC-1).
     #[test]
     fn window_snapshot_publish_reaches_the_transport_on_every_platform() {
@@ -1239,24 +1323,24 @@ mod tests {
     }
 
     #[test]
-    fn scope_resolution_failure_is_outcome_unknown_not_fallback() {
+    fn scope_resolution_failure_allows_local_fallback() {
         let error = publish_issue_monitor_control_with_timeout(
             Path::new("relative-project-root"),
             json!({"enabled": false}),
             Duration::from_millis(100),
         )
-        .expect_err("relative project root cannot establish daemon absence");
+        .expect_err("scope failure prevents sending the control");
 
-        assert!(!error.allows_local_fallback());
+        assert!(error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(message)
                 if message.contains("scope resolution failed")
         ));
     }
 
     #[test]
-    fn bootstrap_resolution_failure_is_outcome_unknown_not_fallback() {
+    fn bootstrap_resolution_failure_allows_local_fallback() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1274,18 +1358,18 @@ mod tests {
             json!({"enabled": false}),
             Duration::from_millis(100),
         )
-        .expect_err("unreadable endpoint cannot establish daemon absence");
+        .expect_err("unreadable endpoint prevents sending the control");
 
-        assert!(!error.allows_local_fallback());
+        assert!(error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(message)
                 if message.contains("bootstrap resolve failed")
         ));
     }
 
     #[test]
-    fn malformed_endpoint_spawn_is_outcome_unknown_not_fallback() {
+    fn malformed_endpoint_spawn_allows_local_fallback() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1305,12 +1389,12 @@ mod tests {
             json!({"enabled": false}),
             Duration::from_millis(100),
         )
-        .expect_err("malformed endpoint cannot prove daemon absence");
+        .expect_err("malformed endpoint prevents sending the control");
 
-        assert!(!error.allows_local_fallback());
+        assert!(error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(message)
                 if message.contains("endpoint evidence")
         ));
     }
@@ -1354,7 +1438,9 @@ mod tests {
         assert!(matches!(
             error,
             crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
-                if message.contains("live endpoint mismatch")
+                if message.contains("incompatible daemon protocol")
+                    && message.contains(&format!("actual={}", DAEMON_PROTOCOL_VERSION + 1))
+                    && message.contains(&format!("expected={DAEMON_PROTOCOL_VERSION}"))
         ));
     }
 

@@ -1,0 +1,5 @@
+Exception: E:\gwt\work\issue-5561\scripts\verify-runtime-memory-cleanup.ps1:23
+Line |
+  23 |  … ount -ne 1) { throw 'Expected the managed-browser preflight guard.' }
+     |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Expected the managed-browser preflight guard.

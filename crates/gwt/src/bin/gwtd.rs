@@ -1,5 +1,9 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+#[cfg(windows)]
+#[path = "gwtd/windows_verification_recovery.rs"]
+mod windows_verification_recovery;
+
 // Issue #3675: unit tests must never reach the real GitHub API. Armed before
 // any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
 // SAFETY(pre-main): only stores a relaxed AtomicBool.
@@ -11,6 +15,17 @@ fn forbid_real_gh_in_tests() {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if let Some(code) = windows_verification_recovery::run_private_role(&argv, |input| {
+        dispatch_json_envelope("gwtd", input)
+    }) {
+        return ExitCode::from(code.clamp(0, 255) as u8);
+    }
+    if let Some(code) = gwt::cli::run_feedback_private_role(&argv) {
+        // A bounded private owner may still have an unobserved bookkeeping
+        // thread. This role must not enter ordinary startup or join that I/O.
+        std::process::exit(code.clamp(0, 255));
+    }
     if argv.get(1).map(String::as_str)
         == Some(gwt::cli::verification_record::interruption::WATCHDOG_ARG)
     {
@@ -212,6 +227,8 @@ fn format_workspace_help() -> String {
         "  workspace.work_prune                   Repair stale Works: close closed-owner Works,",
         "                                         discard orphaned placeholders, detach container",
         "                                         refs owned by another canonical Work",
+        "  workspace.work_repair                  Refold one Work's portable container aliases",
+        "                                         from accepted source evidence (dry-run default)",
         "  workspace.projection_list              List Workspace projections (--stale/--all)",
         "  workspace.projection_prune             Archive/delete stale Workspace projections",
         "  workspace.store_consolidate            Move durable Workspace state to the split root",
@@ -221,7 +238,8 @@ fn format_workspace_help() -> String {
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
         "  ids                                    Scope work_prune/projection_prune to these ids",
-        "  dry_run                                Both prune operations default to dry-run;",
+        "  work_id                                Existing Work for work_repair",
+        "  dry_run                                work_prune/work_repair default to dry-run;",
         "                                         pass false to apply",
         "",
         "Resolving an ambiguous execution container:",
@@ -344,7 +362,7 @@ fn format_issue_help() -> String {
         "                                        finding. issue.spec.inspection.complete then",
         "                                        checks the GitHub-entity readback per section",
         "                                        and refuses undisposed critical findings",
-        "  project_root                          Optional Issue Monitor project scope",
+        "  project_root                          Optional Issues project scope",
         "  number, position                      Move one priority (head or numeric index)",
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
         "  number, reason                        issue.monitor.requeue releases a dead",
@@ -364,7 +382,7 @@ fn format_issue_help() -> String {
         "                                        settled execution / dead binding) and closes",
         "                                        their panes; dry_run reports only",
         "  issue_numbers                         Replace the complete priority order",
-        "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
+        "  enabled=false, autonomous_mode=false  Safe Issues kill switches",
         "  max_active                            Positive concurrent-agent limit",
         "  launch_agent                          Switch the saved launch profile's agent",
         "                                        (codex / claude); model resets to default",
@@ -386,13 +404,17 @@ fn format_pr_help() -> String {
         "",
         "Operations:",
         "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
-        "  pr.create | pr.edit | pr.ready | pr.draft | pr.close | pr.comment",
+        "  pr.create | pr.edit | pr.ready | pr.close | pr.comment",
         "  pr.update_branch | pr.review_threads.reply_and_resolve",
         "",
         "Key params:",
-        "  number, base, head, title, body, labels, add_labels, draft, comment",
+        "  number, base, head, title, body, labels, add_labels, comment",
+        "  pr.create: creates a verified Ready PR; Draft PRs are prohibited.",
         "  pr.edit: base alone is a valid update; existing edit authority applies.",
         "  pr.close: number and optional comment; preserves the branch.",
+        "  pr.review_threads.reply_and_resolve: number, body (plain text), optional thread_id.",
+        "  thread_id selects one thread; omitted, processes all unresolved threads.",
+        "  Unknown thread_id and JSON array bodies are rejected before mutations.",
         "",
     ]
     .join("\n")
@@ -413,16 +435,38 @@ fn format_actions_help() -> String {
         "  actions.rerun                           Re-run a failed run or a single failed job",
         "  actions.cancel                          Request cancellation of a queued or in-progress run",
         "  actions.queued                          List queued runs without jobs, with elapsed age_seconds",
+        "  actions.diagnostic.observe              Inspect the fixed historical Windows profile or request",
+        "  actions.diagnostic.request              Reserve and submit that fixed profile once",
+        "  actions.diagnostic.cancel               Cancel the exact bound live run once",
+        "  actions.diagnostic.policy.status        Read fixed akiojin/gwt diagnostic permission and token",
+        "  actions.diagnostic.policy.add           Allow windows-diagnostic.yml with exact scoped authority",
+        "  actions.diagnostic.policy.rollback      Undo only the diagnostic permission added by its receipt",
+        "  actions.release_policy.status           Read current release permission, CAS token and recovery",
+        "  actions.release_policy.add              Allow prepare-release.yml for this repository only",
+        "  actions.release_policy.rollback         Undo a successful add with unchanged post-state",
         "",
         "Key params:",
         "  run_id, job_id",
         "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "  request_id (UUID), expected_token, reason   Fixed workflow policy mutations",
+        "  instruction_id | approval_id              Exact scoped human authority, registered PM only",
+        "  added_by                                  rollback: the original successful add request_id",
+        "  profile_id, expected_profile_digest        Fixed diagnostic profile; request_id is a UUID",
+        "  expected_run_id, expected_revision         Diagnostic cancellation requires current binding",
+        "  preexecution_of, expected_predecessor_revision   One correction after verified NoStart only",
         "",
         "Notes:",
         "  actions.rerun refuses a run_id/job_id the current repository does not own.",
         "  actions.cancel refuses completed runs and a run_id the current repository does not own.",
         "  actions.queued takes no params.",
         "  Prefer job_id so one flaky check does not re-run every job in the run.",
+        "  Release policy uses stdin JSON only and preserves other workflow permissions.",
+        "  Read status first; a verified checkout CLI uses the existing PM Host bridge.",
+        "  Changed Host/Session/generation or stale token refuses before settings persistence.",
+        "  UNKNOWN: inspect status without resending. Existing QA scopes cannot be expanded.",
+        "  Diagnostic requests require the registered PM, live Host proof and explicit repository permission.",
+        "  In akiojin/gwt, generic dispatch cannot submit windows-diagnostic.yml; use actions.diagnostic.request.",
+        "  Diagnostic receipt acceptance is separate from case PASS, cleanup and Ready verification.",
         "",
     ]
     .join("\n")
@@ -935,9 +979,17 @@ fn run_json_envelope_cli(argv: &[String]) -> i32 {
         eprintln!("{prog}: failed to read JSON envelope: {error}");
         return 1;
     }
+    #[cfg(windows)]
+    if let Some(code) = windows_verification_recovery::forward_if_needed(&input) {
+        return code;
+    }
+    dispatch_json_envelope(prog, &input)
+}
+
+fn dispatch_json_envelope(prog: &str, input: &str) -> i32 {
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut env = json_envelope_env(repo_path, &input);
-    gwt::cli::dispatch_json_input(&mut env, prog, &input)
+    let mut env = json_envelope_env(repo_path, input);
+    gwt::cli::dispatch_json_input(&mut env, prog, input)
 }
 
 fn json_envelope_env(repo_path: PathBuf, input: &str) -> gwt::cli::DefaultCliEnv {
@@ -1175,6 +1227,49 @@ mod tests {
         assert_eq!(did_you_mean("baord"), Some("board"));
     }
 
+    #[test]
+    fn issue_3789_pr_help_documents_targeted_and_bulk_replies() {
+        let help = family_help("pr").expect("pr family help");
+        for expected in [
+            "thread_id",
+            "omitted",
+            "all unresolved",
+            "plain text",
+            "JSON array",
+        ] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
+    #[test]
+    fn release_policy_actions_help_documents_fixed_scope_and_recovery() {
+        let help = family_help("actions").unwrap();
+        for expected in [
+            "actions.diagnostic.request",
+            "actions.diagnostic.observe",
+            "actions.diagnostic.cancel",
+            "actions.diagnostic.policy.status",
+            "actions.diagnostic.policy.add",
+            "actions.diagnostic.policy.rollback",
+            "actions.release_policy.status",
+            "actions.release_policy.add",
+            "actions.release_policy.rollback",
+            "prepare-release.yml",
+            "request_id",
+            "expected_token",
+            "added_by",
+            "instruction_id",
+            "approval_id",
+            "registered PM",
+            "stdin JSON",
+            "UNKNOWN",
+            "without resending",
+            "Host bridge",
+        ] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
     /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
     /// and both of its target params, so an agent blocked on `gh run rerun`
     /// can discover the sanctioned replacement from the help alone.
@@ -1215,6 +1310,7 @@ mod tests {
             "workspace.join",
             "workspace.candidates",
             "workspace.work_prune",
+            "workspace.work_repair",
             "workspace.projection_list",
             "workspace.projection_prune",
             "workspace.store_consolidate",

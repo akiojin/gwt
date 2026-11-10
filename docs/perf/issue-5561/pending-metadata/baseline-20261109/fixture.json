@@ -1,0 +1,29 @@
+{
+  "isolated_home": "<user-home>\\AppData\\Local\\Temp\\gwt-runtime-memory-6bf44e4b-33ab-4c3c-b7b6-bfe09a28c27c",
+  "workload_projects": [
+    {
+      "path": "<user-home>\\AppData\\Local\\Temp\\gwt-runtime-memory-6bf44e4b-33ab-4c3c-b7b6-bfe09a28c27c\\workload\\project-0",
+      "branch": "main",
+      "project_key": "3de0cdcd622ad547"
+    },
+    {
+      "path": "<user-home>\\AppData\\Local\\Temp\\gwt-runtime-memory-6bf44e4b-33ab-4c3c-b7b6-bfe09a28c27c\\workload\\project-1",
+      "branch": "main",
+      "project_key": "dcb79f49223252c7"
+    },
+    {
+      "path": "<user-home>\\AppData\\Local\\Temp\\gwt-runtime-memory-6bf44e4b-33ab-4c3c-b7b6-bfe09a28c27c\\workload\\project-2",
+      "branch": "main",
+      "project_key": "1f65febe6298706c"
+    },
+    {
+      "path": "<user-home>\\AppData\\Local\\Temp\\gwt-runtime-memory-6bf44e4b-33ab-4c3c-b7b6-bfe09a28c27c\\workload\\project-3",
+      "branch": "main",
+      "project_key": "39cbe3a7681cc1d0"
+    }
+  ],
+  "gui_pid": 34156,
+  "started_at": "2026-11-09T11:51:33.2541870Z",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "checkout_binary": "E:\\gwt\\work\\issue-5561\\target\\debug\\gwt.exe"
+}

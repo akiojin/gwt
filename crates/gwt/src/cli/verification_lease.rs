@@ -937,7 +937,18 @@ fn holder_is_self(
 impl HolderDiagnostics {
     fn read(status: &HeavyLeaseStatus, caller_target: Option<&str>) -> Self {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-        let mut system = System::new();
+        let Ok(mut system) = System::new() else {
+            return Self {
+                exe: None,
+                cwd: None,
+                has_live_children: None,
+                self_hold: holder_is_self(
+                    status,
+                    caller_target,
+                    std::env::var("GWT_SESSION_ID").ok().as_deref(),
+                ),
+            };
+        };
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -1233,17 +1244,21 @@ fn status_for_lease(lease_id: &str) -> Result<Option<LeaseStatusSnapshot>, SpecO
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     let settings = gwt_config::Settings::load()
         .map_err(|err| unexpected(format!("verification configuration invalid: {err}")))?;
-    let capacity = settings.verification.slots.map_or_else(
-        || {
-            let mut host = sysinfo::System::new();
+    let capacity = match settings.verification.slots {
+        None => {
+            let mut host = sysinfo::System::new().map_err(|error| {
+                unexpected(format!(
+                    "verification host observation unavailable: {error}"
+                ))
+            })?;
             host.refresh_memory();
             automatic_slot_capacity(
                 std::thread::available_parallelism().map_or(1, usize::from),
                 host.total_memory(),
             )
-        },
-        |slots| usize::from(slots.get()),
-    );
+        }
+        Some(slots) => usize::from(slots.get()),
+    };
     IndexCoordinator::open_verification(verification_coordinator_root(), capacity)
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
@@ -1419,6 +1434,20 @@ pub(super) fn command_temporary_base(worktree: &Path, command: &str) -> Result<P
     })
 }
 
+pub(super) fn command_admission_disk_budgets(
+    worktree: &Path,
+    command: &str,
+    target: Option<&Path>,
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
+    let temporary = command_temporary_base(worktree, command)?;
+    command_disk_budgets(&[
+        target
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| worktree.join("target")),
+        temporary,
+    ])
+}
+
 // #5082: sampled target growth 4,650,508,061 + temporary growth 269,853,053
 // bytes across the changed-surface matrix, with 20% headroom (rounded up).
 const DEFAULT_VERIFICATION_DISK_BUDGET_BYTES: u64 = 5_904_433_337;
@@ -1433,14 +1462,15 @@ pub(super) fn command_disk_budgets(
 fn command_disk_budgets_with_inventory(
     paths: &[PathBuf],
     settings: &gwt_config::Settings,
-    _disk_inventory: impl FnOnce() -> sysinfo::Disks,
+    _disk_inventory: impl FnOnce() -> Result<sysinfo::Disks, sysinfo::Error>,
 ) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
     let bytes = settings
         .verification
         .disk_budget_bytes
         .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
     #[cfg(not(unix))]
-    let disks = _disk_inventory();
+    let disks = _disk_inventory()
+        .map_err(|error| format!("verification disk observation unavailable: {error}"))?;
     let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
     for path in paths {
         let mut probe = path.clone();
@@ -1707,6 +1737,7 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             "capacity: {capacity}\nrunning: {}\navailable: {}\n",
             status.running, status.available
         ));
+        out.push_str("disk_admission_scope: sampled per resident queued command; available slots alone do not establish disk admission\n");
         out.push_str("exclusive_commands: commands without a resolved build directory (Cargo metadata or inline CARGO_TARGET_DIR); legacy root locks also exclude all slots\n");
         let exclusive_held = status
             .slots
@@ -1880,6 +1911,30 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             out.push_str(&format!("queue[{position}].mode: {mode}\n"));
             if let Some(reason) = &entry.scheduling_reason {
                 out.push_str(&format!("queue[{position}].scheduling: {reason}\n"));
+            }
+            if let Some(disks) = &entry.disk_admission {
+                out.push_str(&format!(
+                    "queue[{position}].disk_blocked: {}\n",
+                    disks.iter().any(|disk| disk.blocked)
+                ));
+                for (disk_index, disk) in disks.iter().enumerate() {
+                    out.push_str(&format!(
+                        "queue[{position}].disk[{disk_index}]: volume={} path={} free_bytes={} reserved_bytes={} reserve_bytes={} floor_bytes={} required_bytes={} shortfall_bytes={} blocked={}\n",
+                        disk.volume,
+                        disk.path.display(),
+                        disk.free_bytes,
+                        disk.reserved_bytes,
+                        disk.reserve_bytes,
+                        disk.floor_bytes,
+                        disk.required_bytes,
+                        disk.shortfall_bytes,
+                        disk.blocked,
+                    ));
+                }
+            } else if let Some(error) = &entry.disk_admission_error {
+                out.push_str(&format!("queue[{position}].disk_blocked: unknown\nqueue[{position}].disk_error: active reservation or disk measurement unavailable at {error}\n"));
+            } else {
+                out.push_str(&format!("queue[{position}].disk_blocked: unknown (no current command budget; non-resident or older claimant)\n"));
             }
         }
     }
@@ -2677,6 +2732,8 @@ mod tests {
                         priority: JobPriority::ManualRebuild,
                         mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
                         scheduling_reason: None,
+                        disk_admission: None,
+                        disk_admission_error: None,
                         queued_at_ms: 500,
                         waiting_ms: 90_000,
                         resident: true,
@@ -2689,6 +2746,8 @@ mod tests {
                         priority: JobPriority::ManualRebuild,
                         mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
                         scheduling_reason: None,
+                        disk_admission: None,
+                        disk_admission_error: None,
                         queued_at_ms: 900,
                         waiting_ms: 89_600,
                         resident: true,
@@ -2747,6 +2806,50 @@ mod tests {
              queue[1]: target=repo--verification--late priority=manual-rebuild \
              queued_at_ms=900 waiting_ms=89600 resident=true attempt_id=unknown job_status=unknown\n"
         );
+    }
+
+    #[test]
+    fn status_renders_disk_blocker_beside_free_capacity() {
+        use gwt_core::index_coordinator::{
+            HeavyQueueEntry, HeavyQueueMode, VerificationDiskAdmission,
+        };
+
+        let snapshot = super::LeaseStatusSnapshot {
+            capacity: Some(3),
+            available: 3,
+            pending: 1,
+            queue: vec![HeavyQueueEntry {
+                target: Some("repo--verification--waiter".into()),
+                priority: JobPriority::ManualRebuild,
+                mode: HeavyQueueMode::Shared,
+                queued_at_ms: 1,
+                waiting_ms: 1,
+                resident: true,
+                attempt_id: None,
+                job_status: None,
+                bypass_reason: None,
+                scheduling_reason: None,
+                disk_admission: Some(vec![VerificationDiskAdmission {
+                    volume: "C:".into(),
+                    path: std::path::PathBuf::from("C:/Temp"),
+                    free_bytes: 93_601_193_984,
+                    reserved_bytes: 0,
+                    reserve_bytes: 1,
+                    floor_bytes: 99_961_379_020,
+                    required_bytes: 99_961_379_021,
+                    shortfall_bytes: 6_360_185_037,
+                    blocked: true,
+                }]),
+                disk_admission_error: None,
+            }],
+            ..Default::default()
+        };
+        let mut out = String::new();
+        super::push_status_fields(&mut out, &snapshot, "repo");
+        assert!(out.contains("available: 3\n"), "{out}");
+        assert!(out.contains("queue[0].disk_blocked: true\n"), "{out}");
+        assert!(out.contains("path=C:/Temp"), "{out}");
+        assert!(out.contains("shortfall_bytes=6360185037"), "{out}");
     }
 
     /// Issue #4561 AC-4: `holder_state` on its own was read as a decision —

@@ -1,4 +1,4 @@
-//! Read-only process observations, separate from Issue Monitor admission.
+//! Read-only process observations, separate from Issues admission.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ static RUNTIME_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLoc
 #[cfg(test)]
 thread_local! {
     static RUNTIME_PATH_STAMP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROJECT_CENSUS_CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn cached_runtime_entry(
@@ -118,6 +119,9 @@ pub struct SessionObservation {
     pub child_started_at: u64,
     pub started_at: String,
     pub launch_origin: SessionLaunchOrigin,
+    /// Known skill token only; launch arguments and prompt bodies stay private.
+    #[serde(default)]
+    pub launch_entrypoint: Option<String>,
     pub restore_source_session_id: Option<String>,
 }
 
@@ -216,6 +220,9 @@ fn finish_machine_inventory(
     resources: &MachineProcessResources,
 ) -> MachineSessionInventory {
     inventory.uncertainties.retain(|uncertainty| {
+        if resources.observation_error.is_some() {
+            return true;
+        }
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
         }
@@ -253,6 +260,7 @@ fn finish_machine_inventory(
 
 #[derive(Default)]
 struct MachineProcessResources {
+    observation_error: Option<String>,
     memory: BTreeMap<u32, u64>,
     reviews: BTreeSet<u32>,
     scalar_identities: BTreeMap<u32, u64>,
@@ -369,7 +377,14 @@ pub struct ProjectSessionCensus {
 }
 
 impl ProjectSessionCensus {
+    #[cfg(test)]
+    pub(crate) fn captures_for_test() -> usize {
+        PROJECT_CENSUS_CAPTURES.with(std::cell::Cell::get)
+    }
+
     pub fn capture(sessions_dir: &Path) -> Self {
+        #[cfg(test)]
+        PROJECT_CENSUS_CAPTURES.with(|count| count.set(count.get().wrapping_add(1)));
         let mut inventory = SessionInventory::default();
         let mut snapshot = None;
         let candidates = read_candidates_scope_with_snapshot(
@@ -478,14 +493,22 @@ fn capture_process_resources(
     candidates: &[RuntimeCandidate],
     inventory: &SessionInventory,
     measure_resources: bool,
-    snapshot: Option<sysinfo::System>,
+    snapshot: Option<Result<sysinfo::System, sysinfo::Error>>,
 ) -> MachineProcessResources {
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
         return MachineProcessResources::default();
     }
     // Read process state after the sidecars so a newly published child is not
     // compared with an OS snapshot taken before it was spawned.
-    let system = snapshot.unwrap_or_else(process_snapshot);
+    let system = match snapshot.unwrap_or_else(process_snapshot) {
+        Ok(system) => system,
+        Err(error) => {
+            return MachineProcessResources {
+                observation_error: Some(error.to_string()),
+                ..MachineProcessResources::default()
+            };
+        }
+    };
     capture_process_resources_with_system(candidates, inventory, measure_resources, &system)
 }
 
@@ -546,8 +569,11 @@ fn capture_process_resources_with_system(
         .collect::<BTreeMap<_, _>>();
     // Resource refreshes retain old values on access failure. Keep those probes
     // transient so an earlier positive RSS/environment never survives a tick.
-    let mut scalar_system = System::new();
-    if !legacy_children.is_empty() {
+    let mut scalar_system = System::new().ok();
+    if let Some(scalar_system) = scalar_system
+        .as_mut()
+        .filter(|_| !legacy_children.is_empty())
+    {
         scalar_system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&legacy_children),
             true,
@@ -561,8 +587,12 @@ fn capture_process_resources_with_system(
         .iter()
         .map(|(pid, process)| (pid.as_u32(), process.start_time()))
         .collect::<BTreeMap<_, _>>();
-    let legacy_processes =
-        legacy_process_observations(system, &scalar_system, &legacy_hosts, &legacy_identities);
+    let legacy_processes = legacy_process_observations(
+        system,
+        scalar_system.as_ref(),
+        &legacy_hosts,
+        &legacy_identities,
+    );
     // Identity comes from the per-process start token, not the wall-clock
     // start time, which moves with the boot time on Linux (Issue #5089).
     // Only the PIDs a candidate can name are read.
@@ -593,7 +623,7 @@ fn capture_process_resources_with_system(
         })
         .collect::<BTreeMap<_, _>>();
     let mut resources = MachineProcessResources::default();
-    if measure_resources {
+    if let Some(scalar_system) = scalar_system.as_mut().filter(|_| measure_resources) {
         // Only named PTY identities are queried for resource/role scalars.
         let pids = named
             .iter()
@@ -626,7 +656,8 @@ fn capture_process_resources_with_system(
             }
         }
     }
-    let boot_epoch = System::boot_time();
+    // An unavailable boot epoch cannot prove that a runtime predates this boot.
+    let boot_epoch = System::boot_time().unwrap_or_default();
     let tokens_are_epoch = cfg!(not(target_os = "linux"));
     resources.processes = epochs.clone();
     resources.processes.extend(processes);
@@ -643,6 +674,14 @@ fn observe_candidate_resources(
     resources: &MachineProcessResources,
     require_host_absence: bool,
 ) {
+    if let Some(error) = &resources.observation_error {
+        inventory.uncertain(
+            Path::new("runtime"),
+            None,
+            format!("process_snapshot_unavailable: {error}"),
+        );
+        return;
+    }
     let candidates = candidates
         .into_iter()
         .filter(|candidate| {
@@ -656,11 +695,16 @@ fn observe_candidate_resources(
     if require_host_absence {
         // Census absence alone does not authorize abandoning another Session.
         for candidate in &candidates {
-            if candidate
+            let host_identity_missing = candidate
                 .runtime
                 .host_started_at
                 .filter(|started| *started > 0)
-                .is_none()
+                .is_none();
+            if (host_identity_missing
+                || exact_host_identity(
+                    &candidate.runtime,
+                    resources.processes.get(&candidate.host_pid).copied(),
+                ))
                 && candidate
                     .runtime
                     .child_pid
@@ -672,7 +716,12 @@ fn observe_candidate_resources(
                 inventory.uncertain(
                     &candidate.path,
                     Some(&candidate.session.id),
-                    "host_identity_missing_for_recovery".to_string(),
+                    if host_identity_missing {
+                        "host_identity_missing_for_recovery"
+                    } else {
+                        "child_identity_missing"
+                    }
+                    .to_string(),
                 );
             }
         }
@@ -687,16 +736,16 @@ fn observe_candidate_resources(
     );
 }
 
-fn process_snapshot() -> sysinfo::System {
+fn process_snapshot() -> Result<sysinfo::System, sysinfo::Error> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let mut system = System::new();
+    let mut system = System::new()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    system
+    Ok(system)
 }
 
 fn legacy_process_observations(
     system: &sysinfo::System,
-    scalar_system: &sysinfo::System,
+    scalar_system: Option<&sysinfo::System>,
     legacy_hosts: &BTreeSet<u32>,
     legacy_identities: &BTreeMap<u32, u64>,
 ) -> Vec<LegacyProcessObservation> {
@@ -714,11 +763,13 @@ fn legacy_process_observations(
                 .get(&pid.as_u32())
                 .copied()
                 .unwrap_or_default();
-            let scalar = scalar_system.process(*pid).filter(|scalar| {
-                started_at > 0
-                    && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
-                        == started_at
-            });
+            let scalar = scalar_system
+                .and_then(|system| system.process(*pid))
+                .filter(|scalar| {
+                    started_at > 0
+                        && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
+                            == started_at
+                });
             let session_id = scalar
                 .and_then(|scalar| {
                     scalar
@@ -754,7 +805,7 @@ fn legacy_process_observations(
 }
 
 #[cfg(test)]
-fn observe_with_processes(
+pub(crate) fn observe_with_processes(
     project_root: &Path,
     sessions_dir: &Path,
     processes: &BTreeMap<u32, u64>,
@@ -841,7 +892,11 @@ fn historical_runtime(
                 .child_started_at
                 .filter(|expected| *expected > 0)
                 .is_some_and(|expected| expected != *started),
-            Some(_) => false,
+            Some(_) => {
+                runtime.status == gwt_agent::AgentStatus::Stopped
+                    && !processes.contains_key(&host_pid)
+                    && !group_alive(pid)
+            }
         };
     }
     !exact_direct_child && !exact_host_identity(runtime, processes.get(&host_pid).copied())
@@ -891,7 +946,7 @@ fn read_candidates_scope_with_snapshot(
     sessions_dir: &Path,
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
-    snapshot: &mut Option<sysinfo::System>,
+    snapshot: &mut Option<Result<sysinfo::System, sysinfo::Error>>,
 ) -> Vec<RuntimeCandidate> {
     let mut process_evidence = None;
     read_candidates_with_liveness(
@@ -910,8 +965,10 @@ fn read_candidates_scope_with_snapshot(
             // PIDs too: a Host can spawn a child and exit after the snapshot
             // but before its direct probe. Never collect environments.
             let (observed, pids) = process_evidence.get_or_insert_with(|| {
-                let system = snapshot.get_or_insert_with(process_snapshot);
-                process_liveness_evidence(system)
+                match snapshot.get_or_insert_with(process_snapshot) {
+                    Ok(system) => process_liveness_evidence(system),
+                    Err(_) => (false, BTreeSet::new()),
+                }
             });
             !*observed || pids.contains(&host_pid)
         },
@@ -1112,6 +1169,23 @@ fn observe_candidates(
         runtime,
     } in candidates
     {
+        // A dead Host's stopped sidecar may name a recycled protected PID.
+        // Use the same historical check even without a saved child identity.
+        if runtime
+            .child_pid
+            .is_some_and(|pid| processes.get(&pid) == Some(&0))
+            && historical_runtime(
+                &runtime,
+                host_pid,
+                processes,
+                &group_alive,
+                legacy_processes.iter().any(|process| {
+                    process.parent_pid == host_pid && process.session_id == session.id
+                }),
+            )
+        {
+            continue;
+        }
         let child = runtime
             .child_pid
             .zip(runtime.child_started_at)
@@ -1154,10 +1228,10 @@ fn observe_candidates(
                         && (process.session_id.is_empty() || process.session_id == session.id)
                         && (!process.session_id.is_empty() || process.parent_may_be_host)
                 });
-            // A legacy namespace PID may now belong to an unrelated process.
-            // Require Host provenance or actual child evidence, not PID alone.
-            if exact_host_identity(&runtime, processes.get(&host_pid).copied())
-                || unidentified_child
+            // A shared live Host also owns stopped and not-yet-spawned
+            // Sessions. Census counts children; recovery fences the Host
+            // separately in observe_candidate_resources.
+            if unidentified_child
                 || runtime
                     .child_pid
                     .is_some_and(|pid| processes.contains_key(&pid) || group_alive(pid))
@@ -1209,6 +1283,10 @@ fn observe_candidates(
             if !seen.insert((child_pid, child_started_at)) {
                 continue;
             }
+            let entrypoint = gwt_agent::permission_mode::entrypoint_from_launch_args(
+                &session.launch_args,
+                false,
+            );
             inventory.sessions.push(SessionObservation {
                 session_id: session.id.clone(),
                 issue_number: session.linked_issue_number,
@@ -1222,6 +1300,13 @@ fn observe_candidates(
                 child_started_at,
                 started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 launch_origin: session.launch_origin,
+                launch_entrypoint: gwt_skills::assets::CLAUDE_SKILLS
+                    .dirs()
+                    .any(|skill| {
+                        skill.path().file_name().and_then(|name| name.to_str())
+                            == Some(entrypoint.as_str())
+                    })
+                    .then_some(entrypoint),
                 restore_source_session_id: session.restore_source_session_id.clone(),
             });
         }
@@ -1235,6 +1320,7 @@ fn observe_candidates(
             // The ledger describes only the latest use of a Session id; it
             // cannot attribute one origin to multiple distinct live PTYs.
             row.launch_origin = SessionLaunchOrigin::Unknown;
+            row.launch_entrypoint = None;
             row.restore_source_session_id = None;
         }
     }
@@ -1316,6 +1402,37 @@ mod tests {
     }
 
     #[test]
+    fn process_snapshot_creation_failure_is_uncertain_instead_of_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "held",
+            Some((123, 456)),
+        );
+        let mut inventory = SessionInventory::default();
+        let candidates =
+            read_candidates_with_liveness(None, &sessions, None, &mut inventory, |_, _| true);
+        assert_eq!(candidates.len(), 1);
+        let resources = capture_process_resources(
+            &candidates,
+            &inventory,
+            false,
+            Some(Err(sysinfo::Error::Unsupported)),
+        );
+        observe_candidate_resources(candidates, &mut inventory, &resources, true);
+        assert!(inventory.sessions.is_empty());
+        assert!(
+            inventory.uncertainties.iter().any(|row| {
+                row.session_id.is_none() && row.reason.starts_with("process_snapshot_unavailable:")
+            }),
+            "a failed process census must not authorize absence-based recovery"
+        );
+    }
+
+    #[test]
     fn project_census_keeps_scopes_and_uncertainties_without_rereading_the_tick() {
         let temp = tempfile::tempdir().unwrap();
         let sessions = temp.path().join("sessions");
@@ -1371,8 +1488,8 @@ mod tests {
             .unwrap();
         let entry = std::fs::read_dir(temp.path())
             .unwrap()
-            .next()
-            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path() == path)
             .unwrap();
         let before_cold = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
         let first = cached_runtime_entry(&entry, &path).unwrap();
@@ -1529,7 +1646,7 @@ mod tests {
             std::fs::write(path, &json).unwrap();
         }
         let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         let mut cpu_ms = || {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[pid]),
@@ -1615,7 +1732,7 @@ mod tests {
         for id in ["first", "later"] {
             save_runtime(&sessions, temp.path(), temp.path(), id, None);
         }
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().unwrap();
         let mut refreshes = 0;
         let inventory =
             observe_machine_sessions_with_system_refresh(&sessions, &mut system, |_| {
@@ -1731,6 +1848,35 @@ mod tests {
             |_| false,
             false
         ));
+        assert!(historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| false,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(100, 10), (201, 0)]),
+            |_| false,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| true,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| false,
+            true
+        ));
+        runtime.status = AgentStatus::Running;
         assert!(!historical_runtime(
             &runtime,
             100,
@@ -1738,6 +1884,7 @@ mod tests {
             |_| false,
             false
         ));
+        runtime.status = AgentStatus::Stopped;
         assert!(!historical_runtime(
             &runtime,
             100,
@@ -2001,8 +2148,16 @@ mod tests {
         ] {
             save_runtime(&sessions, &project, worktree, id, Some(child));
         }
+        let mut launched = Session::load(&sessions.join("first.toml")).unwrap();
+        launched.launch_args =
+            vec!["$gwt-execute #4305\nPrivate launch instructions must not be exposed".to_string()];
+        launched.save(&sessions).unwrap();
         let mut unlinked = Session::load(&sessions.join("second.toml")).unwrap();
         unlinked.linked_issue_number = None;
+        unlinked.launch_args = vec![
+            "--model".to_string(),
+            "$gwt-private-token-do-not-publish".to_string(),
+        ];
         unlinked.save(&sessions).unwrap();
         let mut bound = Session::load(&sessions.join("missing.toml")).unwrap();
         bound.execution_binding = Some(gwt_agent::SessionExecutionBinding {
@@ -2056,7 +2211,19 @@ mod tests {
                 serde_json::json!(row["session_id"] == "first"),
                 "only the linked unbound Session lacks producing authority: {row}"
             );
+            assert_eq!(
+                row["launch_entrypoint"],
+                if row["session_id"] == "first" {
+                    serde_json::json!("gwt-execute")
+                } else {
+                    serde_json::Value::Null
+                },
+                "active_sessions exposes only the known launch entrypoint: {row}"
+            );
         }
+        assert!(!status_sessions
+            .to_string()
+            .contains("Private launch instructions"));
         let first = observed
             .sessions
             .iter()
@@ -2188,7 +2355,7 @@ mod tests {
     fn legacy_snapshot_presence_survives_unavailable_scalar_observation() {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
         let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
@@ -2198,12 +2365,8 @@ mod tests {
         let parent = process.parent().expect("current process parent").as_u32();
         let started_at = crate::process::snapshot_process_start_identity(pid.as_u32(), process);
         let identities = BTreeMap::from([(pid.as_u32(), started_at)]);
-        let rows = legacy_process_observations(
-            &system,
-            &System::new(),
-            &BTreeSet::from([parent]),
-            &identities,
-        );
+        let rows =
+            legacy_process_observations(&system, None, &BTreeSet::from([parent]), &identities);
         assert_eq!(
             rows.len(),
             1,
@@ -2218,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_live_host_without_child_identity_reports_uncertainty() {
+    fn live_host_without_any_child_does_not_make_the_census_uncertain() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions = temp.path().join("sessions");
         save_runtime(&sessions, temp.path(), temp.path(), "legacy", None);
@@ -2227,14 +2390,9 @@ mod tests {
                 false
             });
         assert!(observed.sessions.is_empty());
-        assert_eq!(
-            observed.uncertainties.len(),
-            1,
-            "unknown must not become a confident zero"
-        );
-        assert_eq!(
-            observed.uncertainties[0].session_id.as_deref(),
-            Some("legacy")
+        assert!(
+            observed.uncertainties.is_empty(),
+            "a shared Host alone is not a worker; Session recovery has its own Host fence"
         );
     }
 
@@ -2349,6 +2507,9 @@ mod tests {
             "reused-session",
             Some((201, 20)),
         );
+        let mut session = Session::load(&sessions.join("reused-session.toml")).unwrap();
+        session.launch_args = vec!["$gwt-execute #4305".to_string()];
+        session.save(&sessions).unwrap();
         let mut successor = SessionRuntimeState::new(AgentStatus::Running);
         successor.child_pid = Some(202);
         successor.child_started_at = Some(21);
@@ -2373,5 +2534,11 @@ mod tests {
             .iter()
             .all(|row| row.launch_origin == SessionLaunchOrigin::Unknown
                 && row.restore_source_session_id.is_none()));
+        let rows = serde_json::to_value(&observed.sessions).unwrap();
+        assert!(rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["launch_entrypoint"].is_null()));
     }
 }

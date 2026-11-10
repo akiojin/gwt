@@ -55,7 +55,7 @@ pub(super) fn validate(intent: &OperationIntent) -> io::Result<()> {
     let allowed: &[&str] = match intent.operation.as_str() {
         "pr.close" => &["number", "comment"],
         "worktree.gc_build_artifacts" => &["dry_run", "base", "include_unmerged", "include_protected_workspaces"],
-        "pm.message.send" => &["id", "text"],
+        "pm.message.send" => &["id", "text", "operation_id"],
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "pm.operation.execute only supports pr.close, worktree.gc_build_artifacts and pm.message.send")),
     };
     let params = intent

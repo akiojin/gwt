@@ -175,15 +175,18 @@ impl RunOutcomeCounts {
 
 /// The run's headline status. `INTERRUPTED` is reported only when every
 /// command that did not pass was killed from outside; any real failure keeps
-/// the run a `FAIL`.
+/// the run a `FAIL`. A passing subset of a registered plan is not `PASS`.
 pub(crate) fn run_status_label(
     all_passed: bool,
+    registered_plan_uncovered: bool,
     quarantined: bool,
     commands: &[VerificationCommandResult],
 ) -> &'static str {
     let counts = RunOutcomeCounts::of(commands);
     if counts.environment_incompatible > 0 && counts.failed == 0 {
         "ENVIRONMENT_INCOMPATIBLE"
+    } else if all_passed && registered_plan_uncovered {
+        "PLAN_NOT_COVERED"
     } else if all_passed {
         "PASS"
     } else if quarantined {
@@ -1256,6 +1259,35 @@ pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &st
             .is_ok_and(|(commits, _)| commits.is_empty())
 }
 
+/// A merged owner PR's receipt is inherited by a later verified HEAD when the
+/// PR head reaches that HEAD and every product commit between them is already
+/// contained in the configured base (`origin/<base>`): other owners' delivered
+/// work on a fresh startup HEAD is not undelivered source (#6893). Product
+/// commits that only the work branch holds still refuse the inheritance.
+pub(crate) fn inherits_delivered_receipt(
+    worktree: &Path,
+    merged_head: &str,
+    verified: &str,
+    base_ref_name: &str,
+) -> bool {
+    if base_ref_name.trim().is_empty() {
+        return false;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", merged_head, verified])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && super::pr::head_check::product_changes_since(
+            &worktree,
+            merged_head,
+            verified,
+            &format!("origin/{}", base_ref_name.trim()),
+        )
+        .is_ok_and(|(commits, _)| commits.is_empty())
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],
@@ -1669,7 +1701,9 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
 /// undelivered predecessor shard still dirties the tracked store, so no
 /// delivery pressure is lost. An unreadable authority keeps the obligation.
 fn open_obligation_is_superseded(worktree: &Path, record: &WorkEventSettlementRecord) -> bool {
-    match work_event_receipt_authorizes_current_generation(worktree, record) {
+    // A takeover preserves provenance, but its new writer must still be able
+    // to replace an inherited pending mutation with its own terminal update.
+    match work_event_receipt_authorizes_current_writer(worktree, record) {
         Ok(authorized) => !authorized,
         Err(error) => {
             tracing::warn!(%error, "open Work event obligation authority is unreadable");
@@ -1721,6 +1755,17 @@ pub fn save_work_event_settlement_record(
     session_id: &str,
     open_obligation: bool,
 ) -> io::Result<WorkEventSettlementRecord> {
+    save_work_event_settlement_record_with_comparison(worktree, session_id, open_obligation)
+        .map(|(record, _)| record)
+}
+
+/// Keep the comparison observed by this refresh for immediate diagnostics,
+/// without changing the durable receipt or re-reading moving Git refs.
+pub(crate) fn save_work_event_settlement_record_with_comparison(
+    worktree: &Path,
+    session_id: &str,
+    open_obligation: bool,
+) -> io::Result<(WorkEventSettlementRecord, Option<String>)> {
     let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
     crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
@@ -1744,7 +1789,8 @@ pub fn save_work_event_settlement_record(
                             &trusted_dir,
                             record,
                             &delivery,
-                        );
+                        )
+                        .map(|record| (record, None));
                     }
                     Err(error) => return Err(error),
                 }
@@ -1761,8 +1807,12 @@ pub fn save_work_event_settlement_record(
             .as_ref()
             .map(|delivery| pending_work_event_shard_relative_path(worktree, &delivery.event_id))
             .transpose()?;
-        let mut status =
-            evaluate_work_event_settlement_for_path(worktree, exact_event_path.as_deref());
+        let mut comparison = None;
+        let mut status = evaluate_work_event_settlement_for_path(
+            worktree,
+            exact_event_path.as_deref(),
+            &mut comparison,
+        );
         if status.is_settled() {
             if let Some(delivery) = pending_delivery.as_ref() {
                 if !pending_work_event_shard_matches_head(worktree, &delivery.event_id)? {
@@ -1792,7 +1842,7 @@ pub fn save_work_event_settlement_record(
         };
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
         persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
-        Ok(record)
+        Ok((record, comparison))
     })
 }
 
@@ -1881,7 +1931,7 @@ fn persist_work_event_settlement_record_to_resolved_dir(
 /// #5216 / FR-026: verified delivery ends only its own bookkeeping obligation.
 /// Called under the owner write lease after the durable Completed transition.
 /// Preserve dirty/pending facts and immutable events as audit evidence; another
-/// Session or generation must still settle its own receipt independently.
+/// generation or unaudited Session must still settle its receipt independently.
 pub(crate) fn close_completed_work_event_obligation_locked(
     worktree: &Path,
     execution: &execution_state::ExecutionControlRecord,
@@ -1889,6 +1939,7 @@ pub(crate) fn close_completed_work_event_obligation_locked(
     if execution.status != execution_state::ExecutionControlStatus::Completed
         || execution.completion_evidence.is_none()
         || !execution_state::integrity_ok(execution)
+        || execution_state::load(worktree)?.as_ref() != Some(execution)
     {
         return Ok(());
     }
@@ -1896,7 +1947,8 @@ pub(crate) fn close_completed_work_event_obligation_locked(
         return Ok(());
     };
     if !receipt.obligation_open
-        || receipt.session_id != execution.primary_session_id
+        || (receipt.execution_binding.is_none()
+            && receipt.session_id != execution.primary_session_id)
         || !work_event_receipt_authorizes_current_generation(worktree, &receipt)?
     {
         return Ok(());
@@ -2135,12 +2187,13 @@ fn pending_legacy_work_event_is_persisted(
 /// a failed probe as evidence of settlement.
 #[must_use]
 pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementStatus {
-    evaluate_work_event_settlement_for_path(worktree, None)
+    evaluate_work_event_settlement_for_path(worktree, None, &mut None)
 }
 
 fn evaluate_work_event_settlement_for_path(
     worktree: &Path,
     exact_event_path: Option<&str>,
+    comparison: &mut Option<String>,
 ) -> WorkEventSettlementStatus {
     let states = match work_event_path_states(worktree) {
         Ok(states) => states,
@@ -2210,10 +2263,15 @@ fn evaluate_work_event_settlement_for_path(
     let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return terminal_work_integration_delivery(worktree, "origin", &event_commit)
-                .unwrap_or(WorkEventSettlementStatus::Blocked(
-                    WorkEventSettlementBlocker::MissingUpstream,
-                ));
+            return terminal_work_integration_delivery(
+                worktree,
+                "origin",
+                &event_commit,
+                comparison,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream,
+            ));
         }
         Err(UpstreamFailure::Git) => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -2222,11 +2280,22 @@ fn evaluate_work_event_settlement_for_path(
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return terminal_work_integration_delivery(worktree, &remote, &event_commit).unwrap_or(
-                WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteReadbackError),
-            );
+            return terminal_work_integration_delivery(
+                worktree,
+                &remote,
+                &event_commit,
+                comparison,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::RemoteReadbackError,
+            ));
         }
     };
+    *comparison = Some(work_event_settlement_comparison(
+        &event_commit,
+        &upstream_ref,
+        &remote_tip,
+    ));
     // SPEC #3590 FR-027: only the event commit has to be reachable. A later
     // unpushed source commit is delivery's business, not bookkeeping's.
     let event_on_remote = match git_is_ancestor(worktree, &event_commit, &remote_tip) {
@@ -2267,26 +2336,33 @@ fn terminal_work_integration_delivery(
     worktree: &Path,
     remote: &str,
     event_commit: &str,
+    comparison: &mut Option<String>,
 ) -> Option<WorkEventSettlementStatus> {
     if !canonical_work_for_worktree_is_terminal(worktree) {
         return None;
     }
-    let mut observed_base = false;
+    let mut comparisons = Vec::new();
     for branch in ["develop", "main"] {
         let Ok(tip) = fetch_upstream_tip(worktree, remote, &format!("refs/heads/{branch}")) else {
             continue;
         };
-        observed_base = true;
+        let upstream_ref = format!("{remote}/{branch}");
+        comparisons.push(work_event_settlement_comparison(
+            event_commit,
+            &upstream_ref,
+            &tip,
+        ));
+        *comparison = Some(comparisons.join("; "));
         if git_is_ancestor(worktree, event_commit, &tip) == Ok(true) {
             return Some(WorkEventSettlementStatus::Settled {
                 event_commit: event_commit.to_string(),
-                upstream_ref: format!("{remote}/{branch}"),
+                upstream_ref,
             });
         }
     }
     // A deleted upstream is no longer a mere network warning when the remote
     // bases were read successfully and prove this event commit has not landed there.
-    observed_base.then_some(WorkEventSettlementStatus::Blocked(
+    (!comparisons.is_empty()).then_some(WorkEventSettlementStatus::Blocked(
         WorkEventSettlementBlocker::CommitNotPushed,
     ))
 }
@@ -2429,9 +2505,17 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         _ => {}
     }
 
+    let mut comparison = None;
     let status = if let Some(receipt) = receipt {
-        match save_work_event_settlement_record(worktree, &receipt.session_id, false) {
-            Ok(refreshed) => refreshed.status,
+        match save_work_event_settlement_record_with_comparison(
+            worktree,
+            &receipt.session_id,
+            false,
+        ) {
+            Ok((refreshed, observed)) => {
+                comparison = observed;
+                refreshed.status
+            }
             Err(error) => {
                 tracing::warn!(%error, "work event settlement receipt could not be refreshed");
                 if pending_shard_refresh_failure_must_block(&receipt) {
@@ -2441,7 +2525,7 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             }
         }
     } else {
-        evaluate_work_event_settlement(worktree)
+        evaluate_work_event_settlement_for_path(worktree, None, &mut comparison)
     };
     match status {
         WorkEventSettlementStatus::PendingMutation {
@@ -2461,17 +2545,14 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             None
         }
         WorkEventSettlementStatus::Blocked(blocker) => Some(
-            work_event_settlement_blocker_description(&blocker, worktree),
+            work_event_settlement_blocker_description(&blocker, worktree, comparison.as_deref()),
         ),
     }
 }
 
-/// Authenticate a Work settlement receipt against the authoritative current
-/// generation. A receipt may name the exact current binding or an authentic
-/// same-Session lifecycle prefix (for example, the Active head immediately
-/// before that generation settled as Completed). Generation successors,
-/// takeovers, foreign Sessions, and arbitrary heads remain unauthorized.
-pub(crate) fn work_event_receipt_authorizes_current_generation(
+/// Keep pending-mutation replacement scoped to the current writer. Historical
+/// takeover provenance alone must not pin that writer to an older request.
+fn work_event_receipt_authorizes_current_writer(
     worktree: &Path,
     receipt: &WorkEventSettlementRecord,
 ) -> io::Result<bool> {
@@ -2493,16 +2574,40 @@ pub(crate) fn work_event_receipt_authorizes_current_generation(
     }
 }
 
+/// A receipt belongs to its generation even after an audited writer takeover.
+/// Authenticate its exact historical writer/head without granting producing or
+/// verification authority. Successor generations and forged prefixes still fail.
+pub(crate) fn work_event_receipt_authorizes_current_generation(
+    worktree: &Path,
+    receipt: &WorkEventSettlementRecord,
+) -> io::Result<bool> {
+    let Some(binding) = receipt.execution_binding.as_ref() else {
+        return work_event_receipt_authorizes_current_writer(worktree, receipt);
+    };
+    let Some(execution) = execution_state::load(worktree)? else {
+        return Ok(false);
+    };
+    execution_state::execution_binding_has_current_generation_provenance(
+        worktree,
+        execution_state::ExecutionOwnerKey {
+            kind: execution.owner_kind,
+            number: execution.owner_number,
+        },
+        &receipt.session_id,
+        binding,
+    )
+}
+
 /// #4523: `execution.reopen` appends its Blocked -> Active lifecycle event to
 /// the same generation, which advances `ledger_head_hash` and would otherwise
 /// invalidate the very record the reopen consumed — forcing a second, identical
 /// full verification matrix before the first PR mutation.
 ///
 /// A run record may therefore name the exact current binding or an authentic
-/// same-Session lifecycle prefix of the current generation, exactly as
-/// [`work_event_receipt_authorizes_current_generation`] already allows for Work
-/// settlement receipts. Predecessors, successors, takeovers, and foreign
-/// Sessions stay refused, and worktree freshness remains a separate gate.
+/// same-Session lifecycle prefix of the current generation. Unlike bookkeeping
+/// provenance, verification remains writer-scoped. Predecessors, successors,
+/// takeovers, and foreign Sessions stay refused, and worktree freshness remains
+/// a separate gate.
 fn record_binding_authorizes_current_generation(
     worktree: &Path,
     session_id: &str,
@@ -2561,50 +2666,30 @@ pub(crate) fn work_event_settlement_pending_description(
 pub(crate) fn work_event_settlement_blocker_description(
     blocker: &WorkEventSettlementBlocker,
     worktree: &Path,
+    comparison: Option<&str>,
 ) -> String {
-    let comparison = matches!(
-        blocker,
-        WorkEventSettlementBlocker::CommitNotPushed | WorkEventSettlementBlocker::RemoteDiverged
-    )
-    .then(|| work_event_settlement_comparison(worktree));
+    let comparison = comparison.filter(|_| {
+        matches!(
+            blocker,
+            WorkEventSettlementBlocker::CommitNotPushed
+                | WorkEventSettlementBlocker::RemoteDiverged
+        )
+    });
     work_event_settlement_blocker_description_with_gate(
         blocker,
         crate::cli::hook::workflow_policy::identity_gate_closed(worktree),
-        comparison.as_deref(),
+        comparison,
     )
 }
 
 /// SPEC #3590 FR-028: name the two refs and SHAs the delivery check compared.
-/// Read from local refs only: the evaluator has just fetched the upstream.
-fn work_event_settlement_comparison(worktree: &Path) -> String {
-    let resolve = |args: &[&str]| {
-        git_stdout(worktree, args)
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "unresolved".to_string())
-    };
-    let event_commit = resolve(&[
-        "rev-list",
-        "-1",
-        "HEAD",
-        "--",
-        WORK_EVENT_LOG_RELATIVE,
-        WORK_EVENT_STORE_RELATIVE,
-    ]);
-    match configured_upstream(worktree) {
-        Ok((_, _, upstream_ref)) => {
-            let upstream_tip = resolve(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{upstream_ref}^{{commit}}"),
-            ]);
-            format!("compared event commit `{event_commit}` with `{upstream_ref}` at `{upstream_tip}`")
-        }
-        Err(_) => format!(
-            "compared event commit `{event_commit}` with the remote `develop` / `main` (no configured upstream)"
-        ),
-    }
+/// Use the evaluator's values, including the exact shard and integration base.
+fn work_event_settlement_comparison(
+    event_commit: &str,
+    upstream_ref: &str,
+    upstream_tip: &str,
+) -> String {
+    format!("compared event commit `{event_commit}` with `{upstream_ref}` at `{upstream_tip}`")
 }
 
 /// Issue #4533 (AC-1): the refusal demands a commit, and while the Agent
@@ -2676,20 +2761,40 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         Some(comparison) => format!("{reason} ({comparison})"),
         None => reason,
     };
+    let recovery = if matches!(blocker, WorkEventSettlementBlocker::CommitNotPushed) {
+        "Push the existing event commit through the repository's normal delivery path, then retry once the compared upstream contains it. Later source-only commits do not need to be pushed.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::RemoteDiverged) {
+        "Integrate the existing event commit with the compared upstream without rewriting it, using the repository's normal delivery path, then retry once that upstream contains the event commit. Later source-only commits do not need to be pushed.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::MissingUpstream) {
+        "Restore the owning branch environment and its usable configured upstream through the repository's normal work-environment path, then retry. Keep the existing event commit and source unchanged.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::RemoteReadbackError) {
+        "Restore the Git environment and access to the configured upstream so it can be fetched and read back, then retry. Keep the existing event commit and source unchanged.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::GitStatusError) {
+        "Restore the Git environment so the Work event store and existing commit information can be inspected, then retry. Keep the existing event commit and source unchanged.".to_string()
+    } else if matches!(
+        blocker,
+        WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment { .. }
+    ) {
+        "Restore the Git environment and access to the configured upstream, then retry to inspect the remaining Work event changes before committing or pushing them. Keep the existing event commit and source unchanged.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::InvalidWorkOnlyCommit) {
+        "Correct the existing bookkeeping-only event commit's subject to start with the exact `chore(work):` prefix only through the repository's authorized history repair process. Keep the Work event store and source unchanged. Deliver the corrected commit through the repository's normal delivery path, then retry once its configured upstream contains it.".to_string()
+    } else {
+        format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
+    };
     format!(
-        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. {recovery}{}",
         identity_gate_escape_suffix(identity_gate_closed)
     )
 }
 
 /// Issue #4533 (AC-1/AC-3): the ordered escape from the identity gate,
-/// appended to any refusal that demands a commit while the gate is closed.
+/// appended to any refusal that demands a commit or push while the gate is closed.
 /// Empty when the gate is open, so the common refusal stays short.
 fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
     if !identity_gate_closed {
         return "";
     }
-    " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
+    " The Agent Workspace identity gate is closed for this session, so the required Git operations are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then retry the required Git operations and settlement. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
 /// Only the successful PR mutation path calls this with the event returned by
@@ -2703,8 +2808,9 @@ pub(crate) fn certify_pr_delivery_event(
         return Err(io::Error::other("delivery certificate requires a PR event"));
     }
     let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id);
-    let mut bytes = serde_json::to_vec(event)?;
-    bytes.push(b'\n');
+    let bytes =
+        gwt_core::workspace_projection::canonical_workspace_work_event_bytes(event, worktree)
+            .map_err(io::Error::other)?;
     if fs::read(&path)? != bytes {
         return Err(io::Error::other(
             "PR delivery event changed before certification",
@@ -2838,6 +2944,7 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
+            "--ignored=traditional",
             "--",
             WORK_EVENT_LOG_RELATIVE,
             WORK_EVENT_STORE_RELATIVE,
@@ -2856,6 +2963,19 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             return Err(());
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
+        if index == b'!' && worktree_state == b'!' {
+            let path = &bytes[3..];
+            if classify_path(path) == DeliveryPath::WorkEventShard
+                && !is_certified_pr_delivery_event(worktree, path)
+            {
+                dirty.push(WorkEventDirtyPath {
+                    path: line[3..].to_string(),
+                    state: WorkEventPathState::Untracked,
+                    basis: WorkEventDirtyBasis::GwtIgnoredShard,
+                });
+            }
+            continue;
+        }
         let mut push = |state| {
             dirty.push(WorkEventDirtyPath {
                 path: line[3..].to_string(),
@@ -2880,37 +3000,6 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             push(WorkEventPathState::Unstaged);
         }
     }
-    let ignored = gwt_core::process::hidden_command("git")
-        .args([
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--",
-            WORK_EVENT_STORE_RELATIVE,
-        ])
-        .current_dir(worktree)
-        .output()
-        .map_err(|_| ())?;
-    if !ignored.status.success() {
-        return Err(());
-    }
-    dirty.extend(
-        ignored
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .filter(|path| {
-                classify_path(path) == DeliveryPath::WorkEventShard
-                    && !is_certified_pr_delivery_event(worktree, path)
-            })
-            .map(|path| WorkEventDirtyPath {
-                path: String::from_utf8_lossy(path).into_owned(),
-                state: WorkEventPathState::Untracked,
-                basis: WorkEventDirtyBasis::GwtIgnoredShard,
-            }),
-    );
     Ok(dirty)
 }
 
@@ -3277,6 +3366,16 @@ fn child_environment_contract() -> Vec<(String, Option<String>)> {
         // FR-008, Issue #3850): a `cargo test` child that inherits it spends
         // the real budget from every fixture-free test.
         (LIVE_GITHUB_OPT_IN_ENV.to_string(), None),
+        // Launch ownership belongs to the caller, not the command's fixtures.
+        // Legacy markers otherwise misclassify manual sessions (Issue #4878).
+        (
+            crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV.to_string(),
+            None,
+        ),
+        (
+            crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV.to_string(),
+            None,
+        ),
     ];
     // Share the test defaults with both inherited and daemon-hosted children.
     // Terminal suppression alone does not disable credential helpers or GCM.
@@ -3330,26 +3429,51 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// Cargo's test-only self dependency can overwrite the operational gwtd with
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
-fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
+fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Result<Vec<String>, String> {
     // The verification driver is pinned outside Cargo's artifacts on Windows,
     // so restoring the operational executable is safe there too (Issue #5480).
-    if !commands.iter().any(|command| {
-        split_command_line(command)
+    if !is_gwt_checkout(worktree) {
+        return Ok(Vec::new());
+    }
+    let mut restorations = Vec::new();
+    for command in commands {
+        let tests = split_command_line(command)
             .and_then(take_env_assignments)
             .is_ok_and(|(_, args)| {
                 args.first().map(String::as_str) == Some("cargo")
                     && (args.get(1).map(String::as_str) == Some("test")
                         || (args.get(1).map(String::as_str) == Some("nextest")
                             && args.get(2).map(String::as_str) == Some("run")))
-            })
-    }) {
-        return None;
+            });
+        if tests {
+            if let Some(restoration) = gwtd_artifact_restore_command(worktree, command)? {
+                if !restorations.contains(&restoration) {
+                    restorations.push(restoration);
+                }
+            }
+        }
     }
-    gwtd_artifact_restore_command(worktree)
+    Ok(restorations)
 }
 
-fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
-    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd --target-dir target")
+fn gwtd_artifact_restore_command(worktree: &Path, command: &str) -> Result<Option<String>, String> {
+    if !is_gwt_checkout(worktree) {
+        return Ok(None);
+    }
+    let Some(target) =
+        crate::cli::verification_lease::effective_cargo_target(worktree, command, false)?
+    else {
+        return Ok(None);
+    };
+    let target = target
+        .to_str()
+        .ok_or("gwtd artifact restoration target is not UTF-8")?;
+    // Pin the resolved target even when recovery scrubs CARGO_TARGET_DIR.
+    // The runner's splitter supports quoted fragments, not backslash escapes.
+    Ok(Some(format!(
+        "cargo build -p gwt --bin gwtd --target-dir '{}'",
+        target.replace('\'', "'\"'\"'")
+    )))
 }
 
 /// Identify this repository without comparing another project's HEAD to gwt's.
@@ -3400,23 +3524,30 @@ pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
 #[cfg(all(test, not(windows)))]
 fn restore_gwtd_after_deferral(
     worktree: &Path,
+    command: &str,
     host: &VerificationHost,
     artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
 ) -> String {
-    restore_gwtd_after_deferral_cancellable(worktree, host, artifacts, None)
+    restore_gwtd_after_deferral_cancellable(worktree, command, host, artifacts, None)
 }
 
 fn restore_gwtd_after_deferral_cancellable(
     worktree: &Path,
+    command: &str,
     host: &VerificationHost,
     artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
     check: Option<&CancellationCheck<'_>>,
 ) -> String {
-    let Some(command) = gwtd_artifact_restore_command(worktree) else {
-        return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
+    let command = match gwtd_artifact_restore_command(worktree, command) {
+        Ok(Some(command)) => command,
+        Ok(None) => {
+            return "gwtd artifact restoration: skipped (no eligible gwt artifact target)"
+                .to_string();
+        }
+        Err(error) => return format!("gwtd artifact restoration: failed: {error}"),
     };
     match execute_command_with_artifact_guard_cancellable(
-        worktree, command, true, None, host, None, artifacts, check,
+        worktree, &command, true, None, host, None, artifacts, check,
     ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
@@ -3803,6 +3934,10 @@ fn execute_inherited_command_cancellable(
         let stderr_reader = fs::File::open(stderr)?;
         let mut spawned = InheritedVerificationChild::spawn(process)?;
         let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
+        let _activity = VerificationCommandActivity::start(
+            process.get_current_dir(),
+            spawned.spawned.child.id(),
+        );
         let (status, stopped) = spawned.wait_cancellable(timeout, &mut now, check)?;
         let output = std::process::Output {
             status,
@@ -4103,7 +4238,13 @@ fn execute_command_on_daemon(
     let delegated = crate::cli::daemon::verification_host::run_cancellable(
         endpoint,
         request,
-        |pid| progress.map(|progress| progress.start(pid)),
+        |pid| {
+            let command_scope = progress.map(|progress| progress.start(pid));
+            (
+                VerificationCommandActivity::start(Some(&request.cwd), pid),
+                command_scope,
+            )
+        },
         command_timeout(command, progress),
         check,
     );
@@ -4513,14 +4654,19 @@ where
             .to_string()
             .into());
     }
-    // Keep the operational artifact restore as the final matrix occurrence.
+    // Keep operational artifact restoration at the end of the matrix.
     let mut effective_commands = commands.to_vec();
-    let restoration = gwtd_artifact_restoration(worktree, commands);
-    if let Some(restoration) = restoration {
-        effective_commands.push(restoration.to_string());
+    let restoration_start = effective_commands.len();
+    let mut restoration_by_command = Vec::new();
+    for command in commands {
+        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
+            if !effective_commands[restoration_start..].contains(&restoration) {
+                effective_commands.push(restoration.clone());
+            }
+            restoration_by_command.push((command.clone(), restoration));
+        }
     }
     let commands = effective_commands.as_slice();
-    let restoration_index = restoration.map(|_| commands.len() - 1);
     let request = authority.map(|authority| {
         continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
     });
@@ -4650,7 +4796,7 @@ where
         );
     }
     let mut continuation = request;
-    let mut results = Vec::new();
+    let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
     if let Some(previous) = &predecessor {
         let context = continuation.as_mut().expect("resumption has exact inputs");
@@ -4837,7 +4983,12 @@ where
             attempt.ensure_active().map_err(|error| error.to_string())?;
         }
         let command = &commands[index];
-        if failed_raw.is_some() && Some(index) != restoration_index {
+        if failed_raw.is_some()
+            && (index < restoration_start
+                || !restoration_by_command.iter().any(|(source, restoration)| {
+                    restoration == command && results.iter().any(|result| &result.command == source)
+                }))
+        {
             skipped_after_failure.push(command.clone());
             continue;
         }
@@ -5037,6 +5188,8 @@ where
         {
             tail.push_str("verification wrapper defect: the reporter drive path was split before Playwright started; repair argument forwarding and rerun canonical verification.\n");
         }
+        let relink_hint = driver::relink_failure_hint(exit_code, &tail);
+        tail.push_str(relink_hint);
         transcript.push_str(&tail);
         match terminated_by_signal {
             Some(signal) => transcript.push_str(&format!(
@@ -5070,7 +5223,7 @@ where
             });
         if exit_code != 0
             && failed_raw.is_none()
-            && Some(index) != restoration_index
+            && index < restoration_start
             && !quarantine_candidate
         {
             failed_raw = Some(command.clone());
@@ -6036,6 +6189,18 @@ pub(crate) fn caller_has_verification_authority(worktree: &Path, session_id: &st
     snapshot_verification_caller_authority(worktree, session_id).is_ok()
 }
 
+/// Doctor needs positive bound evidence; the native verification gate also
+/// accepts legacy unbound callers. Reuse its validation without changing it.
+pub(crate) fn caller_has_current_bound_verification_authority(
+    worktree: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+) -> bool {
+    snapshot_verification_caller_authority(worktree, &expected.session_id).is_ok_and(|authority| {
+        authority.execution_binding.is_some()
+            && authority.session_binding.as_ref() == Some(expected)
+    })
+}
+
 fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
@@ -6051,6 +6216,7 @@ fn snapshot_verification_caller_authority_with_session_loader(
     session_id: &str,
     load_session: impl FnOnce() -> io::Result<gwt_agent::Session>,
 ) -> io::Result<VerificationCallerAuthority> {
+    verify_runtime_not_revoked(worktree, session_id)?;
     let Some(execution) =
         execution_state::load(worktree).map_err(|_| verification_caller_authority_error())?
     else {
@@ -6152,6 +6318,100 @@ fn snapshot_verification_caller_authority_with_session_loader(
     })
 }
 
+/// A stopped runtime cannot borrow a resumed Session's sidecar to regain a slot.
+/// Requests remain scoped to the captured process incarnation, not the ECR.
+fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<()> {
+    let denied = || {
+        io::Error::new(
+            ErrorKind::PermissionDenied,
+            concat!(
+                "verify.* requires current verification authority; this runtime was revoked ",
+                "or its runtime proof is unavailable. Resume the owning Session to create ",
+                "a new runtime incarnation, then retry",
+            ),
+        )
+    };
+    let prefs =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(worktree))
+            .map_err(|_| {
+            io::Error::new(
+                ErrorKind::PermissionDenied,
+                concat!(
+                    "verify.* requires current verification authority; Monitor runtime ",
+                    "stop state is unavailable. Inspect issue.monitor.status and restore ",
+                    "that state before retrying",
+                ),
+            )
+        })?;
+    let requests = prefs
+        .monitor_runtime_stop_requests
+        .iter()
+        .filter(|request| request.session_id == session_id)
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let recovery_source = crate::process::windows_recovery::capture_source();
+    gwt_agent::validate_session_id_path_component(session_id).map_err(|_| denied())?;
+    let path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(denied)?;
+    let host_pid = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(denied)?;
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let expected = gwt_agent::runtime_state_path_for_pid(&sessions_dir, host_pid, session_id);
+    if dunce::canonicalize(&path).map_err(|_| denied())?
+        != dunce::canonicalize(expected).map_err(|_| denied())?
+    {
+        return Err(denied());
+    }
+    let runtime = gwt_agent::SessionRuntimeState::load(&path).map_err(|_| denied())?;
+    let session = gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+        .map_err(|_| denied())?;
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let child_pid = runtime
+        .child_pid
+        .filter(|pid| *pid > 0)
+        .ok_or_else(denied)?;
+    if runtime.execution_identity.as_ref() != Some(&identity)
+        || runtime
+            .runtime_incarnation
+            .is_none_or(|incarnation| incarnation == 0)
+        || runtime.host_started_at.is_none()
+        || runtime.host_started_at != crate::process::host_process_start_time(host_pid)
+        || runtime.child_started_at.is_none()
+        || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
+        || !crate::process::checked_runtime_descendant_of(
+            std::process::id(),
+            child_pid,
+            recovery_source,
+        )
+        .unwrap_or(false)
+        || requests.iter().any(|request| {
+            // A writable sidecar cannot revive the stopped OS process or
+            // its callers. The child can outlive its original GUI host.
+            crate::process::host_process_start_time(request.child_pid)
+                == Some(request.child_started_at)
+                && crate::process::checked_runtime_descendant_of(
+                    std::process::id(),
+                    request.child_pid,
+                    recovery_source,
+                )
+                .unwrap_or(true)
+        })
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 fn revalidate_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
@@ -6162,6 +6422,209 @@ fn revalidate_verification_caller_authority(
         return Err(verification_caller_authority_error());
     }
     Ok(())
+}
+
+/// The command root comes from spawn/accept, including Light commands that
+/// have no heavy lease. Keep its producing identity separate from hook state.
+struct VerificationCommandActivityContext {
+    worktree: PathBuf,
+    authority: VerificationCallerAuthority,
+    execution_identity: gwt_agent::SessionExecutionIdentity,
+    pane_runtime: crate::issue_monitor_worker::ActivitySessionRoot,
+    command_pid: u32,
+    command_started_at: u64,
+}
+
+impl VerificationCommandActivityContext {
+    fn capture(worktree: &Path, session_id: &str, command_pid: u32) -> Option<Self> {
+        let command_started_at = crate::process::host_process_start_time(command_pid)?;
+        let worktree = dunce::canonicalize(worktree).ok()?;
+        let authority = snapshot_verification_caller_authority(&worktree, session_id).ok()?;
+        authority.execution_binding.as_ref()?;
+        let binding = authority.session_binding.as_ref()?;
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .ok()?;
+        let execution_identity =
+            gwt_agent::SessionExecutionIdentity::from_session(&session).ok()??;
+        if &execution_identity.execution_binding != binding {
+            return None;
+        }
+        let pane_runtime = crate::issue_monitor_worker::activity_session_root(&session)?;
+        let context = Self {
+            worktree,
+            authority,
+            execution_identity,
+            pane_runtime,
+            command_pid,
+            command_started_at,
+        };
+        context.is_current().then_some(context)
+    }
+
+    fn is_current(&self) -> bool {
+        if crate::process::host_process_start_time(self.command_pid)
+            != Some(self.command_started_at)
+        {
+            return false;
+        }
+        let session_id = &self.execution_identity.session_id;
+        let binding = &self.execution_identity.execution_binding;
+        let kind = match binding.owner_kind.as_str() {
+            "issue" => execution_state::ExecutionOwnerKind::Issue,
+            "spec" => execution_state::ExecutionOwnerKind::Spec,
+            _ => return false,
+        };
+        let owner = execution_state::ExecutionOwnerKey {
+            kind,
+            number: binding.owner_number,
+        };
+        // Verification can recover a Blocked execution; activity may only
+        // refresh its currently Active producing generation.
+        if revalidate_verification_caller_authority(&self.worktree, session_id, &self.authority)
+            .is_err()
+            || !execution_state::current_active_execution_binding_matches(
+                &self.worktree,
+                owner,
+                session_id,
+                &binding.identity,
+            )
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let Ok(session) = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        ) else {
+            return false;
+        };
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .ok()
+            .flatten();
+        identity.as_ref() == Some(&self.execution_identity)
+            && crate::issue_monitor_worker::activity_session_root(&session)
+                == Some(self.pane_runtime)
+            && crate::process::host_process_start_time(self.command_pid)
+                == Some(self.command_started_at)
+    }
+
+    fn sample_payload(&self, stopped: &std::sync::atomic::AtomicBool) -> Option<serde_json::Value> {
+        use std::sync::atomic::Ordering;
+
+        if stopped.load(Ordering::Acquire) || !self.is_current() {
+            return None;
+        }
+        // This exact command is still in its canonical wait scope, including
+        // silent I/O waits. Stamp the successful observation before readback
+        // or IPC can delay it.
+        let at = Utc::now().to_rfc3339();
+        if stopped.load(Ordering::Acquire) || !self.is_current() || stopped.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "child_progress": {
+                    "session_id": self.execution_identity.session_id,
+                    "execution_identity": self.execution_identity,
+                    "pane_runtime": self.pane_runtime,
+                    "command_pid": self.command_pid,
+                    "command_started_at": self.command_started_at,
+                    "at": at,
+                }
+            }),
+            std::process::id(),
+        ))
+    }
+}
+
+/// Stop and join with the exact command scope, including cancellation.
+struct VerificationCommandActivity {
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl VerificationCommandActivity {
+    fn start(worktree: Option<&Path>, command_pid: u32) -> Option<Self> {
+        let worktree = worktree?;
+        let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+        let context =
+            VerificationCommandActivityContext::capture(worktree, &session_id, command_pid)?;
+        #[cfg(test)]
+        let home = gwt_core::test_support::gwt_home_override();
+        Self::spawn(std::time::Duration::from_secs(30), move |stopped| {
+            #[cfg(test)]
+            let _home = home
+                .as_ref()
+                .map(gwt_core::test_support::ScopedGwtHome::set);
+            let Some(payload) = context.sample_payload(stopped) else {
+                return;
+            };
+            if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let project_root = context
+                .execution_identity
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&context.worktree);
+            if let Err(error) =
+                crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+            {
+                tracing::debug!(%error, "verification command activity publication unconfirmed");
+            }
+        })
+    }
+
+    fn spawn(
+        interval: std::time::Duration,
+        mut observe: impl FnMut(&std::sync::atomic::AtomicBool) + Send + 'static,
+    ) -> Option<Self> {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = Arc::clone(&stopped);
+        let (stop, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("verification-command-activity".to_string())
+            .spawn(move || {
+                if !worker_stopped.load(Ordering::Acquire) {
+                    observe(&worker_stopped);
+                }
+                while matches!(
+                    receiver.recv_timeout(interval),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    if worker_stopped.load(Ordering::Acquire) {
+                        break;
+                    }
+                    observe(&worker_stopped);
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stopped,
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for VerificationCommandActivity {
+    fn drop(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn board_decision_field<'a>(body: &'a str, label: &str) -> Option<&'a str> {
@@ -6915,6 +7378,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                             let check = || attempt.cancelled().map_err(|error| error.to_string());
                             restore_gwtd_after_deferral_cancellable(
                                 &worktree,
+                                command,
                                 host,
                                 artifacts,
                                 Some(&check),
@@ -7020,14 +7484,22 @@ pub(super) fn run_with_response<E: CliEnv>(
             if let Some(result) = &record.user_verification_result {
                 out.push_str(&format!("User Verification Result: {result}\n"));
             }
-            let command_outcome_accepted =
-                record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
+            let registered_plan_uncovered =
+                record.verification_plan_snapshot.is_some() && !record.plan_covered;
+            let command_outcome_accepted = (record.all_passed && !registered_plan_uncovered)
+                || evidence == EvidenceStatus::FreshWithQuarantine;
             *response = Some(RunResponse::for_record(&record, command_outcome_accepted));
             out.push_str(&RunOutcomeCounts::of(&record.commands).summary());
+            if registered_plan_uncovered {
+                for command in &record.planned_missing {
+                    out.push_str(&format!("verify: planned command missing: {command}\n"));
+                }
+            }
             out.push_str(&format!(
                 "verify: {status} — record {id} ({count} command(s), owner {owner})\n",
                 status = run_status_label(
                     record.all_passed,
+                    registered_plan_uncovered,
                     evidence == EvidenceStatus::FreshWithQuarantine,
                     &record.commands,
                 ),
@@ -7233,7 +7705,8 @@ pub(crate) mod tests {
                         &[],
                     )
                     .unwrap();
-                let target = worktree.path().join("target");
+                let target = worktree.path().join("isolated target");
+                let _target = ScopedEnvVar::set("CARGO_TARGET_DIR", &target);
                 let independent = worktree.path().join("independent-target");
                 let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
                 let recovery = |artifacts: Option<&lease::BuildArtifactGuard>| {
@@ -7262,6 +7735,7 @@ pub(crate) mod tests {
                     let other = lease::lock_build_artifacts(&independent).unwrap();
                     let restored = restore_gwtd_after_deferral(
                         worktree.path(),
+                        "cargo test --workspace",
                         &VerificationHost::Inherit,
                         artifacts,
                     );
@@ -7274,13 +7748,14 @@ pub(crate) mod tests {
                 let error = lease::admission::admit(
                     &mut env,
                     worktree.path(),
-                    Some("cargo test --workspace --target-dir target"),
+                    Some("cargo test --workspace"),
                     Duration::ZERO,
                     recovery,
                 )
                 .unwrap_err();
                 assert!(error.to_string().contains("deferred"), "{error}");
                 assert!(target.join("debug/gwtd").is_file());
+                assert!(!worktree.path().join("target").exists());
                 assert!(lease::try_lock_build_artifacts(&target).unwrap().is_some());
             },
         );
@@ -9041,14 +9516,22 @@ mod tests {
 
     #[test]
     fn nextest_restores_gwtd_only_in_the_gwt_workspace() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().unwrap();
+        // Cargo metadata resolves the temporary-root symlink, unlike absolute overrides.
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let commands = ["cargo nextest run -p gwt --lib".to_string()];
         fs::write(
             dir.path().join("Cargo.toml"),
             "[package]\nname = \"unrelated\"\nversion = \"0.0.0\"\n",
         )
         .unwrap();
-        assert_eq!(gwtd_artifact_restoration(dir.path(), &commands), None);
+        assert!(gwtd_artifact_restoration(dir.path(), &commands)
+            .unwrap()
+            .is_empty());
 
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(&package).unwrap();
@@ -9064,30 +9547,52 @@ mod tests {
              [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
         )
         .unwrap();
-        assert_eq!(
-            gwtd_artifact_restoration(dir.path(), &commands),
-            Some("cargo build -p gwt --bin gwtd --target-dir target")
-        );
-        assert_eq!(
-            gwtd_artifact_restoration(
-                dir.path(),
-                &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
-            ),
-            Some("cargo build -p gwt --bin gwtd --target-dir target")
-        );
-        assert_eq!(
-            gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
-            None
-        );
+        let targets = |commands: &[String]| {
+            gwtd_artifact_restoration(dir.path(), commands)
+                .unwrap()
+                .iter()
+                .map(|restore| {
+                    crate::cli::verification_lease::effective_cargo_target(
+                        dir.path(),
+                        restore,
+                        true,
+                    )
+                    .unwrap()
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&commands), vec![expected_root.join("target")]);
+        let ambient = dir.path().join("ambient target");
+        let _ambient = ScopedEnvVar::set("CARGO_TARGET_DIR", &ambient);
+        assert_eq!(targets(&[
+            commands[0].clone(),
+            r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string(),
+            r#"CARGO_TARGET_DIR=ignored cargo test -p gwt --lib --target-dir "explicit target's""#.to_string(),
+            "CARGO_TARGET_DIR='inline target' cargo test -p gwt --lib".to_string(),
+        ]), vec![ambient, expected_root.join("explicit target's"), expected_root.join("inline target")]);
+        assert!(targets(&["cargo nextest list".to_string()]).is_empty());
+        assert!(gwtd_artifact_restoration(
+            dir.path(),
+            &["cargo test --manifest-path missing/Cargo.toml".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
-    fn default_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
+    fn isolated_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
-        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", dir.path().join("ambient-target"));
+        let target = dir.path().join("isolated target");
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", &target);
+        let candidate = dir
+            .path()
+            .join("target/debug")
+            .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX));
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, "preserved candidate").unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::create_dir_all(package.join("tests")).unwrap();
@@ -9132,18 +9637,34 @@ fn default_integration_test_builds_a_guarded_binary() {
             dir.path(),
             "sess-artifact-default",
             &[
-                "cargo clippy -p gwt --all-features --all-targets --target-dir target -- -D warnings".to_string(),
-                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state --target-dir target"#.to_string(),
-                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --target-dir target --profile gwt-verify --retries 0"#.to_string(),
+                "cargo clippy -p gwt --all-features --all-targets -- -D warnings".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state"#.to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --profile gwt-verify --retries 0"#.to_string(),
             ],
         )
         .unwrap();
 
         assert!(record.all_passed, "{transcript}");
         assert_eq!(record.commands.len(), 4, "{transcript}");
+        assert!(
+            fs::read(&candidate).unwrap() == b"preserved candidate",
+            "candidate artifact was overwritten"
+        );
+        let restored = restore_gwtd_after_deferral_cancellable(
+            dir.path(),
+            "cargo test -p gwt --test artifact_state",
+            &VerificationHost::Inherit,
+            None,
+            None,
+        );
+        assert!(restored.contains("restoration: restored"), "{restored}");
+        assert!(
+            fs::read(&candidate).unwrap() == b"preserved candidate",
+            "deferred recovery overwrote candidate"
+        );
         let output = gwt_core::process::hidden_command(
-            dir.path()
-                .join("target/debug")
+            target
+                .join("debug")
                 .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX)),
         )
         .output()
@@ -9152,14 +9673,22 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert_eq!(
             (
                 String::from_utf8(output.stdout).unwrap().trim(),
-                record.commands[2].nextest.as_ref().map(|evidence| evidence.total_tests)
+                record.commands[2]
+                    .nextest
+                    .as_ref()
+                    .map(|evidence| evidence.total_tests)
             ),
             ("operational", Some(1)),
-            "verification must restore the fixed artifact path and retain prefixed Nextest evidence"
+            "verification must restore the attempt's artifact and retain prefixed Nextest evidence"
         );
         assert_eq!(
-            record.commands[3].command,
-            "cargo build -p gwt --bin gwtd --target-dir target"
+            crate::cli::verification_lease::effective_cargo_target(
+                dir.path(),
+                &record.commands[3].command,
+                false
+            )
+            .unwrap(),
+            Some(target)
         );
     }
 
@@ -9170,6 +9699,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
         fs::write(
@@ -9197,14 +9728,24 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
         assert_eq!(
-            record.commands[1].command,
-            "cargo build -p gwt --bin gwtd --target-dir target"
+            crate::cli::verification_lease::effective_cargo_target(
+                dir.path(),
+                &record.commands[1].command,
+                true
+            )
+            .unwrap(),
+            Some(expected_root.join("target"))
         );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
-        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit, None);
+        let recovery = restore_gwtd_after_deferral(
+            dir.path(),
+            "cargo test -p gwt --lib",
+            &VerificationHost::Inherit,
+            None,
+        );
         assert!(
             recovery.contains("gwtd artifact restoration: failed"),
             "{recovery}"
@@ -9218,13 +9759,20 @@ fn default_integration_test_builds_a_guarded_binary() {
     }
 
     // Issue #5094 AC-2: fail-fast still restores the operational gwtd.
-    #[cfg(not(windows))]
     #[test]
     fn raw_failure_still_runs_gwtd_artifact_restoration() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        let candidate = dir
+            .path()
+            .join("target/debug")
+            .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX));
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, "preserved candidate").unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::write(
@@ -9242,7 +9790,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
         fs::write(
             package.join("src/lib.rs"),
-            "#[test] fn fails() { panic!() }\n",
+            "#[test] fn passes() {}\n#[test] fn fails() { panic!() }\n",
         )
         .unwrap();
 
@@ -9250,21 +9798,69 @@ fn default_integration_test_builds_a_guarded_binary() {
             dir.path(),
             "sess-artifact-fail",
             &[
+                "cargo test -p gwt --lib passes --target-dir 'first target'".to_string(),
+                "cargo test -p gwt --lib fails --target-dir 'isolated target'".to_string(),
                 "cargo test -p gwt --lib".to_string(),
                 "git --version".to_string(),
             ],
         )
         .unwrap();
 
-        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
-        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
+        assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
+        assert_eq!(record.commands.len(), 4, "{transcript}");
+        for (result, target) in record.commands[2..]
+            .iter()
+            .zip(["first target", "isolated target"])
+        {
+            assert_eq!(
+                crate::cli::verification_lease::effective_cargo_target(
+                    dir.path(),
+                    &result.command,
+                    true
+                )
+                .unwrap(),
+                Some(expected_root.join(target))
+            );
+            assert_eq!(result.exit_code, 0, "{transcript}");
+        }
+        assert!(!record.all_passed, "{transcript}");
         assert_eq!(
-            record.commands[1].command,
-            "cargo build -p gwt --bin gwtd --target-dir target"
+            &record.skipped_after_failure[..2],
+            &["cargo test -p gwt --lib", "git --version"]
         );
+        assert!(
+            fs::read(&candidate).unwrap() == b"preserved candidate",
+            "unused target candidate was overwritten"
+        );
+
+        // A command-specific config may become unreadable after its test.
+        // Restoration must reuse its target without re-reading that config.
+        let config = dir.path().join("command-config.toml");
+        fs::write(&config, "").unwrap();
+        fs::write(
+            package.join("src/lib.rs"),
+            format!(
+                "#[test] fn corrupts_config() {{ std::fs::write({config:?}, \"[\").unwrap(); panic!(); }}\n"
+            ),
+        )
+        .unwrap();
+        let command = "cargo test -p gwt --lib corrupts_config --config command-config.toml --target-dir 'failed target'".to_string();
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-invalid-config",
+            std::slice::from_ref(&command),
+        )
+        .unwrap();
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
-        assert_eq!(record.skipped_after_failure, vec!["git --version"]);
+        assert!(gwtd_artifact_restoration(dir.path(), &[command]).is_err());
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().record_id,
+            record.record_id
+        );
     }
 
     // Re-entered in child processes so this regression also runs on Windows.
@@ -9433,10 +10029,17 @@ fn default_integration_test_builds_a_guarded_binary() {
         let interrupted = [result(0, None), result(-1, Some(9))];
         let mixed = [result(1, None), result(-1, Some(9))];
 
-        assert_eq!(run_status_label(true, false, &interrupted), "PASS");
-        assert_eq!(run_status_label(false, true, &mixed), "QUARANTINED");
-        assert_eq!(run_status_label(false, false, &interrupted), "INTERRUPTED");
-        assert_eq!(run_status_label(false, false, &mixed), "FAIL");
+        assert_eq!(run_status_label(true, false, false, &interrupted), "PASS");
+        assert_eq!(
+            run_status_label(true, true, false, &interrupted),
+            "PLAN_NOT_COVERED"
+        );
+        assert_eq!(run_status_label(false, false, true, &mixed), "QUARANTINED");
+        assert_eq!(
+            run_status_label(false, false, false, &interrupted),
+            "INTERRUPTED"
+        );
+        assert_eq!(run_status_label(false, false, false, &mixed), "FAIL");
         assert_eq!(
             RunOutcomeCounts::of(&mixed).summary(),
             "verify: outcome — 0 passed, 1 failed, 1 interrupted by external signal\n"
@@ -9459,7 +10062,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         }))
         .unwrap();
         assert_eq!(
-            run_status_label(false, false, std::slice::from_ref(&result)),
+            run_status_label(false, false, false, std::slice::from_ref(&result)),
             "ENVIRONMENT_INCOMPATIBLE"
         );
         assert_eq!(RunOutcomeCounts::of(&[result]).failed, 0);
@@ -9600,7 +10203,8 @@ fn default_integration_test_builds_a_guarded_binary() {
     /// SPEC #4093 AC-11 (Issue #3850): the live GitHub opt-in set in the
     /// operator's shell must not reach the `cargo test` child, whose fixtures
     /// rely on the gh guard failing closed. The child re-enters this test
-    /// binary and checks its own environment.
+    /// binary and checks its own environment. Issue #4878: autonomous launch
+    /// markers must not misclassify a manual fixture in that child either.
     #[test]
     fn verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once() {
         const CHILD_PROBE: &str = "GWT_VERIFY_LIVE_GH_CHILD_PROBE";
@@ -9613,6 +10217,10 @@ fn default_integration_test_builds_a_guarded_binary() {
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
             assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("never"));
+            for key in ["GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE"] {
+                assert!(std::env::var_os(key).is_none(), "inherited {key}");
+            }
+            assert!(autonomous_confirmation_refusal(None, "confirmed").is_none());
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -9626,11 +10234,18 @@ fn default_integration_test_builds_a_guarded_binary() {
         );
         let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
         let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _autonomous = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _issue = ScopedEnvVar::set("GWT_AUTONOMOUS_ISSUE", "4878");
         let _interactive = ScopedEnvVar::set("GCM_INTERACTIVE", "true");
 
         let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
 
         assert!(record.all_passed, "{transcript}");
+        assert_eq!(
+            std::env::var("GWT_AUTONOMOUS_EXECUTION").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(std::env::var("GWT_AUTONOMOUS_ISSUE").as_deref(), Ok("4878"));
         assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("true"));
         assert_eq!(
             transcript.matches("GWT_ALLOW_REAL_GH").count(),
@@ -9654,6 +10269,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _parameters = ScopedEnvVar::unset("GIT_CONFIG_PARAMETERS");
+        let _autonomous = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _issue = ScopedEnvVar::set("GWT_AUTONOMOUS_ISSUE", "4878");
         assert_eq!(
             child_environment_contract()
                 .iter()
@@ -9661,6 +10278,8 @@ fn default_integration_test_builds_a_guarded_binary() {
                 .collect::<Vec<_>>(),
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
+                ("GWT_AUTONOMOUS_EXECUTION", None),
+                ("GWT_AUTONOMOUS_ISSUE", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
                 ("GIT_ASKPASS", Some("")),
                 ("GCM_INTERACTIVE", Some("never")),
@@ -9668,6 +10287,12 @@ fn default_integration_test_builds_a_guarded_binary() {
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
+        // The daemon gets a complete environment from the same contract.
+        for key in ["GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE"] {
+            assert!(!resolved_child_environment(false)
+                .iter()
+                .any(|(existing, _)| existing == key));
+        }
     }
 
     // #4182 AC-7: a test that fetches an unreachable remote makes Windows'
@@ -11912,13 +12537,14 @@ fn default_integration_test_builds_a_guarded_binary() {
         )
         .unwrap();
         assert_eq!(code, 0, "{out}");
+        assert!(out.contains("verify: PASS"), "{out}");
         assert_eq!(
             crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob"),
             vec![crate::cli::action_obligation::ObligationKind::Implementation],
             "plan-less run must not settle obligations"
         );
 
-        // Registered plan + covering run settles.
+        // A passing subset of a registered plan is not an accepted run.
         save_plan(
             dir.path(),
             &VerificationPlanRecord::from(VerificationPlanData {
@@ -11926,7 +12552,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 session_id: "sess-ob".to_string(),
                 owner_number: None,
                 execution_binding: None,
-                commands: vec!["git --version".to_string()],
+                commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
@@ -11948,7 +12574,29 @@ fn default_integration_test_builds_a_guarded_binary() {
             }),
         )
         .unwrap();
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("verify: PLAN_NOT_COVERED"), "{out}");
+        assert!(out.contains("git --exec-path"), "{out}");
+        assert!(load(dir.path()).unwrap().unwrap().all_passed);
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob"),
+            vec![crate::cli::action_obligation::ObligationKind::Implementation],
+        );
+
+        // A covering run settles the registered plan's obligations.
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap();
         assert_eq!(code, 0, "{out}");
+        assert!(out.contains("verify: PASS"), "{out}");
         assert!(
             crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob").is_empty(),
             "plan-covering run must settle implementation obligations"
@@ -12253,6 +12901,24 @@ fn default_integration_test_builds_a_guarded_binary() {
             .expect("execution generation binding exists")
     }
 
+    fn take_over_work_event_generation(worktree: &Path, from: &str, to: &str) {
+        let request = crate::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: format!("receipt-takeover-{to}"),
+            principal_id: "receipt-takeover-principal".to_string(),
+            work_id: None,
+            source: Some("continue-work:handoff".to_string()),
+            from_session_id: from.to_string(),
+            to_session_id: to.to_string(),
+            reason: "verified stale owner".to_string(),
+            requested_at: Utc::now(),
+        };
+        let owner = generation_scoped_owner();
+        crate::cli::execution_state::prepare_generation_takeover(worktree, owner, &request)
+            .expect("prepare receipt generation takeover");
+        crate::cli::execution_state::activate_generation_takeover(worktree, owner, &request)
+            .expect("activate receipt generation takeover");
+    }
+
     fn persist_generation_scoped_session(
         worktree: &Path,
         session_id: &str,
@@ -12310,6 +12976,172 @@ fn default_integration_test_builds_a_guarded_binary() {
             .save(&sessions_dir)
             .expect("persist advanced generation-scoped Session binding");
         binding
+    }
+
+    #[test]
+    fn verification_child_activity_fixture() {
+        use std::io::Read;
+
+        let Some(ready) = std::env::var_os("GWT_VERIFY_CHILD_ACTIVITY_FIXTURE") else {
+            return;
+        };
+        fs::write(ready, "ready").unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+    }
+
+    #[test]
+    fn issue_3809_verification_child_progress_uses_exact_command_and_current_authority() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-command-progress";
+        let binding = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, binding.clone(), 1);
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), session_id);
+        let mut runtime = gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            started,
+            std::process::id(),
+            started,
+        );
+        runtime.save(&runtime_path).unwrap();
+        let ready = dir.path().join("command-ready");
+        let mut command = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_child_activity_fixture",
+            ])
+            .env("GWT_VERIFY_CHILD_ACTIVITY_FIXTURE", &ready)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = InheritedVerificationChild::spawn(&mut command).unwrap();
+        // test-hygiene: allow-wall-clock-deadline Readiness comes from the child; the deadline only bounds a failed launch.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline The child readiness event determines success; this only bounds a failed launch.
+                std::time::Instant::now() < deadline,
+                "child never became ready"
+            );
+            assert!(child.spawned.child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let pid = child.spawned.child.id();
+        let context = VerificationCommandActivityContext::capture(dir.path(), session_id, pid)
+            .expect("a managed command has exact producing authority");
+        let stopped = AtomicBool::new(false);
+        let payload = context
+            .sample_payload(&stopped)
+            .expect("a real command blocked on I/O must publish while its exact root lives");
+        let crate::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } =
+            crate::runtime_daemon_events::decode_runtime_daemon_event(
+                crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+                payload.clone(),
+                0,
+            )
+            .expect("the actual publication must satisfy the receiver's wire envelope")
+        else {
+            panic!("command progress must use Issues control channel");
+        };
+        assert_eq!(payload["source_pid"], std::process::id());
+        assert_eq!(event["event"], "control");
+        let payload = &event["payload"];
+        assert_eq!(payload["child_progress"]["session_id"], session_id);
+        assert_eq!(payload["child_progress"]["command_pid"], pid);
+        assert_eq!(
+            payload["child_progress"]["pane_runtime"],
+            serde_json::json!({
+                "process": [std::process::id() as u64, started],
+                "host": [std::process::id() as u64, started],
+                "incarnation": 1,
+            })
+        );
+        assert_eq!(
+            payload["child_progress"]["command_started_at"],
+            context.command_started_at
+        );
+        assert_eq!(
+            payload["child_progress"]["execution_identity"],
+            serde_json::to_value(&context.execution_identity).unwrap()
+        );
+        assert!(
+            DateTime::parse_from_rfc3339(payload["child_progress"]["at"].as_str().unwrap()).is_ok()
+        );
+        runtime.runtime_incarnation = Some(2);
+        runtime.save(&runtime_path).unwrap();
+        assert!(
+            context.sample_payload(&stopped).is_none(),
+            "an unchanged Session and capability cannot lend an old command to a new pane"
+        );
+        runtime.runtime_incarnation = Some(1);
+        runtime.save(&runtime_path).unwrap();
+        stopped.store(true, Ordering::Release);
+        assert!(context.sample_payload(&stopped).is_none());
+        stopped.store(false, Ordering::Release);
+        advance_generation_scoped_session_binding(session_id, binding);
+        assert!(
+            context.sample_payload(&stopped).is_none(),
+            "an observer with superseded authority must fail closed"
+        );
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .unwrap();
+        runtime.execution_identity =
+            gwt_agent::SessionExecutionIdentity::from_session(&session).unwrap();
+        runtime.save(&runtime_path).unwrap();
+        let current = VerificationCommandActivityContext::capture(dir.path(), session_id, pid)
+            .expect("the same live command can capture the current authority");
+        child.reclaim();
+        child.spawned.child.wait().unwrap();
+        child.reaped = true;
+        assert!(
+            current.sample_payload(&stopped).is_none(),
+            "the exact command root must still be alive"
+        );
+    }
+
+    #[test]
+    fn issue_3809_verification_child_observer_joins_on_drop() {
+        use std::{sync::mpsc, time::Duration};
+
+        assert!(VerificationCommandActivity::start(None, std::process::id()).is_none());
+        let (sent, received) = mpsc::channel();
+        let observer = VerificationCommandActivity::spawn(Duration::from_secs(30), move |_| {
+            sent.send(()).unwrap();
+        })
+        .unwrap();
+        received
+            // test-hygiene: allow-wall-clock-deadline The channel observes admission; the timeout only bounds a missing initial notification.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the command scope must publish before its periodic interval");
+        drop(observer);
+        while received.try_recv().is_ok() {}
+        assert_eq!(
+            received.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected),
+            "scope teardown must stop and join before returning"
+        );
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -12710,6 +13542,123 @@ fn default_integration_test_builds_a_guarded_binary() {
     }
 
     #[test]
+    fn revoked_monitor_runtime_cannot_verify_but_a_new_incarnation_can_recover() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-revoked-monitor-runtime";
+        let binding = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, binding, 1);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        let mut runtime = gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            17,
+            started,
+            pid,
+            started,
+        );
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, pid, session_id);
+        runtime.save(&path).unwrap();
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &path);
+        assert!(snapshot_verification_caller_authority(dir.path(), session_id).is_ok());
+
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["monitor_runtime_stop_requests"] = serde_json::json!([{
+            "issue_number": generation_scoped_owner().number,
+            "window_id": "gone-window", "session_id": session_id,
+            "execution_identity": identity, "host_pid": pid, "host_started_at": started,
+            "runtime_incarnation": 17, "child_pid": pid, "child_started_at": started,
+            "requested_at": Utc::now().to_rfc3339(),
+        }]);
+        let mut prefs: crate::IssueMonitorPrefs = serde_json::from_value(prefs).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let before = verification_artifact_bytes(dir.path());
+        let error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Run {
+                commands: vec!["git --version".into()],
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        )
+        .expect_err("revoked runtime must be rejected before lease admission or dispatch");
+        assert!(error.to_string().contains("runtime"));
+        assert!(error.to_string().contains("incarnation"));
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+        assert_eq!(
+            execution_state::load(dir.path()).unwrap().unwrap().status,
+            execution_state::ExecutionControlStatus::Active,
+            "runtime revocation must preserve the ECR recovery contract",
+        );
+
+        runtime.runtime_incarnation = Some(18);
+        runtime.save(&path).unwrap();
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_err(),
+            "changing only the sidecar incarnation cannot revive the revoked OS process"
+        );
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+
+        // The actual caller is beneath this still-live OS parent. Retargeting
+        // the sidecar child to the caller cannot escape its revoked ancestry.
+        let mut processes = sysinfo::System::new().expect("capture caller ancestry");
+        let caller = sysinfo::Pid::from_u32(pid);
+        processes.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[caller]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        let parent_pid = processes
+            .process(caller)
+            .and_then(sysinfo::Process::parent)
+            .unwrap()
+            .as_u32();
+        let parent_started = crate::process::host_process_start_time(parent_pid).unwrap();
+        assert!(crate::process::is_descendant_of(pid, parent_pid).unwrap());
+        prefs.monitor_runtime_stop_requests[0].child_pid = parent_pid;
+        prefs.monitor_runtime_stop_requests[0].child_started_at = parent_started;
+        // The revoked child remains authoritative after its old host is gone.
+        prefs.monitor_runtime_stop_requests[0].host_started_at = started.saturating_sub(1);
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_err(),
+            "a descendant of the revoked process cannot use a retargeted sidecar"
+        );
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+
+        // Model a historical receipt whose PID has since been reused by this
+        // new OS process. Its actual start identity is independently validated.
+        prefs.monitor_runtime_stop_requests[0].child_pid = pid;
+        prefs.monitor_runtime_stop_requests[0].child_started_at = started.saturating_sub(1);
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_ok(),
+            "a fresh OS process incarnation can resume without a full-matrix recovery"
+        );
+        let _missing_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_err(),
+            "a revoked Session cannot omit runtime evidence to regain admission"
+        );
+    }
+
+    #[test]
     fn blocked_generation_accepts_exact_same_session_for_recovery_evidence() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -13038,6 +13987,14 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        // This recovery test needs successful admission in its private HOME,
+        // independent of the host's free disk space.
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let owner = generation_scoped_owner();
 
         let predecessor = initialize_generation_scoped_execution(dir.path(), "session-predecessor");
@@ -13102,7 +14059,11 @@ fn default_integration_test_builds_a_guarded_binary() {
         .unwrap();
         assert_eq!(code, 0, "{output}");
         let completed = load(dir.path()).unwrap().unwrap();
-        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
+        assert_eq!(
+            completed.execution_binding.as_ref(),
+            Some(&successor),
+            "{output}"
+        );
         assert!(completed.all_passed);
         assert_eq!(
             evaluate_evidence(dir.path(), "session-successor", Some(2359)),
@@ -13247,7 +14208,7 @@ fn default_integration_test_builds_a_guarded_binary() {
     }
 
     #[test]
-    fn generation_scoped_work_settlement_rejects_takeover_suffix() {
+    fn generation_scoped_work_settlement_accepts_audited_takeover_history() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13255,37 +14216,75 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked();
-        let owner = generation_scoped_owner();
         let session_id = "session-settlement-before-takeover";
 
         initialize_generation_scoped_execution(&fixture.repo, session_id);
         let receipt = save_work_event_settlement_record(&fixture.repo, session_id, false)
             .expect("persist pre-takeover Work settlement receipt");
         assert!(receipt.status.is_settled());
-        let request = crate::cli::execution_state::GenerationTakeoverRequest {
-            operation_id: "operation-settlement-takeover".to_string(),
-            principal_id: "principal-settlement-takeover".to_string(),
-            work_id: Some("work-settlement-takeover".to_string()),
-            source: Some("continue-work:handoff".to_string()),
-            from_session_id: session_id.to_string(),
-            to_session_id: "session-settlement-after-takeover".to_string(),
-            reason: "verified stale owner".to_string(),
-            requested_at: Utc::now(),
-        };
-        crate::cli::execution_state::prepare_generation_takeover(&fixture.repo, owner, &request)
-            .expect("prepare same-generation takeover");
-        crate::cli::execution_state::activate_generation_takeover(&fixture.repo, owner, &request)
-            .expect("activate same-generation takeover");
+        take_over_work_event_generation(
+            &fixture.repo,
+            session_id,
+            "session-settlement-after-takeover",
+        );
 
         assert_eq!(
             crate::cli::execution_state::diagnose(&fixture.repo, None)
                 .work_event_receipt_matches_current_generation,
-            Some(false),
-            "a takeover is not a same-Session lifecycle descendant",
+            Some(true),
+            "an audited takeover preserves the receipt's generation provenance",
         );
-        let refusal = work_event_settlement_refusal(&fixture.repo)
-            .expect("a pre-takeover receipt must not authorize the new owner");
-        assert!(refusal.contains("generation"), "{refusal}");
+        assert_eq!(work_event_settlement_refusal(&fixture.repo), None);
+        assert!(
+            open_obligation_is_superseded(&fixture.repo, &receipt),
+            "the new writer's Done must still be able to replace an inherited receipt"
+        );
+    }
+
+    #[test]
+    fn completed_legacy_execution_preserves_foreign_work_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let current_session = "legacy-current-writer";
+        execution_state::materialize_at_launch(
+            &fixture.repo,
+            owner.kind,
+            owner.number,
+            current_session,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        fixture.append_event("foreign-legacy-work");
+        let foreign =
+            save_work_event_settlement_record(&fixture.repo, "foreign-legacy-writer", true)
+                .unwrap();
+        assert!(foreign.obligation_open);
+        assert!(foreign.execution_binding.is_none());
+        plan_and_run(
+            &fixture.repo,
+            current_session,
+            &["git --version".to_string()],
+        );
+        assert!(execution_state::settle_completed_best_effort_guarded(
+            &fixture.repo,
+            current_session,
+            owner.number,
+            None,
+        ));
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap(),
+            foreign,
+            "a ledgerless completion cannot inherit a foreign Session's obligation"
+        );
     }
 
     #[test]
@@ -13304,7 +14303,14 @@ fn default_integration_test_builds_a_guarded_binary() {
             crate::cli::execution_state::settle(
                 &fixture.repo,
                 "session-settlement-predecessor",
-                crate::cli::execution_state::ExecutionSettlement::Completed,
+                crate::cli::execution_state::ExecutionSettlement::CompletedWithEvidence {
+                    evidence: execution_state::ExecutionCompletionEvidence {
+                        verification_record_id: "predecessor-run".into(),
+                        verification_run_hash: "predecessor-run-hash".into(),
+                        verification_plan_hash: "predecessor-plan-hash".into(),
+                        used_typed_quarantine: false,
+                    },
+                },
             )
             .expect("settle predecessor before its delivery receipt"),
             crate::cli::execution_state::SettleResult::Settled(_)
@@ -13313,6 +14319,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
                 .expect("load terminal predecessor binding")
                 .expect("terminal predecessor binding exists");
+        let completed = execution_state::load(&fixture.repo).unwrap().unwrap();
         let receipt = save_work_event_settlement_record(
             &fixture.repo,
             "session-settlement-predecessor",
@@ -13341,6 +14348,21 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(
             refusal.contains("workspace.update") && refusal.contains("current generation"),
             "a live Work refusal must name the terminal workspace.update the current generation still owes: {refusal}"
+        );
+
+        let mut current_receipt = receipt;
+        current_receipt.session_id = request.initial_session_id;
+        current_receipt.execution_binding =
+            execution_state::current_execution_binding(&fixture.repo, owner).unwrap();
+        current_receipt.obligation_open = true;
+        persist_work_event_settlement_record(&fixture.repo, &current_receipt).unwrap();
+        close_completed_work_event_obligation_locked(&fixture.repo, &completed).unwrap();
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap(),
+            current_receipt,
+            "a predecessor completion must not close the current generation's receipt"
         );
     }
 
@@ -13495,6 +14517,18 @@ fn default_integration_test_builds_a_guarded_binary() {
             "SPEC #3590 FR-027: an unpublished source commit is delivery's business; \
              the event commit is already on the remote base"
         );
+
+        let base_sha = fixture.git_stdout(&["rev-parse", "refs/remotes/origin/develop"]);
+        fixture.append_event("undelivered-after-upstream-deletion");
+        fixture.stage_events();
+        fixture.commit("chore(work): undelivered event after integration");
+        let event_commit = fixture.latest_event_commit();
+        let refusal =
+            work_event_settlement_refusal(&fixture.repo).expect("event is not on develop");
+        assert!(refusal.contains(&event_commit), "{refusal}");
+        assert!(refusal.contains("origin/develop"), "{refusal}");
+        assert!(refusal.contains(&base_sha), "{refusal}");
+        assert!(!refusal.contains("refs/remotes/origin/main"), "{refusal}");
     }
 
     #[test]
@@ -13859,11 +14893,48 @@ fn default_integration_test_builds_a_guarded_binary() {
         fixture.commit("chore(work): unpushed Work event");
         let event_commit = fixture.latest_event_commit();
 
+        fs::write(fixture.repo.join("src.txt"), "later local source\n").unwrap();
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after unpushed Work event");
+        let source_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
+
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("an unpushed event commit is refused");
         assert!(refusal.contains(&event_commit), "{refusal}");
         assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
         assert!(refusal.contains(&upstream_sha), "{refusal}");
+        assert!(
+            refusal.contains("Push the existing event commit"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("Commit `"), "{refusal}");
+        assert!(!refusal.contains("force-add"), "{refusal}");
+        assert!(!refusal.contains("related source changes"), "{refusal}");
+
+        let gated = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::CommitNotPushed,
+            true,
+            None,
+        );
+        assert!(gated.contains("Lift the gate first"), "{gated}");
+        assert!(!gated.contains("commit and push"), "{gated}");
+        assert!(!gated.contains("Then commit"), "{gated}");
+
+        fixture.git_ok(&[
+            "push",
+            "-q",
+            "origin",
+            &format!("{event_commit}:refs/heads/main"),
+        ]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(
+            fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]),
+            event_commit
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), source_commit);
     }
 
     #[test]
@@ -13922,16 +14993,55 @@ fn default_integration_test_builds_a_guarded_binary() {
         invalid.write_event_shard("invalid-work-only-shard", b"{}\n");
         invalid.stage_event_shards();
         invalid.commit("fix: misclassify immutable Work event bookkeeping");
-        invalid.push();
         assert_eq!(
             evaluate_work_event_settlement(&invalid.repo),
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit)
+        );
+        let description = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::InvalidWorkOnlyCommit,
+            false,
+            None,
+        );
+        assert!(
+            description.contains("existing bookkeeping-only event commit's subject")
+                && description.contains("authorized history repair process")
+                && description.contains("exact `chore(work):` prefix"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        let tree = invalid.git_stdout(&["rev-parse", "HEAD^{tree}"]);
+        invalid.git_ok(&[
+            "commit",
+            "--amend",
+            "-qm",
+            "chore(work): correct Work commit subject",
+        ]);
+        assert_eq!(invalid.git_stdout(&["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(
+            fs::read(invalid.event_shard_path("invalid-work-only-shard")).unwrap(),
+            b"{}\n"
+        );
+        assert_eq!(
+            evaluate_work_event_settlement(&invalid.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed)
+        );
+        invalid.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&invalid.repo),
+            invalid.settled_status()
         );
     }
 
     #[test]
     fn work_event_settlement_rejects_missing_configured_upstream() {
         let fixture = WorkEventGitFixture::tracked();
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
         fixture.git_ok(&["branch", "--unset-upstream"]);
 
         let status = evaluate_work_event_settlement(&fixture.repo);
@@ -13940,6 +15050,30 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+
+        let description = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::MissingUpstream,
+            false,
+            None,
+        );
+        assert!(
+            description.contains("Restore the owning branch environment")
+                && description.contains("usable configured upstream"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fixture.git_ok(&["branch", "--set-upstream-to=origin/main"]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
 
         let detached = WorkEventGitFixture::tracked();
         detached.git_ok(&["checkout", "--detach", "-q"]);
@@ -13959,6 +15093,12 @@ fn default_integration_test_builds_a_guarded_binary() {
             .expect("write local divergent source");
         fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
         fixture.commit("fix: local source and Work event");
+        let event_commit = fixture.latest_event_commit();
+        let event_bytes = fs::read(fixture.event_path()).unwrap();
+        fs::write(fixture.repo.join("src.txt"), "later local source\n").unwrap();
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after divergent Work event");
+        let source_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
         fixture.advance_remote_from_peer();
         fixture.git_ok(&["fetch", "-q", "origin", "main"]);
 
@@ -13968,13 +15108,70 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
+        let refusal =
+            work_event_settlement_refusal(&fixture.repo).expect("diverged event is refused");
+        assert!(
+            refusal.contains(&fixture.latest_event_commit()),
+            "{refusal}"
+        );
+        assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
+        let upstream_sha = fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]);
+        assert!(refusal.contains(&upstream_sha), "{refusal}");
+        assert!(
+            refusal.contains("Integrate the existing event commit"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("Commit `"), "{refusal}");
+        assert!(!refusal.contains("force-add"), "{refusal}");
+        assert!(!refusal.contains("related source changes"), "{refusal}");
+
+        let peer = fixture._root.path().join("peer");
+        let peer = peer.to_str().unwrap();
+        fixture.git_ok(&[
+            "-C",
+            peer,
+            "fetch",
+            "-q",
+            fixture.repo.to_str().unwrap(),
+            &event_commit,
+        ]);
+        fixture.git_ok(&[
+            "-C",
+            peer,
+            "merge",
+            "-qm",
+            "fix: integrate existing Work event",
+            "FETCH_HEAD",
+        ]);
+        fixture.git_ok(&["-C", peer, "push", "-q", "origin", "main"]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), source_commit);
+        assert_eq!(
+            fixture
+                .git_output(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &source_commit,
+                    &fixture.upstream_ref(),
+                ])
+                .status
+                .code(),
+            Some(1)
+        );
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), event_bytes);
     }
 
     #[test]
     fn work_event_settlement_fails_closed_when_git_status_is_unreadable() {
         let fixture = WorkEventGitFixture::tracked();
-        fs::write(fixture.repo.join(".git/index"), b"corrupt-index")
-            .expect("corrupt fixture index");
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
+        let index_path = fixture.repo.join(".git/index");
+        let index_bytes = fs::read(&index_path).unwrap();
+        fs::write(&index_path, b"corrupt-index").expect("corrupt fixture index");
 
         let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
@@ -13982,11 +15179,37 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+
+        let description = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::GitStatusError,
+            false,
+            None,
+        );
+        assert!(
+            description.contains("Restore the Git environment")
+                && description.contains("Work event store and existing commit information"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fs::write(index_path, index_bytes).expect("restore fixture index");
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
     }
 
     #[test]
     fn work_event_settlement_fails_closed_when_remote_readback_fails() {
         let fixture = WorkEventGitFixture::tracked();
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
         let missing_remote = fixture._root.path().join("missing-upstream.git");
         fixture.git_ok(&[
             "remote",
@@ -14001,12 +15224,43 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteReadbackError)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+
+        let description = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::RemoteReadbackError,
+            false,
+            None,
+        );
+        assert!(
+            description.contains("Restore the Git environment")
+                && description.contains("access to the configured upstream"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fixture.git_ok(&[
+            "remote",
+            "set-url",
+            "origin",
+            fixture.remote.to_str().unwrap(),
+        ]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
     }
 
     #[test]
     fn dirty_work_event_is_warning_while_remote_is_unreachable() {
         let fixture = WorkEventGitFixture::tracked();
         fixture.append_event("offline-dirty-event");
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
         let missing_remote = fixture._root.path().join("missing-upstream.git");
         fixture.git_ok(&[
             "remote",
@@ -14030,6 +15284,30 @@ fn default_integration_test_builds_a_guarded_binary() {
             work_event_settlement_refusal(&fixture.repo).is_none(),
             "an offline environment must not turn a dirty fact into an unreachable Stop block"
         );
+        let WorkEventSettlementStatus::Blocked(blocker) = &status else {
+            unreachable!()
+        };
+        let description = work_event_settlement_blocker_description_with_gate(blocker, false, None);
+        assert!(
+            description.contains("Restore the Git environment")
+                && description.contains("then retry to inspect the remaining Work event changes"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("with the related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fixture.git_ok(&[
+            "remote",
+            "set-url",
+            "origin",
+            fixture.remote.to_str().unwrap(),
+        ]);
+        assert_path_dirty(&fixture, vec![WorkEventPathState::Unstaged]);
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
     }
 
     #[test]
@@ -14463,6 +15741,30 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         fixture.stage_event_shards();
         fixture.commit("chore(work): settle prepared immutable Work event");
+        let event_commit = fixture.latest_event_commit();
+        let upstream_sha = fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]);
+        fixture.write_event_shard("later-unrelated-event", b"{}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): later unrelated Work event");
+        let later_commit = fixture.latest_event_commit();
+        let refusal =
+            work_event_settlement_refusal(&fixture.repo).expect("exact event is unpushed");
+        assert!(refusal.contains(&event_commit), "{refusal}");
+        assert!(!refusal.contains(&later_commit), "{refusal}");
+        assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
+        assert!(refusal.contains(&upstream_sha), "{refusal}");
+        let stop = crate::cli::hook::work_event_settlement_stop_check::handle_with_input(
+            &fixture.repo,
+            "{}",
+            Some("session-pending-shard"),
+        );
+        let crate::cli::hook::HookOutput::StopBlock { reason } = stop else {
+            panic!("an unpushed exact event must block Stop: {stop:?}");
+        };
+        assert!(reason.contains(&event_commit), "{reason}");
+        assert!(!reason.contains(&later_commit), "{reason}");
+        assert!(reason.contains(&fixture.upstream_ref()), "{reason}");
+        assert!(reason.contains(&upstream_sha), "{reason}");
         fixture.push();
         let final_refresh =
             save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
@@ -14488,6 +15790,60 @@ fn default_integration_test_builds_a_guarded_binary() {
             !relative.contains('\\'),
             "Git path must use slash separators"
         );
+    }
+
+    #[test]
+    fn work_event_dirty_paths_reads_ignored_shards_with_one_git_process() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::write(fixture.repo.join(".git/info/exclude"), ".gwt/\n").unwrap();
+        fixture.write_event_shard("ignored-first", b"{}\n");
+        fixture.write_event_shard("ignored-second", b"{}\n");
+        fixture.write_event_log("ignored-legacy");
+        fs::write(
+            fixture
+                .repo
+                .join(WORK_EVENT_STORE_RELATIVE)
+                .join("invalid.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let shard = fixture.event_shard_path("ignored-first");
+        fs::write(
+            shard.with_file_name(format!(
+                ".{}.create-temp",
+                shard.file_name().unwrap().to_str().unwrap()
+            )),
+            b"{}\n",
+        )
+        .unwrap();
+        let trace_path = fixture.repo.join("git-trace.log");
+        let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+
+        let mut dirty = work_event_dirty_paths(&fixture.repo).unwrap();
+        dirty.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut expected = ["ignored-first", "ignored-second"].map(|id| WorkEventDirtyPath {
+            path: pending_work_event_shard_relative_path(&fixture.repo, id).unwrap(),
+            state: WorkEventPathState::Untracked,
+            basis: WorkEventDirtyBasis::GwtIgnoredShard,
+        });
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(dirty, expected);
+        let trace = fs::read_to_string(trace_path).unwrap();
+        let repo = dunce::canonicalize(&fixture.repo).unwrap();
+        let repositories = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["event"] == "def_repo"
+                    && event["worktree"]
+                        .as_str()
+                        .is_some_and(|path| dunce::canonicalize(path).ok().as_ref() == Some(&repo))
+            })
+            .count();
+        assert_eq!(repositories, 1, "one fresh Git operation: {trace}");
     }
 
     #[test]
@@ -14757,6 +16113,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
         let session_id = "session-shard-lost";
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
         let updated_at = Utc::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
@@ -14810,11 +16167,38 @@ fn default_integration_test_builds_a_guarded_binary() {
             "{refusal}"
         );
 
-        // #5216: verified delivery can close this obligation independently of
-        // bookkeeping. Later refreshes must retain the unpersisted identity.
-        let mut completed = refreshed;
-        completed.obligation_open = false;
-        persist_work_event_settlement_record(&fixture.repo, &completed).unwrap();
+        // FR-3590-T1: a verified takeover completes without resending the
+        // predecessor's unconfirmed terminal mutation or losing its identity.
+        let current_session = "session-shard-lost-takeover";
+        take_over_work_event_generation(&fixture.repo, session_id, current_session);
+        let owner = generation_scoped_owner();
+        let binding = execution_state::current_execution_binding(&fixture.repo, owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_scoped_session(&fixture.repo, current_session, binding, 1);
+        plan_and_run(
+            &fixture.repo,
+            current_session,
+            &["git --version".to_string()],
+        );
+        assert!(execution_state::settle_completed_best_effort_guarded(
+            &fixture.repo,
+            current_session,
+            owner.number,
+            None,
+        ));
+        let completed = load_work_event_settlement_record(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !completed.obligation_open,
+            "audited takeover must close the obligation"
+        );
+        assert_eq!(completed.status, refreshed.status);
+        assert_eq!(completed.pending_delivery, refreshed.pending_delivery);
+        assert_eq!(completed.session_id, refreshed.session_id);
+        assert_eq!(completed.execution_binding, refreshed.execution_binding);
+        assert!(!fixture.event_shard_path(&event.id).exists());
         assert_eq!(
             save_work_event_settlement_record(&fixture.repo, session_id, false).unwrap(),
             completed,

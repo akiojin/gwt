@@ -70,6 +70,107 @@ export function createUpdateCtaController({
   let restartRequestSequence = 0;
   let releaseModalFocus = null;
   let modalReturnFocus = null;
+  const checkButton = document.getElementById("update-check-button");
+  const checkStatus = document.getElementById("update-check-status");
+  const checkDetail = document.getElementById("update-check-detail");
+  const checkReason = document.getElementById("update-check-reason");
+  const checkFailure = document.getElementById("update-check-failure");
+  const checkRetry = document.getElementById("update-check-retry");
+  const checkInstall = document.getElementById("update-check-install");
+  let checking = false;
+
+  checkButton?.addEventListener("click", () => {
+    if (checking) return;
+    handleUpdateCheckResult({ checking: true });
+    send({ kind: "check_for_updates" });
+  });
+  checkRetry?.addEventListener("click", () => {
+    if (checking || checkRetry.hidden || status === "scheduled") return;
+    handleClick();
+  });
+
+  function retractIdleManualOffer() {
+    if (status !== "available") return;
+    latestVersion = null;
+    pendingVersion = null;
+    pendingReadyReason = null;
+    availabilityModel.update(() => null);
+    document.getElementById(shellId)?.remove();
+    status = "idle";
+    setVersionState(null, null);
+    announceUpdateDismissed();
+  }
+
+  function handleUpdateCheckResult(payload) {
+    if (!payload) return;
+    checking = Boolean(payload.checking);
+    if (checkButton) checkButton.disabled = checking;
+    if (checkRetry) checkRetry.disabled = checking;
+    const result = payload.result;
+    const offerUpdate = payload.offer_update !== false;
+    let label = "Checking…";
+    if (!checking) {
+      switch (result?.state) {
+        case "available": {
+          label = `Update available: v${result.latest}`;
+          if (!offerUpdate) {
+            label += " — Check again after the current download finishes.";
+          } else if (!result.asset_url) {
+            label += " — No applicable asset for this platform.";
+            retractIdleManualOffer();
+          } else {
+            const sameActiveTarget = (pendingVersion || latestVersion) === result.latest
+              && ["applying", "ready", "draining", "scheduled"].includes(status);
+            if (!sameActiveTarget) handleUpdateState(result);
+          }
+          break;
+        }
+        case "failed":
+          label = `Check failed: ${result.message}`;
+          if (result.retry_at) label += ` — Retry after ${result.retry_at}`;
+          break;
+        case "up_to_date":
+          label = "Up to date";
+          if (offerUpdate) retractIdleManualOffer();
+          break;
+        default:
+          label = "";
+      }
+    }
+    if (checkStatus) {
+      checkStatus.textContent = label;
+      checkStatus.title = label;
+      checkStatus.dataset.state = checking ? "checking" : result?.state || "idle";
+    }
+    if (checking) return;
+    const failure = payload.previous_failure;
+    const mismatch = failure?.outcome === "failure"
+      && failure.to_version !== failure.observed_version;
+    const detailReason = result?.state === "failed" || (result?.state === "available" && (!offerUpdate || !result.asset_url))
+      ? label : "";
+    if (checkDetail) checkDetail.hidden = !mismatch && !detailReason;
+    if (checkReason) {
+      checkReason.hidden = !detailReason;
+      checkReason.textContent = detailReason;
+    }
+    if (checkFailure) {
+      checkFailure.hidden = !mismatch;
+      checkFailure.textContent = mismatch
+        ? `Previous update failed: expected v${failure.to_version}, observed v${failure.observed_version} after restart.`
+        : "";
+    }
+    if (checkRetry) checkRetry.hidden = status === "scheduled" || !offerUpdate || !mismatch || result?.state !== "available" || !result.asset_url;
+    if (checkInstall) {
+      checkInstall.hidden = !mismatch;
+      if (mismatch) {
+        checkInstall.href = result?.state === "available"
+          ? `https://github.com/akiojin/gwt/releases/tag/v${encodeURIComponent(result.latest)}`
+          : "https://github.com/akiojin/gwt/releases/latest";
+      } else {
+        checkInstall.removeAttribute("href");
+      }
+    }
+  }
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -213,7 +314,7 @@ export function createUpdateCtaController({
   }
 
   // Issue #3906 AC-12 — drain-and-apply. `update_drain` on
-  // issue_monitor_status means the Issue Monitor is holding new launches for
+  // issue_monitor_status means Issues is holding new launches for
   // a staged update and waiting for the host to go quiet. The CTA names the
   // version, how many blockers remain and how long the drain has lasted.
   function drainMinutes(since) {
@@ -306,14 +407,32 @@ export function createUpdateCtaController({
   }
 
   function handleUpdateState(event) {
-    if (!event || event.state !== "available") {
+    if (!event || (event.state !== "available" && event.state !== "up_to_date")) {
       return;
     }
-    availabilityModel.update(() => ({ current: event.current, latest: event.latest }));
+    availabilityModel.update(() => ({ state: event.state, current: event.current, latest: event.latest }));
   }
 
   function renderUpdateState(event) {
     removeLegacyUpdateSurfaces();
+    if (event.state === "up_to_date") {
+      // The backend has discarded a failed or obsolete staged release.
+      latestVersion = null;
+      pendingVersion = null;
+      pendingReadyReason = null;
+      status = "idle";
+      autoApplyModel.update(() => null);
+      stagedModel.update(() => null);
+      progressModel.update(() => null);
+      errorModel.update(() => null);
+      drainBlockers = [];
+      dismissedDrainVersion = null;
+      closeModal();
+      document.getElementById(shellId)?.remove();
+      setVersionState(event.current, null);
+      announceUpdateDismissed();
+      return;
+    }
     setVersionState(event.current, event.latest);
     const previousVersion = pendingVersion || latestVersion;
     if (event.latest && previousVersion && previousVersion !== event.latest) {
@@ -380,6 +499,7 @@ export function createUpdateCtaController({
       case "scheduled": {
         removeLegacyUpdateSurfaces();
         closeModal();
+        if (checkRetry) checkRetry.hidden = true;
         pendingVersion = version;
         const grace = Number.isFinite(payload.grace_secs) ? payload.grace_secs : 60;
         renderCta("scheduled", `Update v${version} applies in ${grace} s — click to cancel`);
@@ -681,7 +801,7 @@ export function createUpdateCtaController({
       el("p", {
         className: "update-modal__hint",
         text: anyway
-          ? `The Issue Monitor is draining agents and will apply it automatically once the host is quiet. ${waitingForText()} Apply now anyway restarts gwt immediately through the same graceful path; Stop waiting releases the drain and keeps the update staged.`
+          ? `Issues is draining agents and will apply it automatically once the host is quiet. ${waitingForText()} Apply now anyway restarts gwt immediately through the same graceful path; Stop waiting releases the drain and keeps the update staged.`
           : "Restart now to launch the new version.",
       }),
       releaseNotesLink,
@@ -964,6 +1084,7 @@ export function createUpdateCtaController({
   }
 
   return {
+    handleUpdateCheckResult,
     handleUpdateState,
     handleUpdateProgress,
     handleUpdateReady,

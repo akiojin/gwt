@@ -1,14 +1,14 @@
 import { surfaceForWindow } from "./surface-rail.js";
 
-const SURFACES = { issues: "Issues", agents: "Agents", board: "Board", settings: "Settings" };
-const PRESETS = { issues: "settings", board: "board", settings: "settings" };
+const SURFACES = { issues: "Issues", works: "Works", agents: "Agents", board: "Board", settings: "Settings" };
+const PRESETS = { issues: "issue", board: "board", settings: "settings" };
 
 // A client-local layout: move live views, never clone terminals or persist
 // geometry. One or two panes share the same host; inactive live views stay
 // connected in an inert cache so view lifecycle checks keep their state alive.
 export function createSplitSurfaces({
   document, windowCatalogModel, getWindows, getElement, openSurface, onChange, onLayout,
-  onAgentsHost = () => {},
+  onAgentsHost = () => {}, onWorksHost = () => {},
 }) {
   const host = document.getElementById("split-surfaces");
   const button = document.getElementById("split-view-button");
@@ -18,6 +18,7 @@ export function createSplitSurfaces({
   let active = 0;
   let selections = ["issues", "board"];
   let selectedWindowIds = [null, null];
+  let renderedCatalog = null;
   const parking = document.createElement("section");
   parking.className = "surface-cache";
   parking.hidden = true;
@@ -65,19 +66,24 @@ export function createSplitSurfaces({
     const changed = active !== index;
     active = index;
     for (const [i, pane] of panes.entries()) pane.dataset.active = String(i === active);
-    if (changed && selections.every(surface => surface === "agents")) sync();
+    if (changed && selections.every(surface => surface === "agents" || surface === "works")) sync();
     onChange(selections[active]);
   }
 
-  function sync() {
-    const catalog = windowCatalogModel.read().catalog;
-    const windows = getWindows(catalog);
-    host.dataset.catalogVersion = String(catalog.version);
+  function settleRequested(windows) {
     for (const [surface, existingIds] of requested) {
       if (windows.some(data => matchesSurface(data, surface) && !existingIds.has(data.id))) {
         requested.delete(surface);
       }
     }
+  }
+
+  function sync() {
+    const catalog = windowCatalogModel.read().catalog;
+    renderedCatalog = catalog;
+    const windows = getWindows(catalog);
+    host.dataset.catalogVersion = String(catalog.version);
+    settleRequested(windows);
     if (!opened) return;
     for (const [index, id] of selectedWindowIds.entries()) {
       if (!id) continue;
@@ -114,14 +120,13 @@ export function createSplitSurfaces({
     }
     for (const { index, pane } of visiblePanes) {
       const surface = selections[index];
-      const changedSurface = pane.dataset.surface !== surface;
       pane.dataset.surface = surface;
       for (const option of pane.querySelector(".split-pane__header select").options) {
         option.selected = option.value === surface;
         option.disabled = false;
         option.textContent = SURFACES[option.value];
       }
-      if (surface === "agents") {
+      if (surface === "agents" || surface === "works") {
         pane.querySelector(".split-pane__empty").hidden = true;
         continue;
       }
@@ -136,23 +141,18 @@ export function createSplitSurfaces({
       if (data) {
         const element = getElement(data.id);
         if (element) {
-          if (surface === "issues" && data.settingsSection !== "issues" &&
-            (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
-            element.querySelector('[data-settings-tab="issues"]')?.click();
-          } else if (surface === "settings" && data.settingsSection === "issues" &&
-            (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
-            element.querySelector('[data-settings-tab="system"]')?.click();
-          }
           desired.set(data.id, { element, index });
           selectedWindowIds[index] = data.id;
         }
       }
     }
-    const agentPanes = visiblePanes.filter(({ index }) => selections[index] === "agents").map(({ pane }) => pane);
-    const livePane = selections[active] === "agents" ? panes[active] : agentPanes[0];
-    const previewPane = agentPanes.find(pane => pane !== livePane);
-    onAgentsHost(livePane?.querySelector(".split-pane__body") || null,
-      previewPane?.querySelector(".split-pane__body") || null);
+    for (const [surface, onHost] of [["agents", onAgentsHost], ["works", onWorksHost]]) {
+      const surfacePanes = visiblePanes.filter(({ index }) => selections[index] === surface).map(({ pane }) => pane);
+      const livePane = selections[active] === surface ? panes[active] : surfacePanes[0];
+      const previewPane = surfacePanes.find(pane => pane !== livePane);
+      onHost(livePane?.querySelector(".split-pane__body") || null,
+        previewPane?.querySelector(".split-pane__body") || null);
+    }
     const changed = [];
     for (const [id, element] of mounted) {
       if (desired.has(id)) continue;
@@ -222,7 +222,7 @@ export function createSplitSurfaces({
     if (!surface) return false;
     const existingPane = mounted.get(id)?.closest(".split-pane");
     if (existingPane) active = panes.indexOf(existingPane);
-    selectedWindowIds[active] = surface === "agents" ? null : id;
+    selectedWindowIds[active] = ["agents", "works"].includes(surface) ? null : id;
     selections[active] = surface;
     opened = true;
     if (surface === "pm") split = false;
@@ -250,6 +250,7 @@ export function createSplitSurfaces({
     active = 0;
     requested.clear();
     onAgentsHost(null, null);
+    onWorksHost(null, null);
     host.hidden = false;
     host.dataset.split = "false";
     area.classList.remove("is-split");
@@ -268,9 +269,15 @@ export function createSplitSurfaces({
     onChange(null);
   }
 
-  const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
+  // Launch completion must consume intermediate catalogs even when their DOM
+  // presentation is superseded before the next frame.
+  const unsubscribeRequests = windowCatalogModel.subscribe(state => state.catalog,
+    catalog => settleRequested(getWindows(catalog)));
+  const unsubscribe = windowCatalogModel.subscribeFrame(state => state.catalog, () => {
+    if (windowCatalogModel.read().catalog !== renderedCatalog) sync();
+  });
   return {
-    dispose: unsubscribe,
+    dispose() { unsubscribeRequests(); unsubscribe(); },
     open, show, showWindow, close, collapse, sync, park, select: choose,
     isOpen: () => opened && split,
     get hasLayout() { return true; },

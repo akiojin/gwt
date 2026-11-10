@@ -295,7 +295,7 @@ pub(crate) fn run_gc_with_pressure(
         })
         .collect();
     let root_paths: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
-    let system = process_table();
+    let system = process_table().map_err(unexpected)?;
     let processes = scan_processes(&system, &root_paths);
     let hosts = live_gwt_hosts(&system);
     let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
@@ -389,7 +389,7 @@ pub(crate) fn run_gc_with_pressure(
             // A sweep can take many minutes. Re-read physical processes and
             // live pane/launch sidecars while holding the deletion boundary;
             // enumeration's snapshot cannot authorize a later deletion.
-            let system = process_table();
+            let system = process_table().map_err(unexpected)?;
             let roots = std::slice::from_ref(&candidate.worktree);
             let processes = scan_processes(&system, roots);
             let hosts = live_gwt_hosts(&system);
@@ -585,7 +585,7 @@ fn try_lock_gc_build_artifacts(target: &Path) -> std::io::Result<GcArtifactAcces
 /// The directory every `git` call in the sweep runs from (Issue #4566 AC-1).
 ///
 /// `run_gc` is handed a worktree by the CLI and the *project root* by the
-/// Issue Monitor scan. In the Nested Bare + Worktree layout that project root
+/// Issues scan. In the Nested Bare + Worktree layout that project root
 /// is the container holding `<repo>.git` next to `work/`, `develop/`, … — not
 /// a repository at all — so `git worktree list` there failed with `not a git
 /// repository` and the automatic sweep reported zero candidates while the CLI
@@ -681,8 +681,9 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, String> {
 /// One snapshot of the host's processes with their executables and working
 /// directories. Both the worktree attribution and the launch-liveness check
 /// read it, so the sweep judges every worktree against the same instant.
-fn process_table() -> System {
-    let mut system = System::new();
+fn process_table() -> Result<System, String> {
+    let mut system =
+        System::new().map_err(|error| format!("process census unavailable: {error}"))?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -690,7 +691,7 @@ fn process_table() -> System {
             .with_exe(UpdateKind::Always)
             .with_cwd(UpdateKind::Always),
     );
-    system
+    Ok(system)
 }
 
 /// The gwt Host executable. It is the only process that creates a runtime
@@ -1575,7 +1576,7 @@ mod tests {
         assert!(repo.join(BUILD_ARTIFACT_DIR).is_dir());
     }
 
-    /// Issue #4566 AC-1 / AC-3: the Issue Monitor hands the sweep the project
+    /// Issue #4566 AC-1 / AC-3: Issues hands the sweep the project
     /// root — the Nested Bare + Worktree container that holds `<repo>.git`
     /// next to `work/`, `develop/`, … — which is not itself a repository.
     /// Enumerating from there used to fail with `not a git repository` and

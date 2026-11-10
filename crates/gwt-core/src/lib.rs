@@ -26,15 +26,18 @@ pub mod migration;
 #[cfg(windows)]
 pub mod named_pipe;
 pub mod operation_deadline;
+pub mod pane_health;
 pub mod paths;
 pub mod pm_authorization;
 pub mod pm_peer;
 pub mod pm_report;
+pub mod pm_request_tasks;
 pub mod pm_status;
 pub mod process;
 pub mod process_console;
 pub mod process_executor;
 pub mod process_tree;
+pub mod project_execution_policy;
 pub mod recovery;
 mod release_contract;
 pub mod release_notes;

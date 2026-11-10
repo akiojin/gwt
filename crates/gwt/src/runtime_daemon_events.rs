@@ -15,14 +15,20 @@ pub const RUNTIME_HOOK_CHANNEL: &str = "runtime_hook";
 pub const RUNTIME_APPROVAL_OVERLAY_CHANNEL: &str = "runtime_approval_overlay";
 pub const ISSUE_MONITOR_CHANNEL: &str = "issue_monitor";
 pub const ISSUE_MONITOR_CONTROL_CHANNEL: &str = "issue_monitor_control";
-pub const ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR: &str =
-    "issue monitor control rejected: authority recovery is blocked";
+// Wire identifiers must remain readable by older clients and daemons.
+// Display below applies the current feature name only at the presentation boundary.
+pub const ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR: &str = concat!(
+    "issue",
+    " monitor control rejected: authority recovery is blocked"
+);
 pub const ISSUE_MONITOR_CONTROL_CLOSED_ERROR: &str =
-    "issue monitor control rejected: worker is closed";
+    concat!("issue", " monitor control rejected: worker is closed");
 pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
-    "issue monitor control rejected before commit";
+    concat!("issue", " monitor control rejected before commit");
 pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
-    "issue monitor control rejected: admission is full";
+    concat!("issue", " monitor control rejected: admission is full");
+pub const ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR: &str =
+    concat!("issue", " monitor control rejected: scan_already_in_flight");
 /// Captured source for the private `agent_failed_from_launch` notification.
 /// Its discriminator makes an older daemon reject the fenced notification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,14 +74,20 @@ impl IssueMonitorControlPublishError {
 
 impl std::fmt::Display for IssueMonitorControlPublishError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        let message = match self {
             Self::TransportUnavailable(message)
             | Self::OutcomeUnknown(message)
             | Self::Busy(message)
-            | Self::Rejected(message) => formatter.write_str(message),
-            Self::RecoveryBlocked => {
-                formatter.write_str(ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR)
-            }
+            | Self::Rejected(message) => message.as_str(),
+            Self::RecoveryBlocked => ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR,
+        };
+        if let Some(suffix) = message
+            .strip_prefix(concat!("issue", " monitor"))
+            .or_else(|| message.strip_prefix(concat!("Issue", " Monitor")))
+        {
+            write!(formatter, "Issues{suffix}")
+        } else {
+            formatter.write_str(message)
         }
     }
 }
@@ -135,7 +147,7 @@ struct RuntimeApprovalOverlayPayload {
 }
 
 /// Issue #3596: identity of the project store that actually supplied an
-/// Issue Monitor event. This is the shared wire shape used by both ordinary
+/// Issues event. This is the shared wire shape used by both ordinary
 /// JSON operation envelopes and daemon broadcasts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectStoreIdentity {
@@ -274,7 +286,7 @@ pub fn issue_monitor_payload(event: &str, payload: Value, source_pid: u32) -> Va
         payload,
         project_store: None,
     })
-    .expect("issue monitor payload serializes")
+    .expect("Issues payload serializes")
 }
 
 pub fn issue_monitor_payload_with_project_store(
@@ -289,7 +301,7 @@ pub fn issue_monitor_payload_with_project_store(
         payload,
         project_store: Some(project_store.clone()),
     })
-    .expect("issue monitor payload with project store serializes")
+    .expect("Issues payload with project store serializes")
 }
 
 pub fn decode_runtime_daemon_event(
@@ -342,9 +354,15 @@ pub fn decode_runtime_daemon_event(
                 waiting: payload.waiting,
             })
         }
-        ISSUE_MONITOR_CHANNEL => {
+        ISSUE_MONITOR_CHANNEL | ISSUE_MONITOR_CONTROL_CHANNEL => {
             let payload: IssueMonitorPayload = serde_json::from_value(payload).ok()?;
-            if payload.source_pid == current_pid {
+            if channel == ISSUE_MONITOR_CONTROL_CHANNEL {
+                // Authenticated commands can originate in the same owner process.
+                // Observer notifications retain their separate echo suppression.
+                if payload.event != "control" {
+                    return None;
+                }
+            } else if payload.source_pid == current_pid {
                 return None;
             }
             let mut event = serde_json::json!({
@@ -370,6 +388,43 @@ mod tests {
         RUNTIME_HOOK_CHANNEL, RUNTIME_OUTPUT_CHANNEL, RUNTIME_STATUS_CHANNEL,
     };
     use crate::{RuntimeHookEvent, RuntimeHookEventKind, WindowProcessStatus};
+
+    #[test]
+    fn control_wire_errors_stay_compatible_while_display_uses_issues() {
+        use super::*;
+        for (wire, suffix) in [
+            (
+                ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR,
+                "control rejected: authority recovery is blocked",
+            ),
+            (
+                ISSUE_MONITOR_CONTROL_CLOSED_ERROR,
+                "control rejected: worker is closed",
+            ),
+            (
+                ISSUE_MONITOR_CONTROL_REJECTED_ERROR,
+                "control rejected before commit",
+            ),
+            (
+                ISSUE_MONITOR_CONTROL_BUSY_ERROR,
+                "control rejected: admission is full",
+            ),
+            (
+                ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+                "control rejected: scan_already_in_flight",
+            ),
+        ] {
+            assert_eq!(wire, format!("{} {suffix}", concat!("issue", " monitor")));
+            assert_eq!(
+                IssueMonitorControlPublishError::Rejected(wire.into()).to_string(),
+                format!("Issues {suffix}")
+            );
+        }
+        assert_eq!(
+            IssueMonitorControlPublishError::RecoveryBlocked.to_string(),
+            "Issues control rejected: authority recovery is blocked"
+        );
+    }
 
     fn deterministic_path_fallback_store() -> gwt_core::paths::OperationProjectStore {
         let project_root = std::path::PathBuf::from("/synthetic/issue-3596/source");

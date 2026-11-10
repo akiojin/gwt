@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { parseHTML } from "linkedom";
 
 const source = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
   .replace('from "/board-surface.js"', `from "${new URL("../board-surface.js", import.meta.url).href}"`)
@@ -9,12 +10,15 @@ const { createBoardLogsSurface } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`,
 );
 
-function fixture() {
+function fixture(onNotification) {
   const sent = [], notifications = [];
   const surface = createBoardLogsSurface({
     send: event => sent.push(event),
     windowMap: new Map(),
-    pushAlertToast: notice => notifications.push(notice),
+    pushAlertToast: notice => {
+      notifications.push(notice);
+      onNotification?.(surface.ensureBoardState("board"));
+    },
     activeWorkspace: () => ({ windows: [{ id: "board", preset: "board" }] }),
     focusOrSpawnPreset: () => {},
     activeProjectTab: () => null,
@@ -31,6 +35,113 @@ function fixture() {
 function entry(id, body = id) {
   return { id, body, created_at: `2026-10-15T00:00:0${id}Z` };
 }
+
+test("Board destination batches settings while mount and popover read the latest cache", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { document } = parseHTML('<div id="board"><div class="window-body"></div></div><div id="second"><div class="window-body"></div></div>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const frames = new Map();
+  const previousRequestFrame = globalThis.requestAnimationFrame;
+  const previousCancelFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = callback => { frames.set(callback, callback); return callback; };
+  globalThis.cancelAnimationFrame = callback => frames.delete(callback);
+  t.after(() => {
+    globalThis.requestAnimationFrame = previousRequestFrame;
+    globalThis.cancelAnimationFrame = previousCancelFrame;
+  });
+  const flush = () => { for (const callback of [...frames.values()]) callback(); };
+  // Match the writable select.value browser contract (linkedom is getter-only).
+  const selectPrototype = Object.getPrototypeOf(document.createElement("select"));
+  const selectValue = Object.getOwnPropertyDescriptor(selectPrototype, "value");
+  Object.defineProperty(selectPrototype, "value", {
+    configurable: true,
+    get() { return this.__testValue ?? selectValue.get.call(this); },
+    set(value) { this.__testValue = String(value); },
+  });
+  t.after(() => Object.defineProperty(selectPrototype, "value", selectValue));
+  const sent = [];
+  const windows = [];
+  let destinationRenders = 0;
+  let projectRoot = "/project-a";
+  const surface = createBoardLogsSurface({
+    send: event => sent.push(event),
+    createNode: (tag, className, text) => {
+      if (className === "board-destination-text") destinationRenders++;
+      const node = document.createElement(tag);
+      node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    },
+    windowMap: new Map([["board", document.getElementById("board")], ["second", document.getElementById("second")]]),
+    activeWorkspace: () => ({ windows }),
+    activeProjectTab: () => ({ project_root: projectRoot }),
+    getActiveWorkProjection: () => null,
+  });
+  for (const [root, channel] of [["/project-a", "#alpha"], ["/project-b", "#beta"]]) {
+    surface.applyProjectBoardConfigEventToBoard({ project_root: root, provider: "slack",
+      channel, resolved_provider: "slack", resolved_channel: channel });
+  }
+  const body = document.querySelector(".window-body");
+  for (const [root, channel] of [["/project-a", "#alpha"], ["/project-b", "#beta"]]) {
+    projectRoot = root;
+    surface.mountBoardWindow({ id: "board", preset: "board" }, body);
+    assert.equal(body.querySelector(".board-destination-text").textContent, `Slack ${channel}`);
+  }
+  flush();
+  assert.ok(!sent.some(event => event.kind === "get_project_board_config"));
+  projectRoot = "/project-a";
+  surface.mountBoardWindow({ id: "second", preset: "board" }, document.querySelector("#second .window-body"));
+  windows.push({ id: "board", preset: "board" }, { id: "second", preset: "board" });
+  const before = [...document.querySelectorAll(".board-destination-text")];
+  destinationRenders = 0;
+  for (let index = 0; index < 50; index++) {
+    surface.applyProjectBoardConfigEventToBoard({ project_root: projectRoot, provider: "slack",
+      channel: `#burst-${index}`, resolved_provider: "slack", resolved_channel: `#burst-${index}` });
+  }
+  assert.equal(destinationRenders, 0, "receipt must not render before the frame");
+  assert.deepEqual([...document.querySelectorAll(".board-destination-text")], before);
+  assert.equal(frames.size, 1, "all updates share one scheduled frame");
+  document.querySelector("[data-action='board-destination']").click();
+  assert.equal(document.querySelector(".board-destination-popover input").value, "#burst-49",
+    "the model is already current before its render frame");
+  t.mock.timers.tick(0);
+  document.querySelector(".board-destination-popover-close").click();
+  flush();
+  assert.equal(destinationRenders, 2, "each Board renders once from the latest configuration");
+  assert.equal(frames.size, 0);
+  for (const chip of document.querySelectorAll(".board-destination-text")) {
+    assert.equal(chip.textContent, "Slack #burst-49");
+  }
+  surface.applyProjectBoardConfigEventToBoard({ project_root: "", resolved_channel: "#invalid" });
+  assert.equal(frames.size, 0);
+
+  document.querySelector("[data-action='board-destination']").click();
+  const popover = document.querySelector(".board-destination-popover");
+  const channelInput = popover.querySelector("input");
+  channelInput.value = "#unsaved-destination";
+  sent.length = 0;
+  surface.resyncBoardLogs(["board", "second"]);
+  assert.deepEqual(sent.filter(event => event.kind === "get_project_board_config"),
+    [{ kind: "get_project_board_config", project_root: "/project-a" }],
+    "reconnect refreshes the shared destination once even when already cached");
+  surface.applyProjectBoardConfigEventToBoard({ project_root: projectRoot,
+    resolved_provider: "local" });
+  flush();
+  for (const chip of document.querySelectorAll(".board-destination-text")) {
+    assert.equal(chip.textContent, "Local");
+  }
+  assert.equal(document.querySelector(".board-destination-popover"), popover);
+  assert.equal(popover.querySelector("input"), channelInput);
+  assert.equal(channelInput.value, "#unsaved-destination");
+  assert.ok(!sent.some(event => event.kind === "update_project_board_config"));
+  sent.length = 0;
+  surface.resyncBoardLogs(["logs"]);
+  projectRoot = "";
+  surface.resyncBoardLogs(["board"]);
+  assert.ok(!sent.some(event => event.kind === "get_project_board_config"));
+});
 
 test("Issue #5531: resync reissues lost Board and Logs reads without clearing the composer", () => {
   const { surface, state, sent } = fixture();
@@ -58,7 +169,11 @@ test("Issue #5531: resync reissues lost Board and Logs reads without clearing th
 });
 
 test("Board incremental entries preserve history, update IDs, and ignore repeated mention notifications", () => {
-  const { surface, state, receive, notifications } = fixture();
+  const { surface, state, receive, notifications } = fixture(state => {
+    assert.ok(Object.isFrozen(state.entries), "notify only after the shared snapshot is committed");
+    assert.ok(Object.isFrozen(state.entries.at(-1).mentions));
+    assert.equal(state.entries.at(-1).content.body, "3");
+  });
   receive([entry("2")], true);
   surface.applyBoardLogsReceiveEvent({
     kind: "board_history_page", id: "board", entries: [entry("1")], has_more_before: true,

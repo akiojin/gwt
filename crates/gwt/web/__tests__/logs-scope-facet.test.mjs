@@ -87,7 +87,6 @@ function createFixture(createBoardLogsSurface) {
     activeWorkspace: () => ({ windows: [] }),
     activeProjectTab: () => ({ project_scope: activeProjectScope }),
     projectWindowContextById: () => ({ tab: { project_scope: windowProjectScope } }),
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     getActiveWorkProjection: () => null,
   });
   return {
@@ -165,6 +164,7 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
     severity: "info",
     source: "gwt",
     message: "project event",
+    fields: { nested: { value: "original" } },
   };
   const otherProjectEntry = {
     ...projectEntry,
@@ -192,6 +192,21 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
     [globalEntry],
     "Global mode accepts only entries without project_scope",
   );
+  projectEntry.fields.nested.value = "mutated";
+  assert.equal(projectState.entries[0].fields.nested.value, "original",
+    "live receipts must detach nested payload data");
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entry_appended", entry: globalEntry });
+  assert.equal(globalState.entries.length, 2, "equal-valued live receipts still append");
+
+  surface.requestLogs("logs-project");
+  const pendingScope = projectState.pendingScope;
+  projectState.error = "retained error";
+  projectState.selectedEntryId = projectEntry.id;
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entry_appended", entry: projectEntry });
+  assert.equal(projectState.loading, true, "live receipts do not settle snapshot requests");
+  assert.equal(projectState.pendingScope, pendingScope);
+  assert.equal(projectState.error, "retained error");
+  assert.equal(projectState.selectedEntryId, projectEntry.id);
 });
 
 test("a Project reload refreshes the window scope after project migration", async () => {
@@ -233,6 +248,30 @@ for (const responseKind of ["log_entries", "log_error"]) {
 
     surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries: [] });
     assert.equal(state.loading, false);
+    if (responseKind === "log_error") {
+      const message = '<img src=x onerror="window.unexpected = true">';
+      const search = body.querySelector(".logs-search-input");
+      state.query = "retained query";
+      state.entries = [{ id: 8, severity: "info", message: "retained query", fields: {} }];
+      state.selectedEntryId = 8;
+      const entries = state.entries;
+      for (let receipt = 0; receipt < 2; receipt++) {
+        surface.requestLogs("logs-1");
+        surface.applyBoardLogsReceiveEvent({ kind: "log_error", id: "logs-1", message });
+        assert.equal(state.loading, false);
+        assert.equal(state.error, message, "same-valued errors still settle each request");
+        assert.equal(body.querySelector(".logs-status").textContent, message);
+        assert.equal(body.querySelector(".logs-status img"), null, "error text is never HTML");
+        assert.equal(state.entries, entries);
+        assert.equal(state.selectedEntryId, 8);
+        assert.equal(state.scope, "global");
+        assert.equal(body.querySelector(".logs-search-input"), search);
+        assert.equal(search.value, "retained query");
+      }
+      surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
+      assert.equal(state.error, "");
+      assert.equal(body.querySelector(".logs-status").textContent, "1 visible / 1 total");
+    }
   });
 }
 
@@ -303,4 +342,31 @@ test("scope selector reuses Logs chrome backed by Operator tokens", () => {
     /\.logs-scope-select\s*\{/,
     "scope selector must not fork a custom chrome instead of reusing Logs/Operator tokens",
   );
+});
+
+test("Logs snapshots and live appends retain the latest 1000 entries without extending the payload", async () => {
+  const { createBoardLogsSurface } = await importBoardLogsSurface();
+  const { surface } = createFixture(createBoardLogsSurface);
+  const entries = Array.from({ length: 1002 }, (_, id) => ({
+    id, project_scope: "project-alpha", severity: "info", message: `log-${id}`,
+  }));
+  entries.at(-1).fields = { context: { label: "original" } };
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
+  const state = surface.ensureLogState("logs-1");
+  assert.equal(state.entries.length, 1000);
+  assert.deepEqual(state.entries.map(entry => entry.id), entries.slice(2).map(entry => entry.id));
+  entries.at(-1).message = "changed by caller";
+  entries.at(-1).fields.context.label = "changed by caller";
+  assert.equal(state.entries.at(-1).message, "log-1001");
+  assert.equal(state.entries.at(-1).fields.context.label, "original");
+
+  surface.applyBoardLogsReceiveEvent({
+    kind: "log_entry_appended",
+    entry: { ...entries[0], id: 1002, message: "latest" },
+  });
+  assert.equal(state.entries.length, 1000);
+  assert.equal(state.entries[0].id, 3);
+  assert.equal(state.entries.at(-1).id, 1002);
+  assert.equal(entries.length, 1002, "receiving live output must not extend the snapshot payload");
+  assert.equal(entries.at(-1).id, 1001);
 });

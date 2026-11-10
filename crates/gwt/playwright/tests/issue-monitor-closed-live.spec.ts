@@ -77,12 +77,11 @@ test.describe("Closed Issue retirement (live backend)", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some((entry: any) =>
         entry.payload.kind === "workspace_state"));
       await page.locator(".op-rail").getByRole("button", { name: "Issues", exact: true }).click();
-      const windows = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="settings"]');
+      const windows = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
       await expect(windows.first()).toBeVisible();
-      await expect(windows.first().locator('[data-settings-panel="issues"]')).toBeVisible();
+      await expect(windows.first().locator(".issue-bridge-root")).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
-      await sendLiveGwtEvent(page, { kind: "update_window_geometry", id: windowId,
-        geometry: { x: 50, y: 40, width: 1150, height: 850 }, cols: 100, rows: 28 });
+      await page.setViewportSize({ width: 1280, height: 1020 });
       await expect.poll(() => windows.first().evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(800);
       const before = await cli("issue.monitor.status");
       expect(before.enabled).toBe(false);
@@ -122,7 +121,7 @@ test.describe("Closed Issue retirement (live backend)", () => {
       expect(await cli("issue.reopen", { number })).toMatchObject({ status: "open", changed: true });
       expect((await cli("issue.monitor.status")).gui_status.terminal_queue.map((entry: any) => entry.number)).not.toContain(number);
       expect((await cli("issue.monitor.queue.push", { numbers: [number] })).accepted).toContain(number);
-      // Monitor is disabled: queue.push writes durable admission without a scan
+      // Issues is disabled: queue.push writes durable admission without a scan
       // notification. Its source of truth is this entry and the GitHub label;
       // the GUI admission projection refreshes at the next scheduled scan.
       const pushed = JSON.parse(await readFile(prefsPath, "utf8"));

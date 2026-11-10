@@ -860,7 +860,9 @@ pub(crate) fn codex_self_improvement_stop_hook_commands() -> Vec<String> {
     ]
 }
 
-pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
+/// Complete generated dispatcher forms for configuration audit and Codex trust.
+/// A matching form does not establish executable trust or observed execution.
+pub fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
     vec![
         posix_codex_event_hook_command_with_bin(bin, event),
         powershell_codex_event_hook_command_with_bin(bin, event),

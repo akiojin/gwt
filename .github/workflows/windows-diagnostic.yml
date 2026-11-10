@@ -1,0 +1,70 @@
+name: Fixed Windows diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        required: true
+        type: string
+      expected_profile_digest:
+        required: true
+        type: string
+      expected_workflow_commit:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    if: ${{ github.repository == 'akiojin/gwt' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: windows-latest
+    timeout-minutes: 110
+    steps:
+      - name: Preserve the canonical historical bytes before checkout
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'fixed checkout configuration unavailable' }
+          git config --global core.eol lf 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'fixed checkout configuration unavailable' }
+      - name: Check out the trusted diagnostic wrapper
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out the fixed historical source
+        uses: actions/checkout@v7
+        with:
+          ref: f351dc97c6a3ef805ecac75987dd43246b268c22
+          path: historical
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: clippy,rustfmt
+      - name: Run the fixed diagnostic and seal its safe result
+        shell: pwsh
+        env:
+          GWT_DIAG_REQUEST_ID: ${{ inputs.request_id }}
+          GWT_DIAG_EXPECTED_PROFILE: ${{ inputs.expected_profile_digest }}
+          GWT_DIAG_EXPECTED_WORKFLOW: ${{ inputs.expected_workflow_commit }}
+          GWT_DIAG_SOURCE_ROOT: ${{ github.workspace }}/historical
+          GWT_DIAG_RESULT_DIR: ${{ runner.temp }}/gwt-diagnostic-result
+        run: '& (Join-Path $env:GITHUB_WORKSPACE "trusted/.github/diagnostics/windows/4777-restore-f351-v1/run.ps1")'
+      - name: Upload only the closed safe receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-diagnostic-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/gwt-diagnostic-result/result.json
+          if-no-files-found: error
+          retention-days: 14

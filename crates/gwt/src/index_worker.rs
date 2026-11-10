@@ -48,10 +48,17 @@ fn automatic_background_index_disabled_value(value: Option<&OsStr>) -> bool {
 /// Determine `RepoHash` for the given repository root by shelling out to
 /// `git remote get-url origin`. Returns `None` if no origin is configured.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
-    gwt_core::repo_hash::detect_repo_hash(repo_root).or_else(|| {
-        let index_root = resolve_project_index_repo_root(repo_root)?;
-        gwt_core::repo_hash::detect_repo_hash(&index_root)
-    })
+    gwt_core::repo_hash::detect_repo_hash(repo_root)
+        // Issue #6096: an unambiguous Nested Bare + Worktree layout root
+        // resolves from its bare child's config without spawning Git, which
+        // costs seconds per call on a loaded Windows host.
+        .or_else(|| {
+            gwt_core::repo_hash::detect_repo_identity(repo_root).map(|identity| identity.hash)
+        })
+        .or_else(|| {
+            let index_root = resolve_project_index_repo_root(repo_root)?;
+            gwt_core::repo_hash::detect_repo_hash(&index_root)
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1593,15 +1600,6 @@ pub fn rebuild_index_target(
                 "project index rebuild started"
             );
             let output = run_rebuild_runner_for_target(&ctx, action, qos)?;
-            tracing::info!(
-                target: "gwt::index",
-                scope = rebuild_label,
-                worktree_hash = %rebuild_worktree_hash,
-                action = rebuild_action,
-                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
-                exit_status = %output.exit_status(),
-                "project index rebuild completed"
-            );
             if !output.success() {
                 return Err(output.failure());
             }
@@ -1627,6 +1625,15 @@ pub fn rebuild_index_target(
                 );
                 return Ok(BuildStep::Yielded);
             }
+            tracing::info!(
+                target: "gwt::index",
+                scope = rebuild_label,
+                worktree_hash = %rebuild_worktree_hash,
+                action = rebuild_action,
+                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+                exit_status = %output.exit_status(),
+                "project index rebuild completed"
+            );
             Ok(BuildStep::Done(()))
         },
     )?;
@@ -2054,9 +2061,15 @@ fn repo_scope_source_paths(scope: RefreshScope, root: &Path, repo_hash: &RepoHas
     let home = gwt_core::paths::gwt_project_dir(repo_hash);
     match scope {
         RefreshScope::Issues | RefreshScope::Specs => {
-            vec![crate::issue_cache::issue_cache_root_for_repo_hash(
-                repo_hash,
-            )]
+            let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+            let revision = cache_root.join("source-revision");
+            // Cache refresh rewrites transport metadata even when the source
+            // content is unchanged. Only its canonical revision admits retry.
+            vec![if revision.is_file() {
+                revision
+            } else {
+                cache_root
+            }]
         }
         RefreshScope::Memory | RefreshScope::Discussions => {
             let name = if scope == RefreshScope::Memory {
@@ -2228,6 +2241,60 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("source:{:x}", digest.finalize()))
 }
 
+/// Legacy caches lack a canonical revision. Hash their indexed fields and
+/// full SPEC payloads without admitting transport metadata rewrites as input.
+fn legacy_issue_source_snapshot(cache_root: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    if let Some(source) =
+        crate::issue_cache::issue_cache_source_fingerprint(cache_root).map_err(io::Error::other)?
+    {
+        digest.update(source.fingerprint.as_bytes());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(cache_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+                .is_none()
+        {
+            continue;
+        }
+        let body = entry.path().join("body.md");
+        if body.is_file() {
+            paths.push(body);
+        }
+        let sections = entry.path().join("sections");
+        if sections.is_dir() {
+            for section in std::fs::read_dir(sections)? {
+                let section = section?;
+                if section.file_type()?.is_file()
+                    && section.path().extension() == Some(OsStr::new("md"))
+                {
+                    paths.push(section.path());
+                }
+            }
+        }
+    }
+    paths.sort();
+    for path in paths {
+        digest.update(
+            path.strip_prefix(cache_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .as_bytes(),
+        );
+        digest.update([0]);
+        let mut file = std::fs::File::open(&path)?;
+        digest.update(file.metadata()?.len().to_le_bytes());
+        io::copy(&mut file, &mut digest)?;
+    }
+    Ok(format!("source:{:x}", digest.finalize()))
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct RefreshSourceReads {
@@ -2263,17 +2330,34 @@ impl<'a> SourceRefreshPoll<'a> {
     fn submit_repo_sources(&mut self, root: &Path, repo_hash: &RepoHash) -> Result<(), String> {
         let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         for scope in REFRESH_REPO_SCOPES {
-            let snapshot = self.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+            let snapshot =
+                self.repo_snapshot(scope, repo_scope_source_paths(scope, &root, repo_hash))?;
             self.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)?;
         }
         Ok(())
     }
 
-    fn repo_snapshot(&mut self, paths: Vec<PathBuf>) -> Result<String, String> {
+    fn repo_snapshot(
+        &mut self,
+        scope: RefreshScope,
+        paths: Vec<PathBuf>,
+    ) -> Result<String, String> {
         match self.repo_fingerprints.get(&paths) {
             Some(snapshot) => Ok(snapshot.clone()),
             None => {
-                let snapshot = refresh_source_snapshot(&paths)?;
+                let snapshot = if matches!(scope, RefreshScope::Issues | RefreshScope::Specs)
+                    && paths.len() == 1
+                    && paths[0].is_dir()
+                {
+                    legacy_issue_source_snapshot(&paths[0]).map_err(|error| {
+                        format!(
+                            "legacy index source snapshot {}: {error}",
+                            paths[0].display()
+                        )
+                    })?
+                } else {
+                    refresh_source_snapshot(&paths)?
+                };
                 self.repo_fingerprints.insert(paths, snapshot.clone());
                 Ok(snapshot)
             }
@@ -2326,7 +2410,7 @@ fn submit_repo_scope_refresh(
 ) -> Result<(), String> {
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut poll = SourceRefreshPoll::new(broker)?;
-    let snapshot = poll.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+    let snapshot = poll.repo_snapshot(scope, repo_scope_source_paths(scope, &root, repo_hash))?;
     poll.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)
 }
 
@@ -2585,6 +2669,19 @@ fn execute_claimed_refresh(
                 .complete()
                 .map_err(|err| format!("complete project index refresh claim: {err}"))
         }
+        Err(error) if error == REFRESH_QUANTUM_EXHAUSTED => {
+            tracing::info!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                desired_epoch = intent.desired_epoch,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh checkpointed for continuation"
+            );
+            claim
+                .defer()
+                .map_err(|err| format!("defer project index refresh claim: {err}"))
+        }
         Err(error) => {
             tracing::warn!(
                 target: "gwt::index",
@@ -2733,16 +2830,17 @@ fn execute_claimed_refresh_inner(
     Ok(())
 }
 
-/// File scopes of a refresh target, in build order. Non-file scopes
-/// (`Issues`) are handled by the claim's Issue-cache check, not here.
+/// One v2 action publishes both file scopes atomically; never start a second
+/// cold runner for the same view. Non-file scopes are handled separately.
 fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
     scopes
         .iter()
-        .filter_map(|scope| match scope {
+        .find_map(|scope| match scope {
             RefreshScope::Files => Some(IndexRebuildScope::Files),
             RefreshScope::FilesDocs => Some(IndexRebuildScope::FilesDocs),
             _ => None,
         })
+        .into_iter()
         .collect()
 }
 
@@ -2985,8 +3083,19 @@ mod tests {
 
     #[test]
     fn background_refresh_maintenance_has_one_finite_deadline() {
+        struct FixedBrokerClock;
+        impl gwt_core::index::broker::RefreshBrokerClock for FixedBrokerClock {
+            fn now_millis(&self) -> u64 {
+                10_000
+            }
+        }
         let temp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let broker = RefreshBroker::open_with_clock(
+            temp.path(),
+            Duration::ZERO,
+            std::sync::Arc::new(FixedBrokerClock),
+        )
+        .expect("broker");
         let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
         broker
             .submit(RefreshIntent {
@@ -3002,6 +3111,21 @@ mod tests {
         let claim = broker.claim_next().expect("claim").expect("claimable");
         let started = Instant::now();
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        execute_claimed_refresh(claim, |_| Err(REFRESH_QUANTUM_EXHAUSTED.to_string()))
+            .expect("checkpointed maintenance defers without failure");
+        let snapshot = broker.inspect().expect("snapshot");
+        let pending = snapshot.target(&target).expect("target");
+        assert_eq!(pending.completed_epoch(), None);
+        assert_eq!(pending.last_error(), None);
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.quiet_deadline_millis(), Some(10_000));
+        let claim = broker
+            .claim_next()
+            .expect("claim")
+            .expect("checkpointed input remains resumable");
         execute_claimed_refresh(claim, |_| {
             assert_eq!(
                 gwt_core::operation_deadline::current(),
@@ -3060,6 +3184,8 @@ mod tests {
         );
         assert_eq!(pending.desired_epoch(), 7);
         assert_eq!(pending.completed_epoch(), None);
+        assert_eq!(pending.quiet_deadline_millis(), None);
+        assert!(broker.claim_next().expect("stopped input").is_none());
         assert!(pending
             .last_error()
             .expect("error")
@@ -3169,7 +3295,11 @@ mod tests {
                 RefreshScope::FilesDocs,
                 RefreshScope::Issues
             ]),
-            vec![IndexRebuildScope::Files, IndexRebuildScope::FilesDocs]
+            vec![IndexRebuildScope::Files]
+        );
+        assert_eq!(
+            file_rebuild_scopes(&[RefreshScope::FilesDocs]),
+            vec![IndexRebuildScope::FilesDocs]
         );
     }
 
@@ -3337,9 +3467,9 @@ mod tests {
             .join("worktrees/linked-index/keep");
         std::fs::create_dir_all(kept.parent().expect("parent")).expect("index directory");
         std::fs::write(&kept, b"live index").expect("live index");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() - Duration::from_millis(1),
-        );
+        let now = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         assert!(
             project_index_git_context(&checkout_root).is_none(),
@@ -4521,6 +4651,10 @@ mod tests {
             roots.push(root);
         }
         let repo_hash = detect_repo_hash(&roots[0]).unwrap();
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::write(cache_root.join("source-revision"), "content-revision-1").unwrap();
+        std::fs::write(cache_root.join("refresh-meta.json"), "{}").unwrap();
         let issue_sources = repo_scope_source_paths(RefreshScope::Issues, &roots[0], &repo_hash);
         REFRESH_SOURCE_READS.with(|reads| *reads.borrow_mut() = RefreshSourceReads::default());
         poll_registered_project_index_sources(&broker).unwrap();
@@ -4551,6 +4685,9 @@ mod tests {
             })
             .collect();
         let before = broker.inspect().unwrap();
+        // A successful cache refresh can rewrite transport metadata while the
+        // canonical content revision remains unchanged.
+        std::fs::write(cache_root.join("refresh-meta.json"), "{\"refreshed\":true}").unwrap();
         std::fs::write(roots[0].join("lib.rs"), "fn changed_source() {}\n").unwrap();
         poll_registered_project_index_sources(&broker).unwrap();
         REFRESH_SOURCE_READS.with(|reads| {
@@ -4562,6 +4699,16 @@ mod tests {
             );
         });
         let after = broker.inspect().unwrap();
+        let issue_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Issues]);
+        assert_eq!(
+            before.target(&issue_target).unwrap().desired_snapshot(),
+            after.target(&issue_target).unwrap().desired_snapshot(),
+            "cache transport rewrites must not resume unchanged failed input"
+        );
+        assert_eq!(
+            before.target(&issue_target).unwrap().desired_epoch(),
+            after.target(&issue_target).unwrap().desired_epoch()
+        );
         let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
         assert_eq!(
             before.target(&memory_target).unwrap().desired_epoch(),
@@ -4579,6 +4726,81 @@ mod tests {
         assert_eq!(
             before.target(&targets[1]).unwrap().quiet_deadline_millis(),
             after.target(&targets[1]).unwrap().quiet_deadline_millis()
+        );
+
+        std::fs::remove_file(cache_root.join("source-revision")).unwrap();
+        let issue_dir = cache_root.join("7");
+        std::fs::create_dir_all(issue_dir.join("sections")).unwrap();
+        let meta_path = issue_dir.join("meta.json");
+        std::fs::write(
+            &meta_path,
+            r#"{"title":"Legacy SPEC","state":"open","labels":["gwt-spec"],"generation":"initial"}"#,
+        )
+        .unwrap();
+        let body = format!("{}original ending", "x".repeat(2000));
+        std::fs::write(issue_dir.join("body.md"), &body).unwrap();
+        let section_path = issue_dir.join("sections/spec.md");
+        std::fs::write(&section_path, "Full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let legacy_before = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        std::fs::write(
+            &meta_path,
+            r#"{"title":"Legacy SPEC","state":"open","labels":["gwt-spec"],"generation":"refreshed transport"}"#,
+        )
+        .unwrap();
+        std::fs::write(cache_root.join("refresh-meta.json"), "{\"refreshed\":2}").unwrap();
+        std::fs::write(issue_dir.join("body.md"), &body).unwrap();
+        std::fs::write(&section_path, "Full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let legacy_after = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (
+                legacy_before.desired_snapshot(),
+                legacy_before.desired_epoch()
+            ),
+            (
+                legacy_after.desired_snapshot(),
+                legacy_after.desired_epoch()
+            ),
+            "legacy cache transport rewrites must not resume unchanged input"
+        );
+        std::fs::write(&section_path, "Changed full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let section_changed = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        assert_ne!(
+            legacy_after.desired_snapshot(),
+            section_changed.desired_snapshot()
+        );
+        std::fs::write(
+            issue_dir.join("body.md"),
+            format!("{}new ending", "x".repeat(2000)),
+        )
+        .unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        assert_ne!(
+            section_changed.desired_snapshot(),
+            broker
+                .inspect()
+                .unwrap()
+                .target(&issue_target)
+                .unwrap()
+                .desired_snapshot(),
+            "legacy full body edits beyond the Issue preview remain observable"
         );
     }
 

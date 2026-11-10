@@ -105,73 +105,25 @@ test("telemetry mapping projects runtime states to status strip states", () => {
   assert.equal(mapAgentTelemetryState("idle"), "idle");
   // FR-039 (安心): waiting is its own LOUD telemetry state, not quiet idle.
   assert.equal(mapAgentTelemetryState("waiting"), "waiting");
-  assert.equal(mapAgentTelemetryState("stopped"), "done");
-  assert.equal(mapAgentTelemetryState("exited"), "done");
+  assert.equal(mapAgentTelemetryState("stopped"), "stopped");
+  assert.equal(mapAgentTelemetryState("exited"), "stopped");
+  assert.equal(mapAgentTelemetryState("interrupted"), "interrupted");
   assert.equal(mapAgentTelemetryState("error"), "error");
   assert.equal(mapAgentTelemetryState("future-state"), "idle");
 });
 
-test("agent focus candidates match Agents view, including off-canvas and hidden tabs but excluding PM", () => {
+test("agent focus candidates are Works agents and exclude PM and auxiliary Shells", () => {
   const windows = [
-    {
-      id: "idle-agent-id",
-      preset: "shell",
-      agent_id: "custom-agent",
-      status: "idle",
-    },
-    {
-      id: "starting-hidden-tab",
-      preset: "claude",
-      status: "starting",
-      placement: { kind: "canvas" },
-      tab_group_id: "group-1",
-      tab_group_active: false,
-    },
-    { id: "running-codex", preset: "codex", status: "running" },
+    { id: "starting", preset: "claude", status: "starting" },
+    { id: "running", preset: "codex", status: "running" },
     { id: "pm", preset: "codex", status: "running", is_pm: true },
-    { id: "plain-shell", preset: "shell", status: "running" },
-    {
-      id: "blank-agent-id",
-      preset: "shell",
-      agent_id: "",
-      status: "running",
-    },
-    {
-      id: "kanban-agent",
-      preset: "agent",
-      status: "running",
-      placement: { kind: "agent_kanban" },
-    },
+    { id: "shell", preset: "shell", status: "running", agent_id: "custom-agent" },
+    { id: "embedded", preset: "agent", status: "running", placement: { kind: "agent_kanban" } },
   ];
-
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, null, "forward"),
-    "starting-hidden-tab",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "starting-hidden-tab", "forward"),
-    "running-codex",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "running-codex", "forward"),
-    "plain-shell",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "plain-shell", "forward"),
-    "blank-agent-id",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "blank-agent-id", "forward"),
-    "kanban-agent",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "kanban-agent", "forward"),
-    "idle-agent-id",
-  );
-  assert.equal(
-    selectNextAgentFocusWindowId(windows, "idle-agent-id", "forward"),
-    "starting-hidden-tab",
-  );
+  assert.equal(selectNextAgentFocusWindowId(windows, null, "forward"), "starting");
+  assert.equal(selectNextAgentFocusWindowId(windows, "starting", "forward"), "running");
+  assert.equal(selectNextAgentFocusWindowId(windows, "running", "forward"), "embedded");
+  assert.equal(selectNextAgentFocusWindowId(windows, "embedded", "forward"), "starting");
 });
 
 test("agent focus cycling prioritizes runtime buckets while preserving workspace order", () => {

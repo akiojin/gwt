@@ -1,6 +1,6 @@
 //! Issue #3906: pure decisions for the drain-and-apply self-update flow.
 //!
-//! Everything here is side-effect free so the Issue Monitor / update wiring
+//! Everything here is side-effect free so Issues / update wiring
 //! can be table-tested without a daemon, a PTY, or a lease file:
 //!
 //! - AC-8: [`update_quiescence`] decides whether the host is quiet enough to
@@ -248,6 +248,7 @@ pub enum UpdateAutoApplyStep {
 /// per tick and acts on the returned step; it never kills an agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UpdateAutoApplyPlanner {
+    observed_version: Option<String>,
     tracker: UpdateQuiescenceTracker,
     last_notice_at_secs: Option<u64>,
     scheduled_at_secs: Option<u64>,
@@ -256,6 +257,10 @@ pub struct UpdateAutoApplyPlanner {
 
 impl UpdateAutoApplyPlanner {
     pub fn tick(&mut self, observation: UpdateAutoApplyObservation<'_>) -> UpdateAutoApplyStep {
+        if self.observed_version.as_deref() != Some(observation.version) {
+            self.reset();
+            self.observed_version = Some(observation.version.to_string());
+        }
         if self.is_cancelled(observation.version) {
             return UpdateAutoApplyStep::Idle;
         }
@@ -304,9 +309,15 @@ impl UpdateAutoApplyPlanner {
         self.cancelled_version.as_deref() == Some(version)
     }
 
-    /// The drain is gone (cleared, applied, or never raised): forget the
-    /// streak, the notice cadence and the grace. Keeps the cancellation.
+    /// Whether this version still has an announced apply grace.
+    pub fn is_scheduled_for(&self, version: &str) -> bool {
+        self.observed_version.as_deref() == Some(version) && self.scheduled_at_secs.is_some()
+    }
+
+    /// The drain is gone (cleared, applied, or never raised): forget its
+    /// version, streak, notice cadence and grace. Keeps the cancellation.
     pub fn reset(&mut self) {
+        self.observed_version = None;
         self.tracker.reset();
         self.last_notice_at_secs = None;
         self.scheduled_at_secs = None;
@@ -645,6 +656,45 @@ mod tests {
     }
 
     #[test]
+    fn planner_starts_a_new_grace_when_the_observed_version_changes() {
+        let mut planner = UpdateAutoApplyPlanner::default();
+        planner.tick(observation("9.99.0", 900, 15, Ok(())));
+        assert_eq!(
+            planner.tick(observation("9.99.1", 915, 15, Ok(()))),
+            UpdateAutoApplyStep::Idle,
+            "a new version cannot inherit an unscheduled quiet observation"
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 930, 30, Ok(()))),
+            UpdateAutoApplyStep::Scheduled { apply_at_secs: 990 }
+        );
+        planner.reset();
+        planner.tick(observation("9.99.0", 1_000, 30, Ok(())));
+        planner.tick(observation("9.99.0", 1_015, 45, Ok(())));
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_030, 15, Ok(()))),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_045, 30, Ok(()))),
+            UpdateAutoApplyStep::Scheduled {
+                apply_at_secs: 1_105
+            }
+        );
+        assert!(!planner.is_scheduled_for("9.99.0"));
+        assert!(planner.is_scheduled_for("9.99.1"));
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_075, 60, Ok(()))),
+            UpdateAutoApplyStep::Idle,
+            "the previous version's grace cannot authorize this version"
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_105, 90, Ok(()))),
+            UpdateAutoApplyStep::Apply
+        );
+    }
+
+    #[test]
     fn planner_postpones_when_a_blocker_appears_during_the_grace() {
         // AC-8: the two-tick streak restarts on any blocker, and a scheduled
         // apply is withdrawn instead of firing over a busy host.
@@ -694,6 +744,13 @@ mod tests {
             UpdateAutoApplyStep::StillDraining(vec![UpdateBlocker::PendingAcquireClaim {
                 issue_number: 7
             }])
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_004, 1_800, blocked())),
+            UpdateAutoApplyStep::StillDraining(vec![UpdateBlocker::PendingAcquireClaim {
+                issue_number: 7
+            }]),
+            "a new version has its own first long-drain notice"
         );
     }
 

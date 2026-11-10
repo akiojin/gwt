@@ -64,15 +64,19 @@ Blocking items: <N>
 
 > **No reviewer comment may be left unanswered or unresolved.**
 
-- Every unresolved thread MUST receive a reply AND be resolved.
-- Reply content (every comment gets a reply, even if no code change was needed):
+- Every unresolved thread MUST be addressed and resolved. Existing identical
+  replies are not repeated, and outdated threads are resolved without a new reply.
+- Reply content for current threads, even if no code change was needed:
   - Fixed: "Fixed: <what was done>." with commit reference.
   - Not applicable: "Not applicable: <reason why no change is needed>."
   - Already addressed: "Already addressed in commit <sha>: <summary>."
   - Acknowledged: "Acknowledged: <brief response>." for informational comments.
-- After preparing the reply body, use JSON operation
-  `pr.review_threads.reply_and_resolve` to reply to and resolve all unresolved
-  threads on the PR.
+- After preparing each plain text reply body, use JSON operation
+  `pr.review_threads.reply_and_resolve` once per thread with `number`,
+  `thread_id`, and `body`. JSON array bodies are rejected.
+- Always specify `thread_id` for an individual response. Omitting `thread_id`
+  processes all unresolved threads on the PR with the same `body`, preserving
+  the identical-reply and outdated-thread behavior above.
 - If that surface is unavailable, report the missing operation; do not bypass
   the mutation gate with direct GraphQL writes.
 - **Verification:** After resolving, re-check that no unresolved

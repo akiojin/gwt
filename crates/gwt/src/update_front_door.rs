@@ -66,11 +66,19 @@ const POLL_INTERVAL_LADDER: &[Duration] = &[
 pub struct PollState {
     failure_count: usize,
     last_seen: Option<String>,
+    retry_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl PollState {
     /// Current sleep interval before the next poll attempt.
     pub fn current_interval(&self) -> Duration {
+        self.interval_at(chrono::Utc::now())
+    }
+
+    fn interval_at(&self, now: chrono::DateTime<chrono::Utc>) -> Duration {
+        if let Some(deadline) = self.retry_at {
+            return (deadline - now).to_std().unwrap_or_default();
+        }
         let idx = self.failure_count.min(POLL_INTERVAL_LADDER.len() - 1);
         POLL_INTERVAL_LADDER[idx]
     }
@@ -86,6 +94,7 @@ impl PollState {
     /// the next sleep duration.
     pub fn on_success_uptodate(&mut self) -> Duration {
         self.failure_count = 0;
+        self.retry_at = None;
         self.current_interval()
     }
 
@@ -99,6 +108,7 @@ impl PollState {
             self.last_seen = Some(latest.to_string());
         }
         self.failure_count = 0;
+        self.retry_at = None;
         (should_broadcast, self.current_interval())
     }
 
@@ -106,6 +116,13 @@ impl PollState {
     /// backoff one step (capped at 60 min) and returns the next sleep duration.
     pub fn on_failure(&mut self) -> Duration {
         self.failure_count = self.failure_count.saturating_add(1);
+        self.retry_at = None;
+        self.current_interval()
+    }
+
+    fn on_rate_limit(&mut self, retry_at: chrono::DateTime<chrono::Utc>) -> Duration {
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.retry_at = Some(retry_at);
         self.current_interval()
     }
 }
@@ -115,6 +132,7 @@ pub enum StartupUpdateAction {
     Publish,
     Stop,
     Retry,
+    RetryAt(chrono::DateTime<chrono::Utc>),
 }
 
 pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> StartupUpdateAction {
@@ -126,6 +144,10 @@ pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> S
             asset_url: None, ..
         }
         | gwt_core::update::UpdateState::UpToDate { .. } => StartupUpdateAction::Stop,
+        gwt_core::update::UpdateState::Failed {
+            retry_at: Some(deadline),
+            ..
+        } => StartupUpdateAction::RetryAt(*deadline),
         gwt_core::update::UpdateState::Failed { .. } => StartupUpdateAction::Retry,
     }
 }
@@ -172,6 +194,7 @@ pub fn spawn_startup_update_check(
                 Err(error) => gwt_core::update::UpdateState::Failed {
                     message: format!("update check worker failed: {error}"),
                     failed_at: chrono::Utc::now(),
+                    retry_at: None,
                 },
             };
             match classify_startup_update_state(&update_state) {
@@ -215,6 +238,7 @@ pub fn spawn_startup_update_check(
                         &gwt_core::update::UpdateState::Failed {
                             message: format!("update check worker failed: {error}"),
                             failed_at: chrono::Utc::now(),
+                            retry_at: None,
                         },
                         "retry",
                         next,
@@ -253,6 +277,9 @@ fn handle_poll_outcome(
         }
         StartupUpdateAction::Stop => (state.on_success_uptodate(), "no_applicable_update"),
         StartupUpdateAction::Retry => (state.on_failure(), "retry"),
+        StartupUpdateAction::RetryAt(deadline) => {
+            (state.on_rate_limit(deadline), "rate_limit_retry")
+        }
     };
     log_poll_outcome(&outcome, decision, next);
     next
@@ -676,6 +703,30 @@ fn stage_graceful_update_apply_with_ops(
     ) {
         Ok(version) => Ok(version),
         Err(err) => {
+            // Permission/defer refusals return before this commit boundary.
+            // A helper failure is an actual failed attempt, never a ready retry.
+            let result = gwt_core::update::UpdateApplyResult {
+                outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+                from_version: marker.from_version.clone(),
+                to_version: marker.to_version.clone(),
+                observed_version: marker.from_version.clone(),
+                attempt: marker.attempt,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+                message: Some(err.clone()),
+            };
+            if let Err(error) = gwt_core::update::persist_update_apply_result(&result) {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", "record_apply_result"), ("reason", &error)],
+                );
+            }
+            if let Err(error) = gwt_core::update::discard_failed_pending_update(&marker.to_version)
+            {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", "discard_failed_pending"), ("reason", &error)],
+                );
+            }
             let _ = gwt_core::update::clear_update_resume_marker();
             Err(err)
         }
@@ -698,12 +749,13 @@ pub fn stage_graceful_update_apply(
     if !respect_defer {
         // Explicit Restart now authorizes the existing interactive installer.
         manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
-    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
-        && gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &current_exe)
-    {
-        return Err(
-            "Administrator privileges required; update stays staged for manual apply.".into(),
-        );
+    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic {
+        if let Some(reason) = gwt_core::update::prepared_payload_automatic_apply_refusal(
+            &manifest.payload,
+            &current_exe,
+        ) {
+            return Err(format!("{reason}; update stays staged for manual apply."));
+        }
     }
     let mut ops = RealUpdateApplyOps::default();
     stage_graceful_update_apply_with_ops(
@@ -804,12 +856,16 @@ fn permits_pending_manifest_at_bootstrap(
     automatic_enabled: bool,
     requires_elevation: bool,
 ) -> bool {
-    let attempted = gwt_core::update::load_update_resume_marker()
+    if gwt_core::update::load_update_resume_marker()
         .is_some_and(|marker| marker.to_version == manifest.version)
-        || gwt_core::update::load_update_apply_result().is_some_and(|result| {
-            result.to_version == manifest.version
-                && result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
-        });
+    {
+        // Both manual and automatic attempts must settle before another apply.
+        return false;
+    }
+    let attempted = gwt_core::update::load_update_apply_result().is_some_and(|result| {
+        result.to_version == manifest.version
+            && result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+    });
     manifest.permits_startup_apply(automatic_enabled && !attempted, requires_elevation)
 }
 
@@ -853,6 +909,36 @@ mod poll_state_tests {
         let state = PollState::default();
         assert_eq!(state.current_interval(), FIVE_MIN);
         assert_eq!(state.last_seen(), None);
+    }
+
+    #[test]
+    fn issue_6001_server_deadline_bypasses_startup_fast_retry() {
+        let outcome = serde_json::from_value(serde_json::json!({
+            "state": "failed", "message": "rate limited",
+            "failed_at": "2026-10-22T00:00:00Z",
+            "retry_at": "2099-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_ne!(
+            super::classify_startup_update_state(&outcome),
+            super::StartupUpdateAction::Retry
+        );
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (proxy, events) = crate::AppEventProxy::stub();
+        let mut poll = PollState::default();
+        super::handle_poll_outcome(&mut poll, outcome, &proxy);
+        let deadline = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            poll.interval_at(deadline - chrono::Duration::seconds(120)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(poll.interval_at(deadline), Duration::ZERO);
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(poll.on_success_uptodate(), FIVE_MIN);
+        assert_eq!(poll.on_failure(), TEN_MIN);
     }
 
     #[test]
@@ -947,6 +1033,7 @@ mod poll_state_tests {
                 gwt_core::update::UpdateState::Failed {
                     message: "fixture network failure".into(),
                     failed_at: chrono::Utc::now(),
+                    retry_at: None,
                 },
                 &proxy
             ),
@@ -1327,6 +1414,12 @@ mod poll_state_tests {
             !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
             "an earlier helper attempt must reach startup settlement instead of being retried"
         );
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
+        assert!(
+            !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
+            "a manual attempt must reach mismatch settlement before any bootstrap replay"
+        );
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::Automatic;
         gwt_core::update::settle_update_resume_marker("9.30.0", chrono::Utc::now()).unwrap();
         assert!(
             !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
@@ -1571,9 +1664,16 @@ mod poll_state_tests {
             "a failed commit must not leave a marker that resumes nothing"
         );
         assert!(
-            gwt_core::update::load_pending_update_manifest().is_some(),
-            "the manifest stays so the user can retry"
+            gwt_core::update::load_pending_update_manifest().is_none(),
+            "a failed apply must not reappear as ready"
         );
+        let result = gwt_core::update::load_update_apply_result().expect("failure recorded");
+        assert_eq!(
+            result.outcome,
+            gwt_core::update::UpdateApplyOutcome::Failure
+        );
+        assert_eq!(result.to_version, "9.31.0");
+        assert_eq!(result.message.as_deref(), Some(err.as_str()));
     }
 
     // Issue #4038 (AC-1): the worker-thread `exit(0)` path is gone. Only the

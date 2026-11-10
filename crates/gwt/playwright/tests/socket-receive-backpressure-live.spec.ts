@@ -84,12 +84,19 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       await page.waitForFunction(() => document.visibilityState === "visible", undefined,
         { polling: 100, timeout: 10_000 });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.locator('.op-rail__surface[data-surface="agents"]').click();
-      await page.getByRole("tab", { name: "All agents", exact: true }).click();
-      await page.getByRole("spinbutton", { name: "Agent columns" }).fill("4");
-      const agentTiles = page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile');
-      await expect(agentTiles).toHaveCount(8);
-      for (const tile of await agentTiles.all()) await expect(tile.locator(".xterm-helper-textarea")).toBeVisible();
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      const works = page.locator('.works-surface:not(.works-surface--preview) .work-row');
+      await expect(works).toHaveCount(8);
+      for (const id of paneIds) {
+        const row = page.locator(`.works-surface:not(.works-surface--preview) .work-row[data-window-id="${id}"]`);
+        const preview = row.locator(".terminal-text-preview");
+        await expect(preview).toBeVisible();
+        await expect(preview).toContainText(snapshotText(0, id));
+        expect((await preview.innerText()).trim().split("\n").length).toBeLessThanOrEqual(3);
+        await expect(page.locator(`.works-surface:not(.works-surface--preview) .work-runtime-cache[inert][data-window-id="${id}"] .xterm-helper-textarea`)).toBeAttached();
+      }
       await expect.poll(() => terminalTexts(page)).toEqual(paneIds.map(id => snapshotText(0, id)));
       console.log(`${label}/${theme}: eight terminal snapshots rendered`);
       expect(await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes("longtask"))).toBe(true);
@@ -181,8 +188,12 @@ test.describe("background receive backpressure (Issue #5531)", () => {
         // Echo after snapshots so replacement cannot erase a successful echo.
         recoveryStage = "input_focus";
         await measuredEvaluate(cdp, id => {
-          const textarea = document.querySelector<HTMLTextAreaElement>(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${id}"] .xterm-helper-textarea`);
-          if (!textarea) throw new Error("terminal input is missing");
+          const row = document.querySelector<HTMLElement>(`.works-surface:not(.works-surface--preview) .work-row[data-window-id="${id}"]`);
+          const open = row?.querySelector<HTMLButtonElement>(".work-open");
+          if (!open) throw new Error("the exact live work is missing");
+          open.click();
+          const textarea = document.querySelector<HTMLTextAreaElement>(`.works-full:not([hidden]) .works-terminal[data-window-id="${id}"] .xterm-helper-textarea`);
+          if (!textarea) throw new Error("full-screen terminal input is missing");
           textarea.focus();
           if (document.activeElement !== textarea) throw new Error("terminal input did not focus");
         }, paneIds[0]);
@@ -465,13 +476,18 @@ async function installBackend(page: Page, projectKey: string, root: string) {
   const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright",
     tabs: [{ ...project, project_root: root, workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows } }],
     active_tab_id: project.id, recent_projects: [] } });
+  // This fixture declares exact membership independently of runtime status.
+  const agents = paneIds.map((window_id, index) => ({ window_id, session_id: `load-session-${index + 1}`,
+    runtime_incarnation: index + 1, issue_number: null, is_pm: false }));
+  const activity = () => ({ kind: "active_work_projection", projection: { id: "socket-load-works", active_works: [],
+    local_agent_activity: { project_key: projectKey, host_id: "socket-load-fixture", observed_at: new Date().toISOString(), agents } } });
   function send(socket: WebSocket, messages: unknown[]) {
     frames += messages.length;
     try { for (const message of messages) socket.send(JSON.stringify(message)); }
     catch (error) { errors.push(String(error)); }
   }
   function snapshots(socket: WebSocket) {
-    send(socket, [workspace(), ...paneIds.flatMap(id => [
+    send(socket, [workspace(), activity(), ...paneIds.flatMap(id => [
       { kind: "terminal_snapshot", id, data_base64: Buffer.from(`\x1b[2J\x1b[H${snapshotText(revision, id)}\r\n`).toString("base64") },
       { kind: "terminal_status", id, status: "running", detail: null },
     ])]);
