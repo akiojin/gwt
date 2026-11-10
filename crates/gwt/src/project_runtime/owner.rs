@@ -5586,6 +5586,7 @@ impl OwnerState {
             let is_restart = continuation.is_none()
                 && metadata.inherited_agent_name.is_some()
                 && config.predecessor_session_id.is_some();
+            let admission_feedback = metadata.launch_feedback_context.clone();
             let mut input = InstallAgentLaunchInput {
                 auto_resume_source_snapshot: restore.as_ref().map(|restore| restore.source.clone()),
                 auto_resume_source_session_id: config
@@ -6111,16 +6112,65 @@ impl OwnerState {
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
             let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
+            let cleanup_monitor_window_record = || -> Result<(), String> {
+                if let (Ok(registry), Ok(expected)) = (&owner_registry, &expected_registry_row) {
+                    super::agent_dispatch::OwnedWindowRecordCleanup {
+                        registry: registry.clone(),
+                        registry_path: owner_registry_path.clone(),
+                        root: root.clone(),
+                        project_key: cleanup_project_key.clone(),
+                        canonical_id: id.clone(),
+                        expected_session_id: expected
+                            .as_ref()
+                            .and_then(|row| row.session_id.clone()),
+                    }
+                    .finish()?;
+                }
+                Ok(())
+            };
+            let mut monitor_failure_committed = false;
+            if let Err(error) = &result {
+                if !input.physical_spawn_started
+                    && input.failure_session.is_none()
+                    && input.failed_launch.is_none()
+                    && materialized_snapshot.is_none()
+                    && input.auto_resume_source_snapshot.is_none()
+                    && input.pending_fresh_execution.is_none()
+                    && input.pending_continue_work.is_none()
+                    && expected_registry_row
+                        .as_ref()
+                        .is_ok_and(|row| row.as_ref().is_none_or(|row| row.session_id.is_none()))
+                {
+                    match retry_unclaimed_monitor_capacity(
+                        &root,
+                        admission_feedback.as_ref(),
+                        &input.current,
+                        &error.detail,
+                    ) {
+                        Ok(true) => match cleanup_monitor_window_record() {
+                            Ok(()) => monitor_failure_committed = true,
+                            Err(error) => {
+                                tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                            }
+                        },
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "capacity retry remains unconfirmed");
+                        }
+                    }
+                }
+            }
             if let Some(error) = result.as_ref().err().filter(|_| {
-                restore
-                    .as_ref()
-                    .filter(|restore| {
-                        restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
-                    })
-                    .and_then(|restore| restore.refusal.as_ref())
-                    .is_none_or(|refusal| {
-                        !super::installation::is_expected_restore_exclusion(&refusal.code)
-                    })
+                !monitor_failure_committed
+                    && restore
+                        .as_ref()
+                        .filter(|restore| {
+                            restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                        })
+                        .and_then(|restore| restore.refusal.as_ref())
+                        .is_none_or(|refusal| {
+                            !super::installation::is_expected_restore_exclusion(&refusal.code)
+                        })
             }) {
                 let source = restore
                     .as_ref()
@@ -6149,7 +6199,6 @@ impl OwnerState {
                     },
                 );
             }
-            let mut monitor_failure_committed = false;
             if let Err(error) = &result {
                 let launch = restored_monitor_launch.or_else(|| {
                     let feedback = input.launch_feedback_context.as_ref().filter(|feedback| {
@@ -6177,7 +6226,8 @@ impl OwnerState {
                     })
                 });
                 if let Some(launch) = launch.filter(|_| {
-                    input.failed_launch.is_none()
+                    !monitor_failure_committed
+                        && input.failed_launch.is_none()
                         && (!input.physical_spawn_started
                             || unspawned_runtime_retired
                             || durable_candidate_removed)
@@ -6217,21 +6267,7 @@ impl OwnerState {
                                         );
                                     }
                                 }
-                                if let (Ok(registry), Ok(expected)) =
-                                    (&owner_registry, &expected_registry_row)
-                                {
-                                    super::agent_dispatch::OwnedWindowRecordCleanup {
-                                        registry: registry.clone(),
-                                        registry_path: owner_registry_path.clone(),
-                                        root: root.clone(),
-                                        project_key: cleanup_project_key.clone(),
-                                        canonical_id: id.clone(),
-                                        expected_session_id: expected
-                                            .as_ref()
-                                            .and_then(|row| row.session_id.clone()),
-                                    }
-                                    .finish()?;
-                                }
+                                cleanup_monitor_window_record()?;
                                 if let Some(pending) = input.pending_fresh_execution.as_ref() {
                                     crate::session_launch::recovery::clear_durable_launch_recovery(
                                         &sessions_dir,
@@ -6946,9 +6982,19 @@ impl OwnerState {
                 self.agent_operations
                     .values()
                     .filter(|operation| {
+                        // Before materialization the Monitor's delivery already
+                        // reserves this slot; there is no physical pane yet.
+                        let preparing_monitor = operation.session_id.is_none()
+                            && operation
+                                .request
+                                .pointer(
+                                    "/metadata/launch_feedback_context/issue_monitor_issue_number",
+                                )
+                                .is_some_and(serde_json::Value::is_u64);
                         operation.result.is_none()
                             && operation.id != excluded_id
                             && operation.request["type"] != "check_launch_permission"
+                            && !preparing_monitor
                     })
                     .map(|operation| {
                         let metadata = operation
@@ -11638,6 +11684,71 @@ pub(crate) fn close_runtime(
     Ok(())
 }
 
+fn retry_unclaimed_monitor_capacity(
+    root: &Path,
+    feedback: Option<&super::launch_payload::LaunchFeedbackContext>,
+    current: &AtomicBool,
+    detail: &str,
+) -> Result<bool, String> {
+    let Some(feedback) = feedback.filter(|feedback| {
+        detail.starts_with("Issue Monitor max_active reached (")
+            && !feedback.issue_monitor_review_dispatch
+            && feedback.issue_monitor_autonomous_handoff.is_none()
+            && current.load(Ordering::Acquire)
+    }) else {
+        return Ok(false);
+    };
+    let (Some(issue), Some(delivery_id)) = (
+        feedback.issue_monitor_issue_number,
+        feedback.issue_monitor_delivery_id.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    let path = crate::issue_monitor_prefs_path_for_repo_path(root);
+    let expected = crate::load_issue_monitor_prefs(&path)
+        .map_err(|error| error.to_string())?
+        .pending_launch_deliveries
+        .into_iter()
+        .find(|delivery| delivery.issue_number == issue && delivery.delivery_id == delivery_id);
+    let Some(expected) = expected.filter(|delivery| {
+        delivery.materializer_id.is_none()
+            && delivery.materializer_pid.is_none()
+            && delivery.materializer_window_id.is_none()
+            && delivery.materialized_window_id.is_none()
+            && delivery.workspace_durable_window_id.is_none()
+    }) else {
+        return Ok(false);
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let (_, requeued) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        // Capacity may have recovered since rejection. Only the same unclaimed
+        // delivery may be returned; never release another materializer's work.
+        if !current.load(Ordering::Acquire)
+            || !prefs
+                .pending_launch_deliveries
+                .iter()
+                .filter(|delivery| delivery.issue_number == issue)
+                .eq(std::iter::once(&expected))
+        {
+            return Ok(false);
+        }
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        if monitor.has_monitor_pane_for_issue(issue)
+            || monitor.launch_identity(issue).window_id.is_some()
+        {
+            return Ok(false);
+        }
+        monitor.record_transient_launch_retry(issue, detail.to_string(), &now);
+        *prefs = monitor.prefs();
+        Ok(true)
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(requeued)
+}
+
 #[cfg(test)]
 fn owner_fixture(
     root: &std::path::Path,
@@ -11712,6 +11823,164 @@ fn owner_fixture(
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn quota_release_does_not_count_unmaterialized_operations_twice() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut owner, _, _) = owner_fixture(temp.path());
+        owner.agent_operations.insert(
+            "preparing".into(),
+            AgentOperation {
+                session_id: None,
+                early_events: VecDeque::new(),
+                request: json!({
+                    "type": "launch_agent",
+                    "config": {"linked_issue_number": 7},
+                    "metadata": {"launch_feedback_context": {"issue_monitor_issue_number": 7}}
+                }),
+                id: format!("{}::preparing", owner.project_key),
+                incarnation: 1,
+                current: Arc::new(AtomicBool::new(true)),
+                replies: Vec::new(),
+                cancel_replies: Vec::new(),
+                cancellation_cleaned: false,
+                manual_predecessor_stopped: None,
+                retained_manual_failure: None,
+                pending_continue: None,
+                failed_session: None,
+                result: None,
+            },
+        );
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 8,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                launching_issues: (1..=8)
+                    .map(
+                        |issue_number| crate::issue_monitor::IssueMonitorLaunchingIssue {
+                            issue_number,
+                            claimed_at: None,
+                        },
+                    )
+                    .collect(),
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".into(),
+                    "2026-11-11T00:00:00Z".into(),
+                )]),
+                ..Default::default()
+            },
+        );
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor.clear_provider_quota_hold("codex", "quota reset", "2026-11-10T00:00:00Z");
+        monitor.record_window_snapshot(owner.owner_monitor_window_snapshot("current"));
+        assert_eq!(monitor.agent_status().occupied_slot_count, Some(8));
+        assert!(monitor.has_capacity_for_monitor_spawn(8, false));
+
+        owner
+            .agent_operations
+            .get_mut("preparing")
+            .unwrap()
+            .session_id = Some("session-7".into());
+        let snapshot = owner.owner_monitor_window_snapshot("current");
+        assert_eq!(
+            snapshot.windows.len(),
+            1,
+            "materialized windows remain visible"
+        );
+        assert_eq!(snapshot.windows[0].session_id.as_deref(), Some("session-7"));
+
+        let operation = owner.agent_operations.get_mut("preparing").unwrap();
+        operation.session_id = None;
+        operation.request["metadata"] = json!({});
+        assert_eq!(
+            owner.owner_monitor_window_snapshot("current").windows.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn capacity_refusal_requeues_only_the_unclaimed_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
+        let mut record = crate::issue_monitor::AutonomousIssueRecord::new(42);
+        record.attempts = 3;
+        record.phase = crate::issue_monitor::AutonomousPhase::Implementing;
+        let mut prefs = crate::IssueMonitorPrefs {
+            autonomous_records: vec![record],
+            pending_launch_deliveries: vec![serde_json::from_value(json!({
+                "delivery_id": "delivery-42", "issue_number": 42,
+                "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+                "claim_id": "claim-42", "created_at": "2026-11-10T00:47:09Z"
+            }))
+            .unwrap()],
+            ..Default::default()
+        };
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.terminal_queue_push(&[42], "test", "2026-11-10T00:47:09Z");
+        prefs = monitor.prefs();
+        let feedback = serde_json::from_value(json!({
+            "client_id": "test", "title": "capacity",
+            "issue_monitor_issue_number": 42, "issue_monitor_delivery_id": "delivery-42",
+            "issue_monitor_review_dispatch": false
+        }))
+        .unwrap();
+        let current = AtomicBool::new(false);
+        let message = "Issue Monitor max_active reached (8/8) before launching Issue #42";
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+
+        current.store(true, Ordering::Release);
+        prefs.pending_launch_deliveries[0].materializer_id = Some("successor".into());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        let mut successor = prefs.pending_launch_deliveries[0].clone();
+        successor.delivery_id = "successor-delivery".into();
+        prefs.pending_launch_deliveries[0].materializer_id = None;
+        prefs.pending_launch_deliveries.push(successor);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        prefs.pending_launch_deliveries.pop();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor.record_candidate(
+            serde_json::from_value(json!({
+                "number": 42, "title": "capacity", "labels": ["gwt-queued"], "state": "open"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(monitor.attempt_count(42), 3);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            crate::issue_monitor::AutonomousPhase::Idle
+        );
+    }
 
     #[test]
     fn owner_worker_preserves_the_scoped_durable_control_budget() {
