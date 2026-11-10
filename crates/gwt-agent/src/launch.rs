@@ -364,7 +364,7 @@ fn absolute_search_path(path: &str, cwd: &Path) -> Option<std::ffi::OsString> {
 /// environment. Path-bearing commands are made absolute without requiring
 /// them to exist so the canonical health probe remains the authority that
 /// accepts or rejects the candidate.
-pub(crate) fn resolve_direct_runner_with_effective_env(
+pub fn resolve_direct_runner_with_effective_env(
     command: &str,
     env: &HashMap<String, String>,
     remove_env: &[String],

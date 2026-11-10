@@ -192,34 +192,38 @@ impl IssueMonitorPrefs {
 }
 
 /// Issue #7027: why `tool` cannot start on this host, judged without
-/// spawning it. An unknown tool or unknowable credentials fail open.
-fn tool_launch_exclusion(
-    tool: &str,
-    on_path: impl Fn(&str) -> bool,
-    auth: impl Fn(&str) -> ProviderAuthState,
-) -> Option<String> {
+/// spawning it. An unknown tool fails open. Credentials stay with the
+/// launch-time `provider_unauthenticated` gate, which owns the auth probe.
+fn tool_launch_exclusion(tool: &str, resolves: impl Fn(&str) -> bool) -> Option<String> {
     let id = gwt_agent::resolve_agent_id(tool)?;
     let command = gwt_agent::builtin_agent_descriptors()
         .iter()
         .find(|descriptor| descriptor.id == id)?
         .command;
-    if !on_path(command) {
-        return Some(format!("cli_not_found({command})"));
-    }
-    (auth(tool) == ProviderAuthState::Unauthenticated)
-        .then(|| format!("provider_unauthenticated({tool})"))
+    (!resolves(command)).then(|| format!("cli_not_found({command})"))
 }
 
-/// Host probe used by schedule scans; tests inject their own verdicts.
+/// Resolve the CLI in the active profile's launch environment, the same one
+/// launches and installed-agent detection use. An unreadable profile fails open.
 fn host_tool_launch_exclusion(tool: &str) -> Option<String> {
+    // Unit tests inject verdicts into `reconcile`; the host has no fixture CLI.
     if cfg!(test) {
         return None;
     }
-    tool_launch_exclusion(
-        tool,
-        |command| which::which(command).is_ok(),
-        provider_auth_state_from_env,
-    )
+    let (env, remove_env) = crate::profile_dispatch::config_path()
+        .map_err(|error| error.to_string())
+        .and_then(|path| {
+            gwt_agent::LaunchEnvironment::from_active_profile(
+                &path,
+                gwt_agent::LaunchRuntimeTarget::Host,
+            )
+        })
+        .ok()?
+        .into_parts();
+    tool_launch_exclusion(tool, |command| {
+        gwt_agent::resolve_direct_runner_with_effective_env(command, &env, &remove_env, None)
+            .is_some()
+    })
 }
 
 /// Issue #7027: why an enabled member cannot take automatic work, or `None`
@@ -2056,25 +2060,16 @@ mod tests {
     }
 
     #[test]
-    fn issue_7027_tool_launch_exclusion_names_missing_cli_and_credentials() {
-        let auth = |state| move |_: &str| state;
+    fn issue_7027_tool_launch_exclusion_names_a_missing_cli() {
         assert_eq!(
-            tool_launch_exclusion("codex", |_| false, auth(ProviderAuthState::Authenticated)),
+            tool_launch_exclusion("codex", |_| false),
             Some("cli_not_found(codex)".into())
         );
         assert_eq!(
-            tool_launch_exclusion("codex", |_| true, auth(ProviderAuthState::Unauthenticated)),
-            Some("provider_unauthenticated(codex)".into())
-        );
-        assert_eq!(
-            tool_launch_exclusion("claude", |_| true, auth(ProviderAuthState::Unknown)),
-            None,
-            "unknowable credentials fail open"
-        );
-        assert_eq!(
-            tool_launch_exclusion("not-a-tool", |_| false, auth(ProviderAuthState::Unknown)),
+            tool_launch_exclusion("codex", |command| command == "codex"),
             None
         );
+        assert_eq!(tool_launch_exclusion("not-a-tool", |_| false), None);
     }
 
     #[test]
