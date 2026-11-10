@@ -12,10 +12,16 @@ fn repository_labels_read_runs_off_thread_for_the_requesting_project() {
         init_repo_with_initial_commit(root);
     }
     let cache = gwt::issue_cache::issue_cache_root_for_repo_path(&requested).unwrap();
+    let (owner, repo) =
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(&requested).unwrap();
     fs::create_dir_all(&cache).unwrap();
     fs::write(
         cache.join("repository-labels.json"),
-        r#"[{"name":"backend","color":"123abc"}]"#,
+        serde_json::to_vec(&serde_json::json!({
+            "repository": format!("{owner}/{repo}"),
+            "labels": [{"name":"backend","color":"123abc"}],
+        }))
+        .unwrap(),
     )
     .unwrap();
     let tabs = vec![

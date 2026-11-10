@@ -20,7 +20,26 @@ import json,sys
 root,home=sys.argv[1:]
 json.dump({'active_tab_id':'labels-check','tabs':[{'id':'labels-check','title':'Labels check','project_root':root,'kind':'git'}],'recent_projects':[]},open(home+'/.gwt/session.json','w'))
 PY
-HOOK_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
+# Resolve the same stable fallback as managed launch on the current host.
+# browser-check-hook-authority-begin
+is_checkout_hook() {
+  [[ "$1" =~ (^|[/\\])target[/\\]([^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?$ ]]
+}
+HOOK_BIN="${GWT_HOOK_BIN:-}"
+if is_checkout_hook "$HOOK_BIN" || { [ -n "$HOOK_BIN" ] && [ "$HOOK_BIN" != gwtd ] && [ ! -x "$HOOK_BIN" ]; }; then
+  HOOK_BIN=""
+fi
+if [ -z "$HOOK_BIN" ]; then
+  HOOK_BIN="$(env -u GWT_BIN_PATH -u GWT_HOOK_BIN ./target/debug/gwtd <<'JSON' | python3 -c 'import json,sys; e=json.load(sys.stdin); assert e["ok"],e; print(json.loads(e["output"])["managed_hook_bin"])'
+{"schema_version":1,"operation":"hook.doctor","params":{}}
+JSON
+)"
+fi
+if [ -z "$HOOK_BIN" ] || is_checkout_hook "$HOOK_BIN"; then
+  echo "Cannot resolve a stable managed-hook fallback" >&2
+  exit 1
+fi
+# browser-check-hook-authority-end
 check_hooks() {
   ./target/debug/gwtd <<JSON > "$CHECK_HOME/hook-audit.json"
 {"schema_version":1,"operation":"hook.doctor","params":{"purpose":"managed_browser","expected_hook_bin":"$HOOK_BIN"}}
@@ -44,6 +63,7 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 UNSET_GWT=()

@@ -977,7 +977,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
     await expect(row(page,number)).toHaveCSS("border-left-width","3px");
     expect(await row(page,number).locator(".knowledge-row-number").evaluate(node=>node.nextElementSibling?.className)).toBe("knowledge-row-title");
   }
-  await expect(row(page,3).locator(".issue-card-label")).toHaveText("spec");
+  await expect(row(page,3).locator(".issue-card-label")).toHaveText("gwt-spec");
   await expect(row(page,5).locator(".issue-card-updated + .issue-agent-status")).toHaveCount(1);
   const theme=info.project.name.includes("light")?"light":"dark";
   await page.setViewportSize({width:1600,height:1400});

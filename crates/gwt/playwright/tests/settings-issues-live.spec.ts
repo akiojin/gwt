@@ -1,6 +1,6 @@
 /** Issue #5322 / SPEC #3200: persisted Settings scopes against two real projects. */
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
@@ -292,20 +292,26 @@ test.describe("Issue #5322 Settings", () => {
     const [a, b] = backend.projects;
     expect(a.hash).not.toBe(b.hash);
     await withLiveGwtBackendLock(backend.url, info, async () => {
-      // These projects intentionally have no remote. Supply their real
-      // repository-scoped caches before the frontend requests label choices.
-      for (const project of [a, b]) {
-        const cache = join(backend.home, ".gwt/cache/issues", project.hash);
-        await mkdir(cache, { recursive: true });
-        const labels = project === a
-          ? [{ name: "auto-merge", color: "008672" }, { name: "bug", color: "d73a4a" }]
-          : [{ name: "project-b", color: "0075ca" }];
-        await writeFile(join(cache, "repository-labels.json"), JSON.stringify(labels));
-      }
       const pageB = await context.newPage();
       const errors: string[] = [];
       const workspaceFrames: Array<Record<string, unknown>> = [];
       for (const [index, current] of [page, pageB].entries()) {
+        // Keep these projects remote-free: only the external label catalog is
+        // a fixture; settings reads, writes and project isolation stay real.
+        await current.addInitScript(({ root, labels }) => {
+          const originalSend = WebSocket.prototype.send;
+          WebSocket.prototype.send = function (data) {
+            if (typeof data === "string" && JSON.parse(data)?.kind === "get_repository_labels") {
+              queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+                kind: "repository_labels", project_root: root, labels, loaded: true, error: null,
+              }) })));
+              return;
+            }
+            return originalSend.call(this, data);
+          };
+        }, { root: index ? b.root : a.root, labels: index
+          ? [{ name: "project-b", color: "0075ca" }]
+          : [{ name: "auto-merge", color: "008672" }, { name: "bug", color: "d73a4a" }] });
         current.on("pageerror", error => errors.push(error.message));
         current.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
         current.on("websocket", socket => {

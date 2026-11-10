@@ -1060,7 +1060,6 @@ export function createKnowledgeKanbanSurface({
       // remember which of the two sources changed last for the summary line.
       const repositoryLabelsModel = createUiStateStore({}, { scheduleFrame });
       let repositoryLabelCatalogs = new Map();
-      let repositoryLabelsVersion = 0;
       function applyRepositoryLabels(event) {
         if (!event.loaded) return;
         repositoryLabelsModel.update(state => {
@@ -1072,7 +1071,6 @@ export function createKnowledgeKanbanSurface({
       repositoryLabelsModel.subscribeFrame(state => state, catalogs => {
         repositoryLabelCatalogs = new Map(Object.entries(catalogs).map(([root, labels]) =>
           [root, new Map(labels.map(label => [label.name, label.color]))]));
-        repositoryLabelsVersion++;
         renderAllKnowledgeBridgeWindows();
       });
       function renderIssueLabels(entry) {
@@ -3518,7 +3516,7 @@ export function createKnowledgeKanbanSurface({
             version: entry => {
               const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
               const faces = issueRowFaces(windowId, entry, work);
-              return JSON.stringify([repositoryLabelsVersion, { ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
+              return JSON.stringify([(entry.labels || []).map(name => repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)), { ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
                 agentActivityModel?.read().byIssue[entry.number],
@@ -5322,7 +5320,7 @@ export function createKnowledgeKanbanSurface({
           const body = column.querySelector("[data-role='body']");
           if (body) reconcileKnowledgeList(body, items, {
             scrollRoot: body, virtualize: visibleEntries.length > 200,
-            version: entry => JSON.stringify([repositoryLabelsVersion, entry, state.pendingPhaseUpdates?.has(entry.number)]),
+            version: entry => JSON.stringify([(entry.labels || []).map(name => repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)), entry, state.pendingPhaseUpdates?.has(entry.number)]),
             update: (card, entry) => {
               card.classList.toggle("is-selected", state.selectedNumber === entry.number);
               if (state.selectedNumber === entry.number) {
