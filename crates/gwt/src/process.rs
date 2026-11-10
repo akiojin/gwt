@@ -15,6 +15,7 @@
 //! front door's endpoint-slot handling entirely rather than by giving it a
 //! second liveness definition.
 
+mod ancestry;
 pub mod windows_recovery;
 
 fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
@@ -171,32 +172,15 @@ pub fn is_host_process_alive(pid: u32) -> bool {
 
 /// Issue #3906 AC-8: whether `pid` runs somewhere under `ancestor` in the
 /// process tree (an agent pane's `gwtd verify.run`, for example). Walks the
-/// parent chain through `sysinfo`; a missing process or a chain longer than
+/// parent chain using parent-only observations; a missing process or a chain longer than
 /// 64 hops counts as "not ours" so the drain never blocks on a stranger.
 /// Initialization errors remain unknown; protection callers must retain their
 /// guard, while callers requiring positive ownership must refuse it.
 pub fn is_descendant_of(pid: u32, ancestor: u32) -> Result<bool, sysinfo::Error> {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-
     if pid == 0 || ancestor == 0 || pid == ancestor {
         return Ok(false);
     }
-    let mut system = System::new()?;
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    let mut current = sysinfo::Pid::from_u32(pid);
-    for _ in 0..64 {
-        let Some(parent) = system.process(current).and_then(sysinfo::Process::parent) else {
-            return Ok(false);
-        };
-        if parent.as_u32() == ancestor {
-            return Ok(true);
-        }
-        if parent.as_u32() <= 1 {
-            return Ok(false);
-        }
-        current = parent;
-    }
-    Ok(false)
+    ancestry::is_descendant_of(pid, ancestor)
 }
 
 /// Runtime callers include the exact process, ordinary descendants, and a
