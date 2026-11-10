@@ -8,10 +8,17 @@ import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
 
+async function installUsageTheme(page: any, theme: string) {
+  await page.addInitScript(({ theme, appOrigin }) => {
+    // Init scripts can also run in the opaque document before app navigation.
+    if (location.origin === appOrigin) localStorage.setItem("gwt:ui:theme", theme);
+  }, { theme, appOrigin: new URL(liveUrl || APP_URL).origin });
+}
+
 test.describe("Provider usage status summary", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
   test.beforeEach(async ({ page }, info) => {
-    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
+    await installUsageTheme(page,
       info.project.name.includes("light") ? "light" : "dark");
   });
 
@@ -475,6 +482,7 @@ test.describe("Provider usage status summary", () => {
 
   test("distinguishes Claude model zero, missing, degraded and stale values (SPEC #2970 Phase 11)", async ({ page }, info) => {
     const errors = captureUsageErrors(page);
+    await page.goto("about:blank");
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
     if (liveUrl) await gotoLiveGwt(page, liveUrl);
@@ -536,7 +544,7 @@ test.describe("Provider usage status summary", () => {
     const errors = captureUsageErrors(initialPage);
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const openFixture = async (page: any) => {
-      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await installUsageTheme(page, theme);
       if (!liveUrl) await installEmbeddedRoutes(page);
       await installProviderUsageBackend(page);
       if (liveUrl) await gotoLiveGwt(page, liveUrl);
