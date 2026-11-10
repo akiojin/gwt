@@ -1022,6 +1022,7 @@ pub fn install_agent_launch(
     };
     // This function already runs on a blocking worker. Keep the file guard
     // entirely within the physical spawn, never across a GUI event handoff.
+    let phase = super::launch::LaunchPhaseTimer::start("pty_spawn");
     let spawn = if monitor_admission {
         crate::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
@@ -1049,6 +1050,7 @@ pub fn install_agent_launch(
             });
         }
     };
+    phase.finish();
     input.failed_launch = Some(Box::new(PreparedAgentLaunchSuccess {
         project_root: input.project_root.clone(),
         active_session: active.clone(),
@@ -1994,6 +1996,20 @@ impl PreparedIssueMonitorSpawnAdmission {
                     .all(IssueMonitorAdmissionFileStamp::is_current))
             && self.capacity_admits()
     }
+
+    /// Re-evaluate changed observations once, retaining all strict source fences.
+    pub fn revalidate_if_needed(
+        &mut self,
+        input: &IssueMonitorSpawnAdmissionInput,
+    ) -> Result<(), String> {
+        if !self.is_current(&input.host_project_roots) {
+            *self = input.refresh(self)?;
+            if !self.is_current(&input.host_project_roots) {
+                return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl IssueMonitorSpawnAdmissionInput {
@@ -2345,6 +2361,11 @@ impl IssueMonitorLaunchClaimInput {
     pub fn claim_or_reuse(
         &self,
     ) -> Result<bool, crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+            issue_number = self.issue_number, delivery_id = %self.delivery_id,
+            window_id = %self.materializer_window_id);
+        let _claim_span = claim_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start("claim");
         let prefs = crate::load_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&self.project_root),
         )
@@ -2359,9 +2380,14 @@ impl IssueMonitorLaunchClaimInput {
                 crate::process::host_process_start_time(self.materializer_pid),
             )
         {
+            phase.finish();
             return Ok(true);
         }
-        self.claim_from_worker()
+        let result = self.claim_from_worker();
+        if result.is_ok() {
+            phase.finish();
+        }
+        result
     }
 
     fn matches_durable_claim(&self, prefs: &crate::IssueMonitorPrefs) -> bool {
@@ -2781,9 +2807,13 @@ pub(crate) fn prepare_owner_agent_admission(
             .as_ref()
             .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
-        if !prepared.is_current(input.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-        }
+        prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
+            project_root: input.project_root.into(),
+            host_project_roots: input.host_project_roots.to_vec(),
+            issue_number,
+            target_branch: config.branch.clone().unwrap_or_default(),
+            issue_link_cache_dir: input.issue_link_cache_dir.into(),
+        })?;
         let now = chrono::Utc::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
