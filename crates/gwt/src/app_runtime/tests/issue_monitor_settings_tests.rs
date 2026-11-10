@@ -839,7 +839,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         },
     );
     runtime.handle_launch_wizard_action(
@@ -911,7 +911,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
     assert!(prefs.last_scan_driver.is_none());
     let profile = prefs.launch_profile.expect("saved launch profile");
     assert_eq!(profile.agent_id, "codex");
-    assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(profile.model.as_deref(), Some("gpt-6-luna"));
     assert_eq!(profile.reasoning.as_deref(), Some("high"));
     assert_eq!(
         prefs.autonomous_tuning, autonomous_tuning,

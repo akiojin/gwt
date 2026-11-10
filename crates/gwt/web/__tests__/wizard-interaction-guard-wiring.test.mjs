@@ -111,6 +111,14 @@ function createWizardHarness({ sendResult = "sent" } = {}) {
   const deliveries = [];
   const createNode = (tag, className, textContent) => {
     const node = document.createElement(tag);
+    // linkedom exposes a read-only select value; supply the browser setter.
+    if (tag === "select") Object.defineProperty(node, "value", {
+      get: () => node.querySelector("option[selected]")?.value ?? node.options[0]?.value ?? "",
+      set: value => {
+        for (const option of node.options) option.removeAttribute("selected");
+        [...node.options].find(option => option.value === value)?.setAttribute("selected", "");
+      },
+    });
     if (className) node.className = className;
     if (textContent != null) node.textContent = textContent;
     return node;
@@ -148,6 +156,29 @@ function dispatchPointerActivation(document, button) {
     new document.defaultView.Event("click", { bubbles: true, cancelable: true }),
   );
 }
+
+test("saved unavailable Codex model stays visible until an explicit new selection", () => {
+  const harness = createWizardHarness();
+  try {
+    harness.surface.applyLaunchWizardStateEvent({ wizard: holderWizard({
+      show_manual_setup: true,
+      show_agent_settings: true,
+      selected_agent_id: "codex",
+      selected_model: "retired-model",
+      model_options: [{ value: "current-model", label: "Current model" }],
+      model_fallback_notice: "Codex no longer offers retired-model; the saved model is kept and not replaced.",
+    }) });
+    const select = harness.document.querySelector('select[aria-label="Model"]');
+    assert.equal(select.value, "retired-model");
+    assert.equal(select.querySelector('option[value="retired-model"]').disabled, true);
+    assert.match(select.textContent, /unavailable/);
+    select.value = "current-model";
+    select.dispatchEvent(new harness.document.defaultView.Event("change"));
+    assert.deepEqual(harness.sent.at(-1), { kind: "set_model", model: "current-model" });
+  } finally {
+    harness.restore();
+  }
+});
 
 test("holder decision replaces normal launch chrome with availability-gated actions and reasons", () => {
   const harness = createWizardHarness();

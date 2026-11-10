@@ -24,14 +24,10 @@ crates/gwt-agent/src/session.rs|session_lease_holds_epoch_rotation_until_authori
 crates/gwt-agent/src/session.rs|session_lease_holds_epoch_rotation_until_authorized_operation_finishes|letrotated=rotation_rx.recv_timeout(std::time::Duration::from_secs(1)).expect().expect()|1
 crates/gwt-config/src/settings.rs|persist_embedded_port_is_serialized_with_global_updates|Err(RecvTimeoutError::Timeout)=>done_rx.recv_timeout(Duration::from_secs(2)).map(|result|(false,result)).expect(),Ok(result)=>(true,result),Err(RecvTimeoutError::Disconnected)=>|1
 crates/gwt-config/src/settings.rs|persist_embedded_port_is_serialized_with_global_updates|letbefore_release=done_rx.recv_timeout(Duration::from_millis(250))|1
-crates/gwt-core/src/coordination.rs|prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment|let_deadline=crate::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_millis(1),)|1
 crates/gwt-core/src/coordination.rs|prompt_board_tail_bounds_reads_with_twelve_thousand_entries|assert!(elapsed<Duration::from_millis(200),)|1
 crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter|granted_rx.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt-core/src/operation_deadline.rs|expired_deadline_rejects_an_available_file_lock|let_deadline=ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1))|1
-crates/gwt-core/src/operation_deadline.rs|fixed_operation_clock_controls_expiry_without_spending_wall_time|letstart=Instant::now()-Duration::from_secs(1)|1
-crates/gwt-core/src/operation_deadline.rs|nested_deadlines_keep_the_earliest_expiry|letouter_expiry=Instant::now()+Duration::from_secs(1)|1
 crates/gwt-core/src/process_console/spawn.rs|cleanup_future_is_abandoned_after_grace|letcompleted=tokio::time::timeout(Duration::from_secs(2),run_cleanup_with_grace(Duration::from_millis(20),std::future::pending()),).await.expect()|1
 crates/gwt-core/src/process_console/spawn.rs|deadline_cleanup_does_not_extend_the_absolute_hard_cap|assert!(started.elapsed()<Duration::from_millis(900),)|1
 crates/gwt-core/src/process_console/spawn.rs|deadline_cleanup_does_not_extend_the_absolute_hard_cap|tokio::time::timeout(crate::deadline_budget::HANG_GUARD,child.wait()).await.expect().expect()|1
@@ -81,7 +77,6 @@ crates/gwt-docker/src/detect.rs|resolved_runtime_times_out_a_stuck_known_basenam
 crates/gwt-git/src/worktree.rs|run_command_with_timeout_does_not_wait_for_lingering_descendant_pipes|assert!(elapsed<Duration::from_secs(LINGERING_DESCENDANT_SECS),)|1
 crates/gwt-git/src/worktree.rs|run_command_with_timeout_kills_descendants_when_job_is_unavailable|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt-git/src/worktree.rs|run_command_with_timeout_kills_descendants_when_job_is_unavailable|whilewindows_process_alive(pid)&&Instant::now()<deadline|1
-crates/gwt-git/src/worktree.rs|worktree_listing_honors_the_active_operation_deadline|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1),)|1
 crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expiry_and_caps_connect_time|letexpired=ResolutionDeadline::at(Instant::now()-Duration::from_millis(1),Duration::from_secs(3),)|1
 crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expiry_and_caps_connect_time|letexpires_at=Instant::now()+Duration::from_secs(10)|1
 crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline|letdeadline=ResolutionDeadline::at(std::time::Instant::now()-Duration::from_millis(1),Duration::from_secs(1),)|1
@@ -498,9 +493,7 @@ crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|started_rx.recv_timeout(std::time::Duration::from_secs(1)).expect()|1
 crates/gwt/src/issue_monitor.rs|expired_deadline_rejects_durable_write_before_canonical_rename|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_millis(1),)|1
 crates/gwt/src/issue_monitor_worker.rs|a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window|let_scan_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+scan_window,)|1
-crates/gwt/src/issue_monitor_worker.rs|expired_scan_deadline_still_fails_default_base_resolution|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_millis(1),)|1
 crates/gwt/src/issue_monitor_worker.rs|github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline|assert!(started.elapsed()<std::time::Duration::from_millis(1_500),,started.elapsed())|1
-crates/gwt/src/issue_monitor_worker.rs|proposal_return_deadline_expiry_is_stage_typed|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_millis(1),)|1
 crates/gwt/src/issue_monitor_worker.rs|the_readback_fan_out_stops_while_the_launch_stage_still_has_budget|let_almost_spent=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+ISSUE_MONITOR_LAUNCH_RESERVE-std::time::Duration::from_millis(1),)|1
 crates/gwt/src/knowledge_bridge.rs|knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/src/knowledge_bridge.rs|knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip|started.recv_timeout(Duration::from_secs(30)).expect()|1

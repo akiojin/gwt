@@ -449,6 +449,18 @@ export function createNotificationCenter({
     return true;
   }
 
+  /** Remove a keyed notice when its attention target has recovered or closed. */
+  function removeNotice(key) {
+    const existing = key == null ? null : liveSurfaceRow(String(key));
+    if (!existing) return false;
+    existing.item.remove();
+    surfaceRows.delete(String(key));
+    unread.delete(existing.item);
+    syncEmptyState();
+    notifyUnread();
+    return true;
+  }
+
   function open(key) {
     if (!isOpen) {
       isOpen = true;
@@ -542,6 +554,7 @@ export function createNotificationCenter({
     recordSurfaceNotice,
     recordError,
     resolveError,
+    removeNotice,
     open,
     close,
     toggle,

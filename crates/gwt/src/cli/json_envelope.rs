@@ -6281,7 +6281,7 @@ mod tests {
         let mut env = TestEnv::new(repo);
         let command = ok(
             "issue.monitor.queue.auto_refill",
-            json!({"enabled": true, "limit": 3}),
+            json!({"enabled": true, "limit": 0}),
         );
         let CliCommand::Issue(command) = command else {
             panic!("issue command")
@@ -6289,8 +6289,11 @@ mod tests {
         let mut out = String::new();
         crate::cli::issue::run(&mut env, command, &mut out).expect("auto refill config");
         let prefs = crate::load_issue_monitor_prefs(&path).expect("prefs");
+        let reply: Value = serde_json::from_str(&out).expect("auto refill reply");
         assert!(prefs.terminal_queue_auto_refill);
         assert_eq!(prefs.terminal_queue_auto_refill_limit, 3);
+        assert_eq!(reply["saved_config"]["terminal_queue_auto_refill"], true);
+        assert_eq!(reply["saved_config"]["terminal_queue_auto_refill_limit"], 3);
         assert!(prefs.enabled);
         assert_eq!(prefs.priority_order, vec![7, 42]);
 

@@ -289,9 +289,9 @@ function renderIssuesSettingsPanel(panel, options) {
   }
   const replenishment = group("Refill");
   const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
-  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 0);
   setControlExplanation(refill, "Automatically add eligible issues to the launch queue when it has fewer issues than the refill limit.", "settings-auto-refill");
-  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. 0 disables automatic refill.", "settings-refill-limit");
+  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. Turning Auto-refill on with 0 uses the default limit of 3.", "settings-refill-limit");
   limit.min = "0";
   limit.step = "1";
   const saveRefill = () => {
@@ -403,6 +403,11 @@ export function renderMemberTuningControls(host, options) {
       input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
       input.addEventListener("input", event => edit(input.memberComposing || event.isComposing === true));
     }
+    const modelUnavailable = document.createElement("p");
+    modelUnavailable.className = "settings-help";
+    modelUnavailable.setAttribute("role", "status");
+    modelUnavailable.dataset.modelUnavailable = "";
+    host.append(modelUnavailable);
     const revision = document.createElement("p"); revision.className = "settings-help"; revision.dataset.memberTuningRevision = ""; host.append(revision);
     const status = document.createElement("p"); status.className = "settings-status"; status.dataset.memberTuningStatus = ""; status.setAttribute("role", "status"); host.append(status);
     const retry = document.createElement("button"); retry.type = "button"; retry.className = "wizard-button"; retry.textContent = "Retry profile"; retry.dataset.action = "retry-tuning";
@@ -425,8 +430,19 @@ export function renderMemberTuningControls(host, options) {
       : key === "model" ? [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]
         : (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value);
     const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
-    for (const value of suggestions) { const option = document.createElement("option"); option.value = value; list.append(option); }
+    for (const value of suggestions) {
+      const option = document.createElement("option"); option.value = value;
+      if (key === "model") option.label = entry?.models?.find(model => model.value === value)?.label || value;
+      list.append(option);
+    }
   }
+  const model = target?.draft.model;
+  const unlisted = Boolean(entry && (entry.id === "codex" || entry.models?.length) && model && !selectedModel);
+  const modelUnavailable = host.querySelector("[data-model-unavailable]");
+  modelUnavailable.textContent = unlisted
+    ? `Saved model ${model} is no longer offered by ${entry.name}. It is kept as saved and not replaced; choose a listed model before launching.`
+    : "";
+  modelUnavailable.hidden = !unlisted;
   host.querySelector("[data-member-tuning-revision]").textContent = target ? `Revision: ${target.canonical.revision}` : "Settings unavailable. Reload registered members.";
   host.querySelector("[data-member-tuning-status]").textContent = !editable ? "Settings unavailable. Reload the current profile; your draft is retained." : target?.error || ({ saving: "Saving…", queued: "Saving…", saved: "Saved" }[target?.status] || "");
   const retry = host.querySelector('[data-action="retry-tuning"]'); retry.hidden = !target?.blocked; retry.disabled = !editable || !!target?.composing || !!target?.pending;

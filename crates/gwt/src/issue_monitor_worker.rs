@@ -9098,9 +9098,9 @@ pub(crate) mod tests {
 
     #[test]
     fn proposal_return_deadline_expiry_is_stage_typed() {
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
-        );
+        let expiry = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expiry);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expiry);
 
         let error = ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)
             .expect_err("expired final deadline must reject the proposal");
@@ -9719,9 +9719,9 @@ exit 1
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
-        );
+        let expiry = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expiry);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expiry);
 
         let failure = try_resolve_default_base_branch(tmp.path())
             .expect_err("an expired deadline must abort the stage");

@@ -34,6 +34,69 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
+  for (const savedLimit of [0, 2]) test(`Issue #6922 Start refills the queue on its first scan with saved limit ${savedLimit}`, async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      additionalIssueNumbers: [45, 46, 47],
+      monitorPreferences: { enabled:false, terminal_queue_auto_refill:false, terminal_queue_auto_refill_limit:savedLimit },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const prefs = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const expectedLimit = savedLimit || 3;
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge:true });
+      await page.locator('[data-surface="issues"]').click();
+      const controls = page.getByRole("group", { name:"Monitor controls", exact:true });
+      const refill = controls.getByRole("switch", { name:"Auto-refill", exact:true });
+      await expect(refill).toHaveAttribute("aria-checked", "false");
+      await controls.getByRole("button", { name:"Issues settings", exact:true }).click();
+      const settings = page.locator('[data-settings-panel="issues"]');
+      await expect(settings.getByLabel("Refill limit", { exact:true })).toHaveValue(String(savedLimit));
+      await page.locator('[data-surface="issues"]').click();
+      await refill.click();
+      await expect.poll(async () => (await prefs()).terminal_queue_auto_refill_limit).toBe(expectedLimit);
+      await expect(refill).toHaveAttribute("aria-checked", "true");
+      await expect(() => {
+        const envelope = fixture.fixtureOperation("issue.monitor.status");
+        expect(envelope.ok, JSON.stringify(envelope)).toBe(true);
+        expect(JSON.parse(envelope.output).saved_config).toMatchObject({
+          terminal_queue_auto_refill:true, terminal_queue_auto_refill_limit:expectedLimit,
+        });
+      }).toPass({ timeout:10_000 });
+      await controls.getByRole("button", { name:"Issues settings", exact:true }).click();
+      await expect(settings.getByLabel("Refill limit", { exact:true })).toHaveValue(String(expectedLimit));
+      await page.locator('[data-surface="issues"]').click();
+      const beforeStart = await prefs();
+      expect(beforeStart.enabled).toBe(false);
+      expect(Object.values(beforeStart.terminal_queues ?? {}).flatMap((queue: any) => queue.entries)).toEqual([]);
+      await expect(page.locator('[data-role="monitor-refill-guidance"]')).toBeVisible();
+      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the Monitor to begin Auto-refill.");
+      const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      await controls.getByRole("button", { name:"Start", exact:true }).click();
+      const firstScan = await page.waitForFunction(({ cursor, previousScan }) => {
+        return ((window as any).__gwtPlaywrightMessages ?? []).find(({ sequence, payload }: any) =>
+          sequence > cursor && payload.kind === "issue_monitor_status" && payload.status.enabled
+          && payload.status.last_scan_at && payload.status.last_scan_at !== previousScan)?.payload.status;
+      }, { cursor, previousScan:beforeStart.last_scan_at }, { timeout:90_000 }).then(handle => handle.jsonValue());
+      expect(firstScan.terminal_queue).toHaveLength(expectedLimit);
+      expect(firstScan.terminal_queue.every((entry: any) => entry.queued_by === "auto-refill")).toBe(true);
+      await expect(page.locator('[data-queue-column="queued"] .knowledge-row')).toHaveCount(expectedLimit);
+      await expect(page.locator('[data-role="monitor-refill-guidance"]')).toBeHidden();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await info.attach(`refill-first-scan-${savedLimit}-${theme}`, {
+        body:JSON.stringify({ beforeStart, firstScan, saved:await prefs() }, null, 2), contentType:"application/json",
+      });
+      await info.attach(`refill-${savedLimit}-${theme}`, { body:await page.screenshot(), contentType:"image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned process cleanup").toEqual([]);
+  });
+
   test("roster Manual same-value save updates machine policy before autonomous queue launch", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, { page, autonomousMode: true });
     const errors: string[] = [];

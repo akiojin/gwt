@@ -1532,13 +1532,13 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         });
 
         let configured = state.view();
         assert!(!configured.show_start_methods);
         assert!(configured.show_manual_setup);
-        assert_eq!(configured.selected_model, "gpt-5.5");
+        assert_eq!(configured.selected_model, "gpt-6-luna");
 
         state.apply(LaunchWizardAction::Back);
 
@@ -1546,7 +1546,7 @@ mod tests {
         assert!(state.completion.is_none());
         assert!(backed.show_start_methods);
         assert!(!backed.show_manual_setup);
-        assert_eq!(backed.selected_model, "gpt-5.5");
+        assert_eq!(backed.selected_model, "gpt-6-luna");
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -1554,7 +1554,7 @@ mod tests {
         let configured_again = state.view();
         assert!(!configured_again.show_start_methods);
         assert!(configured_again.show_manual_setup);
-        assert_eq!(configured_again.selected_model, "gpt-5.5");
+        assert_eq!(configured_again.selected_model, "gpt-6-luna");
     }
 
     #[test]
@@ -1673,7 +1673,7 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
                 live_window_id: None,
@@ -1691,7 +1691,7 @@ mod tests {
         });
 
         assert_eq!(state.agent_id, "codex");
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-luna");
         assert_eq!(state.reasoning, "high");
         assert_eq!(state.mode, "resume");
         assert_eq!(state.resume_session_id.as_deref(), Some("resume-1"));
@@ -1702,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_with_removed_codex_model_falls_back_to_current_default() {
+    fn quick_start_with_removed_codex_model_preserves_saved_selection() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -1728,20 +1728,20 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "gpt-6.1-sol");
-        // Issue #3962 AC-5: the swap is reported, not silent.
+        assert_eq!(state.model, "gpt-5.2-codex");
+        // Issue #6933 AC-3: the saved model stays visible and is not swapped.
         let notice = state
             .model_fallback_notice
             .as_deref()
             .expect("a removed Quick Start model must be reported");
         assert!(
-            notice.contains("gpt-5.2-codex") && notice.contains("gpt-6.1-sol"),
-            "the notice must name both models: {notice}"
+            notice.contains("gpt-5.2-codex") && notice.contains("kept"),
+            "the notice must explain the saved model: {notice}"
         );
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert_eq!(config.model.as_deref(), Some("gpt-6.1-sol"));
+                    assert_eq!(config.model.as_deref(), Some("gpt-5.2-codex"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -1771,7 +1771,7 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
                 live_window_id: None,
@@ -1845,7 +1845,7 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
                 live_window_id: None,
@@ -1886,7 +1886,7 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: None,
                 live_window_id: None,
@@ -1937,7 +1937,7 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         });
         state.apply(LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
@@ -1952,7 +1952,7 @@ mod tests {
 
         assert_eq!(view.branch_mode, "use_selected");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.5");
+        assert_eq!(view.selected_model, "gpt-6-luna");
         assert_eq!(view.selected_reasoning, "high");
         assert_eq!(view.selected_runtime_target, "host");
         assert!(view.show_reasoning);
@@ -2009,8 +2009,8 @@ mod tests {
         state.set_agent_id("missing");
         assert_eq!(state.error.as_deref(), Some("Agent option is unavailable"));
 
-        state.set_model("gpt-5.5");
-        assert_eq!(state.model, "gpt-5.5");
+        state.set_model("gpt-6-luna");
+        assert_eq!(state.model, "gpt-6-luna");
         state.set_model("bad-model");
         assert_eq!(state.error.as_deref(), Some("Model option is unavailable"));
 

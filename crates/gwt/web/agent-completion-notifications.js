@@ -76,6 +76,27 @@ export function notificationForTransition(input) {
   return null;
 }
 
+// Issue #6932: presentation identity only; the raw diagnostic ledger is unchanged.
+export function monitorDiagnostic({ message, kind, stage, issue_number } = {}) {
+  const raw = typeof message === "string" ? message.trim() : "";
+  if (!raw) return null;
+  const continuations = [...raw.matchAll(/\(continued_with_([\w]+)\)/g)];
+  if (raw.startsWith("scan continued:") && !raw.includes("launch_suppressed") && continuations.length
+    && continuations.every(([, value]) => ["stale_readback", "previous_candidates"].includes(value))) return null;
+  const stalled = raw.startsWith("Issue Monitor scan stalled");
+  const normalized = raw
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g, "<time>")
+    .replace(/\b\d+(?:\.\d+)?(?:ms|s)\b/g, "<duration>")
+    .replace(/\s+/g, " ");
+  const identity = stalled
+    ? normalized.replace(/ for <duration> \(poll interval <duration>\)/, "").replace(/; last scan at <time>/, "")
+    : normalized;
+  const phase = (!stalled && stage) || raw.match(/scan failed at ([\w-]+) stage:/)?.[1] || "monitor";
+  const source = stalled ? "scan_stall" : kind || (phase === "monitor" ? "monitor" : "scan_failure");
+  return { key: `issue-monitor:${JSON.stringify([source, phase, identity, issue_number || null])}`,
+    message: stalled ? identity : raw, stalled };
+}
+
 // The server owns runtime timing, attention suppression, and recipient election.
 // This desktop-only sink never derives notifications from runtime snapshots.
 export function createAgentCompletionNotifier({

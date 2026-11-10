@@ -171,6 +171,19 @@ test("Settings launch controls retain their nodes and save once across status re
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
+test("Issue #6922: Refill limit displays the saved zero and confirmed default after enabling", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { name: "A" }, send: () => {} };
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0", "missing saved fields use the stored default");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:0 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:3 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "3");
+});
+
 test("Project settings never writes capacity when opened, remounted or updated", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -198,7 +211,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
     ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
-    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
     const control = panel.querySelector(`[aria-label="${name}"]`);
@@ -696,12 +709,49 @@ test("shared member tuning preserves custom values and target revision without c
   const model = panel.querySelector('[data-member-tuning-field="model"]');
   assert.equal(model.value, 'opusplan');
   assert.ok(model.parentElement.querySelector('datalist option[value=haiku]'), 'roster tuning choices use the shared list projection');
+  assert.equal(model.parentElement.querySelector('datalist option[value=haiku]').label, 'Haiku');
   assert.equal(panel.querySelector('[data-member-tuning-field="reasoning"]').value, 'custom-effort');
   assert.equal(panel.querySelector('[data-member-tuning-field="agent_id"]').disabled, true);
   model.value = 'unlisted'; model.dispatchEvent(new Event('input'));
   assert.deepEqual(edits[0], [{ model: 'unlisted' }, { composing: false }]);
   assert.equal(panel.querySelector('[data-profile-field]'), null);
   assert.match(panel.textContent, /exact-token/);
+});
+
+test("Codex shared tuning keeps catalog value/label order and warns without replacing saved models", () => {
+  const { document, Event } = parseHTML('<section></section>');
+  const panel = document.querySelector('section'), edits = [];
+  const target = { canonical: { role: 'implementation', member_id: 'm-codex', agent_id: 'codex', revision: 'core-token' },
+    draft: { agent_id: 'codex', model: 'retired-model', reasoning: 'high' }, status: 'saved' };
+  const render = () => load('renderMemberTuningControls')(panel, { target, choices: candidateChoices.agents,
+    onEdit: (...args) => edits.push(args) });
+  render();
+  const model = panel.querySelector('[data-member-tuning-field="model"]');
+  assert.deepEqual([...model.parentElement.querySelectorAll('datalist option')].map(option => ({ value: option.value, label: option.label })),
+    candidateChoices.agents[0].models.map(({ value, label }) => ({ value, label })));
+  assert.equal(model.value, 'retired-model');
+  const notice = panel.querySelector('[data-model-unavailable]');
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent,
+    'Saved model retired-model is no longer offered by Codex. It is kept as saved and not replaced; choose a listed model before launching.');
+  assert.deepEqual(edits, [], 'catalog refresh must not replace a saved model');
+  model.value = 'gpt-6-luna'; model.dispatchEvent(new Event('input'));
+  assert.deepEqual(edits, [[{ model: 'gpt-6-luna' }, { composing: false }]], 'edits keep the model id, not its display label');
+  target.draft.model = 'gpt-6-luna'; render();
+  assert.equal(notice.hidden, true, 'choosing a listed model clears the notice');
+});
+
+test("Codex shared tuning warns about a saved model even when the public catalog is empty", () => {
+  const { document } = parseHTML('<section></section>');
+  const choices = structuredClone(candidateChoices);
+  choices.agents.find(agent => agent.id === 'codex').models = [];
+  const panel = document.querySelector('section');
+  const target = { canonical: { role: 'implementation', member_id: 'm-codex', agent_id: 'codex', revision: 'core-token' },
+    draft: { agent_id: 'codex', model: 'retired-model', reasoning: 'high' }, status: 'saved' };
+  load('renderMemberTuningControls')(panel, { target, choices, onEdit: () => assert.fail('render must not write tuning') });
+  assert.equal(panel.querySelector('[data-member-tuning-field="model"]').value, 'retired-model');
+  assert.equal(panel.querySelector('[data-model-unavailable]').hidden, false);
+  assert.match(panel.querySelector('[data-model-unavailable]').textContent, /retired-model/);
 });
 
 test("implementation candidate choices exclude configured or retained PM roles", () => {
