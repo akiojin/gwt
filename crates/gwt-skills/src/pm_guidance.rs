@@ -1490,9 +1490,18 @@ same profile to try again.
 ### Stop during blocked authority recovery
 
 When `issue.monitor.status` reports `authority recovery is blocked`,
-`issue.monitor.config.set` remains fail-closed, including OFF and
-`max_active` changes. Record the error and its preferences/fence paths;
-do not delete the fence or hand-edit the preferences to bypass it.
+the registered PM may use `issue.monitor.config.set` for OFF and capacity changes
+through the typed emergency transaction. ON and unrelated configuration changes
+remain refused. A malformed/unreadable authority fence can also prevent transport
+before this reply; use the direct stop fallback below in that case. Record the
+error and its preferences/fence paths; do not delete the fence or hand-edit the
+preferences to bypass it.
+
+For a launch storm, five launches of one Issue within 300 seconds exhaust its
+budget. The next launch stops Monitor and parks that Issue in `needs_human`.
+Inspect the recorded reason, resolve the cause, then use `issue.monitor.requeue`
+and enable Monitor after the five-minute window expires. Restarting the app does
+not reset this budget.
 
 - Apply `issue.label {number, action:"add", labels:["hold"]}` to each
   affected owner and require successful GitHub readback. A `hold` label
@@ -1920,8 +1929,10 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   unattended work, use `issue.monitor.config.set` under the existing
   registered-PM authority and `expected_config_token` rules, then read back
   status before attempting a launch. Respect an explicit instruction to keep
-  the Monitor off; the standing mandate does not override it. Config success
-  alone is not proof of launch availability or launch success.
+  the Monitor off; the standing mandate does not override it.
+  A launch-storm shutdown stays off until its cause is resolved, the affected Issue is explicitly
+  requeued, and the five-minute window expires; do not auto-enable it for other work.
+  Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
   approval/owner-handoff rules before asking the user to act. When recovery
@@ -3409,7 +3420,8 @@ mod tests {
         let guidance = unwrapped(&render_contract());
         for phrase in [
             "authority recovery is blocked",
-            "`issue.monitor.config.set` remains fail-closed",
+            "registered PM may use `issue.monitor.config.set` for OFF and capacity changes",
+            "A launch-storm shutdown stays off",
             "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
             "The direct `issue.monitor.stop` path still works when typed preferences are readable",
             "preserves the authority fence",

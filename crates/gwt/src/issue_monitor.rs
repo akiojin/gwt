@@ -1119,6 +1119,9 @@ pub struct IssueMonitorPrefs {
     /// commit that records it and the process boundary after it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplicate_launch_refusals: Vec<IssueMonitorDuplicateLaunchRefusal>,
+    /// Issue #4804: unique launch reservation IDs and their timestamps, retained across restart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recent_launches: BTreeMap<u64, BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     /// Issue #3883 AC-4: the driver of the last scan, so the next one can tell
@@ -1397,6 +1400,7 @@ impl Default for IssueMonitorPrefs {
             candidate_pool_degradation: None,
             generation_reclaim: None,
             duplicate_launch_refusals: Vec::new(),
+            recent_launches: BTreeMap::new(),
             launched_issues: Vec::new(),
             last_scan_driver: None,
             last_prefs_reset: None,
@@ -5351,6 +5355,8 @@ pub struct IssueMonitorState {
     /// generation guard while the Issue's launch kept running.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     duplicate_launch_refusals: BTreeMap<u64, IssueMonitorDuplicateLaunchRefusal>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    recent_launches: BTreeMap<u64, BTreeMap<String, String>>,
     launched_windows: BTreeMap<u64, String>,
     /// Issue #3883 AC-4: the driver of the last recorded scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7135,6 +7141,14 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    save_issue_monitor_prefs_unlocked_with_policy_preservation(path, prefs, false)
+}
+
+fn save_issue_monitor_prefs_unlocked_with_policy_preservation(
+    path: &Path,
+    prefs: &IssueMonitorPrefs,
+    preserve_legacy_policy: bool,
+) -> io::Result<()> {
     let started = std::time::Instant::now();
     let mut normalized = prefs.clone();
     crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
@@ -7144,9 +7158,21 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
     validate_existing_issue_monitor_prefs_schema(path)?;
     let validated_at = std::time::Instant::now();
-    crate::machine_agent_settings::migration_before_project_save(path)?;
+    if !preserve_legacy_policy {
+        crate::machine_agent_settings::migration_before_project_save(path)?;
+    }
     let migrated_at = std::time::Instant::now();
-    let content = if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
+    let content = if preserve_legacy_policy {
+        // Emergency OFF changes no policy. Keep legacy migration inputs in the
+        // project until their independent machine migration can succeed.
+        let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
+        let previous: serde_json::Value =
+            serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+        if let Some(legacy) = previous.get("auto_apply_updates") {
+            value["auto_apply_updates"] = legacy.clone();
+        }
+        serde_json::to_string_pretty(&value).map_err(io::Error::other)?
+    } else if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
         let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
         let fields = value.as_object_mut().expect("Monitor preferences object");
         // Older readers require this key. It is a fixed safe compatibility
@@ -7171,7 +7197,9 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
         serde_json::to_string_pretty(prefs).map_err(io::Error::other)?
     };
     let serialized_at = std::time::Instant::now();
-    crate::update_settings::migrate_before_project_save(path, false)?;
+    if !preserve_legacy_policy {
+        crate::update_settings::migrate_before_project_save(path, false)?;
+    }
     let prepared_at = std::time::Instant::now();
     let committed = durable_atomic_write(path, content.as_bytes());
     let canonical_finished_at = std::time::Instant::now();
@@ -7739,6 +7767,36 @@ pub fn try_mutate_issue_monitor_prefs<T>(
             save_issue_monitor_prefs_unlocked(path, &prefs)?;
         }
         Ok((prefs, result))
+    })
+}
+
+/// Disable only, without requiring unrelated machine-policy migrations.
+/// The caller's PM authority and the observed config are rechecked under the
+/// project lock; schema validation, revocation and durable saves stay intact.
+pub(crate) fn disable_issue_monitor_during_recovery(
+    path: &Path,
+    expected_config_token: Option<&str>,
+    caller_is_registered_pm: impl FnOnce() -> bool,
+) -> io::Result<IssueMonitorPrefs> {
+    with_issue_monitor_prefs_lock(path, || {
+        if !caller_is_registered_pm() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "blocked Issues recovery control requires the registered PM",
+            ));
+        }
+        let before = load_issue_monitor_prefs_unlocked(path)?;
+        check_expected_issue_monitor_config_token(&before, expected_config_token)?;
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), before.clone());
+        monitor
+            .set_enabled_with_effect_revocation(false)
+            .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
+        let prefs = monitor.prefs();
+        if prefs != before {
+            save_issue_monitor_prefs_unlocked_with_policy_preservation(path, &prefs, true)?;
+        }
+        Ok(prefs)
     })
 }
 
@@ -8423,6 +8481,7 @@ impl IssueMonitorState {
             candidate_pool_degradation: None,
             generation_reclaim: None,
             duplicate_launch_refusals: BTreeMap::new(),
+            recent_launches: BTreeMap::new(),
             launched_windows: BTreeMap::new(),
             last_scan_driver: None,
             last_prefs_reset: None,
@@ -8523,6 +8582,7 @@ impl IssueMonitorState {
         state.update_drain = prefs.update_drain.clone();
         state.candidate_pool_degradation = prefs.candidate_pool_degradation.clone();
         state.generation_reclaim = prefs.generation_reclaim;
+        state.recent_launches = prefs.recent_launches;
         state.duplicate_launch_refusals = prefs
             .duplicate_launch_refusals
             .into_iter()
@@ -8713,6 +8773,7 @@ impl IssueMonitorState {
             candidate_pool_degradation: self.candidate_pool_degradation.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
             duplicate_launch_refusals: self.duplicate_launch_refusals.values().cloned().collect(),
+            recent_launches: self.recent_launches.clone(),
             launched_issues: self
                 .launched_windows
                 .iter()
@@ -13128,6 +13189,14 @@ impl IssueMonitorState {
         autonomous_policy: AutonomousRecordRebasePolicy,
         typed_wait_controls: &[AutonomousIssueRecord],
     ) {
+        // Launch reservations are append-only within the rolling window. Merge by
+        // reservation identity so stale observers cannot reset the storm budget.
+        for (number, launches) in &disk.recent_launches {
+            self.recent_launches
+                .entry(*number)
+                .or_default()
+                .extend(launches.clone());
+        }
         // Wait controls commit under the prefs lock, independently of a scan's
         // phase changes. Capture their launch identity before additive merges
         // can import a confirmation and make a different lifecycle look equal.
@@ -15673,6 +15742,11 @@ impl IssueMonitorState {
                         error_message: item
                             .error_message
                             .clone()
+                            .or_else(|| {
+                                self.duplicate_launch_refusals
+                                    .get(&item.issue.number)
+                                    .map(|refusal| refusal.message.clone())
+                            })
                             .or_else(|| {
                                 self.pending_session_start_diagnosis_at(item.issue.number, now)
                             })
@@ -19364,6 +19438,45 @@ impl IssueMonitorState {
         }
     }
 
+    /// Bound repeated launches independently of ACKs, retry counts and process
+    /// restarts. Five reservations per Issue in five minutes accommodate normal
+    /// retries while stopping the 20–60 second loop reported in Issue #4804.
+    fn reserve_launch_attempt(&mut self, issue_number: u64, identity: &str, now: &str) -> bool {
+        let Some(current) = parse_rfc3339_utc(now) else {
+            return false;
+        };
+        self.recent_launches.retain(|_, launches| {
+            launches.retain(|_, timestamp| {
+                let Some(at) = parse_rfc3339_utc(timestamp) else {
+                    // Keep the reservation fail-closed, but give corrupt history
+                    // a bounded window so operator recovery can succeed later.
+                    *timestamp = now.to_owned();
+                    return true;
+                };
+                current.signed_duration_since(at).num_seconds() < 300
+            });
+            !launches.is_empty()
+        });
+        let launches = self.recent_launches.entry(issue_number).or_default();
+        if launches.contains_key(identity) {
+            return true;
+        }
+        if launches.len() < 5 {
+            launches.insert(identity.to_owned(), now.to_owned());
+            return true;
+        }
+        let reason = "launch storm: five launches within 300 seconds; Monitor stopped. Inspect the repeated launches, then requeue the Issue and enable Monitor after the window expires.";
+        // Use the same epoch revocation and claim compensation as explicit OFF.
+        // Overflow must still close local admission; never emit another launch.
+        if self.set_enabled_with_effect_revocation(false).is_none() {
+            self.config.enabled = false;
+            self.pending_launches.clear();
+            self.pending_launch_deliveries.clear();
+        }
+        self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, reason);
+        false
+    }
+
     pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
         let max_active = self.effective_max_active_agents();
         if !self.gui_connected
@@ -19385,7 +19498,11 @@ impl IssueMonitorState {
                 && self.scan_dependency_exclusion(*issue).is_none()
                 && self.agent_schedule_launch_exclusion(*issue).is_none()
         })?;
-        let issue_number = self.queue.remove(position)?;
+        let issue_number = *self.queue.get(position)?;
+        if !self.reserve_launch_attempt(issue_number, &uuid::Uuid::new_v4().to_string(), now) {
+            return None;
+        }
+        self.queue.remove(position)?;
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -20373,6 +20490,17 @@ impl IssueMonitorState {
         // compensate the claim that GitHub has already accepted.
         if let Some(record) = self.permission_readiness_block_for_launch(issue_number, now) {
             self.record_permission_readiness_block(issue, &record);
+            ensure_claim_release_effect(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                claim_effect_id,
+                issue_number,
+                &claim_id,
+                &claim_owner,
+            );
+            return false;
+        }
+        if !self.reserve_launch_attempt(issue_number, claim_effect_id, now) {
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -37538,6 +37666,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_4804_invalid_launch_times_hold_once_and_then_allow_recovery() {
+        let now = "2026-11-11T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        monitor.recent_launches.insert(
+            42,
+            (0..5)
+                .map(|n| (format!("old-{n}"), "invalid".to_owned()))
+                .collect(),
+        );
+        assert!(monitor.next_launch_request(now).is_none());
+        assert!(!monitor.config.enabled);
+        assert!(monitor.recent_launches[&42].values().all(|at| at == now));
+        let later = "2026-11-11T00:05:01Z";
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "repaired clock", later),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        monitor.set_enabled_with_effect_revocation(true).unwrap();
+        assert_eq!(monitor.next_launch_request(later).unwrap().issue_number, 42);
+    }
+
+    #[test]
+    fn issue_4804_launch_storm_survives_restart_and_stops_monitor() {
+        for durable in [false, true] {
+            let now = "2026-11-11T00:00:00Z";
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            scan_queued_candidates(&mut monitor, &[issue(42)], now);
+            for attempt in 0..5 {
+                let mut stale_reader = monitor.clone();
+                let admitted = if durable {
+                    monitor.apply_confirmed_claim(
+                        42,
+                        format!("claim-{attempt}"),
+                        "owner",
+                        &format!("effect-{attempt}"),
+                        now,
+                    )
+                } else {
+                    monitor.next_launch_request(now).is_some()
+                };
+                assert!(admitted, "durable={durable}, attempt {attempt}");
+                monitor.clear_active_tracking(42);
+                monitor.set_inbox_state(42, MonitorInboxState::Queued);
+                monitor.queue.push_back(42);
+                stale_reader.rebase_daemon_driver_prefs(&monitor.prefs());
+                assert_eq!(stale_reader.recent_launches, monitor.recent_launches);
+                let saved =
+                    serde_json::from_slice(&serde_json::to_vec(&monitor.prefs()).unwrap()).unwrap();
+                monitor = test_monitor_with_prefs(monitor.config.clone(), saved);
+                monitor.set_gui_connected(true);
+                scan_queued_candidates(&mut monitor, &[issue(42)], now);
+            }
+            scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+            let admitted = if durable {
+                monitor.apply_confirmed_claim(42, "claim-overflow", "owner", "effect-overflow", now)
+            } else {
+                monitor.next_launch_request(now).is_some()
+            };
+            assert!(!admitted);
+            if durable {
+                assert!(monitor.pending_effects.iter().any(|effect| matches!(
+                &effect.payload, IssueMonitorEffectPayload::ReleaseClaim { claim_id, .. }
+                    if claim_id == "claim-overflow")));
+            }
+            assert!(!monitor.config.enabled);
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("owner", now, 2, |_| false),
+                0
+            );
+            assert!(monitor.take_pending_launch_requests().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::NeedsHuman
+            );
+            assert!(monitor
+                .inbox_item(42)
+                .unwrap()
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("launch storm"));
+            let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+            scan_queued_candidates(&mut restored, &[issue(42), issue(43)], now);
+            assert!(!restored.config.enabled);
+            assert_eq!(
+                restored.inbox_item(42).unwrap().state,
+                MonitorInboxState::NeedsHuman
+            );
+            let later = "2026-11-11T00:05:01Z";
+            assert!(matches!(
+                restored.requeue_failed_issue(42, "storm resolved", later),
+                IssueMonitorRequeueOutcome::Requeued { .. }
+            ));
+            assert!(restored.set_enabled_with_effect_revocation(true).is_some());
+            restored.set_gui_connected(true);
+            assert_eq!(
+                restored.next_launch_request(later).unwrap().issue_number,
+                42
+            );
+        }
+    }
+
     /// Issue #4150 AC-1 / AC-2 / AC-3 / AC-4 / AC-5: the generation guard
     /// refuses the *new* attempt, not the launch that is already running.
     ///
@@ -37598,7 +37838,7 @@ mod tests {
             .find(|row| row.issue_number == 4140)
             .expect("status row");
         assert_eq!(row.state, MonitorInboxState::Launched);
-        assert_eq!(row.error_message, None);
+        assert_eq!(row.error_message.as_deref(), Some(refusal.as_str()));
         let refused = row
             .duplicate_launch_refusal
             .as_ref()

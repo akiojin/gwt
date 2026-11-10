@@ -4929,14 +4929,34 @@ fn run_monitor_config_set<E: CliEnv>(
     let payload =
         crate::runtime_daemon_events::issue_monitor_payload("control", control, std::process::id());
     let publication = publish_monitor_config_set(&project_root, payload);
+    let mut recovery_off_only = false;
     if let Err(error) = publication {
-        if !error.allows_local_fallback() {
+        // Issue #4804: a blocked worker cannot grant authority, but the
+        // registered PM must retain OFF and capacity control. Keep every other
+        // control fail-closed, including an ON bundled with a capacity change.
+        let recovery_control = matches!(
+            &error,
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked
+        ) && caller_is_resident_pm
+            && enabled != Some(true)
+            && allowed_labels.is_none()
+            && autonomous_mode.is_none()
+            && auto_close_merged_issues.is_none()
+            && launch_agent.is_none()
+            && update_drain.is_none();
+        if !error.allows_local_fallback() && !recovery_control {
             return Err(local_save_error(io::Error::other(error.to_string())));
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         let control_id = uuid::Uuid::new_v4().to_string();
         let mut shared_write_started = false;
-        crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+        let mutation = |prefs: &mut crate::IssueMonitorPrefs| {
+            if recovery_control && !super::pm::caller_is_registered_pm(&project_root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "blocked Issues recovery control requires the registered PM",
+                ));
+            }
             let mut candidate = prefs.clone();
             apply_monitor_config_set(
                 &mut candidate,
@@ -4950,17 +4970,38 @@ fn run_monitor_config_set<E: CliEnv>(
                 update_drain.clone(),
                 caller_is_resident_pm,
             )?;
-            let requested = candidate.max_active_last_change.as_ref()
+            let requested = candidate
+                .max_active_last_change
+                .as_ref()
                 .filter(|_| max_active.is_some() || max_active_auto);
             shared_write_started = requested.is_some();
             let policy = crate::machine_agent_settings::checked_update(
-                prefs, expected_config_token, requested, &control_id,
+                prefs,
+                expected_config_token,
+                requested,
+                &control_id,
             )?;
             crate::issue_monitor::apply_machine_policy_to_prefs(&mut candidate, &policy);
             *prefs = candidate;
             Ok(())
-        })
-        .map_err(|error| {
+        };
+        recovery_off_only =
+            recovery_control && enabled == Some(false) && max_active.is_none() && !max_active_auto;
+        let commit = if recovery_off_only {
+            crate::issue_monitor::disable_issue_monitor_during_recovery(
+                &prefs_path,
+                expected_config_token,
+                || super::pm::caller_is_registered_pm(&project_root),
+            )
+            .map(|prefs| (prefs, ()))
+        } else if recovery_control {
+            // This is the same typed, locked transaction used by direct stop:
+            // preserve the fence and reject unreadable prefs or epoch overflow.
+            crate::try_mutate_issue_monitor_prefs(&prefs_path, mutation)
+        } else {
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, mutation)
+        };
+        commit.map_err(|error| {
             if shared_write_started && error.to_string() != crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR {
                 local_save_error(io::Error::other(format!(
                     "shared Max active save outcome is uncertain (control {control_id}); machine policy may be committed while project configuration is not. Re-read issue.monitor.status before retrying: {error}"
@@ -4976,7 +5017,9 @@ fn run_monitor_config_set<E: CliEnv>(
     .map_err(local_save_error)?;
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
-    monitor.refresh_agent_capacity(&project_root);
+    if !recovery_off_only {
+        monitor.refresh_agent_capacity(&project_root);
+    }
     out.push_str(
         &serde_json::json!({
             "config_token": prefs.config_token(),
@@ -15152,6 +15195,213 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn issue_4804_recovery_blocked_pm_can_disable_and_set_capacity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = gwt_core::test_support::socket_tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: 7,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let marker = prefs_path.with_extension("shutdown-revoke");
+        crate::persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+        )
+        .unwrap();
+        let fence_before = std::fs::read(&marker).unwrap();
+        crate::pm_registry::try_register_pm(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".into(),
+                agent_id: "codex".into(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .unwrap();
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let (stop, server) = spawn_quota_hold_clear_daemon(
+            tmp.path(),
+            &repo,
+            gwt_core::daemon::DaemonFrame::Error {
+                message: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                    .into(),
+            },
+            "config_set",
+        );
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
+                allowed_labels: None,
+                project_root: None,
+                enabled: Some(false),
+                autonomous_mode: None,
+                max_active: Some(2),
+                max_active_auto: false,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: None,
+            },
+            &mut out,
+        );
+        stop.store(true, Ordering::Release);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+        let saved = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(!saved.enabled);
+        assert_eq!(saved.effect_authority_epoch, 8);
+        assert_eq!(saved.max_active_agents, 2);
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(2)
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), fence_before);
+        // The emergency path must not grant ON, unrelated writes, or non-PM control.
+        for (session, enabled, allowed_labels) in [
+            ("pm-session", Some(true), None),
+            ("pm-session", Some(false), Some(vec!["backend".to_string()])),
+            ("other-agent", Some(false), None),
+        ] {
+            let _caller =
+                gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session);
+            std::fs::remove_file(tmp.path().join("quota-hold.sock")).unwrap();
+            let before = std::fs::read(&prefs_path).unwrap();
+            let machine_before = std::fs::read(crate::machine_agent_settings::path()).unwrap();
+            let (stop, server) = spawn_quota_hold_clear_daemon(
+                tmp.path(),
+                env.repo_path(),
+                gwt_core::daemon::DaemonFrame::Error {
+                    message:
+                        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                            .into(),
+                },
+                "config_set",
+            );
+            out.clear();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorConfigSet {
+                    expected_config_token: None,
+                    allowed_labels,
+                    project_root: None,
+                    enabled,
+                    autonomous_mode: None,
+                    max_active: Some(4),
+                    max_active_auto: false,
+                    auto_close_merged_issues: None,
+                    launch_agent: None,
+                    update_drain: None,
+                },
+                &mut out,
+            );
+            stop.store(true, Ordering::Release);
+            server.join().unwrap();
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+            assert_eq!(
+                std::fs::read(crate::machine_agent_settings::path()).unwrap(),
+                machine_before
+            );
+        }
+        // Missing shared settings must not make an OFF-only recovery depend
+        // on their unavailable migration lock. Preserve the legacy capacity.
+        let legacy = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 11,
+            max_active_agents: 7,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            ..Default::default()
+        };
+        let mut legacy_json = serde_json::to_value(&legacy).unwrap();
+        legacy_json["auto_apply_updates"] = serde_json::json!(false);
+        std::fs::write(&prefs_path, serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+        std::fs::remove_file(crate::machine_agent_settings::path()).unwrap();
+        let machine_lock = crate::machine_agent_settings::path().with_extension("lock");
+        std::fs::remove_file(&machine_lock).unwrap();
+        std::fs::create_dir(&machine_lock).unwrap();
+        let token = legacy.config_token();
+        for (expected, max_active, succeeds) in [
+            ("stale-token", None, false),
+            (token.as_str(), Some(4), false),
+            (token.as_str(), None, true),
+        ] {
+            std::fs::remove_file(tmp.path().join("quota-hold.sock")).unwrap();
+            let before = std::fs::read(&prefs_path).unwrap();
+            let (stop, server) = spawn_quota_hold_clear_daemon(
+                tmp.path(),
+                env.repo_path(),
+                gwt_core::daemon::DaemonFrame::Error {
+                    message:
+                        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                            .into(),
+                },
+                "config_set_if_matches",
+            );
+            out.clear();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorConfigSet {
+                    expected_config_token: Some(expected.to_string()),
+                    allowed_labels: None,
+                    project_root: None,
+                    enabled: Some(false),
+                    autonomous_mode: None,
+                    max_active,
+                    max_active_auto: false,
+                    auto_close_merged_issues: None,
+                    launch_agent: None,
+                    update_drain: None,
+                },
+                &mut out,
+            );
+            stop.store(true, Ordering::Release);
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            if expected == "stale-token" {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR));
+            }
+            assert!(!crate::machine_agent_settings::path().exists());
+            if succeeds {
+                let saved = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+                assert!(!saved.enabled);
+                assert_eq!(saved.effect_authority_epoch, 12);
+                assert_eq!(saved.max_active_agents, 7);
+                assert_eq!(saved.max_active_agents_mode, legacy.max_active_agents_mode);
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+                assert_eq!(raw["auto_apply_updates"], false);
+            } else {
+                assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
     fn issue_monitor_config_set_falls_back_safely_when_daemon_is_absent() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -20267,7 +20517,7 @@ command = "my-agent-cli"
     }
 
     /// Issue #3961: a fake daemon that owns the control lane and answers one
-    /// `quota_hold_clear` publish with `reply` without touching the prefs —
+    /// control publish with `reply` without touching the prefs —
     /// the shape of a daemon that predates the control (rejects) and of one
     /// that acknowledges without adopting the release.
     #[cfg(unix)]
@@ -20275,6 +20525,7 @@ command = "my-agent-cli"
         tmp: &Path,
         repo: &Path,
         reply: gwt_core::daemon::DaemonFrame,
+        expected_control: &'static str,
     ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
         let scope = gwt_core::daemon::RuntimeScope::from_project_root(
             repo,
@@ -20348,7 +20599,10 @@ command = "my-agent-cli"
                     channel,
                     crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
                 );
-                assert_eq!(payload["payload"]["quota_hold_clear"]["provider"], "codex");
+                assert!(payload["payload"].get(expected_control).is_some());
+                if expected_control == "quota_hold_clear" {
+                    assert_eq!(payload["payload"][expected_control]["provider"], "codex");
+                }
                 writeln!(
                     writer,
                     "{}",
@@ -20380,6 +20634,7 @@ command = "my-agent-cli"
             gwt_core::daemon::DaemonFrame::Error {
                 message: "unknown Issues control".to_string(),
             },
+            "quota_hold_clear",
         );
 
         let mut env = crate::cli::TestEnv::new(repo);
@@ -20427,8 +20682,12 @@ command = "my-agent-cli"
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         let seed = seed_codex_quota_hold(&prefs_path);
-        let (stop, server) =
-            spawn_quota_hold_clear_daemon(tmp.path(), &repo, gwt_core::daemon::DaemonFrame::Ack);
+        let (stop, server) = spawn_quota_hold_clear_daemon(
+            tmp.path(),
+            &repo,
+            gwt_core::daemon::DaemonFrame::Ack,
+            "quota_hold_clear",
+        );
 
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
