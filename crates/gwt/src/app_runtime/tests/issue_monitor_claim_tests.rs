@@ -1,7 +1,17 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
-fn insert_monitored_update_pane(runtime: &mut AppRuntime, id: &str) {
+/// The returned guard pins the GUI control budget for the calling test thread:
+/// these fixtures assert the committed drain outcome through a real daemon ACK,
+/// not how fast a loaded runner answers within the 200ms hot-path deadline.
+#[must_use = "the control budget pin is released when the guard drops"]
+fn insert_monitored_update_pane(
+    runtime: &mut AppRuntime,
+    id: &str,
+) -> gwt_core::deadline_budget::ScopedDeadlineBudget {
+    let control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::ISSUE_MONITOR_CONTROL_BUDGET,
+    );
     let root = runtime
         .tab(&runtime.window_lookup[id].tab_id)
         .unwrap()
@@ -17,6 +27,7 @@ fn insert_monitored_update_pane(runtime: &mut AppRuntime, id: &str) {
     runtime.test_project_owners.insert(root, owner);
     insert_test_pane_runtime(runtime, id);
     runtime.runtimes.get_mut(id).unwrap().status = WindowProcessStatus::Starting;
+    control_budget
 }
 
 fn committed_update_status_events(runtime: &mut AppRuntime, root: &Path) -> Vec<OutboundEvent> {
@@ -3474,7 +3485,7 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
-    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
 
     let mut events = runtime.update_staged_events_with("99.0.0", None);
     events.extend(committed_update_status_events(&mut runtime, &repo));
@@ -3545,7 +3556,7 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
-    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.rebuild_window_lookup();
@@ -3607,7 +3618,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
-    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let seed = || {
         gwt::save_issue_monitor_prefs(
@@ -3784,7 +3795,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
-    insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
         user_events
             .lock()
