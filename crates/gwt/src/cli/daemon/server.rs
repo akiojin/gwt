@@ -19808,10 +19808,13 @@ exit 0
 
     #[test]
     fn daemon_scan_hands_unmet_acceptance_to_a_human_instead_of_closing() {
-        // Issue #3917 AC-2 / AC-6: unchecked criteria → comment + needs_human.
+        // Manual mode retains Issue #3917's comment + needs_human contract.
         with_settlement_scan_fixture(
             "settle_unmet",
-            delivered_prefs(true),
+            crate::IssueMonitorPrefs {
+                auto_close_merged_issues: Some(true),
+                ..delivered_prefs(false)
+            },
             |_, prefs_path, mut monitor| {
                 let effect = settlement_effect(&monitor).expect("unmet criteria still settle");
                 assert!(
@@ -19856,7 +19859,7 @@ exit 0
     }
 
     #[test]
-    fn daemon_scan_records_a_stale_close_as_unmet_acceptance() {
+    fn daemon_scan_requeues_when_a_close_becomes_stale() {
         with_settlement_scan_fixture(
             "settle_close",
             delivered_prefs(true),
@@ -19875,7 +19878,7 @@ exit 0
                 ));
                 assert_eq!(
                     monitor.inbox_item(43).map(|item| item.state),
-                    Some(crate::MonitorInboxState::NeedsHuman)
+                    Some(crate::MonitorInboxState::Queued)
                 );
             },
         );
@@ -19883,7 +19886,7 @@ exit 0
 
     #[test]
     fn daemon_scan_keeps_delegated_unchecked_acceptance_open() {
-        // Issue #5126: delegation prose never substitutes for checked AC.
+        // Delegation prose cannot close unchecked AC; Auto continues the work.
         with_settlement_scan_fixture(
             "settle_delegated",
             delivered_prefs(true),
@@ -19894,7 +19897,7 @@ exit 0
                         effect.payload,
                         crate::IssueMonitorEffectPayload::SettleMergedIssue {
                             issue_number: 43,
-                            action: crate::MergedIssueSettlementAction::UnmetAcceptance { .. },
+                            action: crate::MergedIssueSettlementAction::ContinueWork { .. },
                             ..
                         }
                     ),
@@ -19914,8 +19917,12 @@ exit 0
                 ));
                 assert_eq!(
                     monitor.inbox_item(43).map(|item| item.state),
-                    Some(crate::MonitorInboxState::NeedsHuman)
+                    Some(crate::MonitorInboxState::Queued)
                 );
+                assert!(monitor.prefs().closure_records.iter().all(|record| {
+                    record.issue_number != 43
+                        || record.state != crate::issue_monitor::IssueClosureState::Closed
+                }));
             },
         );
     }
