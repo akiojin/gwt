@@ -1468,6 +1468,14 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    /// Admission ignores inactive automatic drains and the staged version's
+    /// host-wide defer. Saved configuration remains available for diagnostics.
+    pub(crate) fn effective_update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
+        self.update_drain
+            .as_ref()
+            .filter(|drain| drain.is_effective(self.enabled, self.autonomous_mode))
+    }
+
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1514,8 +1522,8 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
-    /// Resolve only selected people with the primary's fixed tool. Exact queue
-    /// and delivery pins wait when unavailable instead of changing their owner.
+    /// Automatic reservations keep the primary's fixed tool. Explicit choices
+    /// and exact deliveries use their selected member's own registered tool.
     pub fn registered_launch_profiles_for_issue(
         &self,
         issue_number: u64,
@@ -1527,20 +1535,33 @@ impl IssueMonitorPrefs {
         else {
             return pool;
         };
-        let tool = normalize_issue_monitor_provider(&primary.agent_id);
         let host = crate::process::current_hostname();
-        let scheduled = self
+        let delivery_member = self
             .pending_launch_deliveries
             .iter()
             .find(|delivery| delivery.issue_number == issue_number)
-            .and_then(|delivery| delivery.agent_member_id.as_deref())
-            .or_else(|| {
-                self.agent_issue_schedule
-                    .reservations
-                    .iter()
-                    .find(|entry| entry.issue_number == issue_number && entry.host_id == host)
-                    .map(|entry| entry.agent_member_id.as_str())
-            });
+            .and_then(|delivery| delivery.agent_member_id.as_deref());
+        let reservation = self
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
+        let scheduled =
+            delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
+        let explicit_member = delivery_member.or_else(|| {
+            reservation
+                .filter(|entry| entry.reason == AgentScheduleReason::AssignedByYou)
+                .map(|entry| entry.agent_member_id.as_str())
+        });
+        let tool = normalize_issue_monitor_provider(
+            &explicit_member
+                .and_then(|id| {
+                    pool.iter()
+                        .find(|profile| profile.agent_member_id.as_deref() == Some(id))
+                })
+                .unwrap_or(primary)
+                .agent_id,
+        );
         pool.iter()
             .filter(|profile| {
                 normalize_issue_monitor_provider(&profile.agent_id) == tool
@@ -3673,6 +3694,17 @@ pub struct IssueMonitorUpdateDrain {
     pub blocking: Vec<crate::update_drain::UpdateBlocker>,
 }
 
+impl IssueMonitorUpdateDrain {
+    fn is_effective(&self, enabled: bool, autonomous_mode: bool) -> bool {
+        self.reason != IssueMonitorUpdateDrainReason::Auto
+            || !self.automatic.unwrap_or(autonomous_mode)
+            || (enabled
+                && !gwt_core::update::load_pending_update_manifest().is_some_and(|pending| {
+                    pending.version == self.version && pending.auto_apply_deferred
+                }))
+    }
+}
+
 /// Issue #3906 AC-3: how a `config_set` control asks for the drain.
 /// `true` / `false` (the #4037 operator form) raise a `Manual` drain stamped
 /// with the running gwt version or clear it; the object form lets the update
@@ -4772,6 +4804,16 @@ pub fn select_launch_profile(
         .filter(|profile| profile.agent_member_id.is_some())
         .and_then(|profile| normalize_issue_monitor_provider(&profile.agent_id));
     for (index, profile) in pool.iter().enumerate() {
+        if !gwt_agent::resolve_agent_id(&profile.agent_id)
+            .is_some_and(|agent| agent.supports_monitor_initial_prompt())
+        {
+            selection.skipped.push(LaunchProfileSkip {
+                index,
+                agent_id: profile.agent_id.clone(),
+                reason: "Unsupported initial prompt delivery; select Claude Code, Codex, Grok Build, or Hermes".into(),
+            });
+            continue;
+        }
         let provider = normalize_issue_monitor_provider(&profile.agent_id);
         if fixed_tool
             .as_ref()
@@ -9846,6 +9888,16 @@ impl IssueMonitorState {
             {
                 return false;
             }
+        } else if !self.launch_profiles.is_empty() {
+            let pool = self
+                .prefs()
+                .registered_launch_profiles_for_issue(issue_number);
+            if select_launch_profile(&pool, &self.provider_quota_holds, &[], None, now)
+                .selected
+                .is_none()
+            {
+                return false;
+            }
         }
         let held_provider = self
             .autonomous_records
@@ -11269,6 +11321,9 @@ impl IssueMonitorState {
     pub(crate) fn max_active_agents_policy(
         &self,
     ) -> (Option<usize>, Option<IssueMonitorMaxActiveChange>) {
+        if let Some(policy) = &self.roster_machine_policy {
+            return (policy.manual_limit, policy.last_change.clone());
+        }
         (
             self.max_active_agents_override(),
             self.max_active_last_change.clone(),
@@ -11478,6 +11533,15 @@ impl IssueMonitorState {
     pub fn record_control_commit_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
         self.launch_auth_required = false;
+    }
+
+    /// A failed write may change its diagnostic without changing scan inputs.
+    /// Compare all other state, including transient recovery markers that the
+    /// routine observation compatibility check intentionally does not compare.
+    pub(crate) fn scan_inputs_unchanged_after_failed_control(&self, mut previous: Self) -> bool {
+        previous.last_error = self.last_error.clone();
+        previous.launch_auth_required = self.launch_auth_required;
+        self == &previous
     }
 
     pub(crate) fn record_authority_recovery_blocked(&mut self, error: impl Into<String>) {
@@ -12275,8 +12339,7 @@ impl IssueMonitorState {
                 let record =
                     self.permission_readiness_block_for_launch(delivery.issue_number, &now);
                 (record.is_some()
-                    || (self.launch_auto
-                        && !self.retry_ready_for_saved_profile(delivery.issue_number, &now)))
+                    || !self.retry_ready_for_saved_profile(delivery.issue_number, &now))
                 .then_some((delivery.issue_number, record))
             })
             .collect::<BTreeMap<_, _>>();
@@ -12492,11 +12555,13 @@ impl IssueMonitorState {
         } else {
             None
         };
+        let registered = self
+            .prefs()
+            .registered_launch_profiles_for_issue(issue_number);
         let profile = if self.launch_auto {
             &automatic.as_ref()?.profile
         } else {
-            self.launch_profiles
-                .get(select(&self.launch_profiles).selected?)?
+            registered.get(select(&registered).selected?)?
         };
         let agent_id = gwt_agent::resolve_agent_id(&profile.agent_id)?;
         let custom_agent = match &agent_id {
@@ -14747,7 +14812,7 @@ impl IssueMonitorState {
     }
 
     fn launch_admission_hold_at(&self, now: &str) -> Option<IssueMonitorStallReason> {
-        if self.update_drain.is_some() {
+        if self.update_drain().is_some() {
             Some(IssueMonitorStallReason::UpdateDrain)
         } else if self.saved_profile_provider_is_held_at(now) {
             Some(IssueMonitorStallReason::QuotaHold)
@@ -14792,9 +14857,11 @@ impl IssueMonitorState {
         None
     }
 
-    /// Issue #4037 AC-1: the update drain, if raised.
+    /// The admission-effective drain. Saved configuration is retained in prefs.
     pub fn update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
-        self.update_drain.as_ref()
+        self.update_drain
+            .as_ref()
+            .filter(|drain| drain.is_effective(self.config.enabled, self.autonomous_mode))
     }
 
     /// Issue #4037 AC-1 / AC-3: raise the update drain. Only admission changes;
@@ -14817,7 +14884,7 @@ impl IssueMonitorState {
         now: &str,
         automatic: Option<bool>,
     ) {
-        if self.update_drain.is_some() {
+        if self.update_drain().is_some() {
             return;
         }
         self.update_drain = Some(IssueMonitorUpdateDrain {
@@ -15001,6 +15068,7 @@ impl IssueMonitorState {
         quota_hold: Option<IssueMonitorProviderQuotaHold>,
     ) -> IssueMonitorStatusView {
         let last_error = self.selected_status_error().map(|(message, _)| message);
+        let update_drain = self.update_drain();
         // Issue #5321 AC-3: Issue failures remain diagnostic history, while
         // only a current monitor fault makes the whole monitor read as Error.
         let has_current_error = self.scan_recovery_error.is_some()
@@ -15057,7 +15125,7 @@ impl IssueMonitorState {
                 "auth_required".to_string()
             } else if quota_hold.is_some() {
                 "quota_hold".to_string()
-            } else if self.update_drain.is_some() {
+            } else if update_drain.is_some() {
                 "update_drain".to_string()
             } else if self.active_count() > 0 {
                 if self
@@ -15086,8 +15154,8 @@ impl IssueMonitorState {
             other_terminal_queue_count,
             active_count: self.active_count(),
             max_active_agents: self.effective_max_active_agents(),
-            max_active_agents_override: self.max_active_agents_override(),
-            max_active_last_change: self.max_active_last_change.clone(),
+            max_active_agents_override: self.max_active_agents_policy().0,
+            max_active_last_change: self.max_active_agents_policy().1,
             agent_capacity: self.agent_capacity.clone(),
             total_candidates: self.inbox.len(),
             active_issue_number: self.active_issue_number(),
@@ -15106,11 +15174,8 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             quota_hold,
             github_budget: None,
-            update_drain: self.update_drain.clone(),
-            update_drain_release: self
-                .update_drain
-                .as_ref()
-                .map(|_| UPDATE_DRAIN_RELEASE_OPERATION.to_string()),
+            update_drain: update_drain.cloned(),
+            update_drain_release: update_drain.map(|_| UPDATE_DRAIN_RELEASE_OPERATION.to_string()),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
             effective_launch_profile: self.effective_launch_profile_at(now),
             provider_quota_holds: self.active_provider_quota_holds_at(now),
@@ -15382,8 +15447,8 @@ impl IssueMonitorState {
             pending_claim_issues: Some(self.pending_claim_issue_numbers().into_iter().collect()),
             active_launches_incomplete: false,
             max_active: self.effective_max_active_agents(),
-            max_active_agents_override: self.max_active_agents_override(),
-            max_active_last_change: self.max_active_last_change.clone(),
+            max_active_agents_override: status.max_active_agents_override,
+            max_active_last_change: status.max_active_last_change.clone(),
             agent_capacity: self.agent_capacity.clone(),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
@@ -18607,7 +18672,7 @@ impl IssueMonitorState {
 
     pub fn set_terminal_queue_auto_refill(&mut self, enabled: bool, limit: usize) {
         self.terminal_queue_auto_refill = enabled;
-        self.terminal_queue_auto_refill_limit = limit;
+        self.terminal_queue_auto_refill_limit = if enabled && limit == 0 { 3 } else { limit };
     }
 
     fn retire_completed_terminal_queue(&mut self) {
@@ -31276,6 +31341,49 @@ mod tests {
     }
 
     #[test]
+    fn initial_prompt_unsupported_profiles_are_skipped_before_claim() {
+        let now = "2026-11-08T00:00:00Z";
+        let unsupported = test_launch_profile("openclaw");
+        let hermes = test_launch_profile("hermes");
+        let pool = vec![unsupported.clone(), hermes.clone()];
+        let selection = select_launch_profile(&pool, &BTreeMap::new(), &[], None, now);
+        assert_eq!(selection.selected, Some(1));
+        assert!(selection.skipped[0].reason.contains("initial prompt"));
+
+        for launch_auto in [false, true] {
+            let mut prefs = IssueMonitorPrefs {
+                enabled: true,
+                launch_auto,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_tiers: vec![vec![unsupported.clone()]],
+                ..IssueMonitorPrefs::default()
+            };
+            prefs.set_launch_profile_pool(vec![unsupported.clone()]);
+            let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[42], "test", now);
+            monitor.record_candidate(issue(42));
+            assert!(!monitor.retry_ready_for_saved_profile(42, now));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", now, 1, |_| false),
+                0
+            );
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert_eq!(monitor.attempt_count(42), 0);
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.pending_effects().is_empty());
+
+            monitor.set_launch_profile_pool(vec![hermes.clone()]);
+            monitor.launch_tiers = vec![vec![hermes.clone()]];
+            assert!(monitor.retry_ready_for_saved_profile(42, now));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", now, 1, |_| false),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn select_launch_profile_skips_held_candidates() {
         let pool = vec![test_launch_profile("codex"), test_launch_profile("claude")];
         let now = "2026-08-22T03:00:00Z";
@@ -31776,6 +31884,39 @@ mod tests {
             serde_json::from_str(r#"{"enabled":true,"max_active_agents":2,"priority_order":[]}"#)
                 .expect("pre-#4037 prefs load");
         assert!(legacy.update_drain.is_none());
+
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        crate::update_settings::set(Some(true)).unwrap();
+        let paused = IssueMonitorPrefs {
+            autonomous_mode: true,
+            update_drain: Some(IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: now.into(),
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(true),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let mut restored = test_monitor_with_prefs(Default::default(), paused.clone());
+        restored.set_allowed_labels(vec!["backend".into()]);
+        assert_eq!(
+            restored.prefs().update_drain,
+            paused.update_drain,
+            "unrelated settings must preserve the disabled monitor's raw drain"
+        );
+        assert!(restored.update_drain().is_none());
+        assert!(restored.status_view_at(now).update_drain.is_none());
+        let mut observer = test_monitor(Default::default());
+        observer.rebase_daemon_driver_prefs(&restored.prefs());
+        assert_eq!(observer.prefs().update_drain, paused.update_drain);
+        assert!(observer.update_drain().is_none());
+        observer.set_enabled(true);
+        assert_eq!(
+            observer.update_drain(),
+            paused.update_drain.as_ref(),
+            "re-enabling restores admission without recreating the saved drain"
+        );
     }
 
     /// Issue #4037 AC-2: while the drain is raised, no launch is handed out
@@ -32867,7 +33008,7 @@ mod tests {
             None,
             "2026-08-22T02:01:00Z",
         );
-        assert!(unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
+        assert!(!unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
         assert_eq!(unsupported.pending_launch_delivery_id(43), None);
         assert!(!unsupported.active_issue_numbers().contains(&43));
         assert_eq!(unsupported.attempt_count(43), 1);
@@ -32905,12 +33046,11 @@ mod tests {
             ),
             0
         );
-        let blocked = unsupported.inbox_item(43).unwrap();
-        assert_eq!(blocked.state, MonitorInboxState::NotReady);
-        let reason = blocked.exclusion_reason.as_deref().unwrap();
-        for expected in ["pre_launch_block", "openclaw", "Recovery:"] {
-            assert!(reason.contains(expected), "{reason}");
-        }
+        assert_eq!(
+            unsupported.inbox_item(43).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(unsupported.attempt_count(43), 1);
 
         monitor.try_hold_provider_usage_limit(
             42,
@@ -44616,9 +44756,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("issue-monitor.json");
         fs::write(&path, b"original").expect("seed canonical bytes");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
-        );
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         let error = super::durable_atomic_write(&path, b"replacement")
             .expect_err("expired deadline must reject the canonical rename");
@@ -45934,6 +46074,20 @@ mod tests {
             row.last_activity_at.as_deref(),
             Some("2026-06-29T01:00:00Z")
         );
+    }
+
+    #[test]
+    fn failed_control_comparison_preserves_transient_recovery_fences() {
+        let mut baseline = IssueMonitorState::new(IssueMonitorConfig::default());
+        baseline.unbound_wait_lifecycle_ends.insert(42);
+        let mut failed = baseline.clone();
+        failed.record_control_commit_error("writer budget expired");
+        assert!(failed.scan_inputs_unchanged_after_failed_control(baseline.clone()));
+
+        failed.unbound_wait_lifecycle_ends.clear();
+        assert_eq!(failed.prefs(), baseline.prefs());
+        assert!(failed.scan_observations_compatible_with(&baseline, "2026-11-06T00:00:00Z"));
+        assert!(!failed.scan_inputs_unchanged_after_failed_control(baseline));
     }
 
     #[test]
@@ -50091,7 +50245,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let now = "2026-10-05T19:10:00Z";
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
         monitor.set_update_drain_with_origin(
             IssueMonitorUpdateDrainReason::Auto,
             "9.110.0",
@@ -50142,6 +50299,50 @@ mod tests {
         assert!(
             legacy_manual.update_drain().is_some(),
             "a legacy manual-click drain honors its project's explicit auto-apply OFF"
+        );
+
+        let payload = temp.path().join("staged-gwt");
+        fs::write(&payload, b"staged payload").unwrap();
+        gwt_core::update::persist_pending_update_manifest(
+            &gwt_core::update::PendingUpdateManifest {
+                version: "9.110.0".into(),
+                asset_url: "https://example.invalid/update".into(),
+                payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+                downloaded_at: now.into(),
+                origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+                auto_apply_deferred: true,
+            },
+        )
+        .unwrap();
+        let manual_prefs = legacy_manual.prefs();
+        assert!(
+            manual_prefs.effective_update_drain().is_some(),
+            "Apply after agents finish raises a manual drain before resuming its deferred manifest"
+        );
+        let mut scheduled = test_monitor_with_prefs(Default::default(), manual_prefs.clone());
+        scheduled.rebase_daemon_driver_prefs(&manual_prefs);
+        assert!(scheduled.update_drain().is_some());
+        assert!(scheduled.status_view_at(now).update_drain.is_some());
+        let mut automatic = manual_prefs;
+        automatic.enabled = true;
+        automatic.update_drain.as_mut().unwrap().automatic = Some(true);
+        crate::update_settings::set(Some(true)).unwrap();
+        let mut resumed = test_monitor_with_prefs(Default::default(), automatic.clone());
+        assert_eq!(resumed.prefs().update_drain, automatic.update_drain);
+        assert!(
+            resumed.update_drain().is_none(),
+            "automatic defer still releases admission"
+        );
+        resumed.set_update_drain_with_origin(
+            IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            now,
+            Some(false),
+        );
+        assert_eq!(
+            resumed.update_drain().and_then(|drain| drain.automatic),
+            Some(false),
+            "an explicit manual schedule replaces a deferred automatic hold"
         );
 
         monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.110.0", now);

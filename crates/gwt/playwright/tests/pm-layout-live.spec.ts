@@ -50,6 +50,7 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
     await expect(page.locator('#op-pm-entry')).toHaveAttribute('data-pm-state', 'stopped');
     await page.locator('#op-pm-entry').click();
     const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+    await pane.getByRole('button', { name: 'Reports', exact: true }).click();
     const card = pane.getByRole('region', { name: 'PM status', exact: true });
     await expect(card).toBeVisible({ timeout: 30_000 });
     await expect(pane.locator('.pm-chat__message')).toHaveCount(6);

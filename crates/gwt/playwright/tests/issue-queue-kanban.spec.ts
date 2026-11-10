@@ -46,6 +46,47 @@ const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-is
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
 
+test("Issue #6880 artifact diagnostics recover to queued without a requeue request", async ({ page }, info) => {
+  const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6880_PROJECTION;
+  test.skip(!projectionPath, "Requires the projections emitted by the Issue #6880 Rust regression test");
+  const body = readFileSync(projectionPath!, "utf8");
+  const snapshots = JSON.parse(body);
+  await info.attach("artifact-readiness-projections", { body, contentType: "application/json" });
+  expect(snapshots).toHaveLength(3);
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 42, state: "open", labels: ["gwt-spec"], related_work_refs: [],
+      title: "Reposted multipart SPEC artifacts" }]);
+  });
+  const reasons: string[] = [];
+  for (const [index, snapshot] of snapshots.entries()) {
+    const item = snapshot.inbox[0];
+    expect(item.issue.number).toBe(42);
+    expect(item.state).toBe(index < 2 ? "not_ready" : "queued");
+    const reason = item.exclusion_reason;
+    await page.evaluate(snapshot => {
+      const fixture = window as any;
+      fixture.__queueConfirm(snapshot.status.queue, snapshot.status.gui_status || {});
+      fixture.__queueInbox(snapshot.inbox);
+    }, snapshot);
+    const card = row(page, 42);
+    await expect(card).toBeVisible();
+    await expect(card.locator(".knowledge-row-badge")).toHaveText(index < 2 ? "Not ready" : "Queued");
+    if (index < 2) {
+      expect(reason).toBeTruthy();
+      await expect(card).toContainText(reason);
+      reasons.push(reason);
+    } else {
+      await expect(column(page, "queued").locator('[data-issue-number="42"]')).toBeVisible();
+      for (const previous of reasons) await expect(card).not.toContainText(previous);
+    }
+  }
+  expect(await messages(page)).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([]);
+});
+
 test("Issue #6690 delivered open parent waits without an Agent failed badge", async ({ page }, info) => {
   const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6690_PROJECTION;
   test.skip(!projectionPath, "Requires the normalized projection emitted by the Issue #6690 Rust regression test");
@@ -396,7 +437,7 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
     await expect(statusPill).toHaveAttribute("data-tone", tone);
   }
   await root.locator('[data-action="monitor-diagnostics"]').click();
-  await expect(page.locator('[data-error-key="issue-monitor:last_error"]')).toContainText("Fixture current failure");
+  await expect(page.locator('.notification-center__item[data-error-key^="issue-monitor:"]').filter({ hasText: "Fixture current failure" })).toContainText("Fixture current failure");
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await page.evaluate(() => (window as any).__queueStatus({ state: "idle", last_error: null, active_count: 0, queue_len: 0 }));
   await expect(statusPill).toHaveText("Waiting · Empty");

@@ -37,7 +37,7 @@ mod platform {
         path::Path,
         ptr::NonNull,
         sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::Notify;
 
@@ -217,13 +217,35 @@ mod platform {
         }
 
         pub fn arm(&self, issued_at: u64, expires_at: u64, now: u64) -> io::Result<()> {
+            self.arm_until(issued_at, expires_at, now, None)
+        }
+
+        /// Cap acceptance at the absolute registration deadline as well as the
+        /// device/session expiry. Sampling the raw clock first makes conversion
+        /// conservative even if this thread pauses before sampling Instant.
+        pub fn arm_until(
+            &self,
+            issued_at: u64,
+            expires_at: u64,
+            now: u64,
+            registration_deadline: Option<Instant>,
+        ) -> io::Result<()> {
             if now < issued_at || now >= expires_at {
                 return Err(refused());
             }
-            let deadline = (expires_at - now)
+            let raw_before = monotonic_ns()?;
+            let mut deadline = (expires_at - now)
                 .checked_mul(1_000_000_000)
-                .and_then(|remaining| monotonic_ns().ok()?.checked_add(remaining))
+                .and_then(|remaining| raw_before.checked_add(remaining))
                 .ok_or_else(refused)?;
+            if let Some(registration_deadline) = registration_deadline {
+                let remaining = registration_deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or_else(refused)?;
+                let remaining = u64::try_from(remaining.as_nanos()).map_err(|_| refused())?;
+                deadline = deadline.min(raw_before.checked_add(remaining).ok_or_else(refused)?);
+            }
             // Exactly one caller may publish deadline fields; a failed re-arm
             // must never overwrite the bounds seen by the native process.
             self.arm_started
@@ -348,7 +370,10 @@ mod platform {
             }
         }
 
-        fn check_time_and_host(&self) -> io::Result<()> {
+        fn check_time_and_host(
+            &self,
+            clock: &impl Fn() -> io::Result<(u64, u64)>,
+        ) -> io::Result<()> {
             // A matching PID/birth may still describe a zombie. Only a live
             // creator descriptor holds this exclusive lease. The owner's
             // independent open uses a nonblocking query and holds no lease.
@@ -360,13 +385,10 @@ mod platform {
                 }
                 Err(_) => return Err(refused()),
             }
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| refused())?
-                .as_secs();
+            let (now, monotonic) = clock()?;
             if now < self.mapping.time(ISSUED).load(Ordering::Relaxed)
                 || now >= self.mapping.time(EXPIRES).load(Ordering::Relaxed)
-                || monotonic_ns()? >= self.mapping.time(DEADLINE).load(Ordering::Relaxed)
+                || monotonic >= self.mapping.time(DEADLINE).load(Ordering::Relaxed)
                 || crate::process::host_process_start_time(self.reference.host_pid)
                     != Some(self.reference.host_birth)
             {
@@ -378,17 +400,76 @@ mod platform {
         /// Call only with the physical writer held and all owner identity,
         /// pane/Session and payload checks satisfied. This CAS is acceptance.
         pub fn accept(&self) -> io::Result<()> {
+            self.accept_with_clock(&|| {
+                Ok((
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| refused())?
+                        .as_secs(),
+                    monotonic_ns()?,
+                ))
+            })
+        }
+
+        fn accept_with_clock(&self, clock: &impl Fn() -> io::Result<(u64, u64)>) -> io::Result<()> {
             if self.mapping.state().load(Ordering::Acquire) != ARMED {
                 return Err(refused());
             }
-            self.check_time_and_host()?;
+            self.check_time_and_host(clock)?;
             self.mapping
                 .state()
                 .compare_exchange(ARMED, ACCEPTED, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| refused())?;
             // A late expiry or observed creator death cannot authorize a write.
             // Acceptance remains consumed; callers never retry this operation.
-            self.check_time_and_host()
+            self.check_time_and_host(clock)
+        }
+    }
+
+    #[cfg(test)]
+    mod registration_deadline_tests {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn registration_deadline_caps_the_actual_owner_acceptance() {
+            let wall = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let permit = NativeInputPermit::new().unwrap();
+            let owner = permit.reference().open().unwrap();
+            let before = monotonic_ns().unwrap();
+            permit
+                .arm_until(
+                    wall,
+                    wall + 300,
+                    wall,
+                    // test-hygiene: allow-wall-clock-deadline Exercises production Instant-to-kernel-clock conversion; expiry is checked with the injected owner clock, never by sleeping.
+                    Some(Instant::now() + Duration::from_secs(30)),
+                )
+                .unwrap();
+            let cap = owner.mapping.time(DEADLINE).load(Ordering::Relaxed);
+            assert!(cap > before);
+            assert!(cap <= monotonic_ns().unwrap() + 30_000_000_000);
+            assert!(
+                owner.accept_with_clock(&|| Ok((wall, cap))).is_err(),
+                "lease boundary must reject without a Host recheck"
+            );
+            assert_eq!(owner.mapping.state().load(Ordering::Acquire), ARMED);
+            owner.accept().unwrap();
+            assert!(owner.accept().is_err());
+            let elapsed = NativeInputPermit::new().unwrap();
+            assert!(elapsed
+                .arm_until(
+                    wall,
+                    wall + 300,
+                    wall,
+                    // test-hygiene: allow-wall-clock-deadline A past Instant deterministically rejects arming; no real-time deadline is awaited.
+                    Some(Instant::now() - Duration::from_secs(1))
+                )
+                .is_err());
+            assert!(elapsed.reference().open().unwrap().accept().is_err());
         }
     }
 }
@@ -414,6 +495,19 @@ mod platform {
         pub fn reference(&self) -> NativeInputPermitRef {
             unreachable!("unsupported permits cannot be created")
         }
+        pub fn arm_until(
+            &self,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: Option<std::time::Instant>,
+        ) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "native mobile input requires Unix shared atomics",
+            ))
+        }
+
         pub fn arm(&self, _: u64, _: u64, _: u64) -> io::Result<()> {
             Err(unsupported())
         }

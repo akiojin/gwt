@@ -695,7 +695,10 @@ fn capture_monitor_preflight_rejection(
                 && handoff.delivered_at.is_none()
         })
         .cloned();
-    if !error.contains("provider_unauthenticated")
+    let preparation_exhausted =
+        error == gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED;
+    if !(preparation_exhausted && handoff.is_none())
+        && !error.contains("provider_unauthenticated")
         && !(handoff.is_some()
             && error == "answered autonomous handoff native conversation is unavailable or foreign")
     {
@@ -711,6 +714,7 @@ fn capture_monitor_preflight_rejection(
     Some(Box::new(
         gwt::project_runtime::events::OwnerMonitorLaunchRejection {
             operation_id: uuid::Uuid::new_v4().to_string(),
+            preparation_exhausted,
             expected_delivery: Some(Box::new(delivery.clone())),
             expected_profile: prefs
                 .effective_launch_tiers()
@@ -754,6 +758,7 @@ fn capture_monitor_answer_profile_expectation(
     Some(Box::new(
         gwt::project_runtime::events::OwnerMonitorLaunchRejection {
             operation_id: uuid::Uuid::new_v4().to_string(),
+            preparation_exhausted: false,
             expected_delivery: None,
             expected_profile: prefs
                 .effective_launch_tiers()
@@ -3908,7 +3913,7 @@ impl AppRuntime {
                 self.project_execution_admission(&context, &[format!("issue:{issue_number}")])
             })
         {
-            tracing::info!(issue_number, %reason, "Monitor materialization withheld by Project execution policy");
+            tracing::warn!(issue_number, %reason, "Monitor materialization withheld by Project execution policy");
             return Vec::new();
         }
         self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
@@ -4168,6 +4173,67 @@ impl AppRuntime {
         events
     }
 
+    fn observe_accepted_issue_monitor_materialization(
+        &mut self,
+        context: &super::ProjectContext,
+        request: &super::DeferredIssueMonitorLaunch,
+        window_id: &str,
+        started_at: std::time::Instant,
+        accepted_owner: &gwt::daemon_subscriber::ProjectOwnerIdentity,
+    ) -> Vec<OutboundEvent> {
+        let delivery_id = request.delivery_id.as_deref().expect("accepted delivery");
+        if self
+            .runtimes
+            .get(window_id)
+            .is_some_and(|runtime| &runtime.owner_identity == accepted_owner)
+        {
+            // The owner may already have committed readiness while the GUI
+            // retained its placeholder. Ask that exact owner, without adopting
+            // a different pane or creating a second launch.
+            return self.issue_monitor_launch_completed_delivery_events(
+                &request.project_root,
+                request.issue_number,
+                window_id,
+                Some(delivery_id),
+            );
+        }
+        if self.has_pending_agent_launch_worker(window_id) {
+            return Vec::new();
+        }
+        let elapsed = started_at.elapsed();
+        if elapsed < super::ISSUE_MONITOR_MATERIALIZING_TTL {
+            tracing::debug!(target: "gwt.launch.timing", issue_number = request.issue_number,
+                %delivery_id, %window_id, elapsed_ms = elapsed.as_millis(),
+                reason = "accepted owner projection pending", "Issue Monitor observation deferred");
+            return Vec::new();
+        }
+        let Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+            observation_error_reported,
+            ..
+        }) = self.issue_monitor_launch_deliveries.get_mut(delivery_id)
+        else {
+            return Vec::new();
+        };
+        if std::mem::replace(observation_error_reported, true) {
+            return Vec::new();
+        }
+        tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
+            %delivery_id, %window_id, elapsed_ms = elapsed.as_millis(),
+            ?accepted_owner, current_owner = ?self.project_state(context)
+                .and_then(|state| state.project_owner_identity.as_ref()),
+            window_exists = self.tracked_window_exists(window_id),
+            reason = "accepted owner projection unavailable within materialization budget",
+            "Issue Monitor owner observation failed; accepted launch retained");
+        self.issue_monitor_control_error_events(
+            Some(&request.project_root), None,
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "Issue #{}: accepted owner projection is unavailable after the {}s materialization budget; observation failed, the owner launch is retained",
+                request.issue_number, super::ISSUE_MONITOR_MATERIALIZING_TTL.as_secs(),
+            )),
+            "owner-materialization-observation", Some(request.issue_number),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
         &mut self,
@@ -4180,6 +4246,9 @@ impl AppRuntime {
         queue_head: bool,
     ) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context_for_root(project_root) else {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = delivery_id.as_deref().unwrap_or("none"),
+                reason = "project context unavailable", "Issue Monitor preparation deferred");
             return Vec::new();
         };
         let request = super::DeferredIssueMonitorLaunch {
@@ -4190,12 +4259,18 @@ impl AppRuntime {
             launch_session_strategy,
         };
         if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
+                reason = "startup generation reaper pending", "Issue Monitor preparation deferred");
             deferred.push(request);
             return Vec::new();
         }
         // A reserved writer has not started its replacement Pane yet. Keep
         // this delivery pending instead of acknowledging the prior runtime.
         if self.issue_monitor_issue_launch_pending(&context, issue_number, linked_issue_kind) {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
+                reason = "another launch worker owns this Issue", "Issue Monitor preparation deferred");
             self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
@@ -4209,6 +4284,7 @@ impl AppRuntime {
                     window_id,
                     started_at,
                     accepted_owner,
+                    ..
                 }) => {
                     // A missing GUI row does not retire the owner's immutable operation.
                     // Unknown health is not evidence of a replacement owner either.
@@ -4217,7 +4293,13 @@ impl AppRuntime {
                             .and_then(|state| state.project_owner_identity.as_ref())
                             .is_none_or(|current| current == accepted)
                     }) {
-                        return Vec::new();
+                        return self.observe_accepted_issue_monitor_materialization(
+                            &context,
+                            &request,
+                            &window_id,
+                            started_at,
+                            accepted_owner.as_ref().expect("accepted owner"),
+                        );
                     }
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
@@ -4230,6 +4312,8 @@ impl AppRuntime {
                         && (live_runtime
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
+                        tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id, %window_id,
+                            reason = "existing materialization still active", "Issue Monitor preparation deferred");
                         return Vec::new();
                     }
                 }
@@ -4254,13 +4338,18 @@ impl AppRuntime {
                         .schedule_issue_monitor_launch_failure(context, request, message, None);
                 }
                 Some(super::IssueMonitorLaunchDeliveryState::Rejecting { .. }) => {
-                    return Vec::new()
+                    tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id,
+                        reason = "owner preflight rejection pending", "Issue Monitor preparation deferred");
+                    return Vec::new();
                 }
                 _ => {}
             }
         }
         let key = issue_monitor_launch_preparation_key(&context, &request);
         if self.issue_monitor_launch_preparations.contains(&key) {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
+                reason = "same delivery preparation already registered", "Issue Monitor preparation deferred");
             return Vec::new();
         }
         if self.issue_monitor_launch_lane_busy(&context)
@@ -4270,9 +4359,25 @@ impl AppRuntime {
                         && self.project_context_is_current(&pending.context)
                 }))
         {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
+                reason = "project preparation lane or earlier queued delivery pending", "Issue Monitor preparation deferred");
             self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
+        // A replay must converge even if GUI application never reaches the owner.
+        // A new durable delivery (the normal requeue operation) gets a new budget.
+        let preparation_exhausted = if request.delivery_id.is_some() {
+            let attempts = self
+                .issue_monitor_launch_attempts
+                .entry(key.clone())
+                .or_default();
+            let exhausted = *attempts >= 3;
+            *attempts = attempts.saturating_add(1);
+            exhausted
+        } else {
+            false
+        };
         self.issue_monitor_launch_preparations.insert(key.clone());
         let cache = self.launch_wizard_cache.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -4295,6 +4400,21 @@ impl AppRuntime {
             let mut phase_started = std::time::Instant::now();
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
             let prefs = gwt::load_issue_monitor_prefs(&prefs_path).ok();
+            if preparation_exhausted {
+                let error = gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED;
+                tracing::error!(target: "gwt.launch.timing", issue_number,
+                    delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = error,
+                    "Issue Monitor full preparation budget exhausted");
+                let rejection = prefs.as_ref().and_then(|prefs|
+                    capture_monitor_preflight_rejection(&request, prefs, &sessions_dir, error));
+                proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(IssueMonitorLaunchPrepared {
+                    context, request, prefs_stamp: None, provider_usage,
+                    delivery: PreparedIssueMonitorDelivery { result: Err(error.into()), claim: None,
+                        admission: None, existing_window: None, answered_handoff_pending: false, autonomous_mode: false },
+                    source_facts: None, revalidated: false, rejection,
+                })));
+                return;
+            }
             let existing_window = prefs.as_ref().and_then(|prefs| {
                 let delivery = prefs.pending_launch_deliveries.iter().find(|delivery| {
                     delivery.issue_number == issue_number && Some(&delivery.delivery_id) == request.delivery_id.as_ref()
@@ -4479,7 +4599,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|runtime| {
                     runtime.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,
@@ -4614,6 +4734,9 @@ impl AppRuntime {
                 receipt
             }
             Err(error) => {
+                tracing::error!(target: "gwt.launch.timing", issue_number = completion.issue_number,
+                    delivery_id = completion.delivery_id.as_deref().unwrap_or("none"), reason = %error,
+                    "Issue Monitor owner could not settle preflight rejection");
                 if let Some(delivery_id) = completion.delivery_id.as_ref() {
                     self.issue_monitor_launch_deliveries.remove(delivery_id);
                 }
@@ -4628,7 +4751,11 @@ impl AppRuntime {
                     },
                 )];
             }
-            _ => return Vec::new(),
+            _ => {
+                tracing::error!(target: "gwt.launch.timing", issue_number = completion.issue_number,
+                    reason = "preflight receipt operation changed", "Issue Monitor rejection receipt discarded");
+                return Vec::new();
+            }
         };
         if let Some(delivery_id) = completion.delivery_id.as_ref() {
             self.issue_monitor_launch_deliveries.remove(delivery_id);
@@ -4665,6 +4792,9 @@ impl AppRuntime {
         error: String,
         _failed_attempt: Option<gwt::AutonomousHandoffDeliveryAttempt>,
     ) -> Vec<OutboundEvent> {
+        tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
+            delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
+            "Issue Monitor launch did not reach an owner pane");
         self.issue_monitor_launch_preparations
             .remove(&issue_monitor_launch_preparation_key(&context, &request));
         if let Some(delivery_id) = request.delivery_id {
@@ -4725,6 +4855,9 @@ impl AppRuntime {
         let key = issue_monitor_launch_preparation_key(&context, &request);
         let registered = self.issue_monitor_launch_preparations.remove(&key);
         if !self.project_context_is_current(&context) {
+            tracing::warn!(target: "gwt.launch.timing", issue_number = correlation_issue_number,
+                delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"),
+                reason = "project context changed", "Issue Monitor prepared launch discarded");
             if let Some(attempt) = delivery.unsubmitted_handoff_attempt() {
                 return self.schedule_issue_monitor_launch_failure(
                     context,
@@ -4736,6 +4869,9 @@ impl AppRuntime {
             return Vec::new();
         }
         if !registered {
+            tracing::warn!(target: "gwt.launch.timing", issue_number = correlation_issue_number,
+                delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"),
+                reason = "preparation registration missing", "Issue Monitor prepared launch discarded");
             return Vec::new();
         }
         if let Some(rejection) = rejection {
@@ -4887,7 +5023,7 @@ impl AppRuntime {
                     } else {
                         String::new()
                     };
-                    tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_revalidate", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), admission_stale, prefs_changed, provider_changed, changed_prefs_keys = %changed_prefs_keys, thread = "worker", "Issue Monitor launch facts re-evaluated against newer inputs");
+                    tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_revalidate", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), admission_stale, prefs_changed, provider_changed, changed_prefs_keys = %changed_prefs_keys, thread = "worker", "Issue Monitor launch facts re-evaluated against newer inputs");
                     let mut started = std::time::Instant::now();
                     revalidate_issue_monitor_launch_prepared(
                         &mut refreshed,
@@ -4929,7 +5065,7 @@ impl AppRuntime {
                     } else {
                         String::new()
                     };
-                    tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, revalidated, changed_prefs_keys = %changed_prefs_keys, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issue Monitor launch facts require revalidation");
+                    tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, revalidated, changed_prefs_keys = %changed_prefs_keys, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issue Monitor launch facts require revalidation");
                 });
             });
             let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)
@@ -4975,11 +5111,17 @@ impl AppRuntime {
             .issue_monitor_tab_id_for_project_root(project_root)
             .and_then(|id| self.project_context(&id))
         else {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = delivery_id.as_deref().unwrap_or("none"),
+                reason = "project tab unavailable", "Issue Monitor launch deferred before spawn");
             return Vec::new();
         };
         // Issue #4378 AC-2: hold deliveries until the startup generation
         // reaper reports back, so a launch never races a stale generation.
         if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = delivery_id.as_deref().unwrap_or("none"),
+                reason = "startup generation reaper pending", "Issue Monitor launch deferred before spawn");
             deferred.push(super::DeferredIssueMonitorLaunch {
                 project_root: project_root.to_path_buf(),
                 issue_number,
@@ -4998,6 +5140,9 @@ impl AppRuntime {
                     && delivery.unsubmitted_handoff_attempt().is_none()
             })
         {
+            tracing::warn!(target: "gwt.launch.timing", issue_number,
+                delivery_id = delivery_id.as_deref().unwrap_or("none"),
+                reason = "another launch worker owns this Issue", "Issue Monitor launch deferred before spawn");
             let reusable = prepared
                 .as_ref()
                 .and_then(|delivery| delivery.reusable_fresh_launch(launch_session_strategy));
@@ -5026,13 +5171,26 @@ impl AppRuntime {
                     window_id,
                     started_at,
                     accepted_owner,
+                    ..
                 }) => {
                     if accepted_owner.as_ref().is_some_and(|accepted| {
                         self.project_state(&context)
                             .and_then(|state| state.project_owner_identity.as_ref())
                             .is_none_or(|current| current == accepted)
                     }) {
-                        return Vec::new();
+                        return self.observe_accepted_issue_monitor_materialization(
+                            &context,
+                            &super::DeferredIssueMonitorLaunch {
+                                project_root: project_root.to_path_buf(),
+                                issue_number,
+                                linked_issue_kind,
+                                delivery_id: Some(delivery_id.to_string()),
+                                launch_session_strategy,
+                            },
+                            &window_id,
+                            started_at,
+                            accepted_owner.as_ref().expect("accepted owner"),
+                        );
                     }
                     let window_exists = self.tracked_window_exists(&window_id);
                     // A live preparation or its queued completion still owns
@@ -5050,6 +5208,8 @@ impl AppRuntime {
                             || live_runtime
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
+                        tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id, %window_id,
+                            reason = "existing materialization still active", "Issue Monitor launch deferred before spawn");
                         return Vec::new();
                     }
                     self.issue_monitor_launch_deliveries.remove(delivery_id);
@@ -5118,7 +5278,9 @@ impl AppRuntime {
                     return events;
                 }
                 Some(super::IssueMonitorLaunchDeliveryState::Rejecting { .. }) => {
-                    return Vec::new()
+                    tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id,
+                        reason = "owner preflight rejection pending", "Issue Monitor launch deferred before spawn");
+                    return Vec::new();
                 }
                 None => {}
             }
@@ -5192,6 +5354,9 @@ impl AppRuntime {
                 recovery_events
             }
             Ok(None) => {
+                tracing::warn!(target: "gwt.launch.timing", issue_number,
+                    delivery_id = delivery_id.as_deref().unwrap_or("none"),
+                    reason = "launch profile unavailable; configuration required", "Issue Monitor did not spawn");
                 if self.launch_wizard_for(&context).is_some() {
                     recovery_events.push(OutboundEvent::project(
                         context.project_key.clone(),
@@ -5306,6 +5471,14 @@ impl AppRuntime {
         target_branch: &str,
     ) -> Option<String> {
         self.issue_agent_windows_matching(tab_id, issue_number, target_branch, |window_id| {
+            // Persisted layout/hook state cannot acknowledge a delivery. Only an
+            // installed owner projection can supply the fenced adoption RPC.
+            if !self.runtimes.contains_key(window_id) {
+                tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
+                    reason = "persisted pane has no owner runtime for adoption",
+                    "Issue Monitor ignores unconnected pane metadata");
+                return false;
+            }
             self.issue_monitor_window_is_live(window_id)
         })
         .into_iter()
@@ -6108,9 +6281,13 @@ impl AppRuntime {
                 }
                 // A materializing window reserves the native writer identity
                 // but is not yet a conversation that can accept an answer.
+                tracing::warn!(target: "gwt.launch.timing", issue_number, %holder_window_id,
+                    reason = "answer holder has not published its Session", "Issue Monitor answer delivery deferred");
                 return Ok((Some(Vec::new()), None));
             }
             let Some(runtime) = self.runtimes.get(&holder_window_id) else {
+                tracing::warn!(target: "gwt.launch.timing", issue_number, %holder_window_id,
+                    reason = "answer holder has no connected owner runtime", "Issue Monitor answer delivery deferred");
                 return Ok((Some(Vec::new()), None));
             };
             let client = runtime.client.clone();
@@ -6123,6 +6300,8 @@ impl AppRuntime {
             if matches!(self.issue_monitor_launch_deliveries.get(&local_delivery_key),
                 Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. }) if window_id == &holder_window_id)
             {
+                tracing::warn!(target: "gwt.launch.timing", issue_number, %holder_window_id,
+                    reason = "exact answer delivery already materializing", "Issue Monitor answer delivery deferred");
                 return Ok((Some(Vec::new()), None));
             }
             self.issue_monitor_launch_deliveries.insert(
@@ -6131,6 +6310,7 @@ impl AppRuntime {
                     window_id: holder_window_id.clone(),
                     started_at: std::time::Instant::now(),
                     accepted_owner: None,
+                    observation_error_reported: false,
                 },
             );
             let proxy = self.proxy.clone();

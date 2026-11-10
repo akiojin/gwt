@@ -1139,6 +1139,7 @@ impl OwnerState {
                     })).collect())
                 },
             ).map_err(|error| tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start owner Monitor runtime reconciliation")).ok();
+            state.start_initial_gui_attach_grace();
             let shutdown_replies = state.run(receiver);
             drop(_monitor_reconciler);
             #[cfg(windows)]
@@ -1149,6 +1150,11 @@ impl OwnerState {
             }
         });
         handle
+    }
+    fn start_initial_gui_attach_grace(&mut self) {
+        // Startup recovery and name migration may outlast the attach budget.
+        // Begin the unchanged GUI grace only when attachment can be served.
+        self.gui_presence = GuiPresence::new(self.gui_presence.intent(), std::time::Instant::now());
     }
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
         let mut continue_active = false;
@@ -1591,7 +1597,9 @@ impl OwnerState {
                     if self.stopping
                         && matches!(
                             request.command,
-                            OwnerCommand::Health | OwnerCommand::Close { .. }
+                            OwnerCommand::Health
+                                | OwnerCommand::Close { .. }
+                                | OwnerCommand::PendingCancelExact { .. }
                         ) =>
                 {
                     if let OwnerMessage::Request(request, reply) = message {
@@ -9767,6 +9775,20 @@ impl OwnerState {
         if self.exact(&id, incarnation).is_err() {
             return;
         }
+        // The EOF reader can deliver a pre-exit Running snapshot after the
+        // independent status worker has recorded the physical exit.
+        if raw_status == crate::WindowProcessStatus::Running
+            && !exit_confirmed
+            && self.runtimes.get(&id).is_some_and(|runtime| {
+                runtime
+                    .pane
+                    .lock()
+                    .ok()
+                    .is_some_and(|pane| pane.last_exit().is_some())
+            })
+        {
+            return;
+        }
         // Capture current ownership before terminal status revokes its writer.
         // Only the registered PM's actual nonzero exit can bypass the generic
         // Agent recovery latch; a read error or replacement grants no such cause.
@@ -10709,6 +10731,8 @@ fn retire_unspawned_launch_runtime(
                         || captured.source_event.is_some()
                         || captured.active_tool_calls.is_some()
                         || captured.last_completed_hook_event_at.is_some()
+                        || captured.last_completed_hook_outcome.is_some()
+                        || captured.current_hook_event.is_some()
                         || captured.pending_discussion.is_some()
                         || std::fs::read(&path)? != *expected
                     {
@@ -10774,6 +10798,8 @@ fn finish_agent_session(
             },
             |session| {
                 let path = gwt_agent::runtime_state_path(sessions_dir, &session.id);
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
                 let mut runtime = gwt_agent::SessionRuntimeState::load(&path)?;
                 let child_pid = pty
                     .process_id()
@@ -10797,14 +10823,30 @@ fn finish_agent_session(
                         "unbound Session physical proof changed before close",
                     ));
                 }
+                drop(_publication);
+                drop(writer);
                 if !crate::session_finalizer::kill_and_reap(pty, id)
                     .map_err(|error| std::io::Error::other(error.to_string()))?
                 {
                     return Err(std::io::Error::other("agent process tree did not exit"));
                 }
+                let writer = gwt_agent::session::runtime_writer_lease(&path)?;
+                let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
+                let latest = gwt_agent::SessionRuntimeState::load(&path)?;
+                if latest.execution_identity != runtime.execution_identity
+                    || latest.runtime_incarnation != runtime.runtime_incarnation
+                    || latest.host_started_at != runtime.host_started_at
+                    || latest.child_pid != runtime.child_pid
+                    || latest.child_started_at != runtime.child_started_at
+                {
+                    return Err(std::io::Error::other(
+                        "unbound runtime changed during close",
+                    ));
+                }
+                runtime = latest;
                 runtime.status = gwt_agent::AgentStatus::Stopped;
                 runtime.updated_at = chrono::Utc::now();
-                runtime.save(&path)?;
+                writer.save(&runtime)?;
                 session.update_status(gwt_agent::AgentStatus::Stopped);
                 if let Some(receipt) = exit_receipt {
                     session.record_process_exit(receipt);
@@ -10915,7 +10957,7 @@ fn publish_repaired_inspection_runtime(
                         std::process::id(),
                         &source.id,
                     );
-                    let _writer = gwt_agent::session::runtime_writer_lease(&path)
+                    let writer = gwt_agent::session::runtime_writer_lease(&path)
                         .map_err(|error| error.to_string())?;
                     let _publication = gwt_agent::session::runtime_publication_lease(&path)
                         .map_err(|error| error.to_string())?;
@@ -10943,7 +10985,7 @@ fn publish_repaired_inspection_runtime(
                         );
                     }
                     proof.execution_identity = Some(identity);
-                    proof.save(&path).map_err(|error| error.to_string())
+                    writer.save(&proof).map_err(|error| error.to_string())
                 })
                 .ok_or("legacy repair Active bearer changed before runtime publication")??;
             Ok(snapshot)
@@ -11660,6 +11702,47 @@ mod tests {
             state.project_execution_status(None).effective_state,
             "stopped"
         );
+    }
+
+    #[test]
+    fn confirmed_exit_rejects_late_running_without_blocking_live_recovery() {
+        use crate::WindowState::{Error, Running};
+
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut state, _receiver, _handle) = owner_fixture(temp.path());
+        let (_, pane) = unbound_fixture(temp.path());
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let pty = state.runtimes["pane"].pty.clone();
+
+        state.owner_status_event("pane".into(), 1, Error, Some("read error".into()), false);
+        state.owner_status_event("pane".into(), 1, Running, None, false);
+        assert_eq!(OwnerState::runtime_status(&state.runtimes["pane"]), Running);
+
+        pty.kill().unwrap();
+        pty.wait().unwrap();
+        state.runtimes["pane"]
+            .pane
+            .lock()
+            .unwrap()
+            .check_status()
+            .unwrap();
+        state.owner_status_event("pane".into(), 1, Error, Some("physical exit".into()), false);
+        let mut events = state.events.subscribe();
+
+        // The reader copied Running before the independent exit worker ran,
+        // but its delivery reaches the owner after physical exit was recorded.
+        state.owner_status_event("pane".into(), 1, Running, None, false);
+        let retained = &state.runtimes["pane"];
+        assert_eq!(OwnerState::runtime_status(retained), Error);
+        assert!(Arc::ptr_eq(&retained.pty, &pty));
+        assert_eq!(retained.detail.as_deref(), Some("physical exit"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -12606,6 +12689,89 @@ mod tests {
         assert_eq!(closed.agent_name, edited.agent_name);
         assert_eq!(closed.status, gwt_agent::AgentStatus::Stopped);
         assert!(!closed.restore_window_on_startup);
+    }
+
+    #[tokio::test]
+    async fn initial_gui_attach_grace_starts_when_owner_serves_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        // Model startup recovery consuming the initial grace without waiting.
+        state.gui_presence = GuiPresence::new(
+            gwt_core::daemon::DaemonStartIntent::GuiManaged,
+            // test-hygiene: allow-wall-clock-deadline Injects an expired startup timestamp; no wall-clock wait or elapsed-time verdict.
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+        );
+        let actor = thread::spawn(move || {
+            state.start_initial_gui_attach_grace();
+            run_fixture_owner(state, receiver);
+        });
+        let attached = handle.attach_gui().await;
+        handle.shutdown().await;
+        actor.join().unwrap();
+        assert!(
+            attached.is_ok(),
+            "startup recovery must not consume the first GUI attachment budget: {attached:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_owner_accepts_only_original_exact_launch_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        // Keep the real mailbox available until the captured completion arrives.
+        state.stopping = true;
+        state.input_jobs = 1;
+        let id = format!("{}::cancel-before-admission", state.project_key);
+        let operation_id = "shutdown-launch-race".to_string();
+        let launch = OwnerCommand::LaunchAgent {
+            id: id.clone(),
+            operation_id: operation_id.clone(),
+            tab_id: "project".into(),
+            config: Box::new(
+                gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Custom("fixture".into()))
+                    .working_dir(root.path())
+                    .build(),
+            ),
+            metadata: Box::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let expected_request = serde_json::to_value(&launch).unwrap();
+        let actor = thread::spawn(move || run_fixture_owner(state, receiver));
+        let refused_launch = handle.request(request(launch)).await;
+        let invalid = handle
+            .request(request(OwnerCommand::PendingCancelExact {
+                id: id.clone(),
+                operation_id: "another-operation".into(),
+                expected_request: expected_request.clone(),
+            }))
+            .await;
+        let cancelled = handle
+            .request(request(OwnerCommand::PendingCancelExact {
+                id: id.clone(),
+                operation_id: operation_id.clone(),
+                expected_request,
+            }))
+            .await;
+        let (reply, _) = oneshot::channel();
+        handle
+            .sender
+            .send(OwnerMessage::InputWritten {
+                reply,
+                result: Ok(None),
+            })
+            .ok()
+            .unwrap();
+        actor.join().unwrap();
+        assert!(
+            refused_launch.is_err(),
+            "shutdown cannot admit a new launch"
+        );
+        assert!(invalid.is_err(), "exact request identity must still match");
+        let receipt = cancelled.expect("draining owner must acknowledge exact cleanup");
+        assert_eq!(receipt["cancelled"], true);
+        assert_eq!(receipt["id"], id);
+        assert_eq!(receipt["operation_id"], operation_id);
     }
 
     #[tokio::test]

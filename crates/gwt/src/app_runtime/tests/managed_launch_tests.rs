@@ -3067,6 +3067,70 @@ fn managed_bound_resume_source(
     (owner, source, config)
 }
 
+/// Issue #6890 AC-2: a cleared restore attribution must survive real launch preparation.
+#[test]
+fn automatic_restore_without_monitor_owner_does_not_recover_predecessor_authority() {
+    use gwt::project_runtime::{events::OwnerCommand, test_support::OwnerLaunchStage};
+
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _custom = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);
+    let (owner, mut source, _) = managed_bound_resume_source(temp.path());
+    source.restore_window_on_startup = true;
+    source
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save exact automatic restore source");
+    let id = owner.pane_id("unattributed-restore");
+    let checkpoint = owner_fixture_block_on(
+        owner.pause_next_agent_launch_at(OwnerLaunchStage::MaterializedBeforeInstall),
+    )
+    .unwrap();
+
+    let (receipt, materialized) = owner_fixture_block_on(async {
+        tokio::join!(
+            owner.command(OwnerCommand::RestoreSavedSession {
+                id: id.clone(),
+                operation_id: "unattributed-automatic-restore".into(),
+                source_session_id: source.id.clone(),
+                expected_source: Box::new(source.clone()),
+                origin: gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+                cols: 80,
+                rows: 24,
+            }),
+            async {
+                // test-hygiene: allow-wall-clock-deadline hang guard for the actual owner materialization checkpoint
+                let evidence = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait())
+                    .await
+                    .unwrap();
+                checkpoint.release();
+                evidence
+                    .session
+                    .expect("actual materialized restore Session")
+            }
+        )
+    });
+    let receipt = receipt.unwrap();
+    let pane =
+        owner_fixture_block_on(owner.probe(&id, receipt["incarnation"].as_u64().unwrap())).unwrap();
+    let running = pane.session.as_ref().unwrap().clone();
+    pane_control_tests::control_close(&owner, &pane);
+    let exited = pane.pty.tree_exit_confirmed();
+    owner_fixture_block_on(Arc::try_unwrap(owner).ok().unwrap().shutdown());
+
+    assert!(
+        exited,
+        "the restored child must be reaped before assertions"
+    );
+    for session in [&materialized, &running] {
+        assert_eq!(session.linked_issue_number, None);
+        assert!(session.execution_binding.is_none());
+        assert_ne!(session.id, source.id);
+    }
+}
+
 #[test]
 fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retains_it() {
     use gwt::project_runtime::{
@@ -4617,7 +4681,22 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
         );
         if !live_hook {
             let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
-            return owner_monitor_read(&repo, 42);
+            return owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed control exit; observed state controls progress.
+                tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                    loop {
+                        owner.wait_monitor_idle().await.unwrap();
+                        let monitor = owner_monitor_read(&repo, 42);
+                        if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty()
+                        {
+                            break monitor;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the control exit must release and notify its Monitor slot")
+            });
         }
         let mut hook =
             runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);

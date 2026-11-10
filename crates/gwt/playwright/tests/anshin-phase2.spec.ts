@@ -7,31 +7,11 @@ const liveUrl = configuredUrl
   : undefined;
 const errors = new WeakMap<Page, string[]>();
 
-// SPEC-2356 Anshin Addendum — Phase 2 activity surfacing + mission convergence.
-//
-// Drives the embedded frontend against a deterministic WebSocket stub (mirroring
-// kill-switch.spec.ts / fleet-minimap.spec.ts) and asserts the FR-045 / FR-047
-// behaviours that the Phase 2 implementation added on the always-visible
-// surfaces (Fleet Minimap, Window Switcher, Status Strip):
-//
-//   - FR-047: the MISSION convergence cell (`#op-strip-mission`) shows
-//     `done/agents` and flips `.op-status-strip__cell--complete` once every
-//     agent has converged (done === agents > 0). Driven by emitting
-//     `window_state` transitions that map to telemetry `active` vs `done`.
-//   - FR-045: a window's `dynamic_title_detail` surfaces as the Fleet Minimap
-//     cell tooltip (`title` = "Title · detail")
-//     line inside the Window Switcher row.
-//
-// Runtime-state -> telemetry mapping used to seed `done` vs `active`
-// (mapAgentTelemetryState in window-runtime-state.js):
-//   - status/state "running"        -> telemetry "active"
-//   - window_state state "stopped"  -> telemetry "done" (also "exited")
-//   - "idle"/"ready"/unknown        -> telemetry "idle"
-// recomputeOperatorTelemetry counts every live agent pane (preset agent/claude/
-// codex) as `agents`, and increments `done` for each pane whose telemetry state
-// is "done".
+// SPEC #3340 AS-03: stopping agent processes is not a mission completion rate.
+// Keep this deterministic frontend fixture against either embedded routes or
+// the isolated checkout server, and assert both themes without browser errors.
 
-test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
+test.describe("Status Strip runtime telemetry", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
   test.beforeEach(async ({ page }, info) => {
     const captured: string[] = [];
@@ -45,42 +25,39 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
-  test("FR-047: MISSION cell trends done/agents and flips complete on convergence", async ({
-    page,
-  }) => {
+  test("AS-03: stopped agents never render a MISSION completion indicator", async ({ page }, info) => {
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installPhase2Backend(page);
     await page.goto(liveUrl || APP_URL);
 
-    // Three agent panes boot "running" -> telemetry active -> 0/3, not complete.
-    const mission = page.locator("#op-strip-mission");
-    const missionCell = page.locator(".op-status-strip__cell--mission");
-    await expect(mission).toHaveText("0/3", { timeout: 10_000 });
-    await expect(missionCell).not.toHaveClass(/op-status-strip__cell--complete/);
-
-    // Two agents finish (stopped -> telemetry done): in-progress 2/3, still not
-    // complete because one agent is still active.
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    await expect(page.locator("#op-strip-mission, .op-status-strip__cell--mission")).toHaveCount(0);
+    await expect(page.locator("#op-briefing")).toHaveCount(1);
     await page.evaluate(() => {
-      window.__emit({ kind: "window_state", window_id: "agent-1", state: "stopped" });
-      window.__emit({ kind: "window_state", window_id: "agent-2", state: "stopped" });
+      for (const id of ["agent-1", "agent-2", "agent-3"]) {
+        window.__emit({ kind: "window_state", window_id: id, state: "stopped" });
+      }
+      window.__emit({ kind: "active_work_projection", projection: {
+        id: "stopped-census", active_works: [], local_agent_activity: {
+          project_key: location.pathname.split("/").filter(Boolean).at(-1),
+          host_id: "mission-fixture", observed_at: new Date().toISOString(), agents: [],
+        },
+      } });
     });
-    await expect(mission).toHaveText("2/3");
-    await expect(missionCell).not.toHaveClass(/op-status-strip__cell--complete/);
-
-    // The last agent finishes -> every agent converged -> 3/3 + complete state.
-    await page.evaluate(() => {
-      window.__emit({ kind: "window_state", window_id: "agent-3", state: "stopped" });
+    await expect(page.locator("#op-strip-running")).toHaveText("0");
+    await expect(page.locator("#op-strip-idle")).toHaveText("0");
+    await expect(page.locator("#op-strip-mission, .op-status-strip__cell--complete")).toHaveCount(0);
+    await expect(page.locator("#op-strip-branches")).toBeVisible();
+    await info.attach("stopped-status-strip", {
+      body: await page.screenshot({ path: info.outputPath("stopped-status-strip.png") }), contentType: "image/png",
     });
-    await expect(mission).toHaveText("3/3");
-    await expect(missionCell).toHaveClass(/op-status-strip__cell--complete/);
   });
 
 
 });
 
 // Deterministic backend: a single project tab with three canvas agent panes.
-// agent-3 carries a live activity detail (dynamic_title_detail) for the FR-045
-// surfaces; all three feed the FR-047 MISSION convergence count.
+// All three initially have live children in the host census.
 async function installPhase2Backend(page) {
   await page.addInitScript(() => {
     window.__sent = [];
@@ -132,6 +109,7 @@ async function installPhase2Backend(page) {
               id: "tab-1",
               title: "Anshin Phase 2 Fixture",
               project_root: "/fixture",
+              project_key: location.pathname.split("/").filter(Boolean).at(-1),
               kind: "git",
               workspace: {
                 viewport: { x: 0, y: 0, zoom: 1 },
@@ -169,6 +147,13 @@ async function installPhase2Backend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit({ kind: "active_work_projection", projection: {
+            id: "running-census", active_works: [], local_agent_activity: {
+              project_key: location.pathname.split("/").filter(Boolean).at(-1),
+              host_id: "mission-fixture", observed_at: new Date().toISOString(),
+              agents: windows.map(w => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: 1, is_pm: false, issue_number: null })),
+            },
+          } });
         }, 0);
       }
 
@@ -203,7 +188,7 @@ async function installPhase2Backend(page) {
     }
 
     // Lets a test push backend events (bare window_state transitions) directly,
-    // mirroring exactly what the daemon sends when an agent finishes / errors /
+    // mirroring exactly what the daemon sends when an agent stops / errors /
     // starts waiting while keeping its window (no workspace_state follows).
     window.__emit = (payload) => {
       if (socketRef) socketRef.emit(payload);

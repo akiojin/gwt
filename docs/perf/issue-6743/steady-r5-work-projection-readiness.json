@@ -1,0 +1,46 @@
+{
+  "ready": true,
+  "source": "full active_work_projection after hook-health aggregation",
+  "source_captured_at": "2026-11-04T21:17:27.780Z",
+  "expected_work_id_count": 1752,
+  "frontier_required": true,
+  "observed_work_id_count": 1752,
+  "missing_work_id_count": 0,
+  "missing_work_ids": [],
+  "active_work_rows": 897,
+  "received_at": "2026-11-04T21:20:24.586Z",
+  "expected_session_count": 5,
+  "matched_session_count": 5,
+  "matches": [
+    {
+      "work_id": "work-session-588947bb-7724-484e-9406-48b9b26381b1",
+      "session_id": "588947bb-7724-484e-9406-48b9b26381b1",
+      "worktree_root": "E:\\gwt\\work\\issue-6743\\target\\issue-5658-home-f6c58752d6e643ca8cb288e56f724ec9\\fixture\\idle-cpu-dark-0",
+      "hook_health_status": "needs_attention"
+    },
+    {
+      "work_id": "work-session-d891fc0c-a937-459e-bce6-29b0ece16dc4",
+      "session_id": "d891fc0c-a937-459e-bce6-29b0ece16dc4",
+      "worktree_root": "E:\\gwt\\work\\issue-6743\\target\\issue-5658-home-f6c58752d6e643ca8cb288e56f724ec9\\fixture\\idle-cpu-dark-1",
+      "hook_health_status": "needs_attention"
+    },
+    {
+      "work_id": "work-session-ab7b8065-5888-4624-bcb1-e598012b466d",
+      "session_id": "ab7b8065-5888-4624-bcb1-e598012b466d",
+      "worktree_root": "E:\\gwt\\work\\issue-6743\\target\\issue-5658-home-f6c58752d6e643ca8cb288e56f724ec9\\fixture\\idle-cpu-dark-2",
+      "hook_health_status": "needs_attention"
+    },
+    {
+      "work_id": "work-session-fe8c0a74-f630-4a18-8e78-1fc892f1099d",
+      "session_id": "fe8c0a74-f630-4a18-8e78-1fc892f1099d",
+      "worktree_root": "E:\\gwt\\work\\issue-6743\\target\\issue-5658-home-f6c58752d6e643ca8cb288e56f724ec9\\fixture\\idle-cpu-dark-3",
+      "hook_health_status": "needs_attention"
+    },
+    {
+      "work_id": "work-session-c8f8ca5c-c5a1-4dc6-a4ea-ee31bb89e95d",
+      "session_id": "c8f8ca5c-c5a1-4dc6-a4ea-ee31bb89e95d",
+      "worktree_root": "E:\\gwt\\work\\issue-6743\\target\\issue-5658-home-f6c58752d6e643ca8cb288e56f724ec9\\fixture\\idle-cpu-dark-4",
+      "hook_health_status": "needs_attention"
+    }
+  ]
+}

@@ -283,6 +283,17 @@ impl ProjectOwnerHarness {
         })
         .await
         .map_err(|error| error.to_string())??;
+        if with_monitor {
+            // test-hygiene: allow-wall-clock-deadline Bound the real fixture startup barrier; observe its initial scan before routing.
+            tokio::time::timeout(
+                gwt_core::deadline_budget::HANG_GUARD,
+                fixture.wait_monitor_idle(),
+            )
+            .await
+            .map_err(|_| {
+                "fixture Monitor startup did not complete its initial scan".to_string()
+            })??;
+        }
         fixture.client = super::client::ProjectRuntimeClient::from_current_project(
             &root,
             &gwt_core::paths::gwt_home(),
@@ -367,11 +378,9 @@ impl ProjectOwnerHarness {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         if !with_monitor {
-            std::fs::write(
-                &fixture.endpoint_path,
-                serde_json::to_vec(&fixture.endpoint).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
+            // Startup persistence also discovers this endpoint concurrently.
+            gwt_core::daemon::persist_endpoint(&fixture.endpoint_path, &fixture.endpoint)
+                .map_err(|error| error.to_string())?;
         }
         Ok(fixture)
     }

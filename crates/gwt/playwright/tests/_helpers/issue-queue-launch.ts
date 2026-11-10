@@ -10,6 +10,9 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
+  issueNumber?: number;
+  additionalIssueNumbers?: number[];
+  monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
   prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
@@ -17,14 +20,16 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   const comments: { id: number; body: string; updated_at: string }[] = [];
   const requests: { method: string; url: string }[] = [];
   const issue = {
-    number: 43, title: "Queue launch fixture", state: "OPEN",
+    number: options.issueNumber ?? 43, title: "Queue launch fixture", state: "OPEN",
     body: "## Acceptance Criteria\n- [ ] AC-1: Record the provider handoff.",
     labels: [{ name: "bug" }, { name: "auto-improve" }],
-    url: "https://github.com/fixture/queue/issues/43",
+    url: `https://github.com/fixture/queue/issues/${options.issueNumber ?? 43}`,
     updatedAt: new Date().toISOString(),
   };
   const issues = [issue, ...(options.targetIssueNumber ? [{ ...issue, number: options.targetIssueNumber,
-    title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : [])];
+    title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : []),
+    ...(options.additionalIssueNumbers ?? []).map(number => ({ ...issue, number,
+      title: `Queue refill fixture ${number}`, url: `https://github.com/fixture/queue/issues/${number}` }))];
   const issueComments = new Map(issues.map(value => [value.number, value.number === issue.number ? comments : [] as typeof comments]));
   let nextCommentId = 1;
   const restIssue = (value: typeof issue) => ({ ...value, state: value.state.toLowerCase(), html_url: value.url,
@@ -141,6 +146,21 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       if (daemon.exitCode === null && daemon.signalCode === null) throw new Error(`Owned fixture daemon ${daemon.pid} remained after shutdown`);
     }
   }
+  async function startDaemon(project: string, env: NodeJS.ProcessEnv) {
+    daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+    let daemonErrors = "";
+    daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
+    daemon.stdin?.end(JSON.stringify({ schema_version: 1, operation: "daemon.start", params: {} }) + "\n");
+    const until = Date.now() + 30_000;
+    while (Date.now() < until) {
+      if (daemon.exitCode !== null || daemon.signalCode !== null) throw new Error(`Fixture daemon exited: ${daemonErrors}`);
+      const status = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 5_000, windowsHide: true,
+        input: JSON.stringify({ schema_version: 1, operation: "daemon.status", params: {} }) });
+      if (status.status === 0 && status.stdout.includes(String(daemon.pid))) return;
+      await delay(100);
+    }
+    throw new Error(`Fixture daemon readiness timed out: ${daemonErrors}`);
+  }
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
@@ -152,25 +172,14 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
         enabled: true, autonomous_mode: options.autonomousMode ?? false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
         launch_profile: { agent_id: "codex", version: "installed", runtime_target: "Host", skip_permissions: true },
+        ...options.monitorPreferences,
       },
       async beforeStart({ home, project, env, preferences }) {
         if (options.terminalConvergence)
           await writeFile(join(home, ".gwt/config.toml"), "[agent]\nterminal_close_grace_secs = 1\n");
         projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
-        daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
-        let daemonErrors = "";
-        daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
-        daemon.stdin?.end(JSON.stringify({ schema_version: 1, operation: "daemon.start", params: {} }) + "\n");
-        const until = Date.now() + 30_000;
-        while (Date.now() < until) {
-          if (daemon.exitCode !== null || daemon.signalCode !== null) throw new Error(`Fixture daemon exited: ${daemonErrors}`);
-          const status = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 5_000, windowsHide: true,
-            input: JSON.stringify({ schema_version: 1, operation: "daemon.status", params: {} }) });
-          if (status.status === 0 && status.stdout.includes(String(daemon.pid))) return;
-          await delay(100);
-        }
-        throw new Error(`Fixture daemon readiness timed out: ${daemonErrors}`);
+        await startDaemon(project, env);
       },
       async prepare({ home, bin, project, env }) {
         auditEnv = env;
@@ -358,6 +367,20 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return null;
   }
   return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
+    async restartRuntime(ownerPid: number) {
+      if (daemon?.pid !== ownerPid) throw new Error("Saved switch host is not the owned fixture daemon");
+      // Quiet GUI reconnects before replacing the physical owner. Provider
+      // cleanup runs only after that owner has stopped driving the switch.
+      await active.stopGui();
+      await stopDaemon();
+      await active.stop();
+      await startDaemon(active.project, auditEnv);
+      if (daemon?.pid === ownerPid) throw new Error("Fixture runtime owner was not replaced");
+      await info.attach("runtime-owner-restart", {
+        body: JSON.stringify({ previous_owner_pid: ownerPid, new_owner_pid: daemon?.pid }), contentType: "application/json",
+      });
+      return active.start();
+    },
     issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
     actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line)),

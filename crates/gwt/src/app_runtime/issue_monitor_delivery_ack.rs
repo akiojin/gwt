@@ -69,15 +69,23 @@ impl AppRuntime {
             return Vec::new();
         }
         let Some(address) = self.window_lookup.get(window_id) else {
+            tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
+                reason = "window lookup missing", "Issue Monitor cannot acknowledge pane");
             return Vec::new();
         };
         let Some(context) = self.project_context(&address.tab_id) else {
+            tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
+                reason = "project context missing", "Issue Monitor cannot acknowledge pane");
             return Vec::new();
         };
         if !super::same_worktree_path(&context.project_root, project_root) {
+            tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
+                reason = "project root changed", "Issue Monitor cannot acknowledge pane");
             return Vec::new();
         }
         let Some(runtime) = self.runtimes.get(window_id) else {
+            tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
+                reason = "owner runtime missing", "Issue Monitor cannot acknowledge pane");
             return Vec::new();
         };
         let identity = LaunchDeliveryAckIdentity {
@@ -120,12 +128,20 @@ impl AppRuntime {
             },
         );
         if let Some(delivery_id) = delivery_id {
-            self.issue_monitor_launch_deliveries.insert(
-                delivery_id.to_string(),
-                IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
-                    window_id: window_id.to_string(),
-                },
-            );
+            // An uncertain observation cannot discard the accepted owner epoch:
+            // replacement-owner recovery still needs its original start and identity.
+            let accepted = matches!(self.issue_monitor_launch_deliveries.get(delivery_id),
+                Some(IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id: pending, accepted_owner: Some(owner), ..
+                }) if pending == window_id && owner == &identity.owner_identity);
+            if !accepted {
+                self.issue_monitor_launch_deliveries.insert(
+                    delivery_id.to_string(),
+                    IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
+                        window_id: window_id.to_string(),
+                    },
+                );
+            }
         }
         let proxy = self.proxy.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {

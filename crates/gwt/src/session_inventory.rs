@@ -19,6 +19,7 @@ static RUNTIME_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLoc
 #[cfg(test)]
 thread_local! {
     static RUNTIME_PATH_STAMP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROJECT_CENSUS_CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn cached_runtime_entry(
@@ -376,7 +377,14 @@ pub struct ProjectSessionCensus {
 }
 
 impl ProjectSessionCensus {
+    #[cfg(test)]
+    pub(crate) fn captures_for_test() -> usize {
+        PROJECT_CENSUS_CAPTURES.with(std::cell::Cell::get)
+    }
+
     pub fn capture(sessions_dir: &Path) -> Self {
+        #[cfg(test)]
+        PROJECT_CENSUS_CAPTURES.with(|count| count.set(count.get().wrapping_add(1)));
         let mut inventory = SessionInventory::default();
         let mut snapshot = None;
         let candidates = read_candidates_scope_with_snapshot(
@@ -687,11 +695,16 @@ fn observe_candidate_resources(
     if require_host_absence {
         // Census absence alone does not authorize abandoning another Session.
         for candidate in &candidates {
-            if candidate
+            let host_identity_missing = candidate
                 .runtime
                 .host_started_at
                 .filter(|started| *started > 0)
-                .is_none()
+                .is_none();
+            if (host_identity_missing
+                || exact_host_identity(
+                    &candidate.runtime,
+                    resources.processes.get(&candidate.host_pid).copied(),
+                ))
                 && candidate
                     .runtime
                     .child_pid
@@ -703,7 +716,12 @@ fn observe_candidate_resources(
                 inventory.uncertain(
                     &candidate.path,
                     Some(&candidate.session.id),
-                    "host_identity_missing_for_recovery".to_string(),
+                    if host_identity_missing {
+                        "host_identity_missing_for_recovery"
+                    } else {
+                        "child_identity_missing"
+                    }
+                    .to_string(),
                 );
             }
         }
@@ -787,7 +805,7 @@ fn legacy_process_observations(
 }
 
 #[cfg(test)]
-fn observe_with_processes(
+pub(crate) fn observe_with_processes(
     project_root: &Path,
     sessions_dir: &Path,
     processes: &BTreeMap<u32, u64>,
@@ -874,7 +892,11 @@ fn historical_runtime(
                 .child_started_at
                 .filter(|expected| *expected > 0)
                 .is_some_and(|expected| expected != *started),
-            Some(_) => false,
+            Some(_) => {
+                runtime.status == gwt_agent::AgentStatus::Stopped
+                    && !processes.contains_key(&host_pid)
+                    && !group_alive(pid)
+            }
         };
     }
     !exact_direct_child && !exact_host_identity(runtime, processes.get(&host_pid).copied())
@@ -1147,6 +1169,23 @@ fn observe_candidates(
         runtime,
     } in candidates
     {
+        // A dead Host's stopped sidecar may name a recycled protected PID.
+        // Use the same historical check even without a saved child identity.
+        if runtime
+            .child_pid
+            .is_some_and(|pid| processes.get(&pid) == Some(&0))
+            && historical_runtime(
+                &runtime,
+                host_pid,
+                processes,
+                &group_alive,
+                legacy_processes.iter().any(|process| {
+                    process.parent_pid == host_pid && process.session_id == session.id
+                }),
+            )
+        {
+            continue;
+        }
         let child = runtime
             .child_pid
             .zip(runtime.child_started_at)
@@ -1189,10 +1228,10 @@ fn observe_candidates(
                         && (process.session_id.is_empty() || process.session_id == session.id)
                         && (!process.session_id.is_empty() || process.parent_may_be_host)
                 });
-            // A legacy namespace PID may now belong to an unrelated process.
-            // Require Host provenance or actual child evidence, not PID alone.
-            if exact_host_identity(&runtime, processes.get(&host_pid).copied())
-                || unidentified_child
+            // A shared live Host also owns stopped and not-yet-spawned
+            // Sessions. Census counts children; recovery fences the Host
+            // separately in observe_candidate_resources.
+            if unidentified_child
                 || runtime
                     .child_pid
                     .is_some_and(|pid| processes.contains_key(&pid) || group_alive(pid))
@@ -1449,8 +1488,8 @@ mod tests {
             .unwrap();
         let entry = std::fs::read_dir(temp.path())
             .unwrap()
-            .next()
-            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path() == path)
             .unwrap();
         let before_cold = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
         let first = cached_runtime_entry(&entry, &path).unwrap();
@@ -1809,6 +1848,35 @@ mod tests {
             |_| false,
             false
         ));
+        assert!(historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| false,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(100, 10), (201, 0)]),
+            |_| false,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| true,
+            false
+        ));
+        assert!(!historical_runtime(
+            &runtime,
+            100,
+            &BTreeMap::from([(201, 0)]),
+            |_| false,
+            true
+        ));
+        runtime.status = AgentStatus::Running;
         assert!(!historical_runtime(
             &runtime,
             100,
@@ -1816,6 +1884,7 @@ mod tests {
             |_| false,
             false
         ));
+        runtime.status = AgentStatus::Stopped;
         assert!(!historical_runtime(
             &runtime,
             100,
@@ -2312,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_live_host_without_child_identity_reports_uncertainty() {
+    fn live_host_without_any_child_does_not_make_the_census_uncertain() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions = temp.path().join("sessions");
         save_runtime(&sessions, temp.path(), temp.path(), "legacy", None);
@@ -2321,14 +2390,9 @@ mod tests {
                 false
             });
         assert!(observed.sessions.is_empty());
-        assert_eq!(
-            observed.uncertainties.len(),
-            1,
-            "unknown must not become a confident zero"
-        );
-        assert_eq!(
-            observed.uncertainties[0].session_id.as_deref(),
-            Some("legacy")
+        assert!(
+            observed.uncertainties.is_empty(),
+            "a shared Host alone is not a worker; Session recovery has its own Host fence"
         );
     }
 

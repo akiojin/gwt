@@ -227,10 +227,34 @@ fn structured_decisions_and_corrections_are_material_but_internal_actions_still_
         question: "Ship?".into(),
         recommendation: "Wait".into(),
         reason: "CI is red".into(),
-        options: vec!["Wait".into(), "Investigate".into()],
+        options: vec![
+            "Wait — preserve the current state".into(),
+            "Investigate — collect more evidence".into(),
+            "Retry — repeat the failed check".into(),
+            "Cancel — stop this attempt".into(),
+        ],
     });
+    for count in [1, 5] {
+        let mut invalid = input.clone();
+        invalid.events[0].summary.decision.as_mut().unwrap().options = vec!["Choice".into(); count];
+        assert!(post_submission(&repo, &invalid).is_err());
+        assert!(!reports_path(&repo).exists());
+    }
     let first = post_submission(&repo, &input).unwrap();
     assert_eq!(first.decisions[0].reason, PostingReason::Immediate);
+    assert_eq!(load_reports(&repo).unwrap(), first.reports);
+    assert_eq!(post_submission(&repo, &input).unwrap(), first);
+    for count in [2, 3] {
+        let mut compatible = input.clone();
+        compatible.events[0]
+            .summary
+            .decision
+            .as_mut()
+            .unwrap()
+            .options
+            .truncate(count);
+        compatible.validate().unwrap();
+    }
     input.request_id = "same-decision".into();
     input.events[0].expected_revision = 1;
     assert!(post_submission(&repo, &input).unwrap().reports.is_empty());

@@ -1256,6 +1256,35 @@ pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &st
             .is_ok_and(|(commits, _)| commits.is_empty())
 }
 
+/// A merged owner PR's receipt is inherited by a later verified HEAD when the
+/// PR head reaches that HEAD and every product commit between them is already
+/// contained in the configured base (`origin/<base>`): other owners' delivered
+/// work on a fresh startup HEAD is not undelivered source (#6893). Product
+/// commits that only the work branch holds still refuse the inheritance.
+pub(crate) fn inherits_delivered_receipt(
+    worktree: &Path,
+    merged_head: &str,
+    verified: &str,
+    base_ref_name: &str,
+) -> bool {
+    if base_ref_name.trim().is_empty() {
+        return false;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", merged_head, verified])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && super::pr::head_check::product_changes_since(
+            &worktree,
+            merged_head,
+            verified,
+            &format!("origin/{}", base_ref_name.trim()),
+        )
+        .is_ok_and(|(commits, _)| commits.is_empty())
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],
@@ -6319,6 +6348,7 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
     if requests.is_empty() {
         return Ok(());
     }
+    let recovery_source = crate::process::windows_recovery::capture_source();
     gwt_agent::validate_session_id_path_component(session_id).map_err(|_| denied())?;
     let path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
         .map(PathBuf::from)
@@ -6355,16 +6385,23 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
         || runtime.host_started_at != crate::process::host_process_start_time(host_pid)
         || runtime.child_started_at.is_none()
         || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
-        || (child_pid != std::process::id()
-            && !crate::process::is_descendant_of(std::process::id(), child_pid).unwrap_or(false))
+        || !crate::process::checked_runtime_descendant_of(
+            std::process::id(),
+            child_pid,
+            recovery_source,
+        )
+        .unwrap_or(false)
         || requests.iter().any(|request| {
             // A writable sidecar cannot revive the stopped OS process or
             // its callers. The child can outlive its original GUI host.
             crate::process::host_process_start_time(request.child_pid)
                 == Some(request.child_started_at)
-                && (request.child_pid == std::process::id()
-                    || crate::process::is_descendant_of(std::process::id(), request.child_pid)
-                        .unwrap_or(true))
+                && crate::process::checked_runtime_descendant_of(
+                    std::process::id(),
+                    request.child_pid,
+                    recovery_source,
+                )
+                .unwrap_or(true)
         })
     {
         return Err(denied());
@@ -9473,6 +9510,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().unwrap();
+        // Cargo metadata resolves the temporary-root symlink, unlike absolute overrides.
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let commands = ["cargo nextest run -p gwt --lib".to_string()];
         fs::write(
             dir.path().join("Cargo.toml"),
@@ -9512,7 +9551,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(targets(&commands), vec![dir.path().join("target")]);
+        assert_eq!(targets(&commands), vec![expected_root.join("target")]);
         let ambient = dir.path().join("ambient target");
         let _ambient = ScopedEnvVar::set("CARGO_TARGET_DIR", &ambient);
         assert_eq!(targets(&[
@@ -9520,7 +9559,7 @@ mod tests {
             r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string(),
             r#"CARGO_TARGET_DIR=ignored cargo test -p gwt --lib --target-dir "explicit target's""#.to_string(),
             "CARGO_TARGET_DIR='inline target' cargo test -p gwt --lib".to_string(),
-        ]), vec![ambient, dir.path().join("explicit target's"), dir.path().join("inline target")]);
+        ]), vec![ambient, expected_root.join("explicit target's"), expected_root.join("inline target")]);
         assert!(targets(&["cargo nextest list".to_string()]).is_empty());
         assert!(gwtd_artifact_restoration(
             dir.path(),
@@ -9649,6 +9688,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
@@ -9683,7 +9723,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 true
             )
             .unwrap(),
-            Some(dir.path().join("target"))
+            Some(expected_root.join("target"))
         );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
@@ -9714,6 +9754,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let candidate = dir
             .path()
@@ -9768,7 +9809,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                     true
                 )
                 .unwrap(),
-                Some(dir.path().join(target))
+                Some(expected_root.join(target))
             );
             assert_eq!(result.exit_code, 0, "{transcript}");
         }

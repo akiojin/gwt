@@ -544,6 +544,15 @@ pub struct LaunchConfig {
 }
 
 impl LaunchConfig {
+    /// Append an initial task using the provider's interactive CLI syntax.
+    /// File-backed tasks use this same path for their short reading instruction.
+    pub fn append_initial_prompt(&mut self, prompt: String) {
+        if self.agent_id == AgentId::Hermes {
+            self.args.push("--query".to_string());
+        }
+        self.args.push(prompt);
+    }
+
     /// Revalidate captured provenance against the final child environment and cwd.
     pub fn validated_codex_auth_root_for_cwd(
         &self,

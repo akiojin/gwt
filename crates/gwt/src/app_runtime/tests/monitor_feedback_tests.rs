@@ -1,6 +1,340 @@
 use super::*;
 
 #[test]
+fn issue6861_missing_accepted_owner_projection_reports_one_bounded_observation_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("repo");
+    fs::create_dir_all(&project).unwrap();
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            project.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.test_context();
+    let accepted = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: std::process::id(),
+        host_started_at: 1,
+        host_instance_id: "accepted-epoch".into(),
+    };
+    // test-hygiene: allow-wall-clock-deadline Inject expired observation age without waiting; assertions inspect control flow, not scheduler timing.
+    let started_at = Instant::now() - Duration::from_secs(61);
+    let original = super::super::IssueMonitorLaunchDeliveryState::Materializing {
+        window_id: "tab-1::missing-projection".into(),
+        started_at,
+        accepted_owner: Some(accepted.clone()),
+        observation_error_reported: false,
+    };
+    runtime
+        .issue_monitor_launch_deliveries
+        .insert("accepted-delivery".into(), original);
+    let mut events = Vec::new();
+    for identity in [None, Some(accepted.clone()), None] {
+        runtime
+            .project_state_mut(&context)
+            .unwrap()
+            .project_owner_identity = identity;
+        events.extend(
+            runtime.auto_launch_issue_monitor_delivery_events_for_project(
+                &project,
+                5390,
+                LinkedIssueKind::Issue,
+                Some("accepted-delivery".into()),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            ),
+        );
+        events.extend(runtime.auto_launch_issue_monitor_delivery_events(
+            &context,
+            5390,
+            LinkedIssueKind::Issue,
+            Some("accepted-delivery".into()),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        ));
+    }
+    assert_eq!(events.iter().filter(|event| matches!(&event.event,
+        BackendEvent::IssueMonitorToast { level, message, issue_number: Some(5390), .. }
+            if level == "error" && message.contains("owner projection") && message.contains("60")
+    )).count(), 1, "missing GUI progress must fail observation once without an infinite defer");
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "missing metadata grants no new owner operation"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    assert!(
+        matches!(runtime.issue_monitor_launch_deliveries.get("accepted-delivery"),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id, started_at: original_start, accepted_owner: Some(owner), ..
+        }) if window_id == "tab-1::missing-projection" && *original_start == started_at && owner == &accepted)
+    );
+}
+
+#[test]
+fn issue6842_persisted_pane_without_runtime_does_not_swallow_launch() {
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "persisted-phantom-pane",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let phantom = tab.workspace.add_window(WindowPreset::Agent);
+    tab.workspace
+        .set_linked_issue_number(&phantom.id, Some(3165));
+    tab.workspace
+        .set_status(&phantom.id, WindowProcessStatus::Running);
+    fixture.runtime.register_window("tab-1", &phantom.id);
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let started = Instant::now();
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "a persisted Running row without a runtime must reach spawn, not an empty ACK"
+    );
+    drain_queued_blocking_tasks(&queued);
+    let (window_id, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
+    let launched = launched.expect("the actual owner creates a physical pane");
+    eprintln!(
+        "Issue #6842 phantom-pane recovery: actual PTY pid={:?}, elapsed={:?}",
+        launched.pty.process_id(),
+        started.elapsed()
+    );
+    // test-hygiene: allow-wall-clock-deadline Issue #6842 explicitly requires physical launch within the Monitor's 120-second budget.
+    assert!(started.elapsed() < Duration::from_secs(120));
+    assert!(launched.pty.process_id().is_some());
+    assert!(launched.pty.try_wait().unwrap().is_none());
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let expected_delivery = prefs
+        .pending_launch_deliveries
+        .first()
+        .unwrap()
+        .delivery_id
+        .clone();
+    let refused = owner_fixture_block_on(
+        owner.command(
+            gwt::project_runtime::events::OwnerCommand::RejectMonitorLaunch {
+                rejection: Box::new(gwt::project_runtime::events::OwnerMonitorLaunchRejection {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    preparation_exhausted: true,
+                    expected_delivery: prefs
+                        .pending_launch_deliveries
+                        .first()
+                        .cloned()
+                        .map(Box::new),
+                    expected_profile: prefs
+                        .effective_launch_tiers()
+                        .first()
+                        .and_then(|tier| tier.first())
+                        .cloned(),
+                    expected_profile_readset: None,
+                    expected_handoff: None,
+                    expected_session: None,
+                }),
+            },
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("live, preparing or closing owner"),
+        "{refused}"
+    );
+    let after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert!(
+        after
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.delivery_id == expected_delivery),
+        "a live owner must not lose its delivery to a prepare-budget rejection"
+    );
+    assert!(after.failed_issues.is_empty());
+    assert!(launched.pty.try_wait().unwrap().is_none());
+    authenticate_monitor_owner_readiness(&owner, &launched);
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    fixture.runtime.finish_queued_delivery_acks(&queued);
+    assert!(
+        matches!(fixture.runtime.issue_monitor_launch_deliveries.get(&expected_delivery),
+            Some(super::super::IssueMonitorLaunchDeliveryState::Launched { window_id: id })
+                if id == &window_id),
+        "Issue #6861: accepted replay must observe the exact owner's successful ACK"
+    );
+    assert_eq!(
+        fixture.runtime.runtimes[&window_id].child_pid,
+        launched.pty.process_id()
+    );
+    assert_eq!(
+        fixture.runtime.active_agent_sessions[&window_id].session_id,
+        launched.session.as_ref().unwrap().id
+    );
+    assert!(launched.pty.try_wait().unwrap().is_none());
+    pane_control_tests::control_close(&owner, &launched);
+}
+
+#[test]
+fn issue6842_same_delivery_preparation_without_progress_is_bounded() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "stalled-delivery",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let repo = fixture.project_root.clone();
+    let delivery_id = fixture.delivery_id.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        events.extend(
+            fixture
+                .runtime
+                .auto_launch_issue_monitor_delivery_events_for_project(
+                    &repo,
+                    3165,
+                    LinkedIssueKind::Spec,
+                    delivery_id.clone(),
+                    gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+                ),
+        );
+        drain_queued_blocking_tasks(&queued);
+        drop(take_issue4803_monitor_preparation(&fixture.recorded_events));
+        // Model GUI completions that consume their registration but never spawn.
+        fixture.runtime.issue_monitor_launch_preparations.clear();
+    }
+    events.extend(
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &repo,
+                3165,
+                LinkedIssueKind::Spec,
+                delivery_id,
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            ),
+    );
+    // The fourth request may only settle on the real owner, never prepare/spawn again.
+    drain_queued_blocking_tasks(&queued);
+    let completions = std::mem::take(&mut *fixture.recorded_events.lock().unwrap());
+    for completion in completions {
+        if let Some(UserEvent::IssueMonitorLaunchPrepared(prepared)) =
+            fixture.runtime.accept_project_completion(completion)
+        {
+            events.extend(
+                fixture
+                    .runtime
+                    .handle_issue_monitor_launch_prepared(*prepared),
+            );
+        }
+    }
+    drain_queued_blocking_tasks(&queued);
+    let completions = std::mem::take(&mut *fixture.recorded_events.lock().unwrap());
+    for completion in completions {
+        if let Some(UserEvent::IssueMonitorPreflightRejected(rejected)) =
+            fixture.runtime.accept_project_completion(completion)
+        {
+            events.extend(fixture.runtime.handle_monitor_preflight_rejected(*rejected));
+        }
+    }
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap();
+    assert!(
+        prefs.pending_launch_deliveries.is_empty(),
+        "bounded failure must settle the exact unclaimed delivery"
+    );
+    assert!(prefs
+        .failed_issues
+        .iter()
+        .any(|failure| failure.issue_number == 3165 && failure.message.contains("3 preparations")));
+    assert!(
+        prefs.launching_issues.is_empty(),
+        "failure releases the active Monitor slot"
+    );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["panes"].as_array().unwrap().is_empty(),
+        "bounded rejection creates no PTY"
+    );
+    assert!(
+        events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, message, .. }
+                if level == "error" && message.contains("3") && message.contains("without spawning")
+        )),
+        "a stalled delivery must report the bounded failure: {events:?}"
+    );
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &repo,
+            3165,
+            LinkedIssueKind::Spec,
+            Some("new-delivery-after-requeue".into()),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "a new delivery from requeue has its own budget"
+    );
+}
+
+#[test]
 fn monitor_scan_recovery_failure_emits_one_attention_notice() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -2714,8 +3048,8 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         fixture
             .runtime
             .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
-        Some(combined_window_id("tab-1", &other.id)),
-        "generic Issue lookup must differ from the exact native holder"
+        Some(holder_window_id.clone()),
+        "unconnected metadata must not hide the exact live native holder"
     );
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;

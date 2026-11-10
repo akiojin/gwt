@@ -44,16 +44,16 @@ pub(crate) fn capture_restored_launch(
     source: &gwt_agent::Session,
     row: Option<&crate::PersistedWindowState>,
 ) -> Result<Option<MonitorLaunch>, String> {
-    if row.and_then(|row| row.session_id.as_deref()) != Some(source.id.as_str()) {
-        return Ok(None);
-    }
-    let Some(issue) = source.linked_issue_number else {
+    let Some(row) = row.filter(|row| row.session_id.as_deref() == Some(source.id.as_str())) else {
         return Ok(None);
     };
     let prefs =
         crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(root))
             .map_err(|error| error.to_string())?;
     let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    let Some(issue) = restored_issue_number(&monitor, source, id, row) else {
+        return Ok(None);
+    };
     let captured = IssueMonitorAgentFailureSource::Bound {
         issue_number: issue,
         identity: monitor.launch_identity(issue),
@@ -82,6 +82,22 @@ pub(crate) fn capture_restored_launch(
         },
         source: Some(captured),
     }))
+}
+
+/// Only a current launch for this exact saved Session can own its restore.
+/// Historical Session/branch links and the retained launch ledger are not live launches.
+pub(super) fn restored_issue_number(
+    monitor: &crate::IssueMonitorState,
+    source: &gwt_agent::Session,
+    window_id: &str,
+    row: &crate::PersistedWindowState,
+) -> Option<u64> {
+    if row.session_id.as_deref() != Some(source.id.as_str())
+        || crate::pm_registry::is_canonical_pm_worktree(&source.worktree_path)
+    {
+        return None;
+    }
+    monitor.launched_window_issue(window_id)
 }
 
 pub(crate) fn launch_failure_message(detail: &str) -> String {
@@ -179,7 +195,12 @@ pub(crate) fn reject_preflight_launch(
             gwt_agent::LaunchRuntimeTarget::Host,
         )?
         .into_parts();
-        let detail = if let Some(handoff) = request.expected_handoff.as_deref() {
+        let detail = if request.preparation_exhausted {
+            if expected.is_none() || request.expected_handoff.is_some() || source.is_some() {
+                return Err("prepare exhaustion requires an exact producing delivery".into());
+            }
+            super::events::MONITOR_PREPARATION_EXHAUSTED.to_string()
+        } else if let Some(handoff) = request.expected_handoff.as_deref() {
             let source = source.ok_or("answered rejection has no exact source Session")?;
             if prefs
                 .autonomous_handoffs
@@ -1415,4 +1436,58 @@ pub(crate) fn deliver_existing_answer(
         submitted: true,
         result,
     })
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restored_launch_resolves_current_window_owner_instead_of_saved_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
+        let root = dir.path().join("repo");
+        let mut source = gwt_agent::Session::new(&root, "work", gwt_agent::AgentId::Codex);
+        source.linked_issue_number = Some(5286);
+        let mut row: crate::PersistedWindowState = serde_json::from_value(json!({
+            "id": "agent", "title": "Start Work", "preset": "agent",
+            "z_index": 0, "status": "stopped",
+        }))
+        .unwrap();
+        row.session_id = Some(source.id.clone());
+        let id = format!("{}::agent", gwt_core::paths::project_scope_hash(&root));
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        let capture = |row: &crate::PersistedWindowState| {
+            capture_restored_launch(
+                &root,
+                &id,
+                1,
+                "host",
+                Arc::new(AtomicBool::new(true)),
+                &source,
+                Some(row),
+            )
+            .unwrap()
+            .and_then(|launch| launch.feedback.issue_monitor_issue_number)
+        };
+        // A historical binding without a current launch cannot claim a restore.
+        prefs.launch_bindings.insert(id.clone(), 5286);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert_eq!(capture(&row), None);
+        prefs
+            .launched_issues
+            .push(crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: id.clone(),
+            });
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert_eq!(capture(&row), Some(42));
+        prefs.launched_issues[0].window_id = "another-project::agent".into();
+        let foreign =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored_issue_number(&foreign, &source, &id, &row), None);
+        row.session_id = Some("another-session".into());
+        assert_eq!(capture(&row), None);
+    }
 }

@@ -230,6 +230,22 @@ fn set_switch_reason(root: &Path, intent: &AgentSwitchIntent, reason: &str) -> i
     Ok(())
 }
 
+fn checkpoint_activity_reason(
+    observation: &gwt::issue_monitor::AgentSwitchCwdObservation,
+) -> String {
+    // Bound the existing reason shown in the UI; PIDs are observations, not stop authority.
+    let matching = &observation.matching_pids;
+    let unknown = &observation.unknown_pids;
+    format!(
+        "Waiting for background work and a complete activity observation. Current work is kept. Observed worktree PIDs: {:?} ({} total); unknown cwd PIDs: {:?} ({} total); census complete: {}.",
+        &matching[..matching.len().min(8)],
+        matching.len(),
+        &unknown[..unknown.len().min(8)],
+        unknown.len(),
+        observation.complete,
+    )
+}
+
 fn current_switch_runtime(
     root: &Path,
     intent: &AgentSwitchIntent,
@@ -254,6 +270,7 @@ fn current_switch_runtime(
         &expected.session_id,
     ))?;
     Ok(runtime.status == gwt_agent::AgentStatus::Idle
+        && runtime.is_current_normal_stop()
         && expected.matches_runtime(&expected.session_id, expected.host_pid, &runtime))
 }
 
@@ -443,14 +460,13 @@ fn drive_switch(
             )?;
             return Ok(false);
         }
-        if !gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+        let activity = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
             &proof.execution_identity.worktree_path,
             proof.child_pid,
             proof.child_started_at,
-        )
-        .is_clear()
-        {
-            set_switch_reason(root, intent, "Waiting for background work and a complete activity observation. Current work is kept.")?;
+        );
+        if !activity.is_clear() {
+            set_switch_reason(root, intent, &checkpoint_activity_reason(&activity))?;
             return Ok(false);
         }
         let (target_planning, target_dependencies) = prepare_switch_target(root, intent)?;
@@ -466,6 +482,8 @@ fn drive_switch(
             }
         };
         if intent.stage == Requested {
+            let submitted = std::cell::Cell::new(false);
+            let post_submit_grace = std::cell::Cell::new(None);
             let delivered =
                 gwt::cli::execution_state::with_current_active_session_execution_identity_lease(
                     sessions,
@@ -513,6 +531,7 @@ fn drive_switch(
                                     return Err("Source writer changed after checkpoint body delivery".into());
                                 }
                                 return reservation.write_input_authorized(bytes, |commit| commit(&mut || {}))
+                                    .map(|()| submitted.set(true))
                                     .map_err(|error| error.to_string());
                             }
                             gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
@@ -527,11 +546,24 @@ fn drive_switch(
                                 body_committed = true;
                                 Ok(())
                             }).map(|_| ()).map_err(|error| error.to_string())
-                        }, std::thread::sleep, || Ok(false)).map_err(switch_io)?;
+                        }, |duration| {
+                            if submitted.get() {
+                                post_submit_grace.set(Some(duration));
+                            } else {
+                                std::thread::sleep(duration);
+                            }
+                        }, || Ok(false)).map_err(switch_io)?;
                         Ok(())
                     },
-                )?;
-            delivered.ok_or_else(|| {
+                );
+            // The immediate provider hook needs the Session lease too. Keep
+            // body/CR authorization and the input reservation, but wait for
+            // the existing submit grace only after releasing that lease.
+            // Preserve the grace even when the outer lease returns an error.
+            if let Some(duration) = post_submit_grace.get() {
+                std::thread::sleep(duration);
+            }
+            delivered?.ok_or_else(|| {
                 switch_io("Source authority changed before checkpoint delivery")
             })??;
             return Ok(false);
@@ -554,14 +586,19 @@ fn drive_switch(
                     }
                     if !exact_writer_is_current(writers, intent, entry)
                         || !current_switch_runtime(root, intent, sessions).unwrap_or(false)
-                        || !gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
-                            &proof.execution_identity.worktree_path,
-                            proof.child_pid,
-                            proof.child_started_at,
-                        )
-                        .is_clear()
                     {
                         return Err(io::Error::new(io::ErrorKind::WouldBlock, "Waiting for a complete idle activity observation; current work is kept"));
+                    }
+                    let activity = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+                        &proof.execution_identity.worktree_path,
+                        proof.child_pid,
+                        proof.child_started_at,
+                    );
+                    if !activity.is_clear() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            checkpoint_activity_reason(&activity),
+                        ));
                     }
                     reservation.with_unchanged_ordinary_input(revision, || {
                     Ok(gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {

@@ -352,6 +352,7 @@ impl CliEnv for TestEnv {
                 url: snapshot.inventory.url.clone(),
                 head_ref_name: snapshot.inventory.head_ref_name.clone(),
                 head_sha: snapshot.head_sha.clone(),
+                base_ref_name: snapshot.inventory.base_ref_name.clone(),
             })
             .collect())
     }

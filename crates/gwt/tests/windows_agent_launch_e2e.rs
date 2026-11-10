@@ -853,7 +853,7 @@ async fn assert_public_ws_conpty_boundary_async(
     let mut command_sent = false;
     let mut remote_snapshot_seen = false;
     let mut child_ready = false;
-    let mut shell_screen = vt100::Parser::new(24, 100, 0);
+    let mut shell_screen = vt100::Parser::new(32, 120, 0);
     let mut shell_events = Vec::new();
     while tokio::time::Instant::now() < deadline {
         let value = if let Some(value) = early_shell_events.pop_front() {
@@ -897,7 +897,7 @@ async fn assert_public_ws_conpty_boundary_async(
         // cache. Startup status/output alone can precede that input binding.
         remote_snapshot_seen |= value["kind"] == "terminal_snapshot";
         if value["kind"] == "terminal_snapshot" {
-            shell_screen = vt100::Parser::new(24, 100, 0);
+            shell_screen = vt100::Parser::new(32, 120, 0);
         }
         shell_screen.process(&bytes);
         // Parsed visible child output proves that ConPTY progressed beyond

@@ -170,6 +170,19 @@ test("Settings launch controls retain their nodes and save once across status re
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
+test("Issue #6922: Refill limit displays the saved zero and confirmed default after enabling", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { name: "A" }, send: () => {} };
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0", "missing saved fields use the stored default");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:0 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:3 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "3");
+});
+
 test("Project settings never writes capacity when opened, remounted or updated", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -197,7 +210,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
     ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
-    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
     const control = panel.querySelector(`[aria-label="${name}"]`);
@@ -323,6 +336,20 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
 });
 
+test("Codex warns about a saved model even when the public catalog is empty", () => {
+  const { document } = parseHTML("<section></section>");
+  const choices = structuredClone(candidateChoices);
+  choices.agents.find(agent => agent.id === "codex").models = [];
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired-model" }],
+    choices,
+    send: () => {},
+  });
+  assert.equal(panel.querySelector("[data-model-unavailable]").hidden, false);
+  assert.match(panel.querySelector("[data-model-unavailable]").textContent, /retired-model/);
+});
+
 test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -339,6 +366,11 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   }
   assert.equal(control("model").value, "retired-model");
   assert.equal(control("reasoning").value, "retired-effort");
+  // Issue #6933 AC-3: a saved model the tool no longer lists is announced, never swapped.
+  const retiredNotice = () => control("model").closest("fieldset").querySelector("[data-model-unavailable]");
+  assert.equal(retiredNotice().hidden, false);
+  assert.equal(retiredNotice().textContent,
+    "Saved model retired-model is no longer offered by Codex. It is kept as saved and not replaced; choose a listed model before launching.");
   assert.ok([...control("agent_member_id").options].some(option => option.value === "m-hermes"),
     "shared choices populate Agent before the separate catalog response arrives");
   assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
@@ -354,6 +386,7 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   selectValue(control("model"), "gpt-6-luna");
   control("model").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("reasoning").value, "medium", "a new model uses its shared default");
+  assert.equal(retiredNotice().hidden, true, "choosing a listed model clears the notice");
   assert.equal(sent.at(-1).profiles[0].reasoning, "medium");
   const custom = panel.querySelector('[data-agent-id="custom"]');
   for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);

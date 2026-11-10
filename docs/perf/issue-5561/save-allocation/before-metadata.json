@@ -1,0 +1,10 @@
+{
+  "label": "before",
+  "base_sha": "570a1a78fd20126d4f3bfdee4895a9e7001de5ec",
+  "product_git_blob_sha256": "6a0f013b1a427ac719f551a60adebba0f61adaceaebc93769b862e5737745c85",
+  "probe_sha256": "320975efda2224be6702e2a5bdf8faec40014958bc3567669c75d919beae419e",
+  "binary_sha256": "55722e905eed6b740315ea99e28509eae50e59bece223ac945c442b5fb1108ea",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "rlib_sha256": null,
+  "notes": "Product body from the fetched base; standalone probe linked the pre-change Cargo-built library before production edits. The rlib digest was not recorded. Published probe has rustfmt-only whitespace changes. Initial probe linking lacked native Windows search paths; its first checksum comparison used numeric rather than BTree key order and was corrected before measuring."
+}

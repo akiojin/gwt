@@ -1,5 +1,374 @@
 use super::ClientScope;
 
+#[test]
+fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
+    use super::{RemoteRuntimeCommandCompletion, RemoteRuntimeCommandKind};
+    use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    let original_status = runtime.runtimes[&id].status;
+    let completion = |kind| RemoteRuntimeCommandCompletion {
+        context: context.clone(),
+        connection_id: 1,
+        identity: identity.clone(),
+        id: id.clone(),
+        incarnation: probe.incarnation,
+        kind,
+        approval_resolution_started: false,
+        input_command_id: None,
+        result: Err("project command timed out".into()),
+    };
+    let mut wire = Vec::new();
+    for (kind, operation) in [
+        (
+            RemoteRuntimeCommandKind::Input { reply_client: None },
+            "input",
+        ),
+        (RemoteRuntimeCommandKind::Resize, "resize"),
+        (RemoteRuntimeCommandKind::Stop, "stop"),
+    ] {
+        let events = runtime.handle_remote_runtime_command_complete(completion(kind));
+        assert_eq!(events.len(), 1, "one operation error, no lifecycle frames");
+        assert!(
+            matches!(&events[0].target, DispatchTarget::Project(key) if key == &context.project_key)
+        );
+        let value = serde_json::to_value(&events[0].event).unwrap();
+        assert_eq!(value["kind"], "window_command_error");
+        assert_eq!(value["operation"], operation);
+        assert_eq!(value["message"], "project command timed out");
+        assert_eq!(
+            events[0].event.delivery_policy().delivery,
+            gwt::protocol::BackendEventDeliveryClass::Error
+        );
+        assert_eq!(runtime.runtimes[&id].status, original_status);
+        assert!(!runtime.runtimes[&id].exit_confirmed);
+        wire.push(value);
+    }
+    let ack = runtime.handle_remote_runtime_command_complete(completion(
+        RemoteRuntimeCommandKind::Input {
+            reply_client: Some("origin".into()),
+        },
+    ));
+    assert!(matches!(&ack[0].target, DispatchTarget::Client(client) if client == "origin"));
+    assert!(matches!(
+        &ack[0].event,
+        BackendEvent::PaneSendResult {
+            ok: false,
+            error: Some(_),
+            ..
+        }
+    ));
+    let mut stale = completion(RemoteRuntimeCommandKind::Resize);
+    stale.incarnation += 1;
+    assert!(runtime
+        .handle_remote_runtime_command_complete(stale)
+        .is_empty());
+
+    // Both pre-send fences defer delivery; no worker may send to the old pane.
+    let pane_id = runtime.runtimes[&id].owner_pane_id.clone();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = None;
+    for empty_pane in [false, true] {
+        if empty_pane {
+            runtime
+                .project_state_mut(&context)
+                .unwrap()
+                .project_owner_identity = Some(identity.clone());
+            runtime.runtimes.get_mut(&id).unwrap().owner_pane_id.clear();
+        }
+        let events = runtime.queue_remote_runtime_command(
+            &id,
+            OwnerCommand::Resize {
+                id: pane_id.clone(),
+                incarnation: probe.incarnation,
+                cols: 90,
+                rows: 30,
+            },
+            RemoteRuntimeCommandKind::Resize,
+        );
+        assert!(
+            events.is_empty(),
+            "transient owner drift must recover automatically"
+        );
+    }
+
+    // Use normal health -> inventory -> attach, never repair the stale fields by hand.
+    runtime.handle_project_owner_health(
+        &context,
+        2,
+        Some(identity.clone()),
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Healthy,
+            detail: None,
+        },
+    );
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        unreachable!()
+    };
+    drain_queued_blocking_tasks(&Arc::clone(tasks));
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        unreachable!()
+    };
+    let completed = std::mem::take(&mut *recorded.lock().unwrap());
+    for event in completed {
+        if let Some(UserEvent::RemoteOwnerInventoryComplete(completion)) =
+            runtime.accept_project_completion(event)
+        {
+            runtime.handle_remote_owner_inventory_complete(*completion);
+        }
+    }
+    assert_eq!(runtime.runtimes[&id].owner_pane_id, pane_id);
+    assert_eq!(runtime.runtimes[&id].owner_identity, identity);
+    assert!(runtime
+        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n")
+        .is_empty());
+    let ack = drain_browser_owner_input(&mut runtime);
+    assert!(ack
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: true, .. })));
+    assert!(probe.pty.try_wait().unwrap().is_none());
+
+    // A real owner/PTY error is authoritative even without confirmed process exit.
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("actual PTY read failure".into()),
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    while let Ok(event) = source.try_recv() {
+        if matches!(event, OwnerEvent::Status { .. }) {
+            wire.extend(
+                runtime
+                    .handle_project_owner_event(&context, 2, &identity, event)
+                    .into_iter()
+                    .map(|event| serde_json::to_value(event.event).unwrap()),
+            );
+        }
+    }
+    assert_eq!(runtime.runtimes[&id].status, WindowProcessStatus::Error);
+    assert!(runtime.runtimes[&id]
+        .detail
+        .as_deref()
+        .unwrap()
+        .starts_with("actual PTY read failure"));
+    assert!(!runtime.runtimes[&id].exit_confirmed);
+    println!("ISSUE3340_EVENTS={}", serde_json::to_string(&wire).unwrap());
+}
+
+#[test]
+fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
+    use gwt::protocol::{ProjectOwnerHealthState, ProjectOwnerHealthView};
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for identity_switch in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+        let context = runtime.test_context();
+        let identity = runtime.runtimes[&id].owner_identity.clone();
+        if identity_switch {
+            // The authenticated fixture owner replaces the GUI's stale owner.
+            runtime
+                .runtimes
+                .get_mut(&id)
+                .unwrap()
+                .owner_identity
+                .host_instance_id = "previous-owner-instance".into();
+        } else {
+            runtime.handle_project_owner_health(
+                &context,
+                2,
+                None,
+                ProjectOwnerHealthView {
+                    project_key: context.project_key.to_string(),
+                    state: ProjectOwnerHealthState::Degraded,
+                    detail: Some("fixture reconnect".into()),
+                },
+            );
+        }
+        let events = runtime.pane_send_input_to_window_events("origin".into(), &id, "recover\n");
+        assert!(
+            events.is_empty(),
+            "owner drift must defer, not refuse: {events:?}"
+        );
+        runtime.handle_project_owner_health(
+            &context,
+            3,
+            Some(identity),
+            ProjectOwnerHealthView {
+                project_key: context.project_key.to_string(),
+                state: ProjectOwnerHealthState::Healthy,
+                detail: None,
+            },
+        );
+        let events = finish_remote_command_recovery(&mut runtime);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    BackendEvent::PaneSendResult { ok: true, .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: false, .. })));
+        assert!(probe.pty.try_wait().unwrap().is_none());
+        assert!(
+            finish_remote_command_recovery(&mut runtime).is_empty(),
+            "never replay a completed command"
+        );
+    }
+}
+
+#[test]
+fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    runtime.runtimes.get_mut(&id).unwrap().owner_pane_id.clear();
+    runtime.handle_project_owner_health(
+        &context,
+        2,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Degraded,
+            detail: None,
+        },
+    );
+    assert!(runtime
+        .pane_send_input_to_window_events("origin".into(), &id, "expire\n")
+        .is_empty());
+    let start = Instant::now();
+    assert!(runtime.next_runtime_output_deadline().is_some());
+    // Drive the existing event-loop clock directly; no wall-clock sleep.
+    let events = runtime.flush_runtime_output_batches(start + Duration::from_secs(11));
+    let error = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::PaneSendResult {
+                ok: false, error, ..
+            } => error.as_ref(),
+            _ => None,
+        })
+        .expect("expired command outcome");
+    assert!(error.contains("Degraded"), "{error}");
+    assert!(error.contains("identity mismatch"), "{error}");
+    assert!(error.contains("owner pane unset"), "{error}");
+    assert!(error.contains("Automatic recovery"), "{error}");
+    assert!(error.contains("ms") && error.contains("attempt"), "{error}");
+    assert!(
+        !error.contains("Refresh") && !error.contains("try again"),
+        "{error}"
+    );
+    assert!(
+        !runtime.pane_has_unsent_user_input(&id),
+        "expired input must clear its speculative busy hint"
+    );
+}
+
+#[test]
+fn remote_command_recovery_rejects_a_successor_session() {
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = None;
+    assert!(runtime
+        .pane_send_input_to_window_events("origin".into(), &id, "old session input\n")
+        .is_empty());
+    // An owner restart may reuse a pane ID and incarnation for another Session.
+    runtime
+        .tab_mut(&context.tab_id)
+        .unwrap()
+        .workspace
+        .set_session_id("agent", Some("successor-session".into()));
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = Some(identity);
+    let events = runtime.retry_remote_runtime_commands(&id, Instant::now());
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::PaneSendResult { ok: false, error: Some(error), .. } if error.contains("Session"))));
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "never send old input to a successor Session"
+    );
+}
+
+fn finish_remote_command_recovery(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("stub fixture")
+    };
+    let completions = Arc::clone(completions);
+    let mut events = Vec::new();
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        let had_tasks = !queued.is_empty();
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        let had_completions = !completed.is_empty();
+        for event in completed {
+            match runtime.accept_project_completion(event) {
+                Some(UserEvent::RemoteOwnerInventoryComplete(completion)) => {
+                    events.extend(runtime.handle_remote_owner_inventory_complete(*completion))
+                }
+                Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
+                    events.extend(runtime.handle_remote_runtime_command_complete(*completion))
+                }
+                Some(UserEvent::ProjectOwnerSnapshot(completion)) => {
+                    events.extend(runtime.handle_project_owner_snapshot(*completion))
+                }
+                _ => {}
+            }
+        }
+        if !had_tasks && !had_completions {
+            break;
+        }
+    }
+    events
+}
+
 fn aggregate_test_runtime(root: &Path) -> AppRuntime {
     let tabs = ["a", "b"]
         .into_iter()
@@ -583,6 +952,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         exit_confirmed: false,
         exit_code: None,
         session_id: None,
+        pm_registration: None,
         agent_id: None,
         agent_name: None,
         display_name: None,
@@ -630,10 +1000,19 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             screen_seq: 8,
         },
     );
-    assert!(!gap.iter().any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
-        "a visible-only frame cannot replace the terminal's retained history");
-    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else { unreachable!() };
-    assert_eq!(tasks.lock().unwrap().len(), 1, "request the owner's semantic snapshot");
+    assert!(
+        !gap.iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "a visible-only frame cannot replace the terminal's retained history"
+    );
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        unreachable!()
+    };
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "request the owner's semantic snapshot"
+    );
     assert!(
         !gap.iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
@@ -679,12 +1058,14 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
         && event.terminal_stream_seq == Some(9)));
     let restored = runtime.request_owner_snapshot("a::agent", Some("reconnected-client".into()));
-    assert!(restored.iter().any(|event| matches!(&event.event,
+    assert!(
+        restored.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalSnapshot { data_base64, .. }
         if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
-        && event.terminal_stream_seq == Some(9)
-        && event.target == DispatchTarget::Client("reconnected-client".into())),
-        "closed diagnostic panes restore the final semantic snapshot without a live owner");
+            && event.terminal_stream_seq == Some(9)
+            && event.target == DispatchTarget::Client("reconnected-client".into())),
+        "closed diagnostic panes restore the final semantic snapshot without a live owner"
+    );
     assert!(runtime
         .handle_project_owner_event(&a, 2, &identity, output(7))
         .is_empty());

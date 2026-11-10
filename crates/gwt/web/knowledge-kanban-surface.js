@@ -2,6 +2,7 @@ import { isContainedPlacement } from "./agent-kanban-surface.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { renderUiContent } from "./ui-content.js";
+import { monitorDiagnostic } from "./agent-completion-notifications.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
@@ -845,6 +846,7 @@ export function createKnowledgeKanbanSurface({
   openSurfaceNotice = () => false,
 }) {
       const knowledgeBridgeStateMap = new Map();
+      let knowledgeTransportOnline = false;
       const terminalPreviewText = new Map();
       const issueControlExplanations = new Map();
       const issueExplanationBindings = new WeakMap();
@@ -1053,17 +1055,22 @@ export function createKnowledgeKanbanSurface({
         return meanings[primary.key] || `Reported issue state: ${primary.label}.`;
       }
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
-      // is re-broadcast constantly, so only a CHANGED text is a new event) and
+      // is re-broadcast constantly; only a new diagnosis or failed scan counts) and
       // remember which of the two sources changed last for the summary line.
-      const ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
+      let ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
       let reportedIssueMonitorError = "";
       let issueMonitorErrorSequence = 0;
       let surfaceErrorSequence = 0;
 
       function issueMonitorErrorText() {
-        return typeof issueMonitorModel.read().status?.last_error === "string"
-          ? issueMonitorModel.read().status.last_error.trim()
-          : "";
+        return currentMonitorDiagnostic()?.message || "";
+      }
+
+      function currentMonitorDiagnostic() {
+        const status = issueMonitorModel.read().status;
+        return monitorDiagnostic({ message: status?.last_error,
+          kind: status?.last_error_source,
+          stage: status?.last_error_source === "scan_failure" ? status.last_scan_error?.phase : undefined });
       }
 
       // Issue #3628 (AC-5) / SPEC #3885 FR-022: the fleet outage used to be a
@@ -1091,13 +1098,22 @@ export function createKnowledgeKanbanSurface({
       function syncIssueMonitorErrorReport() {
         syncIssueMonitorBlackoutReport();
         syncIssueMonitorCapacityReport();
-        const lastError = issueMonitorErrorText();
-        if (lastError === reportedIssueMonitorError) return;
-        reportedIssueMonitorError = lastError;
-        if (lastError) {
+        const diagnostic = currentMonitorDiagnostic();
+        const status = issueMonitorModel.read().status;
+        const occurrence = diagnostic ? JSON.stringify([diagnostic.key, diagnostic.message,
+          !diagnostic.stalled && status.last_error_source === "scan_failure"
+            ? status.last_scan_error?.recorded_at || status.last_scan_at : ""]) : "";
+        if (occurrence === reportedIssueMonitorError) return;
+        const previousKey = reportedIssueMonitorError && ISSUE_MONITOR_ERROR_KEY;
+        reportedIssueMonitorError = occurrence;
+        if (diagnostic) {
+          if (previousKey && previousKey !== diagnostic.key) resolveSurfaceError(previousKey);
+          ISSUE_MONITOR_ERROR_KEY = diagnostic.key;
           surfaceErrorSequence += 1;
           issueMonitorErrorSequence = surfaceErrorSequence;
-          reportSurfaceError({ key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: lastError });
+          const notice = { key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: diagnostic.message };
+          if (diagnostic.stalled) reportSurfaceNotice({ ...notice, level: "error" });
+          else reportSurfaceError(notice);
         } else {
           resolveSurfaceError(ISSUE_MONITOR_ERROR_KEY);
         }
@@ -1409,6 +1425,11 @@ export function createKnowledgeKanbanSurface({
           }
           limit.title = limit.disabled ? "Automatic or roster-managed limit. Configure in Issues settings." : "Machine-wide agent limit; existing agents continue.";
         }
+        const autoLimit = bar.querySelector('[data-action="monitor-limit-auto"]');
+        if (autoLimit) {
+          autoLimit.disabled = status.max_active_agents_override == null;
+          autoLimit.title = autoLimit.disabled ? "Automatic machine-wide agent limit is active." : "Use the automatic machine-wide agent limit; existing agents continue.";
+        }
         // Issue #4366 AC-6b: the saved settings and the held fallback stay two
         // separate lines, now of the ⚙ tooltip.
         const settings = bar.querySelector('[data-action="monitor-settings"]');
@@ -1448,6 +1469,9 @@ export function createKnowledgeKanbanSurface({
           const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
+        const refillGuidance = element.querySelector('[data-role="monitor-refill-guidance"]');
+        if (refillGuidance) refillGuidance.hidden = !issueMonitorModel.read().status.terminal_queue_auto_refill
+          || Boolean(issueMonitorModel.read().status.enabled);
 
       }
 
@@ -1663,6 +1687,9 @@ export function createKnowledgeKanbanSurface({
           }
           input.value = String(status.agent_roster_capacity ?? status.max_active_agents_override ?? status.max_active_agents ?? 1);
         });
+        bar.querySelector('[data-action="monitor-limit-auto"]')?.addEventListener("click", () => {
+          send({kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
+        });
         bar
           .querySelector('[data-action="monitor-toggle"]')
           ?.addEventListener("click", () => {
@@ -1872,6 +1899,8 @@ export function createKnowledgeKanbanSurface({
             queuedSearchQuery: "",
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
+            loadInterrupted: false,
+            loadQueued: false,
             loadSlow: false,
             error: "",
             emptyMessage: "",
@@ -2126,6 +2155,8 @@ export function createKnowledgeKanbanSurface({
 
       function finishKnowledgeLoad(state, windowId, knowledgeKind) {
         clearKnowledgeLoadRecoveryTimer(state);
+        state.loadInterrupted = false;
+        state.loadQueued = false;
         state.loading = false;
         state.refreshing = false;
         state.loadSlow = false;
@@ -2154,6 +2185,7 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
+        state.loadInterrupted = false;
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -2169,21 +2201,24 @@ export function createKnowledgeKanbanSurface({
         state.queuedLoadRefresh = false;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
-        send({
+        state.loadQueued = send({
           kind: "load_knowledge_bridge",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
-        });
-        scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
+        }) === "queued";
+        // An unsent read has no backend response deadline until ordinary replay.
+        if (!state.loadQueued) scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
       function resyncKnowledge(windowIds) {
         for (const windowId of windowIds) {
           const state = knowledgeBridgeStateMap.get(windowId);
           if (!state) continue;
+          // Only an unsent owner's Refresh intent transfers to the full read.
+          const refresh = state.loadQueued && (state.refreshing || state.queuedLoadRefresh);
           clearKnowledgeLoadRecoveryTimer(state);
           invalidateKnowledgeSearchOwner(state, state.kind, state.query);
           state.inFlightSearchIntent = null;
@@ -2199,7 +2234,7 @@ export function createKnowledgeKanbanSurface({
           state.pendingPhaseUpdates.clear();
           state.dndSnapshot = null;
           // The full read includes selected detail; keep query and selection.
-          requestKnowledgeBridge(windowId, state.kind, false);
+          requestKnowledgeBridge(windowId, state.kind, refresh);
         }
       }
 
@@ -2497,8 +2532,30 @@ export function createKnowledgeKanbanSurface({
 
       // SPEC #3170 AS-17.2: disconnect invalidates every retry owner;
       // reconnect restarts a degraded still-open window/query at 5 seconds.
-      function handleKnowledgeTransportChange(online) {
+      function handleKnowledgeTransportChange(online, recoverSnapshots = false) {
+        const disconnected = knowledgeTransportOnline && !online;
+        knowledgeTransportOnline = online;
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (disconnected && state.loading && !state.loadQueued) {
+            // Only a read sent before this disconnect needs a replacement.
+            // Repeated offline notifications must not duplicate queued reads.
+            state.loadInterrupted = true;
+            clearKnowledgeLoadRecoveryTimer(state);
+          }
+          // Forced recovery already replaces every read through resyncKnowledge.
+          if (online && !recoverSnapshots && state.loadInterrupted && workspaceWindowById(windowId)) {
+            state.loadInterrupted = false;
+            if (state.loading) {
+              state.ownedLoadRequestIds.clear();
+              state.loading = false;
+              requestKnowledgeBridge(windowId, state.kind, state.refreshing || state.queuedLoadRefresh);
+            }
+          }
+          if (online && !recoverSnapshots && state.loadQueued && workspaceWindowById(windowId)) {
+            // Ordinary open flushes this owner; forced open replaces it in resync.
+            state.loadQueued = false;
+            scheduleKnowledgeLoadRecovery(windowId, state.kind, state.loadRequestId);
+          }
           if (!online && state.revisionPending) {
             state.revisionPending = false;
             state.autoRefreshDirty = true;
@@ -3502,10 +3559,18 @@ export function createKnowledgeKanbanSurface({
             },
           });
           let empty = column.querySelector(".knowledge-empty");
-          if (!items.length && !empty) {
-            empty = createNode("div", "knowledge-empty", phase === "queued"
-              ? "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above." : `No ${phase} items`);
-            column.appendChild(empty);
+          if (!items.length) {
+            if (!empty) {
+              empty = createNode("div", "knowledge-empty");
+              column.appendChild(empty);
+            }
+            const refill = issueMonitorModel.read().status.terminal_queue_auto_refill;
+            const stopped = !issueMonitorModel.read().status.enabled;
+            empty.textContent = phase === "queued"
+              ? (refill && stopped ? "Start the Monitor to begin Auto-refill."
+                : refill ? "Auto-refill adds eligible Backlog issues on the next Monitor scan."
+                  : "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above.")
+              : `No ${phase} items`;
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
           const refuses = phase === "active" || phase === "done";
@@ -5373,11 +5438,13 @@ export function createKnowledgeKanbanSurface({
                       <span class="knowledge-monitor-switch__state">Off</span>
                     </button>
                     <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                     <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>
                     <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                   </div>
+                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the Monitor to begin Auto-refill.</p>
                 </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
@@ -5463,7 +5530,7 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
-              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; 0 disables refill."],
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the Monitor to begin Auto-refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
               ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],

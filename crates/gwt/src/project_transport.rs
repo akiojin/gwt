@@ -4073,6 +4073,17 @@ mod tests {
                 serde_json::json!({"kind":"reopen_pm_request_task","id":"tab-owned::agent-1",
                     "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
                         "reason":"needs another review","task_id":"task"}}),
+                serde_json::json!({"kind":"cancel_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":3,"request":{"operation_id":"cancel","expected_revision":3,
+                        "reason":"withdraw this request","task_id":"task"}}),
+                serde_json::json!({"kind":"complete_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":5,"request":{"operation_id":"complete","expected_revision":3,
+                        "reason":"verified outcome","task_id":"task","condition_revision":1,
+                        "review_generation":1,"evidence":["synthetic:outcome"]}}),
+                serde_json::json!({"kind":"update_pm_request_task","id":"tab-owned::agent-1",
+                    "request_id":4,"request":{"operation_id":"update","expected_revision":3,
+                        "reason":"correct this request","task":{"id":"task","title":"Changed","purpose":"Changed",
+                            "completion_conditions":["Outcome"],"issue_numbers":[],"goal_ids":[],"assignee":null}}}),
             ] {
                 assert!(
                     agent

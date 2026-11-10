@@ -157,6 +157,11 @@ gwt は次の組み込みエージェントに対応しています。Launch Age
 インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
 カスタムエージェントとして引き続き利用できます。
 
+Launch Wizard と Agents 設定の Codex モデル一覧は、ローカルの
+`models_cache.json` に追従し、取得できない場合は同梱の一覧を使います。
+一覧から消えた保存済みモデルは変更せず、警告を表示します。7日ごとに一覧と
+保存済みプロファイルの差分を確認し、新しい差分だけを PM Reports に1回報告します。
+
 **Settings > Supported Agents** では、全対応エージェントの導入状態と
 インストール済みバージョンを確認し、未導入の CLI をインストールできます。
 公式配布元の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
@@ -309,12 +314,54 @@ Project key は小文字 16 進数 16 文字の正規識別子です。未知 fi
 path・secret・時計上書きは request field にありません。発行成功時の応答は公開 identity と
 私有資格 file の path だけで、bearer は file 内に保持します。Git・log・URL・shell 引数へ
 秘密を載せないでください。この資格は将来の Host 登録用であり、端末承認や terminal 入力の
-権限ではありません。Host import とオンライン登録はまだ利用できません。
+権限ではありません。オンライン登録はまだ利用できません。
 
 管理中は台帳と別の lock を保持します。`busy` なら coordinator または他の管理 process を
 停止して再試行します。`commit_uncertain` なら `status` で現在の記録を確認してから判断し、
 自動再発行しないでください。私有保存や時計の error は表示された前提条件を修復して
 再試行し、台帳や失効記録は削除しないでください。`--help` でも field と保存条件を確認できます。
+
+#### PC 資格の offline import と点検（Unix、source build）
+
+PC で `cargo build -p gwt --bin gwt-mobile-host` を実行します。repository 外に
+ユーザー所有・mode `0700` の `$HOME/.gwt`、`$HOME/.gwt/mobile`、
+`$HOME/.gwt/mobile/host` を用意し、symlink と macOS の拡張 ACL entry を使わず、
+祖先を信頼できる非置換の状態に保ちます。発行済み source file も repository 外の
+私有領域に置き、`0600`・single-link regular file・私有 parent を満たしてください。
+コマンドは directory 作成や権限修復を行いません。
+
+期待する Host/origin/Project は source file と独立に指定します。
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"import","source":"/private/issued/host-credential.json","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+例の公開識別子・origin・source path は実際の値へ置き換えます。request は標準入力で
+渡します（最大 16 KiB）。秘密・時計上書き・destination path・有効化 field は受け付けません。
+成功応答は公開 identity と immutable な私有 copy の path だけです。既 copy の置換、
+選択資格・登録・enable 状態・端末承認の変更は行いません。
+
+copy を明示選択して点検するには、私有 mode `0600` の
+`$HOME/.gwt/mobile/host/config.json` を作成します。identity は信頼できない資格から
+推測せず、coordinator の発行 receipt にある公開 identity を指定してください。
+
+```json
+{"schema_version":1,"binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef","identity":{"host_id":"11111111-1111-4111-8111-111111111111","credential_id":"22222222-2222-4222-8222-222222222222","generation":"33333333-3333-4333-8333-333333333333"}}
+```
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"inspect","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+点検応答は公開 identity・binding・project・期限だけです。scope/identity 不一致、期限切れ、
+私有保存条件違反は拒否します。`already_exists` または `commit_uncertain` では、期待する
+発行 identity を明示設定して `inspect` を実行し、結果を見て復旧を判断してください。
+自動再試行・copy 削除・再発行は行いません。不正な設定・私有保存の前提・時計は明示的に
+修復してから再点検します。両操作とも通信を開始せず、現在の台帳上の発行・失効状態や
+登録成功を証明しません。Windows の私有保存には未対応です。`--help` でも request と
+保存条件を確認できます。
 
 ### `gwt serve` 廃止について
 
@@ -380,6 +427,20 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+`workspace.project_scan` は host endpoint の探索について、cache の利用、列挙した
+件数、経過ミリ秒を返します。消失した root と停止済み host は repository identity の
+解決前に除外します。共有 cache は候補一覧だけを保持し、endpoint とプロセスの状態は
+呼び出しごとに確認します。
+
+`workspace.project_prune` は既定で `~/.gwt/projects` の退避候補を調べるだけです。
+候補の hash と `manifest_hash` を確認し、その hash と `dry_run:false` を渡すと
+対象を `~/.gwt/project-quarantine/<id>/` へ移動します。ファイルは削除しません。
+開いている project、稼働中 Session、PM、直近の書き込み、未知・破損状態は保持します。
+走査中に稼働情報が変わったドライランは `protection_changed:true` を返します。
+適用時は保護対象を再読込し、その後の変化があれば中断します。計画が変わった場合は
+ドライランをやり直します。退避先の manifest に復元対象が残り、
+gwt を閉じた後、元の hash の保存先が存在しない場合だけ元へ移動して復元できます。
 
 `fleet.inventory` はプロジェクトの agent プロセス・pane・Monitor 行を1つの
 JSONレポートで返します。対応が取れない行、worktreeの重複、配信の判定根拠、
@@ -669,8 +730,9 @@ PM 窓の会計は別に表示します。
 共通の容量設定の仕様は [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 名簿のあるプロジェクトでは `issue.monitor.config.set` に `{"max_active":4}` を渡すと有効メンバーを4人へ増減します。
-人数と要求上限を一致させるため、Auto への変更は拒否します。名簿のない旧設定では、
-`issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+machine 上限を Auto に戻すには **Agent limit** の隣の **Auto** ボタン、または
+`issue.monitor.config.set` の `{"max_active_mode":"auto"}` を使います。
+名簿のあるプロジェクトでも使え、登録メンバーは維持します。名簿のない旧設定では、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
 名簿のあるプロジェクトでは `agent_roster_capacity` と `agent_roster_revision` がプロジェクトの人数設定を表します。
@@ -1018,6 +1080,21 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 `request` 内の `operation_id`・`expected_revision`・`reason`・`task_id` で Task を
 未完了＋再評価待ちへ戻します。応答は `pm_request_task` で要求の `request_id` を返し、
 変更者はサーバーがブラウザ接続から確定します。PM 停止中も保存済みの Task を扱えます。
+`cancel_pm_request_task` は同じ `request` 項目で依頼を取り消し、完了とは別の取消状態と
+ユーザーの監査記録を保存します。対象と祖先の過去の完了根拠は無効になります。
+`update_pm_request_task` は、`request` 内の `operation_id`・`expected_revision`・
+`reason`・`task: TaskDraft` で保存済みの依頼内容を訂正します。対象 ID は `task.id`
+だけで、変更者はサーバーがブラウザ接続から確定します。Update は適用後に読み取った
+現在の Task と revision に、元の適用 revision の receipt を添えて返します。内容を
+変えない更新も有効で、Task 差分が空の receipt を保存します。
+`complete_pm_request_task` は `request` 内の `operation_id`・`expected_revision`・
+`reason`・`task_id`・`condition_revision`・`review_generation`・空でない `evidence`
+で完了を記録します。変更者はブラウザ接続から確定し、既存 Task の規則に従って、
+古い確認・PM の再評価待ち・未完了の子がある場合は拒否します。同じ完了内容を別の
+operation で確認することも有効で、Task 差分が空の receipt を保存する場合があります。
+同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
+後続の変更や再開を反映する場合があります。
+Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
 過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
@@ -1027,11 +1104,18 @@ actor になるため、旧 operation の再実行は競合になります。現
 
 選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
 `selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
-対象 turn の ID・`prompt_sha256` を原文なしで返します。`window_only:true` と `detail`
+対象 turn の ID・`prompt_sha256`・サーバー計算の `source_id` を原文なしで返します。
+`window_only:true` と `detail`
 が示すのは件数・容量を制限した会話の範囲であり、履歴全件や永続 cursor ではありません。
 `selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
-で原文を 1 件取得します。両 native selector は Task 追跡の読取不能とは独立して
-利用できます。選択した turn を未分類の pending source として保存するには、
+で原文と同じ `source_id` を 1 件取得します。
+両 native selector は Task 追跡の読取不能とは独立して
+利用できます。まず `selector:{kind:"source",id:"<source_id>"}` で既保存の source と
+pending 状態を読み、native identity と本文 hash を照合してから、再受付せず分類や
+既存 Task を確認します。ID 自体は保存済みの証明でも権限でもありません。
+`missing_source` だけが返却 revision 時点での未保存を示します。読取不能・別 project・
+権限拒否は未受付とみなさず degraded として保持します。
+未保存の turn を未分類の pending source として保存するには、
 `pm.request_tasks.capture` に `operation_id`・現在の `expected_revision`・`reason` と、
 `provider`・`conversation_id`・`id`・`prompt_sha256` を指定します。原文・source・actor は
 サーバーが確定し、caller による原文・source・actor・authority の指定は拒否します。
@@ -1819,6 +1903,13 @@ gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
 
+PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲覧できます。未完了を優先し、
+親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
+で完了・取消も表示できます。プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
+長い概要は短縮しますが、保存済みの内容は保持します。読取り失敗時は最後に確認できた一覧を
+警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+同じツールバーから **Reports** と **Execution log** に切り替えられます。
+
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
 **Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
@@ -1831,6 +1922,8 @@ PM の更新は共通の短い概要で表示し、**Details** を開くと説�
 **Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
 切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
 1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
+判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Execution log** で
+番号または自由文を回答できます。**Copy** には番号付き選択肢と詳細を含めます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、
@@ -2296,6 +2389,9 @@ GC の空き容量閾値を残してディスク容量を予約します。
 `verification.disk_budget_bytes` で実測に基づく run 単位の予算を上書きできます。
 既定の予約量は各 volume で 5,904,433,337 bytes（約 5.5 GiB）です。
 target と一時領域の実測増分に 20% の余裕を加えて算出しています。
+volume が空でも予約量と GC の閾値を収容できない場合、`verify.run` は即時に拒否し、
+対象 path、予約量、閾値、総容量、空き容量を表示します。
+対象の Cargo target または `TMPDIR` をより大きな filesystem に移してください。
 `verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
 共通 FIFO queue を表示します。再試行前に確認してください。
 

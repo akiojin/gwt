@@ -496,6 +496,8 @@ pub(crate) const UPDATE_MANUAL_DRAIN_CLIENT_ID: &str = "update-manual-drain";
 pub(crate) enum UpdateAutoApplyRelease {
     /// The user cancelled during the grace (AC-7).
     Cancelled,
+    /// Automatic apply was refused or deferred; manual and inactive holds remain.
+    Deferred,
     /// The persisted manifest for the drained version is gone.
     PayloadMissing,
     /// A newer release invalidated this staged version.
@@ -690,6 +692,13 @@ pub struct WindowRuntime {
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
+    pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
+    input_in_flight_reply: Option<ClientId>,
+    pub(crate) pending_input_commands: std::collections::VecDeque<(
+        gwt::project_runtime::events::OwnerCommand,
+        RemoteRuntimeCommandKind,
+    )>,
+    pending_owner_commands: std::collections::VecDeque<PendingRemoteRuntimeCommand>,
     pub(crate) output_seq: u64,
     pub(crate) status_revision: u64,
     pub(crate) raw_status: gwt::WindowProcessStatus,
@@ -728,6 +737,10 @@ impl WindowRuntime {
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input_observation: None,
             last_human_input_at: None,
+            input_in_flight: None,
+            input_in_flight_reply: None,
+            pending_input_commands: Default::default(),
+            pending_owner_commands: Default::default(),
             output_seq: 0,
             status_revision: 0,
             raw_status: gwt::WindowProcessStatus::Running,
@@ -778,6 +791,26 @@ impl WindowRuntime {
         }
         Some(observation.revision)
     }
+
+    fn input_delivery_pending(&self) -> bool {
+        self.input_in_flight.is_some()
+            || !self.pending_input_commands.is_empty()
+            || self
+                .pending_owner_commands
+                .iter()
+                .any(|pending| matches!(pending.kind, RemoteRuntimeCommandKind::Input { .. }))
+    }
+}
+
+struct PendingRemoteRuntimeCommand {
+    command: gwt::project_runtime::events::OwnerCommand,
+    kind: RemoteRuntimeCommandKind,
+    session_id: Option<String>,
+    owner_identity: gwt::daemon_subscriber::ProjectOwnerIdentity,
+    queued_at: Instant,
+    retry_at: Instant,
+    attempts: u32,
+    reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -796,6 +829,7 @@ pub(crate) struct RemoteRuntimeCommandCompletion {
     pub(crate) incarnation: u64,
     pub(crate) kind: RemoteRuntimeCommandKind,
     pub(crate) approval_resolution_started: bool,
+    pub(crate) input_command_id: Option<uuid::Uuid>,
     pub(crate) result: Result<Option<gwt::project_runtime::events::OwnerInputObservation>, String>,
 }
 
@@ -986,6 +1020,8 @@ pub(crate) struct RemoteRuntimeSnapshot {
     pub(crate) exit_code: Option<u32>,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) pm_registration: Option<Box<gwt::pm_registry::PmRegistration>>,
     #[serde(default)]
     pub(crate) agent_id: Option<String>,
     #[serde(default)]
@@ -1047,6 +1083,7 @@ mod title_sync;
 mod ui_trace;
 mod window;
 mod wizard;
+pub(crate) use startup::StartupAutoResumeAdmissionPrepared;
 pub(crate) use wizard::{
     IssueMonitorLaunchFactsPrefetched, IssueMonitorLaunchPrepared, IssueMonitorPreflightRejected,
 };
@@ -1531,6 +1568,7 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
         started_at: std::time::Instant,
         // A successful launch retains its immutable operation in this owner epoch.
         accepted_owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+        observation_error_reported: bool,
     },
     LaunchedPendingAck {
         window_id: String,
@@ -1702,8 +1740,8 @@ pub(crate) struct ProjectRuntimeState {
 
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
-    /// entry is consumed by `handle_launch_complete`, which writes the PM
-    /// registration once the session id exists.
+    /// entry is consumed by native launch completion to project the owner's
+    /// durable PM registration into the GUI's read-only cache.
     pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
     /// Repositories whose explicit PM-capable pane close has been accepted but
     /// whose durable deregistration is still running. Automatic ensure must
@@ -2016,6 +2054,8 @@ pub(crate) enum WindowCloseMonitorResult {
 }
 
 pub struct AppRuntime {
+    /// Revoke mobile authority before dropping the remaining runtime fields.
+    pub(crate) mobile_host: gwt::mobile_host::MobileHost,
     #[cfg(test)]
     pub(crate) test_project_owners:
         HashMap<PathBuf, Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>>,
@@ -2073,6 +2113,7 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_launch_preparations: HashSet<wizard::IssueMonitorLaunchPreparationKey>,
+    pub(crate) issue_monitor_launch_attempts: HashMap<wizard::IssueMonitorLaunchPreparationKey, u8>,
     pub(crate) issue_monitor_launch_queue: Vec<wizard::PendingIssueMonitorLaunch>,
     pub(crate) issue_monitor_materializer_id: String,
     /// Issue #3878: budget for one local fallback commit of the Issue Monitor
@@ -2169,6 +2210,11 @@ pub struct AppRuntime {
     /// the PTY is live or the window closes.
     pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
+    /// Issue #5379: a blocking worker holds the queued startup restores while
+    /// it evaluates their Project admission off the GUI thread.
+    pub(crate) startup_auto_resume_admission_in_flight: bool,
+    /// The startup restore drain phase, closed by the drain's tail.
+    pub(crate) startup_restore_drain_phase: Option<gwt::perf::startup::PhaseTimer>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
     /// terminal close, keyed by combined window id. Process-local only.
@@ -5100,6 +5146,7 @@ impl AppRuntime {
             Arc::new(persist_dispatcher::PersistDispatcher::new(&blocking_tasks));
         pty_io::initialize_process_window_close_finalizer()?;
         let mut app = Self {
+            mobile_host: Default::default(),
             #[cfg(test)]
             test_project_owners: HashMap::new(),
             _runtime_namespace_gc: runtime_namespace_gc,
@@ -5153,6 +5200,7 @@ impl AppRuntime {
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
+            issue_monitor_launch_attempts: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
@@ -5168,6 +5216,8 @@ impl AppRuntime {
             pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
+            startup_auto_resume_admission_in_flight: false,
+            startup_restore_drain_phase: None,
             active_agent_sessions: HashMap::new(),
             issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),
@@ -9290,6 +9340,21 @@ impl AppRuntime {
                     .iter()
                     .find(|(tab_id, _)| *tab_id == worker_expected_project_tab_id)
                     .map(|(_, live_window_ids)| live_window_ids);
+                // Issue #6933 AC-4: the weekly Codex model-list check rides
+                // the scheduled scan worker; it is a no-op until seven days
+                // have passed; a failure does not stop the scan.
+                if let Err(error) = gwt::launch_wizard::codex_models::run_weekly_check(
+                    &worker_project_root,
+                    &gwt::launch_wizard::codex_models::saved_codex_profile_models(
+                        &worker_prefs_path,
+                    ),
+                    chrono::Utc::now(),
+                ) {
+                    tracing::warn!(
+                        project_root = %worker_project_root.display(),
+                        "Codex model list weekly check failed: {error}"
+                    );
+                }
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
@@ -10371,7 +10436,7 @@ impl AppRuntime {
             .is_some_and(|manifest| manifest.version == version && manifest.auto_apply_deferred)
         {
             return self
-                .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Cancelled);
+                .release_update_auto_apply_events(version, UpdateAutoApplyRelease::Deferred);
         }
         if automatic && !self.automatic_updates_enabled() {
             return Vec::new();
@@ -10679,15 +10744,9 @@ impl AppRuntime {
         if let Some(manifest) = gwt_core::update::load_pending_update_manifest()
             .filter(|manifest| manifest.auto_apply_deferred)
         {
-            if !self.project_contexts().iter().any(|context| {
-                self.project_auto_update_drain(context)
-                    .is_some_and(|(_, drain)| drain.version == manifest.version)
-            }) {
-                return Vec::new();
-            }
             return self.release_update_auto_apply_events(
                 &manifest.version,
-                UpdateAutoApplyRelease::Cancelled,
+                UpdateAutoApplyRelease::Deferred,
             );
         }
         if let Some(observation) = observations
@@ -10722,6 +10781,29 @@ impl AppRuntime {
             observation.snapshot.panes = panes.clone();
             events.extend(self.update_drain_tick_events_for_project(observation, now));
         }
+        // A disabled project withdraws its schedule, while another project
+        // may still own the host announcement for the same version.
+        events.retain(|event| {
+            let BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                ..
+            } = &event.event
+            else {
+                return true;
+            };
+            !self.project_contexts().iter().any(|context| {
+                self.project_state(context)
+                    .is_some_and(|state| state.update_auto_apply.is_scheduled_for(version))
+                    && self
+                        .project_auto_update_drain(context)
+                        .is_some_and(|(prefs, drain)| {
+                            drain.version == *version
+                                && (!drain.automatic.unwrap_or(prefs.autonomous_mode)
+                                    || prefs.enabled)
+                        })
+            })
+        });
         let events = Self::deduplicate_update_host_events(events);
         for event in &events {
             if let BackendEvent::UpdateAutoApply {
@@ -10757,9 +10839,30 @@ impl AppRuntime {
             }
             return Vec::new();
         };
-        if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
+        let automatic = drain.automatic.unwrap_or(prefs.autonomous_mode);
+        if automatic && !prefs.enabled {
+            let withdrawn = self.project_state_mut(context).is_some_and(|state| {
+                let scheduled = state.update_auto_apply.is_scheduled_for(&drain.version);
+                state.update_auto_apply.reset();
+                scheduled
+            });
+            return if withdrawn {
+                vec![OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                    version: drain.version,
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                    grace_secs: None,
+                })]
+            } else {
+                Vec::new()
+            };
+        }
+        if automatic && !self.automatic_updates_enabled() {
             return self
-                .release_update_auto_apply_for_project(context, &drain.version)
+                .release_update_auto_apply_for_project(
+                    context,
+                    &drain.version,
+                    &prefs.config_token(),
+                )
                 .unwrap_or_else(|error| {
                     self.issue_monitor_control_error_events(
                         Some(&context.project_root),
@@ -11023,29 +11126,77 @@ impl AppRuntime {
         release: UpdateAutoApplyRelease,
     ) -> Result<Vec<OutboundEvent>, (String, Vec<OutboundEvent>)> {
         let mut events = Vec::new();
+        let mut released = false;
         for context in self.project_contexts() {
-            if self
-                .project_auto_update_drain(&context)
-                .is_some_and(|(_, drain)| drain.version == version)
+            if release == UpdateAutoApplyRelease::Deferred
+                && self
+                    .project_state(&context)
+                    .is_some_and(|state| state.update_auto_apply.is_cancelled(version))
             {
-                match self.release_update_auto_apply_for_project(&context, version) {
-                    Ok(released) => events.extend(released),
-                    Err(error) => {
-                        let message = error.to_string();
-                        events.extend(self.issue_monitor_control_error_events(
-                            Some(&context.project_root),
-                            None,
-                            error,
-                            "update-drain",
-                            None,
-                        ));
-                        return Err((message, events));
+                continue;
+            }
+            match self.project_auto_update_drain(&context) {
+                Some((prefs, drain)) if drain.version == version => {
+                    if release == UpdateAutoApplyRelease::Deferred {
+                        if !drain.automatic.unwrap_or(prefs.autonomous_mode) {
+                            if let Some(state) = self.project_state_mut(&context) {
+                                if state.update_auto_apply.is_scheduled_for(version) {
+                                    state.update_auto_apply.reset();
+                                    released = true;
+                                }
+                            }
+                            continue;
+                        }
+                        if !prefs.enabled {
+                            if let Some(state) = self.project_state_mut(&context) {
+                                if state.update_auto_apply.is_scheduled_for(version) {
+                                    state.update_auto_apply.cancel(version);
+                                    released = true;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    match self.release_update_auto_apply_for_project(
+                        &context,
+                        version,
+                        &prefs.config_token(),
+                    ) {
+                        Ok(project_events) => {
+                            events.extend(project_events);
+                            released = true;
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            events.extend(self.issue_monitor_control_error_events(
+                                Some(&context.project_root),
+                                None,
+                                error,
+                                "update-drain",
+                                None,
+                            ));
+                            return Err((message, events));
+                        }
                     }
                 }
+                None => {
+                    // A config clear can remove the hold before the runtime
+                    // observes the matching manifest's deferral.
+                    if let Some(state) = self.project_state_mut(&context) {
+                        if state.update_auto_apply.is_scheduled_for(version) {
+                            state.update_auto_apply.cancel(version);
+                            released = true;
+                        }
+                    }
+                }
+                Some(_) => {}
             }
         }
+        if release == UpdateAutoApplyRelease::Deferred && !released {
+            return Ok(events);
+        }
         let (level, message) = match release {
-            UpdateAutoApplyRelease::Cancelled => (
+            UpdateAutoApplyRelease::Cancelled | UpdateAutoApplyRelease::Deferred => (
                 "info",
                 format!(
                     "Update v{version} automatic apply cancelled — the update stays staged; use the update button when ready."
@@ -11079,7 +11230,9 @@ impl AppRuntime {
         self.record_update_apply_observation(
             version,
             match release {
-                UpdateAutoApplyRelease::Cancelled => "pending_refused",
+                UpdateAutoApplyRelease::Cancelled | UpdateAutoApplyRelease::Deferred => {
+                    "pending_refused"
+                }
                 UpdateAutoApplyRelease::PayloadMissing => "pending_failed",
                 UpdateAutoApplyRelease::Superseded => "pending_superseded",
                 UpdateAutoApplyRelease::RequiresElevation => "pending_refused",
@@ -11104,6 +11257,7 @@ impl AppRuntime {
         &mut self,
         context: &ProjectContext,
         version: &str,
+        expected_config_token: &str,
     ) -> Result<Vec<OutboundEvent>, gwt::runtime_daemon_events::IssueMonitorControlPublishError>
     {
         if self.project_state(context).is_none() {
@@ -11111,15 +11265,28 @@ impl AppRuntime {
         }
         let publication = self.publish_project_issue_monitor_control(
             context,
-            serde_json::json!({ "config_set": { "update_drain": false } }),
+            serde_json::json!({ "config_set_if_matches": {
+                "update_drain": false,
+                "expected_config_token": expected_config_token,
+            } }),
         );
         let events = match publication {
             Ok(()) => Vec::new(),
             Err(error) if error.allows_local_fallback() => {
-                let (monitor, ()) = self
-                    .commit_local_issue_monitor_control(context, |monitor| {
-                        monitor.clear_update_drain()
-                    })?;
+                let (monitor, ()) = Self::try_commit_local_issue_monitor_control_with_timeout(
+                    &context.project_root,
+                    self.issue_monitor_fallback_commit_timeout,
+                    |monitor| {
+                        if monitor.prefs().config_token() != expected_config_token {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "Issue Monitor configuration changed before update drain release; read the latest status and retry.",
+                            ));
+                        }
+                        monitor.clear_update_drain();
+                        Ok(())
+                    },
+                )?;
                 self.issue_monitor_snapshot_events_for(None, Some(&context.project_root), monitor)
             }
             Err(error) => return Err(error),
@@ -11325,6 +11492,9 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
+            | FrontendEvent::UpdatePmRequestTask { id, .. }
+            | FrontendEvent::CompletePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11703,6 +11873,9 @@ impl AppRuntime {
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::LoadPmRequestTask { id, .. }
             | FrontendEvent::ReopenPmRequestTask { id, .. }
+            | FrontendEvent::CancelPmRequestTask { id, .. }
+            | FrontendEvent::UpdatePmRequestTask { id, .. }
+            | FrontendEvent::CompletePmRequestTask { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12072,6 +12245,39 @@ impl AppRuntime {
                 &id,
                 request_id,
                 pm_chat::PmRequestTaskOperation::Reopen(request),
+            ),
+            FrontendEvent::CancelPmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Cancel(request),
+            ),
+            FrontendEvent::UpdatePmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Update(request),
+            ),
+            FrontendEvent::CompletePmRequestTask {
+                id,
+                request_id,
+                request,
+            } => self.pm_request_task_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                pm_chat::PmRequestTaskOperation::Complete(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
@@ -14326,6 +14532,9 @@ impl AppRuntime {
         let changed = state.project_owner_health.as_ref() != Some(&health)
             || state.project_owner_connection_id != connection_id
             || state.project_owner_identity != identity;
+        let input_connection_changed = state.project_owner_connection_id != connection_id
+            || state.project_owner_identity != identity
+            || health.state != gwt::protocol::ProjectOwnerHealthState::Healthy;
         if changed {
             state.project_owner_execution_status = None;
         }
@@ -14358,6 +14567,20 @@ impl AppRuntime {
             ),
             self.hub_state_broadcast(),
         ];
+        if input_connection_changed {
+            let ids = self
+                .runtimes
+                .keys()
+                .filter(|id| self.project_key_for_window(id) == Some(&context.project_key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for id in ids {
+                events.extend(self.discard_pending_remote_input(
+                    &id,
+                    "Queued input was discarded because the project connection changed. Retype it.",
+                ));
+            }
+        }
         if health.state == gwt::protocol::ProjectOwnerHealthState::Healthy {
             events.extend(self.queue_owner_inventory(context, Some(connection_id), None, None));
         }
@@ -14587,7 +14810,7 @@ impl AppRuntime {
             runtime.screen_seq = snapshot.screen_seq;
         }
         runtime.has_unsent_user_input.store(
-            snapshot.has_unsent_user_input,
+            snapshot.has_unsent_user_input || runtime.input_delivery_pending(),
             std::sync::atomic::Ordering::Release,
         );
         runtime.observe_input(snapshot.input_observation);
@@ -14689,6 +14912,7 @@ impl AppRuntime {
         id: &str,
     ) -> Vec<OutboundEvent> {
         let mut events = self.flush_runtime_output_batch(id);
+        events.extend(self.discard_recovering_remote_commands(id));
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
@@ -15542,13 +15766,15 @@ impl AppRuntime {
             let mut restore_refusal = None;
             let mut launch_sent = false;
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
+                let mut _gui_presence = None;
                 let attempt = async {
                 if command.is_none() && !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
                 let connected = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await;
-                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.clone());
-                let client = connected?;
+                *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.as_ref().map(|(client, _)| client.clone()).map_err(Clone::clone));
+                let (client, presence) = connected?;
+                _gui_presence = Some(presence);
                 if !current.load(std::sync::atomic::Ordering::Acquire) {
                     return Err("launch cancelled".into());
                 }
@@ -15683,8 +15909,13 @@ impl AppRuntime {
                         return Err(snapshot_error);
                     }
                 };
-                let snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
+                let mut snapshot: RemoteRuntimeSnapshot = serde_json::from_value(value).map_err(|error| error.to_string())?;
                 if snapshot.id != owner_pane_id || snapshot.incarnation != incarnation || snapshot.session_id.as_deref() != receipt["session_id"].as_str() { return Err("owner launch snapshot identity changed".into()); }
+                snapshot.pm_registration = gwt::pm_registry::load_pm_prefs(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                ).ok().and_then(|prefs| prefs.registration).filter(|registration| {
+                    snapshot.session_id.as_deref() == Some(registration.session_id.as_str())
+                }).map(Box::new);
                 let session = read_owner_session(&snapshot, &sessions_dir);
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session))
                 }.await;
@@ -15932,6 +16163,32 @@ impl AppRuntime {
                             Some("owner connection is unavailable".into()),
                         );
                     };
+                    let Some(identity) = client.identity() else {
+                        return Vec::new();
+                    };
+                    if self
+                        .project_state(&context)
+                        .and_then(|state| state.project_owner_identity.as_ref())
+                        .is_some_and(|accepted| accepted != identity)
+                    {
+                        return Vec::new();
+                    }
+                    let pm_root = self
+                        .project_state_mut(&context)
+                        .and_then(|state| state.pending_pm_launches.remove(&window_id));
+                    let pm_cache_changed = match (pm_root, snapshot.pm_registration.as_ref()) {
+                        (Some(root), Some(registration))
+                            if root == context.project_root
+                                && snapshot.session_id.as_deref()
+                                    == Some(registration.session_id.as_str()) =>
+                        {
+                            let changed =
+                                self.pm_session_for_root(&root) != Some(&registration.session_id);
+                            self.sync_pm_session_cache(&root, Some(registration));
+                            changed
+                        }
+                        _ => false,
+                    };
                     if self.runtimes.get(&window_id).is_some_and(|runtime| {
                         runtime.owner_pane_id == snapshot.id
                             && runtime.incarnation == snapshot.incarnation
@@ -15939,7 +16196,12 @@ impl AppRuntime {
                     }) {
                         // Inventory may have installed this same owner before the HTTP launch reply.
                         // A fresh post-install snapshot repairs it without replaying older status/data.
-                        return self.request_owner_snapshot(&window_id, None);
+                        let mut events = Vec::new();
+                        if pm_cache_changed {
+                            events.push(self.workspace_state_broadcast(&context));
+                        }
+                        events.extend(self.request_owner_snapshot(&window_id, None));
+                        return events;
                     }
                     self.record_restore_window_outcome(&window_id, Ok(()));
                     self.restore_launch_windows.remove(&window_id);
@@ -16256,6 +16518,11 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return events;
         };
+        events.extend(self.discard_pending_remote_input(
+            window_id,
+            "Queued input was discarded because the pane runtime changed. Retype it.",
+        ));
+        events.extend(self.discard_recovering_remote_commands(window_id));
         self.runtimes.remove(window_id);
         self.active_agent_sessions.remove(window_id);
         if let Some(tab) = self.tab_mut(&address.tab_id) {
@@ -16389,21 +16656,64 @@ impl AppRuntime {
             .get(window_id)
             .map(|runtime| runtime.status_revision)
             .unwrap_or_default();
+        let connection_id = self
+            .project_state(context)
+            .map(|state| state.project_owner_connection_id);
+        let discard_input = self.runtimes.get(window_id).is_some_and(|runtime| {
+            runtime.input_delivery_pending()
+                && (runtime.owner_pane_id != snapshot.id
+                    || runtime.incarnation != snapshot.incarnation
+                    || runtime.owner_identity != identity
+                    || runtime
+                        .input_in_flight
+                        .is_some_and(|(connection, _)| Some(connection) != connection_id))
+        });
+        let discarded_input = if discard_input {
+            self.discard_pending_remote_input(
+                window_id,
+                "Queued input was discarded because the pane owner changed. Retype it.",
+            )
+        } else {
+            Vec::new()
+        };
         let composer_hint = self
             .runtimes
-            .get(window_id)
+            .get_mut(window_id)
             .filter(|runtime| {
                 runtime.owner_pane_id == snapshot.id
                     && runtime.incarnation == snapshot.incarnation
                     && runtime.owner_identity == identity
             })
             .map(|runtime| {
+                let preserve_input = runtime
+                    .input_in_flight
+                    .is_none_or(|(connection, _)| Some(connection) == connection_id);
                 (
                     runtime.has_unsent_user_input.clone(),
                     runtime.input_observation,
                     runtime.last_human_input_at,
+                    if preserve_input {
+                        (
+                            runtime.input_in_flight.take(),
+                            runtime.input_in_flight_reply.take(),
+                        )
+                    } else {
+                        (None, None)
+                    },
+                    if preserve_input {
+                        std::mem::take(&mut runtime.pending_input_commands)
+                    } else {
+                        Default::default()
+                    },
                 )
             });
+        // These commands have never left the GUI. Keep them across owner
+        // replacement; the retry path checks the exact pane incarnation.
+        let pending_owner_commands = self
+            .runtimes
+            .get_mut(window_id)
+            .map(|runtime| std::mem::take(&mut runtime.pending_owner_commands))
+            .unwrap_or_default();
         let mut runtime = WindowRuntime::remote(
             snapshot.id.clone(),
             snapshot.incarnation,
@@ -16411,10 +16721,15 @@ impl AppRuntime {
             client,
             identity,
         );
-        if let Some((hint, observation, last_human_input_at)) = composer_hint {
+        runtime.pending_owner_commands = pending_owner_commands;
+        if let Some((hint, observation, last_human_input_at, input_in_flight, pending)) =
+            composer_hint
+        {
             runtime.has_unsent_user_input = hint;
             runtime.input_observation = observation;
             runtime.last_human_input_at = last_human_input_at;
+            (runtime.input_in_flight, runtime.input_in_flight_reply) = input_in_flight;
+            runtime.pending_input_commands = pending;
         }
         runtime.status_revision = status_revision;
         runtime.child_pid = snapshot.child_pid;
@@ -16422,7 +16737,7 @@ impl AppRuntime {
         runtime.screen_ansi = snapshot.screen_ansi;
         runtime.screen_seq = snapshot.screen_seq;
         runtime.has_unsent_user_input.store(
-            snapshot.has_unsent_user_input,
+            snapshot.has_unsent_user_input || runtime.input_delivery_pending(),
             std::sync::atomic::Ordering::Release,
         );
         runtime.output_seq = snapshot.screen_seq;
@@ -16449,11 +16764,13 @@ impl AppRuntime {
                 .with_terminal_stream_seq(Some(snapshot.screen_seq)),
         ];
         events.extend(status_events);
+        events.extend(discarded_input);
         events.extend(self.request_owner_snapshot(window_id, None));
         if activity_changed {
             self.invalidate_workspace_projection_patch(&context.tab_id);
             events.extend(self.active_work_projection_broadcast_for_tab(&context.tab_id));
         }
+        events.extend(self.retry_remote_runtime_commands(window_id, Instant::now()));
         events
     }
 
@@ -16492,7 +16809,7 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())
                 .and_then(|executor| {
                     executor.block_on(async {
-                        let client =
+                        let (client, _gui_presence) =
                             gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
                                 context.project_root.clone(),
                                 supervisor,

@@ -3787,6 +3787,12 @@ mod tests {
             verified.verified_head.as_deref()
         );
         env.completion_prs.get_mut(&7).unwrap().head_sha = receipt_head;
+        assert!(
+            crate::cli::completion_pr::admit(&mut env, session_id, Some(42), None, &mut out)
+                .unwrap_err()
+                .contains("wait for CI, auto-merge and confirmed merge")
+        );
+        env.completion_prs.get_mut(&7).unwrap().state = gwt_git::pr_status::PrState::Merged;
         let admission =
             crate::cli::completion_pr::admit(&mut env, session_id, Some(42), None, &mut out);
         assert!(admission.is_ok(), "{admission:?}: {out}");
@@ -4069,6 +4075,7 @@ mod tests {
             &fixture.repo,
             verification.verified_head.as_deref().unwrap(),
         );
+        env.completion_prs.get_mut(&7).unwrap().state = gwt_git::pr_status::PrState::Merged;
         let mut completion_out = String::new();
         assert_eq!(
             crate::cli::execution_state::run(

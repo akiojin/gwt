@@ -307,9 +307,9 @@ function renderIssuesSettingsPanel(panel, options) {
   }
   const replenishment = group("Refill");
   const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
-  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 0);
   setControlExplanation(refill, "Automatically add eligible issues to the launch queue when it has fewer issues than the refill limit.", "settings-auto-refill");
-  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. 0 disables automatic refill.", "settings-refill-limit");
+  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. Turning Auto-refill on with 0 uses the default limit of 3.", "settings-refill-limit");
   limit.min = "0";
   limit.step = "1";
   const saveRefill = () => {
@@ -564,6 +564,12 @@ export function renderAgentsSettingsPanel(panel, options) {
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    // Issue #6933 AC-3: say so when the saved model left the tool's list; never swap it.
+    const modelUnavailable = document.createElement("p");
+    modelUnavailable.className = "settings-help";
+    modelUnavailable.setAttribute("role", "status");
+    modelUnavailable.dataset.modelUnavailable = "";
+    row.append(modelUnavailable);
     const modelSuggestions = document.createElement("datalist");
     modelSuggestions.id = `candidate-models-${Math.random().toString(36).slice(2)}`;
     row.appendChild(modelSuggestions);
@@ -619,6 +625,12 @@ export function renderAgentsSettingsPanel(panel, options) {
         if (agentChanged && !entry?.supports_skip_permissions) skip.checked = false;
       }
       const selectedModel = entry?.models.find(option => option.value === model.value);
+      const unlisted = Boolean(entry && (entry.id === "codex" || entry.models.length)
+        && model.value && !selectedModel);
+      modelUnavailable.textContent = unlisted
+        ? `Saved model ${model.value} is no longer offered by ${entry.name}. It is kept as saved and not replaced; choose a listed model before launching.`
+        : "";
+      modelUnavailable.hidden = !unlisted;
       const levels = selectedModel?.reasoning_options || entry?.reasoning_options || [];
       const defaultReasoning = selectedModel ? selectedModel.default_reasoning : entry?.default_reasoning;
       const level = agentChanged || changed === "model"
@@ -2458,6 +2470,29 @@ export function createSettingsSurface({
         }
       }
 
+      function renderCustomAgentStatus(scroll, state) {
+        let section = scroll.querySelector('[data-role="custom-agent-status"]');
+        if (!state.statusMessage) {
+          section?.remove();
+          return;
+        }
+        if (!section) {
+          section = createDiv("mock-section");
+          section.dataset.role = "custom-agent-status";
+          const label = createDiv("mock-label");
+          label.textContent = "Status";
+          section.appendChild(label);
+          const row = createDiv("mock-row");
+          row.appendChild(document.createElement("span"));
+          section.appendChild(row);
+          scroll.insertBefore(section, scroll.children[1] || null);
+        }
+        section.querySelector(".mock-label").style.color = state.statusKind === "error"
+          ? "var(--color-state-blocked)" : state.statusKind === "success"
+            ? "var(--color-state-success)" : "var(--color-text-muted)";
+        section.querySelector("span").textContent = state.statusMessage;
+      }
+
       function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
@@ -2466,6 +2501,13 @@ export function createSettingsSurface({
           }
           const scroll = body.querySelector("[data-role='settings-scroll']");
           if (!scroll) continue;
+          const editor = scroll.querySelector('[data-role="custom-agent-env-editor"]');
+          if (editor?.dataset.agentId === editingCustomAgentId &&
+              state.catalog.agents.some(agent => agent.id === editingCustomAgentId)) {
+            // Keep the live draft and focus while the canonical catalog advances.
+            renderCustomAgentStatus(scroll, state);
+            continue;
+          }
           while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
 
           const addBtn = document.createElement("button");
@@ -2491,25 +2533,7 @@ export function createSettingsSurface({
             );
           });
           scroll.appendChild(addBtn);
-
-          if (state.statusMessage) {
-            const section = createDiv("mock-section");
-            const label = createDiv("mock-label");
-            label.textContent = "Status";
-            label.style.color =
-              state.statusKind === "error"
-                ? "#ff6b6b"
-                : state.statusKind === "success"
-                  ? "#7abf7a"
-                  : "#999";
-            section.appendChild(label);
-            const row = createDiv("mock-row");
-            const text = document.createElement("span");
-            text.textContent = state.statusMessage;
-            row.appendChild(text);
-            section.appendChild(row);
-            scroll.appendChild(section);
-          }
+          renderCustomAgentStatus(scroll, state);
 
           if (state.catalog.loading && state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
@@ -2572,22 +2596,29 @@ export function createSettingsSurface({
             row.appendChild(delBtn);
             section.appendChild(row);
             if (editingCustomAgentId === agent.id) {
-              section.appendChild(
-                renderCustomAgentEnvEditor({
-                  document,
-                  agent,
-                  onSave: (updatedAgent) => {
-                    editingCustomAgentId = null;
-                    setSettingsStatus("Saving custom agent…", "info");
+              const editor = renderCustomAgentEnvEditor({
+                document,
+                agent,
+                onSave: (draftAgent) => {
+                  const currentAgent = customAgentsModel.read().catalog.agents.find(entry => entry.id === draftAgent.id);
+                  editingCustomAgentId = null;
+                  if (!currentAgent) {
+                    setSettingsStatus("Custom agent is no longer available.", "error");
                     renderSettingsAgentList();
-                    send({ kind: "update_custom_agent", agent: updatedAgent });
-                  },
-                  onCancel: () => {
-                    editingCustomAgentId = null;
-                    renderSettingsAgentList();
-                  },
-                }),
-              );
+                    return;
+                  }
+                  const updatedAgent = { ...currentAgent, env: draftAgent.env };
+                  setSettingsStatus("Saving custom agent…", "info");
+                  renderSettingsAgentList();
+                  send({ kind: "update_custom_agent", agent: updatedAgent });
+                },
+                onCancel: () => {
+                  editingCustomAgentId = null;
+                  renderSettingsAgentList();
+                },
+              });
+              editor.dataset.agentId = agent.id;
+              section.appendChild(editor);
             }
             scroll.appendChild(section);
           }

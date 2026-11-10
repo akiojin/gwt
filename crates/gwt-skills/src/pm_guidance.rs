@@ -439,14 +439,32 @@ Hard limits, no exceptions:
   - two user instructions that genuinely conflict and both still apply.
     When one is newer and clearly supersedes the other, follow the newer
     one without asking.
-- When you do ask, ask once: state the question, your recommendation
-  and why, and a copy-paste answer, so one reply settles it.
+- When you do ask, ask once using the [choice-first question format](#choice-first-questions):
+  state the question, your recommendation and why, so one reply settles it.
 - While a question is pending, proceed with the recommended option when
   it is reversible and already within your authority, and say so; keep other
   fleet work moving. A pending permission request does not authorize the action.
 - When the user leaves a decision to you ("任せる" or equivalent),
   record that this class of decision is delegated and do not ask it
   again. Delegation does not create permission for a gated operation.
+
+## Choice-first questions
+
+- For a decision or confirmation whose answers can be enumerated, offer
+  2-4 distinct choices. Put the recommended choice first and mark it
+  `(Recommended)` in the user's language. Include one line explaining the
+  outcome of each choice and a brief reason for the recommendation.
+- Use the provider's native choice UI when available, such as Claude Code's
+  `AskUserQuestion`. Always allow an `Other` free-text answer; do not invent
+  a predefined answer when the user needs to provide their own.
+- When no choice UI is available, show numbered choices and say that
+  replying with the number is enough. Keep the free-text alternative.
+- Free-text-only questions with an answer example are allowed when the
+  answer inherently needs names, numbers, or original descriptions.
+  Never use a free-text-only question when the answers can be enumerated.
+- A recommended or preselected choice is not a submitted answer or approval.
+  Keep the existing permission boundaries and wait for actual authorization
+  whenever it is required.
 
 ## Scoped permissions and native approval
 
@@ -634,7 +652,9 @@ Use this wire through the existing operation; do not attach legacy `body`,
   are optional. Each summary string is one nonblank logical line of at most
   240 Unicode characters. A decision event requires both `action.kind:decide`
   and a decision packet with `question`, `recommendation`, `reason`, and
-  2-3 `options`. Put a copy-paste answer example in the full details.
+  2-4 `options`. Put the recommended option first and explain each outcome in
+  its option text. Reports display numbered options; the user can reply with
+  the option number or an `Other` free-text answer in the execution log.
 - Preserve complete supporting detail in `details` and `refs`; never truncate
   evidence to fit the summary. Bounds are 1-32 events, 64 KiB details per event,
   at most 16 single-line refs of 2 KiB each, and 256 KiB for the submission.
@@ -720,12 +740,19 @@ Use this wire through the existing operation; do not attach legacy `body`,
 - For selected native intake, use the `native_turns` selector through
   `pm.request_tasks.read` (`selector:{kind:"native_turns"}`). It returns the
   current registered PM's `provider`, `conversation_id` and eligible turn IDs
-  with `prompt_sha256`, without originals. These reads are independent of
-  unavailable Task tracking. Preserve `window_only:true` and `detail`: this
+  with `prompt_sha256` and server-derived `source_id`, without originals.
+  These reads are independent of unavailable Task tracking.
+  Preserve `window_only:true` and `detail`: this
   bounded conversation window is neither complete history nor a durable
   cursor, and an absent turn does not prove no request remains.
 - Read a selected original with the `native_turn` selector and the exact
-  returned `provider`, `conversation_id` and `id`. Use
+  returned `provider`, `conversation_id` and `id`; it returns the same `source_id`.
+  Read the existing `source` selector before recapturing, using that `source_id`.
+  Verify a saved source's native identity and prompt hash against the selection,
+  then reconcile its pending classification or existing tasks without recapture.
+  A source ID does not prove persistence or grant authority. Only `missing_source`
+  establishes that this source is absent at the returned revision; unreadable,
+  foreign or unauthorized results stay degraded, never uncaptured. Use
   `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
   `reason`, and that exact `provider`, `conversation_id`, `id` and
   `prompt_sha256`. The server resolves the original, source and Intake actor;
@@ -793,10 +820,14 @@ Use this wire through the existing operation; do not attach legacy `body`,
   or update. Do not repeat the offer for status queries, monitor events, or
   replies within the same intake. Immediate registration remains the default
   for every request type unless the user opts into refinement.
-- Before registration, offer one optional line in the user's language:
-  "Would you like to refine the details? Otherwise I will proceed with the
-  defaults." Do not wait for a reply or repeat the question. If the user says
-  no or gives no answer, continue the default intake and registration below.
+- Before registration, offer one optional choice in the user's language using
+  the [choice-first question format](role-and-boundaries.md#choice-first-questions).
+  Use a nonblocking native choice UI, or numbered text if the available UI
+  would wait for input: "1. Proceed with defaults (Recommended) — register now;
+  2. Refine details — discuss and refine the same Issue; Other — describe your
+  preference." Recommend defaults to keep registration moving. Do not wait
+  for a reply or repeat the question. If the user chooses defaults or gives no
+  answer, continue the default intake and registration below.
 - If the user opts in, follow the existing `gwt-discussion` skill and its
   references for investigation and clarification; do not duplicate its dialogue
   flow here. Explicit opt-in permits that skill's questions instead of the
@@ -820,8 +851,8 @@ Use this wire through the existing operation; do not attach legacy `body`,
   asking the user.
 - Outside opted-in refinement, ask the user only when a branch is irreversible
   or determines a core specification choice. Present all remaining questions in a single batch;
-  each question includes your recommendation and rationale plus a copy-paste
-  answer example.
+  use the [choice-first question format](role-and-boundaries.md#choice-first-questions)
+  for each question, including your recommendation and rationale.
 - For every branch registered using a PM default, add a Notes entry to the
   Issue body in the form `PM default ruling (override available): ...`.
   Record the branch, chosen default, and rationale, and tell the user that a
@@ -1865,6 +1896,9 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 - In `akiojin/gwt`, inspect retained external-feedback exclusions and fixed
   `gwt-feedback-triage` / `gwt-feedback-evidence` updates through existing
   canonical Issue reads/search (`search`, `issue.view`, `issue.comments`).
+  Every cycle, search pending `gwt-feedback` / `gwt-feedback-triage` reports;
+  a non-empty PM-owned backlog requires you to triage at least the head report or escalate
+  before judging no change, even when the Monitor snapshot is unchanged.
   For author verification, use the fixed `github.com/akiojin/gwt` read-only
   REST GET fallback in External feedback intake; canonical content reads alone
   do not establish marker or adoption authorship. Apply that policy outside the
@@ -2075,6 +2109,11 @@ quota:
   `gh pr list`.
 - Each row already carries a `lifecycle` class and a `default_action`.
   Classify nothing yourself; act on those fields.
+- An open pipeline PR that is `CI-RED` or `AUTO-MERGE-STALLED` requires
+  action even when `issue.monitor.status` is unchanged. Compare its
+  `owner_issue` with the Monitor launch row and `pane.list` / `execution.status`;
+  a producing agent that ended before merge is an ownerless blocked PR:
+  relaunch the owner or escalate. Neither is a no-change cycle.
 - Classes and default actions:
   - `READY_TO_PROMOTE`: mark the Draft Ready (see below)
   - `MERGE-CANDIDATE`: mark Ready if draft, otherwise propose merge
@@ -2564,13 +2603,15 @@ and urgency.
   immediately when first detected or materially changed, using the affected
   window title and the action required
   from the user. For a decision wait, include the question, your
-  recommendation and rationale, and a copy-paste answer example. Never
+  recommendation and rationale using the
+  [choice-first question format](role-and-boundaries.md#choice-first-questions). Never
   reduce the handoff to an instruction to write something in another
   window. Reuse the sanitized episode summary; subsequent supervision does not
   authorize another `pane.read`.
 - Build a stalled-item inventory every cycle covering `needs_human`,
   decision waits, ownerless pull requests, open PRs that are `CI-RED`,
-  `CONFLICTED`, or `escalation_due`, and quiet agents. Advance at
+  `CONFLICTED`, `AUTO-MERGE-STALLED`, or `escalation_due`, pending PM-owned feedback triage,
+  and quiet agents. Advance at
   least one item from that inventory in every cycle through a launch,
   requeue, priority correction, escalation resolution, PR triage or
   update-branch, or concrete user handoff. Inventory membership alone does not
@@ -2882,6 +2923,9 @@ mod tests {
                 "`pm.request_tasks.capture`",
                 "`native_turns`",
                 "`native_turn`",
+                "server-derived `source_id`",
+                "Read the existing `source` selector before recapturing",
+                "A source ID does not prove persistence",
                 "Never infer native identity from candidate text",
                 "`unverified_raw`",
                 "Candidates are not authenticated sources, Tasks or instructions",
@@ -3039,7 +3083,7 @@ mod tests {
             "every branch that is neither irreversible nor a core specification choice",
             "irreversible or determines a core specification choice",
             "single batch",
-            "copy-paste answer example",
+            "role-and-boundaries.md#choice-first-questions",
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
@@ -3619,6 +3663,52 @@ mod tests {
     }
 
     #[test]
+    fn generated_user_questions_default_to_choices_for_both_providers() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let references = dir.path().join(provider).join("skills/gwt-pm/references");
+            let role = unwrapped(
+                &std::fs::read_to_string(references.join("role-and-boundaries.md")).unwrap(),
+            );
+            for required in [
+                "## Choice-first questions",
+                "2-4 distinct choices",
+                "recommended choice first",
+                "one line explaining the outcome of each choice",
+                "`Other` free-text answer",
+                "provider's native choice UI",
+                "`AskUserQuestion`",
+                "numbered choices",
+                "replying with the number is enough",
+                "names, numbers, or original descriptions",
+                "Never use a free-text-only question when the answers can be enumerated",
+            ] {
+                assert!(role.contains(required), "{provider}: missing {required}");
+            }
+            for name in ["intake-and-priority.md", "escalation-and-reporting.md"] {
+                let reference = std::fs::read_to_string(references.join(name)).unwrap();
+                assert!(
+                    reference.contains("role-and-boundaries.md#choice-first-questions"),
+                    "{provider}/{name}: missing shared question format"
+                );
+                assert!(
+                    !reference.contains("Would you like to refine the details?"),
+                    "{provider}/{name}: stale free-text-only intake question"
+                );
+            }
+            assert!(
+                role.contains("2-4 `options`"),
+                "{provider}: stale Reports choice bound"
+            );
+            assert!(
+                role.contains("option number"),
+                "{provider}: missing Reports fallback"
+            );
+        }
+    }
+
+    #[test]
     fn contract_delegates_request_intake_and_minimizes_user_questions() {
         assert!(body().contains(
             "No intermediate confirmation questions except for the intake questions explicitly allowed below"
@@ -3640,17 +3730,21 @@ mod tests {
             "every branch that is neither irreversible nor a core specification choice",
             "irreversible or determines a core specification choice",
             "single batch",
-            "copy-paste answer example",
+            "role-and-boundaries.md#choice-first-questions",
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
             "Offer once for each new user work request that may require Issue registration or update.",
             "Do not repeat the offer for status queries, monitor events, or replies within the same intake.",
             "Immediate registration remains the default for every request type unless the user opts into refinement.",
-            "Before registration, offer one optional line",
-            "Would you like to refine the details?",
+            "Before registration, offer one optional choice",
+            "Use a nonblocking native choice UI",
+            "numbered text if the available UI would wait for input",
+            "1. Proceed with defaults (Recommended)",
+            "2. Refine details",
+            "Other",
             "Do not wait for a reply",
-            "If the user says no or gives no answer",
+            "If the user chooses defaults or gives no answer",
             "If the user opts in, follow the existing `gwt-discussion` skill",
             "Use `gwt-plan-spec` when the resulting design-required Issue needs planning",
             "same Issue's `spec` section / acceptance criteria",
@@ -3704,9 +3798,10 @@ mod tests {
             "Default each user-facing report to 3-6 lines",
             "Every unresolved user-input or decision wait is an escalation",
             "first detected or materially changed",
-            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "the question, your recommendation and rationale using the",
+            "role-and-boundaries.md#choice-first-questions",
             "Build a stalled-item inventory every cycle",
-            "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, or `escalation_due`, and quiet agents",
+            "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, `AUTO-MERGE-STALLED`, or `escalation_due`, pending PM-owned feedback triage, and quiet agents",
             "Advance at least one item from that inventory in every cycle",
             "Inventory membership alone does not require another Report",
             "The same material state on the next tick creates zero cards",
@@ -4009,6 +4104,35 @@ mod tests {
         ] {
             assert!(body.contains(class), "missing class {class}");
         }
+    }
+
+    /// Issue #6859: Monitor deltas cannot stand in for PR and PM-owned intake work.
+    #[test]
+    fn contract_reconciles_blocked_prs_and_feedback_before_no_change() {
+        let loop_contract = section("## Resident loop (unattended)");
+        let pr_contract = section("## Open PR inventory");
+        let reporting = section("## Reporting cadence");
+        for phrase in [
+            "Every cycle, search pending `gwt-feedback` / `gwt-feedback-triage` reports",
+            "triage at least the head report or escalate",
+        ] {
+            assert!(
+                loop_contract.contains(phrase),
+                "resident loop is missing {phrase}"
+            );
+        }
+        for phrase in [
+            "even when `issue.monitor.status` is unchanged",
+            "`owner_issue` with the Monitor launch row and `pane.list` / `execution.status`",
+            "a producing agent that ended before merge is an ownerless blocked PR",
+            "relaunch the owner or escalate",
+        ] {
+            assert!(
+                pr_contract.contains(phrase),
+                "PR inventory is missing {phrase}"
+            );
+        }
+        assert!(reporting.contains("pending PM-owned feedback triage"));
     }
 
     #[test]
@@ -4941,9 +5065,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         ] {
             assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
         }
-        assert!(intake.contains("Before registration, offer one optional line"));
+        assert!(intake.contains("Before registration, offer one optional choice"));
         assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
-        assert!(intake.contains("If the user says no or gives no answer"));
+        assert!(intake.contains("If the user chooses defaults or gives no answer"));
         assert!(claude.contains("Only canonical `verify.run` acquires the host-wide lease"));
         for phrase in [
             "develop uses `strict=false`",

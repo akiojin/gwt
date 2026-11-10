@@ -13,10 +13,14 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, RwLock, Weak,
+        Arc, Condvar, Mutex, MutexGuard, RwLock, Weak,
     },
+    time::Instant,
 };
 
+use crate::mobile_host::{
+    credential::LoadedHostCredential, LeaseError, RegistrationLease, RegistrationRenewal,
+};
 use crate::mobile_input_permit::NativeInputPermit;
 use gwt_core::repo_hash::ProjectKey;
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
@@ -121,6 +125,8 @@ struct StoredDevices {
 pub enum AuthorizationError {
     #[error("mobile access is disabled")]
     Disabled,
+    #[error("mobile registration rejected: {0}; explicitly register from the PC again after repairing the cause")]
+    Registration(LeaseError),
     #[error("unknown pairing request or authentication challenge")]
     UnknownRequest,
     #[error("unknown paired device")]
@@ -137,6 +143,8 @@ pub enum AuthorizationError {
     Revoked,
     #[error("device is not authorized for this project")]
     WrongProject,
+    #[error("mobile input belongs to a different Host; reconnect through the current Host")]
+    WrongHost,
     #[error("mobile peer binding mismatch; reconnect using a fresh peer-bound challenge")]
     WrongPeer,
     #[error("invalid device signature")]
@@ -337,8 +345,10 @@ impl MobileConnection {
     ) -> Self {
         let native_revocation = Arc::new(NativeRevocation::default());
         if let Ok(authority) = authorization.read() {
-            if !authority.enabled
-                || authority.host_epoch != session.host_epoch
+            let runtime = authority.runtime.lock();
+            if !runtime
+                .as_ref()
+                .is_ok_and(|runtime| runtime.enabled && runtime.host_epoch == session.host_epoch)
                 || authority
                     .devices
                     .get(&session.device_id)
@@ -371,8 +381,9 @@ impl MobileConnection {
 
     /// Authorize a peer-bound read without consuming an input sequence.
     /// Session and authority locks cover the synchronous effect, just as for
-    /// input. The adapter must check the current registration lease, live client,
-    /// Project/pane payload allowlist inside `effect`, then synchronously accept
+    /// input. Registered mode checks its lease under the same fence. The adapter
+    /// must check the live client and Project/pane payload allowlist inside
+    /// `effect`, then synchronously accept
     /// the DataChannel write. Peer equality alone proves none of those checks.
     /// Do not await, enqueue a later unauthenticated effect, or reenter these locks.
     pub fn with_authorized_read<T>(
@@ -396,7 +407,7 @@ impl MobileConnection {
         if session.peer_binding.as_ref() != Some(peer) {
             return Err(AuthorizationError::WrongPeer);
         }
-        authorization.check_session(&session, project, now())?;
+        let (_runtime, _) = authorization.check_session(&session, project, now)?;
         effect()
     }
 
@@ -424,7 +435,7 @@ impl MobileConnection {
             .authorization
             .read()
             .map_err(|_| AuthorizationError::Unavailable)?;
-        authorization.dispatch(&mut session, project, sequence, now(), effect)
+        authorization.dispatch_with_clock(&mut session, project, sequence, now, effect)
     }
 }
 
@@ -541,6 +552,12 @@ impl MobileInputRequest {
         &self.project
     }
 
+    /// Check runtime provenance only; final effects still require the existing
+    /// session, registration, Project, sequence and revocation checks.
+    pub fn belongs_to_host(&self, authority: &Arc<RwLock<MobileAuthorization>>) -> bool {
+        Arc::ptr_eq(&self.connection.authorization, authority)
+    }
+
     #[doc(hidden)]
     pub fn book_turn(&self) -> Result<MobileInputTurn, AuthorizationError> {
         if self.connection.order_failed.load(Ordering::Acquire) {
@@ -605,21 +622,23 @@ impl MobileInputRequest {
         current_project: impl FnOnce() -> Option<ProjectKey>,
         now: impl FnOnce() -> u64,
     ) -> Result<(), AuthorizationError> {
-        self.authorize_native_with(current_project, now, |issued, expires, time| {
+        self.authorize_native_with(current_project, now, |issued, expires, time, deadline| {
             permit
-                .arm(issued, expires, time)
+                .arm_until(issued, expires, time, deadline)
                 .map_err(|_| AuthorizationError::Unavailable)
         })
     }
 
     /// A trusted adapter can add its short client-binding fence around arming.
-    /// Lock order remains session, Host authority, client binding, atomic arm.
+    /// Lock order is session, Host authority, authorization runtime, client
+    /// binding, atomic arm. Forward the absolute registration deadline into
+    /// `NativeInputPermit::arm_until`; never restart its remaining duration.
     #[doc(hidden)]
     pub fn authorize_native_with<T>(
         &self,
         current_project: impl FnOnce() -> Option<ProjectKey>,
         now: impl FnOnce() -> u64,
-        arm: impl FnOnce(u64, u64, u64) -> Result<T, AuthorizationError>,
+        arm: impl FnOnce(u64, u64, u64, Option<Instant>) -> Result<T, AuthorizationError>,
     ) -> Result<T, AuthorizationError> {
         let mut session = self
             .connection
@@ -631,7 +650,16 @@ impl MobileInputRequest {
             .authorization
             .read()
             .map_err(|_| AuthorizationError::Unavailable)?;
-        let time = now();
+        let (runtime, time) = authority.check_session(&session, &self.project, now)?;
+        let registration_deadline = match &runtime.registration {
+            RegistrationMode::Legacy => None,
+            RegistrationMode::Required { lease, .. } => Some(
+                lease
+                    .as_ref()
+                    .and_then(|lease| lease.active_deadline())
+                    .ok_or(AuthorizationError::Disabled)?,
+            ),
+        };
         let issued_at = session.issued_at;
         let expires_at = session.expires_at.min(
             authority
@@ -639,12 +667,11 @@ impl MobileInputRequest {
                 .get(&session.device_id)
                 .map_or(0, |device| device.expires_at),
         );
-        authority.dispatch(&mut session, &self.project, self.sequence, time, || {
-            if current_project().as_ref() != Some(&self.project) {
-                return Err(AuthorizationError::WrongProject);
-            }
-            arm(issued_at, expires_at, time)
-        })?
+        consume_sequence(&mut session, self.sequence)?;
+        if current_project().as_ref() != Some(&self.project) {
+            return Err(AuthorizationError::WrongProject);
+        }
+        arm(issued_at, expires_at, time, registration_deadline)
     }
 
     /// Accept an operation at final synchronous dispatch, using current time
@@ -668,11 +695,67 @@ impl MobileInputRequest {
     }
 }
 
+fn consume_sequence(
+    session: &mut AuthenticatedSession,
+    sequence: u64,
+) -> Result<(), AuthorizationError> {
+    if sequence != session.next_sequence {
+        return Err(AuthorizationError::Replay);
+    }
+    session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
+    Ok(())
+}
+
+enum RegistrationMode {
+    Legacy,
+    Required {
+        project: ProjectKey,
+        lease: Option<RegistrationLease>,
+    },
+}
+
+struct AuthorizationRuntime {
+    enabled: bool,
+    host_epoch: Uuid,
+    registration: RegistrationMode,
+}
+
+impl AuthorizationRuntime {
+    fn disable(&mut self) {
+        self.enabled = false;
+        self.host_epoch = Uuid::new_v4();
+        if let RegistrationMode::Required {
+            lease: Some(lease), ..
+        } = &mut self.registration
+        {
+            lease.invalidate();
+        }
+    }
+
+    fn lease_mut(&mut self) -> Result<&mut RegistrationLease, LeaseError> {
+        match &mut self.registration {
+            RegistrationMode::Required {
+                lease: Some(lease), ..
+            } => Ok(lease),
+            _ => Err(LeaseError::NotRegistered),
+        }
+    }
+
+    fn check_project(&self, project: &ProjectKey) -> Result<(), AuthorizationError> {
+        match &self.registration {
+            RegistrationMode::Required {
+                project: registered,
+                ..
+            } if registered != project => Err(AuthorizationError::WrongProject),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// A single authority per Host, shared behind its owner's synchronization fence.
 /// Cloning it would fork replay/revocation state, so it deliberately has no Clone.
 pub struct MobileAuthorization {
-    enabled: bool,
-    host_epoch: Uuid,
+    runtime: Mutex<AuthorizationRuntime>,
     host_binding: Option<HostBinding>,
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, Pairing>,
@@ -683,8 +766,11 @@ pub struct MobileAuthorization {
 impl Default for MobileAuthorization {
     fn default() -> Self {
         Self {
-            enabled: false,
-            host_epoch: Uuid::new_v4(),
+            runtime: Mutex::new(AuthorizationRuntime {
+                enabled: false,
+                host_epoch: Uuid::new_v4(),
+                registration: RegistrationMode::Legacy,
+            }),
             host_binding: None,
             devices: HashMap::new(),
             pending: HashMap::new(),
@@ -697,15 +783,184 @@ impl Default for MobileAuthorization {
 impl MobileAuthorization {
     /// Only the trusted PC control plane may enable access or approve devices.
     pub fn enable(&mut self) {
-        self.enabled = true;
+        if let Ok(runtime) = self.runtime.get_mut() {
+            if matches!(runtime.registration, RegistrationMode::Legacy) {
+                runtime.enabled = true;
+            }
+        }
     }
 
     pub fn disable(&mut self) {
         self.revoke_native_connections(None);
-        self.enabled = false;
-        self.host_epoch = Uuid::new_v4();
+        self.runtime
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .disable();
         self.pending.clear();
         self.challenges.clear();
+    }
+
+    /// Explicit PC enable intent for one imported Host/Project. Parsing the
+    /// credential is not registration authentication: the trusted transport
+    /// must authenticate the coordinator before accepting its matching reply.
+    /// Once selected, registered mode cannot fall back to legacy `enable()`.
+    pub fn enable_registered(
+        &mut self,
+        credential: &LoadedHostCredential,
+        generation: Uuid,
+        now: Instant,
+        wall: u64,
+    ) -> Result<RegistrationRenewal, AuthorizationError> {
+        self.disable();
+        let runtime = self
+            .runtime
+            .get_mut()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        runtime.registration = RegistrationMode::Required {
+            project: credential.project().clone(),
+            lease: None,
+        };
+        if self.host_binding.as_ref() != Some(credential.binding()) {
+            return Err(AuthorizationError::WrongPeer);
+        }
+        let mut lease = RegistrationLease::new(generation, credential.expires_at(), now, wall)
+            .map_err(AuthorizationError::Registration)?;
+        let request = lease
+            .begin_renewal(now, wall)
+            .map_err(AuthorizationError::Registration)?;
+        runtime.registration = RegistrationMode::Required {
+            project: credential.project().clone(),
+            lease: Some(lease),
+        };
+        Ok(request)
+    }
+
+    /// Start one renewal under the PC authority writer; send outside the lock.
+    pub fn begin_registration_renewal(
+        &mut self,
+        now: Instant,
+        wall: u64,
+    ) -> Result<RegistrationRenewal, AuthorizationError> {
+        let runtime = self
+            .runtime
+            .get_mut()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let result = runtime
+            .lease_mut()
+            .and_then(|lease| lease.begin_renewal(now, wall));
+        match result {
+            Ok(request) => Ok(request),
+            Err(error) => {
+                runtime.disable();
+                self.revoke_native_connections(None);
+                Err(AuthorizationError::Registration(error))
+            }
+        }
+    }
+
+    /// Poll from the trusted Host actor, including while awaiting its first
+    /// authenticated reply. Send any returned request outside this writer.
+    /// This does not create a timer or authenticate a reply. Terminal lease
+    /// errors invalidate the epoch and native permits under the same fence.
+    /// An invalidated lease keeps its closed epoch; legacy authority is unchanged.
+    pub fn poll_registration(
+        &mut self,
+        now: Instant,
+        wall: u64,
+    ) -> Result<Option<RegistrationRenewal>, AuthorizationError> {
+        let runtime = self
+            .runtime
+            .get_mut()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if matches!(runtime.registration, RegistrationMode::Legacy) {
+            return Err(AuthorizationError::Registration(LeaseError::NotRegistered));
+        }
+        match runtime
+            .lease_mut()
+            .and_then(|lease| lease.poll_renewal(now, wall))
+        {
+            Ok(request) => Ok(request),
+            Err(error) => {
+                if error != LeaseError::Disabled {
+                    runtime.disable();
+                    self.revoke_native_connections(None);
+                }
+                Err(AuthorizationError::Registration(error))
+            }
+        }
+    }
+
+    /// Consume only an authenticated response for the current one-shot request.
+    /// A stale reply cannot disable a valid newer request or revive a closed one.
+    pub fn accept_registration(
+        &mut self,
+        generation: Uuid,
+        nonce: Uuid,
+        ttl_secs: u64,
+        now: Instant,
+        wall: u64,
+    ) -> Result<(), AuthorizationError> {
+        let runtime = self
+            .runtime
+            .get_mut()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let result = runtime
+            .lease_mut()
+            .and_then(|lease| lease.accept_renewal(generation, nonce, ttl_secs, now, wall));
+        match result {
+            Ok(()) => {
+                runtime.enabled = true;
+                Ok(())
+            }
+            Err(LeaseError::StaleRenewal) => {
+                Err(AuthorizationError::Registration(LeaseError::StaleRenewal))
+            }
+            Err(error) => {
+                runtime.disable();
+                self.revoke_native_connections(None);
+                Err(AuthorizationError::Registration(error))
+            }
+        }
+    }
+
+    fn check_runtime(
+        &self,
+        runtime: &mut AuthorizationRuntime,
+        now: Instant,
+        wall: u64,
+    ) -> Result<(), AuthorizationError> {
+        if !runtime.enabled {
+            return Err(AuthorizationError::Disabled);
+        }
+        let result = match &mut runtime.registration {
+            RegistrationMode::Legacy => Ok(()),
+            RegistrationMode::Required { lease, .. } => lease
+                .as_mut()
+                .ok_or(LeaseError::NotRegistered)
+                .and_then(|lease| lease.check(now, wall)),
+        };
+        if let Err(error) = result {
+            runtime.disable();
+            self.revoke_native_connections(None);
+            return Err(AuthorizationError::Registration(error));
+        }
+        Ok(())
+    }
+
+    fn check_enabled_at(&self, wall: u64) -> Result<(), AuthorizationError> {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        self.check_runtime(&mut runtime, Instant::now(), wall)
+    }
+
+    fn check_registered_project(&self, project: &ProjectKey) -> Result<(), AuthorizationError> {
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        runtime.check_project(project)
     }
 
     pub fn devices(&self) -> Vec<&DeviceRecord> {
@@ -721,7 +976,8 @@ impl MobileAuthorization {
         project: ProjectKey,
         now: u64,
     ) -> Result<PendingPairing, AuthorizationError> {
-        self.check_enabled()?;
+        self.check_enabled_at(now)?;
+        self.check_registered_project(&project)?;
         validate_identity(name, public_key)?;
         if self.devices.values().any(|d| d.public_key == public_key) {
             return Err(AuthorizationError::DuplicateKey);
@@ -753,7 +1009,7 @@ impl MobileAuthorization {
         request_id: &str,
         now: u64,
     ) -> Result<DeviceRecord, AuthorizationError> {
-        self.check_enabled()?;
+        self.check_enabled_at(now)?;
         let pending = self
             .pending
             .remove(request_id)
@@ -880,7 +1136,13 @@ impl MobileAuthorization {
         peer: Option<&PeerBinding>,
         now: u64,
     ) -> Result<AuthenticationChallenge, AuthorizationError> {
-        self.check_enabled()?;
+        self.check_enabled_at(now)?;
+        self.check_registered_project(project)?;
+        let host_epoch = self
+            .runtime
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?
+            .host_epoch;
         if peer.is_some_and(|peer| self.host_binding.as_ref() != Some(&peer.host)) {
             return Err(AuthorizationError::WrongPeer);
         }
@@ -916,7 +1178,7 @@ impl MobileAuthorization {
                 "pc-host",
                 "mobile-client",
                 &peer.host,
-                self.host_epoch.to_string(),
+                host_epoch.to_string(),
                 device_id,
                 hex::encode(ring::digest::digest(
                     &ring::digest::SHA256,
@@ -934,7 +1196,7 @@ impl MobileAuthorization {
         } else {
             serde_json::to_vec(&(
                 "gwt-mobile-auth-v1",
-                self.host_epoch.to_string(),
+                host_epoch.to_string(),
                 device_id,
                 project.as_str(),
                 &id,
@@ -993,7 +1255,7 @@ impl MobileAuthorization {
         signature: &[u8],
         now: u64,
     ) -> Result<AuthenticatedSession, AuthorizationError> {
-        self.check_enabled()?;
+        self.check_enabled_at(now)?;
         let challenge = self
             .challenges
             .remove(challenge_id)
@@ -1012,7 +1274,11 @@ impl MobileAuthorization {
             .map_err(|_| AuthorizationError::InvalidSignature)?;
         Ok(AuthenticatedSession {
             peer_binding: challenge.peer_binding,
-            host_epoch: self.host_epoch,
+            host_epoch: self
+                .runtime
+                .lock()
+                .map_err(|_| AuthorizationError::Unavailable)?
+                .host_epoch,
             device_id: device.id.clone(),
             project: challenge.project,
             issued_at: now,
@@ -1035,11 +1301,19 @@ impl MobileAuthorization {
         now: u64,
         effect: impl FnOnce() -> T,
     ) -> Result<T, AuthorizationError> {
-        self.check_session(session, project, now)?;
-        if sequence != session.next_sequence {
-            return Err(AuthorizationError::Replay);
-        }
-        session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
+        self.dispatch_with_clock(session, project, sequence, || now, effect)
+    }
+
+    fn dispatch_with_clock<T>(
+        &self,
+        session: &mut AuthenticatedSession,
+        project: &ProjectKey,
+        sequence: u64,
+        now: impl FnOnce() -> u64,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, AuthorizationError> {
+        let (_runtime, _) = self.check_session(session, project, now)?;
+        consume_sequence(session, sequence)?;
         Ok(effect())
     }
 
@@ -1047,22 +1321,28 @@ impl MobileAuthorization {
         &self,
         session: &AuthenticatedSession,
         project: &ProjectKey,
-        now: u64,
-    ) -> Result<(), AuthorizationError> {
-        self.check_enabled()?;
-        if session.host_epoch != self.host_epoch {
+        now: impl FnOnce() -> u64,
+    ) -> Result<(MutexGuard<'_, AuthorizationRuntime>, u64), AuthorizationError> {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let wall = now();
+        self.check_runtime(&mut runtime, Instant::now(), wall)?;
+        runtime.check_project(project)?;
+        if session.host_epoch != runtime.host_epoch {
             return Err(AuthorizationError::StaleSession);
         }
         let device = self
             .devices
             .get(&session.device_id)
             .ok_or(AuthorizationError::UnknownDevice)?;
-        device.check(project, now)?;
+        device.check(project, wall)?;
         if &session.project != project {
             return Err(AuthorizationError::WrongProject);
         }
-        check_time(session.issued_at, session.expires_at, now)?;
-        Ok(())
+        check_time(session.issued_at, session.expires_at, wall)?;
+        Ok((runtime, wall))
     }
 
     pub fn snapshot(&self) -> Vec<DeviceRecord> {
@@ -1218,8 +1498,14 @@ impl MobileAuthorization {
         Ok(authority)
     }
 
+    #[cfg(test)]
     fn check_enabled(&self) -> Result<(), AuthorizationError> {
-        if self.enabled {
+        if self
+            .runtime
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?
+            .enabled
+        {
             Ok(())
         } else {
             Err(AuthorizationError::Disabled)
@@ -1338,7 +1624,7 @@ mod tests {
                 "pc-host",
                 "mobile-client",
                 peer.host,
-                auth.host_epoch.to_string(),
+                auth.runtime.lock().unwrap().host_epoch.to_string(),
                 device.id,
                 hex::encode(ring::digest::digest(
                     &ring::digest::SHA256,
@@ -1583,7 +1869,7 @@ mod tests {
         assert_eq!(read(&legacy), Err::<(), _>(AuthorizationError::WrongPeer));
         abandoned.native_revocation.revoke();
         assert_eq!(read(&abandoned), Err(AuthorizationError::Revoked));
-        auth.write().unwrap().host_epoch = Uuid::new_v4();
+        auth.write().unwrap().runtime.get_mut().unwrap().host_epoch = Uuid::new_v4();
         assert_eq!(read(&stale), Err(AuthorizationError::StaleSession));
         auth.write().unwrap().disable();
         auth.write().unwrap().enable();
@@ -1759,6 +2045,68 @@ mod tests {
         let queued = || connection.dispatch(&project(), 0, || NOW, || panic!("revoked effect"));
         auth.write().unwrap().revoke(device.id()).unwrap();
         assert_eq!(queued(), Err(AuthorizationError::Revoked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_drop_revokes_retained_connections_and_native_permits() {
+        for poison in [false, true] {
+            let host = crate::mobile_host::MobileHost::default();
+            let authority = host.authorization().clone();
+            assert!(!authority.read().unwrap().runtime.lock().unwrap().enabled);
+            authority.write().unwrap().enable();
+            let key = key();
+            let device = paired(&mut authority.write().unwrap(), &key);
+            let session = session(&mut authority.write().unwrap(), &device, &key);
+            let connection = Arc::new(MobileConnection::new(authority.clone(), session));
+            let request = MobileInputRequest::new(
+                connection.clone(),
+                "phone".into(),
+                project(),
+                0,
+                "pane".into(),
+                "input".into(),
+            );
+            let permit = request.native_permit().unwrap();
+            request
+                .authorize_native(&permit, || Some(project()), || NOW)
+                .unwrap();
+            let epoch = authority.read().unwrap().runtime.lock().unwrap().host_epoch;
+            let successor = crate::mobile_host::MobileHost::default();
+            assert!(request.belongs_to_host(host.authorization()));
+            assert!(!request.belongs_to_host(successor.authorization()));
+            successor.authorization().write().unwrap().enable();
+            if poison {
+                assert!(std::panic::catch_unwind(|| {
+                    let _guard = authority.write().unwrap();
+                    panic!("poison Host authority");
+                })
+                .is_err());
+            }
+            // Shutdown must never acquire the session held by a native worker.
+            let held_session = connection.session.lock().unwrap();
+            drop(host);
+            assert!(permit.is_revoked());
+            assert!(permit.arm(NOW, NOW + SESSION_TTL_SECS, NOW).is_err());
+            drop(held_session);
+            assert!(connection
+                .dispatch(&project(), 1, || NOW, || panic!("closed Host effect"))
+                .is_err());
+            let auth = authority.read().unwrap_or_else(|error| error.into_inner());
+            let runtime = auth.runtime.lock().unwrap();
+            assert!(!runtime.enabled);
+            assert_ne!(runtime.host_epoch, epoch);
+            assert!(
+                successor
+                    .authorization()
+                    .read()
+                    .unwrap()
+                    .runtime
+                    .lock()
+                    .unwrap()
+                    .enabled
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2542,5 +2890,415 @@ mod tests {
         assert!(path.is_dir());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         assert!(auth.save(&path.join("missing/devices.json")).is_err());
+    }
+    #[cfg(unix)]
+    fn registered_fixture() -> (
+        tempfile::TempDir,
+        MobileAuthorization,
+        PeerBinding,
+        crate::mobile_host::credential::LoadedHostCredential,
+    ) {
+        use crate::mobile_coordinator::storage::CoordinatorStore;
+        use crate::mobile_host::credential::load_host_credential;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = CoordinatorStore::initialize(dir.path(), NOW).unwrap();
+        let issued = store
+            .issue(
+                "https://mobile.example",
+                Uuid::new_v4(),
+                &[project()],
+                NOW + 600,
+                NOW,
+            )
+            .unwrap();
+        let binding = HostBinding::new(
+            &issued.identity.host_id.to_string(),
+            "https://mobile.example",
+        )
+        .unwrap();
+        let credential = load_host_credential(&issued.path, &binding, &project(), NOW).unwrap();
+        let mut auth =
+            MobileAuthorization::load_bound(&dir.path().join("devices.json"), &binding).unwrap();
+        auth.enable();
+        let peer = PeerBinding::new(binding, Uuid::new_v4(), [1; 32], [2; 32]).unwrap();
+        (dir, auth, peer, credential)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registration_poll_checks_pending_and_revokes_idle_native_input() {
+        use std::time::Duration;
+        let (_dir, mut auth, peer, credential) = registered_fixture();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let started = Instant::now();
+        let request = auth
+            .enable_registered(&credential, Uuid::new_v4(), started, NOW)
+            .unwrap();
+        assert_eq!(auth.poll_registration(started, NOW), Ok(None));
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        auth.accept_registration(
+            request.generation(),
+            request.nonce(),
+            30,
+            Instant::now(),
+            NOW,
+        )
+        .unwrap();
+        let session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth.clone(), session));
+        let input = MobileInputRequest::new(
+            connection.clone(),
+            "client".into(),
+            project(),
+            0,
+            "pane".into(),
+            "text".into(),
+        );
+        let permit = input.native_permit().unwrap();
+        input
+            .authorize_native(&permit, || Some(project()), || NOW)
+            .unwrap();
+        let old_epoch = auth.read().unwrap().runtime.lock().unwrap().host_epoch;
+        assert_eq!(
+            auth.write()
+                .unwrap()
+                .poll_registration(started + Duration::from_secs(30), NOW + 30),
+            Err(AuthorizationError::Registration(LeaseError::LeaseExpired))
+        );
+        assert!(permit.is_revoked());
+        let closed_epoch = auth.read().unwrap().runtime.lock().unwrap().host_epoch;
+        assert_ne!(closed_epoch, old_epoch);
+        assert_eq!(
+            auth.write()
+                .unwrap()
+                .poll_registration(started + Duration::from_secs(31), NOW + 31),
+            Err(AuthorizationError::Registration(LeaseError::Disabled))
+        );
+        assert_eq!(
+            auth.read().unwrap().runtime.lock().unwrap().host_epoch,
+            closed_epoch
+        );
+        let next = auth
+            .write()
+            .unwrap()
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.write()
+            .unwrap()
+            .accept_registration(next.generation(), next.nonce(), 30, Instant::now(), NOW)
+            .unwrap();
+        assert_eq!(
+            connection.dispatch(&project(), 1, || NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        let session = peer_session(&mut auth.write().unwrap(), &peer, &device, &key);
+        let fresh = MobileConnection::new(auth, session);
+        assert_eq!(fresh.dispatch(&project(), 0, || NOW, || 7), Ok(7));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registered_authority_requires_a_lease_and_preserves_read_input_fences() {
+        use crate::mobile_host::LeaseError;
+        use std::time::Instant;
+        let (_dir, mut auth, peer, credential) = registered_fixture();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let request = auth
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.enable();
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        assert_eq!(
+            auth.accept_registration(Uuid::new_v4(), request.nonce(), 30, Instant::now(), NOW),
+            Err(AuthorizationError::Registration(LeaseError::StaleRenewal))
+        );
+        auth.accept_registration(
+            request.generation(),
+            request.nonce(),
+            30,
+            Instant::now(),
+            NOW,
+        )
+        .unwrap();
+        let renewal = auth
+            .begin_registration_renewal(Instant::now(), NOW)
+            .unwrap();
+        assert_eq!(
+            auth.accept_registration(
+                request.generation(),
+                request.nonce(),
+                30,
+                Instant::now(),
+                NOW
+            ),
+            Err(AuthorizationError::Registration(LeaseError::StaleRenewal))
+        );
+        auth.accept_registration(
+            renewal.generation(),
+            renewal.nonce(),
+            30,
+            Instant::now(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            auth.accept_registration(
+                renewal.generation(),
+                renewal.nonce(),
+                30,
+                Instant::now(),
+                NOW
+            ),
+            Err(AuthorizationError::Registration(LeaseError::StaleRenewal))
+        );
+        assert_eq!(
+            auth.request_pairing(
+                "Other",
+                self::key().public_key().as_ref(),
+                other_project(),
+                NOW
+            )
+            .unwrap_err(),
+            AuthorizationError::WrongProject
+        );
+        let session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth.clone(), session));
+        assert_eq!(
+            connection.with_authorized_read(&project(), &peer, || NOW, || Ok(7)),
+            Ok(7)
+        );
+        assert_eq!(connection.dispatch(&project(), 0, || NOW, || 9), Ok(9));
+        let input = MobileInputRequest::new(
+            connection.clone(),
+            "client".into(),
+            project(),
+            1,
+            "pane".into(),
+            "text".into(),
+        );
+        let mut saw_deadline = false;
+        input
+            .authorize_native_with(
+                || Some(project()),
+                || NOW,
+                |_, _, _, deadline| {
+                    assert!(deadline.is_some());
+                    assert!(auth.try_write().is_err());
+                    saw_deadline = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(saw_deadline);
+        auth.write().unwrap().disable();
+        auth.write().unwrap().enable();
+        assert!(connection
+            .with_authorized_read(&project(), &peer, || NOW, || Ok(()))
+            .is_err());
+        assert!(auth
+            .write()
+            .unwrap()
+            .accept_registration(
+                request.generation(),
+                request.nonce(),
+                30,
+                Instant::now(),
+                NOW
+            )
+            .is_err());
+        let next = auth
+            .write()
+            .unwrap()
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.write()
+            .unwrap()
+            .accept_registration(next.generation(), next.nonce(), 30, Instant::now(), NOW)
+            .unwrap();
+        assert!(
+            connection.dispatch(&project(), 2, || NOW, || ()).is_err(),
+            "new registration cannot restore old sessions"
+        );
+        let fresh_session = peer_session(&mut auth.write().unwrap(), &peer, &device, &key);
+        let fresh = MobileConnection::new(auth, fresh_session);
+        assert_eq!(fresh.dispatch(&project(), 0, || NOW, || 11), Ok(11));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registered_authority_expiry_and_rollback_disable_without_revival() {
+        use crate::mobile_host::LeaseError;
+        use std::time::{Duration, Instant};
+        let (_dir, mut auth, peer, credential) = registered_fixture();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let request = auth
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.accept_registration(
+            request.generation(),
+            request.nonce(),
+            30,
+            Instant::now(),
+            NOW,
+        )
+        .unwrap();
+        let session = peer_session(&mut auth, &peer, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth.clone(), session));
+        let input = MobileInputRequest::new(
+            connection.clone(),
+            "client".into(),
+            project(),
+            0,
+            "pane".into(),
+            "text".into(),
+        );
+        let permit = input.native_permit().unwrap();
+        input
+            .authorize_native(&permit, || Some(project()), || NOW)
+            .unwrap();
+        let old_epoch = auth.read().unwrap().runtime.lock().unwrap().host_epoch;
+        assert_eq!(
+            connection.with_authorized_read(&project(), &peer, || NOW - 1, || Ok(())),
+            Err(AuthorizationError::Registration(LeaseError::ClockRollback))
+        );
+        assert!(permit.is_revoked());
+        assert_ne!(
+            auth.read().unwrap().runtime.lock().unwrap().host_epoch,
+            old_epoch
+        );
+        assert!(connection.dispatch(&project(), 1, || NOW, || ()).is_err());
+        let request = auth
+            .write()
+            .unwrap()
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.write()
+            .unwrap()
+            .accept_registration(
+                request.generation(),
+                request.nonce(),
+                30,
+                Instant::now(),
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            auth.write()
+                .unwrap()
+                // test-hygiene: allow-wall-clock-deadline Injects a future observation into the real lease API; no timer wait or latency assertion.
+                .begin_registration_renewal(Instant::now() + Duration::from_secs(30), NOW + 30),
+            Err(AuthorizationError::Registration(LeaseError::LeaseExpired))
+        );
+        assert!(auth
+            .write()
+            .unwrap()
+            .accept_registration(
+                request.generation(),
+                request.nonce(),
+                30,
+                Instant::now(),
+                NOW
+            )
+            .is_err());
+        let request = auth
+            .write()
+            .unwrap()
+            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.write()
+            .unwrap()
+            .accept_registration(
+                request.generation(),
+                request.nonce(),
+                30,
+                Instant::now(),
+                NOW,
+            )
+            .unwrap();
+        let fresh_session = peer_session(&mut auth.write().unwrap(), &peer, &device, &key);
+        let fresh = MobileConnection::new(auth.clone(), fresh_session);
+        // No timer or renewal check invalidates this lease: the final read must.
+        // test-hygiene: allow-wall-clock-deadline An already-expired lease must be rejected by the real final read without a timer or renewal check.
+        let past = Instant::now() - Duration::from_secs(60);
+        let mut expired = crate::mobile_host::RegistrationLease::new(
+            Uuid::new_v4(),
+            credential.expires_at(),
+            past,
+            NOW,
+        )
+        .unwrap();
+        let renewal = expired.begin_renewal(past, NOW).unwrap();
+        expired
+            .accept_renewal(renewal.generation(), renewal.nonce(), 30, past, NOW)
+            .unwrap();
+        if let RegistrationMode::Required { lease, .. } = &mut auth
+            .write()
+            .unwrap()
+            .runtime
+            .get_mut()
+            .unwrap()
+            .registration
+        {
+            *lease = Some(expired);
+        }
+        let effects = std::cell::Cell::new(0);
+        let expired_epoch = auth.read().unwrap().runtime.lock().unwrap().host_epoch;
+        assert_eq!(
+            fresh.with_authorized_read(
+                &project(),
+                &peer,
+                || NOW,
+                || {
+                    effects.set(effects.get() + 1);
+                    Ok(())
+                }
+            ),
+            Err(AuthorizationError::Registration(LeaseError::LeaseExpired))
+        );
+        assert_eq!(effects.get(), 0);
+        assert_ne!(
+            auth.read().unwrap().runtime.lock().unwrap().host_epoch,
+            expired_epoch
+        );
+        assert!(fresh
+            .dispatch(&project(), 0, || NOW, || effects.set(1))
+            .is_err());
+        assert_eq!(effects.get(), 0);
+        assert!(auth
+            .write()
+            .unwrap()
+            .enable_registered(
+                &credential,
+                Uuid::new_v4(),
+                Instant::now(),
+                credential.expires_at()
+            )
+            .is_err());
+        let (mut foreign, _) = bound_authority();
+        assert_eq!(
+            foreign.enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW),
+            Err(AuthorizationError::WrongPeer)
+        );
+        foreign.enable();
+        assert_eq!(
+            foreign.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Disabled
+        );
     }
 }

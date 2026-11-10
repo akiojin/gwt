@@ -558,6 +558,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.project_scan" => {
+            reject_unknown_params(params, &[], "workspace.project_scan")?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        }
+        "workspace.project_prune" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "manifest_hash"],
+                "workspace.project_prune",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
+            })
+        }
         "workspace.work_repair" => {
             reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
             CliCommand::Workspace(WorkspaceCommand::WorkRepair {
@@ -5226,6 +5241,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn project_store_maintenance_json_defaults_to_dry_run_and_rejects_unknown_scope() {
+        assert!(matches!(
+            ok("workspace.project_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectPrune {
+                dry_run: true,
+                manifest_hash: None
+            })
+        ));
+        assert!(matches!(
+            ok("workspace.project_scan", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectScan)
+        ));
+        assert!(
+            err("workspace.project_prune", json!({"ids": ["unexpected"]}))
+                .to_string()
+                .contains("ids")
+        );
+    }
+
     /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
     /// an unqualified call only reports candidates. The first call used to be
     /// an immediate `APPLIED` across every Work on the machine (1100 rows,
@@ -6166,7 +6201,7 @@ mod tests {
         let mut env = TestEnv::new(repo);
         let command = ok(
             "issue.monitor.queue.auto_refill",
-            json!({"enabled": true, "limit": 3}),
+            json!({"enabled": true, "limit": 0}),
         );
         let CliCommand::Issue(command) = command else {
             panic!("issue command")
@@ -6174,8 +6209,11 @@ mod tests {
         let mut out = String::new();
         crate::cli::issue::run(&mut env, command, &mut out).expect("auto refill config");
         let prefs = crate::load_issue_monitor_prefs(&path).expect("prefs");
+        let reply: Value = serde_json::from_str(&out).expect("auto refill reply");
         assert!(prefs.terminal_queue_auto_refill);
         assert_eq!(prefs.terminal_queue_auto_refill_limit, 3);
+        assert_eq!(reply["saved_config"]["terminal_queue_auto_refill"], true);
+        assert_eq!(reply["saved_config"]["terminal_queue_auto_refill_limit"], 3);
         assert!(prefs.enabled);
         assert_eq!(prefs.priority_order, vec![7, 42]);
 

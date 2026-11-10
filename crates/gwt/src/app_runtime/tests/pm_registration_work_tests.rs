@@ -359,6 +359,7 @@ fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
 /// resume path (FR-003) goes through the same primitive.
 #[test]
 fn restore_still_resumes_the_stores_own_pm_worktree() {
+    let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -414,8 +415,32 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         |_| false,
     )
     .expect("register the store's own PM");
+    gwt::pm_registry::mutate_pm_prefs(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        |prefs| prefs.settings.auto_start = false,
+    )
+    .unwrap();
+
+    // Issue #6890: unrelated finished Work must not prevent the registered PM's restore.
+    session.linked_issue_number = Some(5286);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save stale PM link");
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        |prefs| prefs.merged_issues.push(5286),
+    )
+    .unwrap();
+    assert_eq!(
+        gwt::project_runtime::installation::restore_saved_session_work_terminality(
+            &session, &repo, None,
+        ),
+        gwt::project_runtime::installation::RestoreAdmission::Admit,
+        "the registered PM owns no implementation Work despite its stale Issue link"
+    );
 
     runtime.restore_open_project_windows("tab-current");
+    runtime.ensure_pm_agent_for_tab("tab-current", super::super::pm::PmEnsureTrigger::Automatic);
 
     let events = drain_pm_owner_restore(&mut runtime, &recorded_events);
 
@@ -449,12 +474,36 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         probe.session.as_ref().unwrap().agent_session_id.as_deref(),
         Some("native-own-pm")
     );
+    assert_eq!(
+        probe.session.as_ref().unwrap().launch_origin,
+        gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+        "the automatic restore must succeed without a manual restart fallback"
+    );
+    assert_eq!(probe.session.as_ref().unwrap().linked_issue_number, None);
     assert!(
         probe.pty.try_wait().unwrap().is_none(),
         "the admitted PM must be physically live"
     );
     close_test_owner_runtime(&mut runtime, &id);
     executor.block_on(owner.shutdown());
+    let workspace = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("the restored PM publishes its workspace");
+    assert_eq!(
+        workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.workspace.windows)
+            .filter(|window| window.is_pm)
+            .map(|window| window.id.as_str())
+            .collect::<Vec<_>>(),
+        [id.as_str()],
+        "the cold successor replaces the registered source's PM projection"
+    );
 }
 
 /// Issue #4394 AC-1 / AC-5: a GUI restart brings back exactly one PM window.
@@ -685,7 +734,15 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_pm_ensure_spawns_from_default_branch("develop", true);
+    assert_pm_ensure_spawns_from_default_branch("develop", true, false);
+}
+
+#[test]
+fn pm_native_completion_cannot_replace_a_newer_requested_pm() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_pm_ensure_spawns_from_default_branch("develop", true, true);
 }
 
 #[test]
@@ -693,7 +750,7 @@ fn pm_ensure_spawns_from_main_without_valid_cached_origin_head() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_pm_ensure_spawns_from_default_branch("main", false);
+    assert_pm_ensure_spawns_from_default_branch("main", false, false);
 }
 
 #[test]
@@ -701,7 +758,7 @@ fn pm_ensure_spawns_from_master_with_cached_origin_head() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_pm_ensure_spawns_from_default_branch("master", true);
+    assert_pm_ensure_spawns_from_default_branch("master", true, false);
 }
 
 /// Issue #4375 (AC-1): preparing the PM worktree runs `git worktree add` and

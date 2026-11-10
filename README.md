@@ -162,6 +162,12 @@ gwt supports the following built-in agents. Launch Agent lists only installed
 built-in agents that gwt detects; other CLI commands remain available through
 custom agents.
 
+Codex model choices follow its local `models_cache.json` in Launch Wizard and
+Agents settings, with a bundled fallback when the cache is unavailable. Saved
+models that disappear remain unchanged and show a warning. Once every seven
+days, gwt checks for catalog and saved-profile differences and adds each new
+difference to PM Reports once.
+
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
 official distribution metadata confirms a newer version: npm for Codex, Grok,
@@ -324,8 +330,7 @@ fields and operations are rejected. Paths, secrets, and clock overrides are not
 request fields. Successful issuance returns only the public identity and private
 credential file path; the bearer stays in that file. Keep it out of Git, logs,
 URLs, and shell arguments. These credentials authorize future Host registration,
-not device approval or terminal input. Host import and online registration are
-not available yet.
+not device approval or terminal input. Online registration is not available yet.
 
 Administration holds a separate registry lock. For `busy`, stop the coordinator
 or other administrator and retry. For `commit_uncertain`, run `status` to inspect
@@ -333,6 +338,51 @@ current records before deciding what to do; do not automatically repeat issuance
 For private-storage or clock errors, repair the reported prerequisite and retry
 without deleting the registry or its revocation records. `--help` lists the
 supported request fields and storage requirements.
+
+#### Offline PC credential import and inspection (Unix, from source)
+
+Build `cargo build -p gwt --bin gwt-mobile-host` on the PC. Provision the
+user-owned `0700` directories `$HOME/.gwt`, `$HOME/.gwt/mobile`, and
+`$HOME/.gwt/mobile/host` outside repositories, without symlinks or macOS extended
+ACL entries. Keep their ancestors trusted and non-replaceable. The issued source
+file must be private (`0600`, single-link regular file, private parent) and outside
+repositories too. The command does not create directories or repair permissions.
+
+Provide the expected Host/origin/Project independently of the source file:
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"import","source":"/private/issued/host-credential.json","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+Replace the example public identifiers, origin and source path with your own.
+Use stdin for the request (maximum 16 KiB); secrets, clock overrides, destination
+paths and activation fields are not accepted. Success returns only the public
+identity and the immutable private copy's path. Import never replaces a copy or
+changes the selected credential, registration, enable state or device approvals.
+
+To explicitly select and inspect a copy, create the private `0600` file
+`$HOME/.gwt/mobile/host/config.json` using the coordinator issuance receipt's
+public identity, not values inferred from an untrusted credential:
+
+```json
+{"schema_version":1,"binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef","identity":{"host_id":"11111111-1111-4111-8111-111111111111","credential_id":"22222222-2222-4222-8222-222222222222","generation":"33333333-3333-4333-8333-333333333333"}}
+```
+
+```sh
+printf '%s\n' '{"schema_version":1,"command":{"operation":"inspect","binding":{"host_id":"11111111-1111-4111-8111-111111111111","coordinator_origin":"https://coordinator.example"},"project":"0123456789abcdef"}}' |
+  target/debug/gwt-mobile-host
+```
+
+Inspection returns only public identity, binding, project and expiry. It rejects
+scope/identity mismatches, expired credentials and unsafe storage. For
+`already_exists` or `commit_uncertain`, explicitly configure the expected
+issuance identity and run `inspect` before deciding recovery; do not automatically
+retry, delete the copy or reissue credentials. Correct an invalid configuration,
+private-storage prerequisite or clock explicitly, then inspect again. Neither
+operation opens a network connection or proves current registry issuance,
+revocation status or successful registration. Windows private storage remains
+unsupported. `--help` describes the request and storage requirements.
 
 ### `gwt serve` removal
 
@@ -402,6 +452,22 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+`workspace.project_scan` reports host endpoint discovery costs, including cache
+hits, enumerated entries and elapsed milliseconds. Missing roots and stopped
+hosts are excluded before repository identity resolution. Its shared candidate
+cache never replaces fresh endpoint and process checks.
+
+`workspace.project_prune` inspects abandoned stores under `~/.gwt/projects`
+without changing them by default. Review its candidate hashes and `manifest_hash`,
+then pass `dry_run:false` with that hash to move eligible stores to
+`~/.gwt/project-quarantine/<id>/`. No files are deleted. Open projects, active
+Sessions, PM stores, recent writes, unknown data and malformed state are retained.
+A dry run reports `protection_changed:true` if the fleet changes during inspection;
+applying always reloads protection and refuses further changes. A changed plan
+requires another dry run. Each quarantine includes a recovery
+manifest; after closing gwt, a store can be moved back to its original hash only
+if that destination is absent.
 
 `fleet.inventory` returns project agent processes, panes, and Monitor rows in one
 JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
@@ -718,10 +784,10 @@ See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capa
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
 `issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
-members; Auto requests are rejected to keep membership and requested capacity equal.
-For legacy projects without a roster, automation uses
-`issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
-`{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
+members. To return the machine limit to Auto, use the **Auto** button beside
+**Agent limit** or `issue.monitor.config.set` with `{"max_active_mode":"auto"}`;
+this also works with a roster and keeps its members. Without a roster,
+`{"max_active":4}` sets a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
 and the shared `agent_capacity` measurement. Roster projects also report
 `agent_roster_capacity` and `agent_roster_revision` for the project member setting.
@@ -1117,10 +1183,28 @@ Issues or change delivery gates.
 
 The project-scoped browser protocol supports `load_pm_request_task` for one
 saved `task_id` and an optional `receipt_operation_id`, and
-`reopen_pm_request_task` with `operation_id`, `expected_revision`, `reason`
+`reopen_pm_request_task` or `cancel_pm_request_task` with `operation_id`, `expected_revision`, `reason`
 and `task_id` inside `request`. Replies use `pm_request_task` and the caller's
 `request_id`. Reopening records the server-assigned browser user actor and
 returns the task to pending reassessment, including when the PM is stopped.
+Cancellation records the same user audit and marks the task cancelled rather
+than completed, invalidating its and its ancestors' previous completion evidence.
+`update_pm_request_task` corrects the saved draft with `operation_id`,
+`expected_revision`, `reason` and `task: TaskDraft` inside `request`; `task.id`
+is the only target ID. The server assigns the browser user actor. Update returns
+the current task and revision observed after applying the operation, alongside
+the receipt at its original applied revision. An unchanged draft is also valid
+and records a receipt with an empty task delta.
+`complete_pm_request_task` accepts `operation_id`, `expected_revision`, `reason`,
+`task_id`, `condition_revision`, `review_generation` and nonempty `evidence`
+inside `request`. It records the browser user's completion audit using the
+existing Task rules: stale reviews, pending PM reassessment and unfinished
+children refuse completion. Repeating the same completion under a new operation
+is valid and may record an empty task delta.
+Replaying Update or Complete preserves
+the original receipt while the current task may reflect later changes, including
+a subsequent reopen. Reopen and Cancel
+continue to return their receipt's applied task state.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own
@@ -1133,11 +1217,19 @@ are still pending.
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
 the current `provider`, `conversation_id` and eligible turn IDs with
-`prompt_sha256`, without originals. `window_only:true` and `detail` describe a
+`prompt_sha256` and server-derived `source_id`, without originals.
+`window_only:true` and `detail` describe a
 bounded conversation window, not complete history or a durable cursor. Use
 `selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
-to read one original. Both native selectors work independently of unavailable
-Task tracking. To preserve that selected turn as an unclassified pending source,
+to read one original and the same `source_id`. Both native selectors work
+independently of unavailable Task tracking.
+First read `selector:{kind:"source",id:"<source_id>"}` to find
+an already saved source and its pending state. Compare its native identity and
+prompt hash before reconciling its classification or tasks without recapturing.
+The ID does not prove persistence or grant authority. Only `missing_source`
+means this source is absent at the returned revision; an unreadable, foreign or
+unauthorized result remains degraded. To preserve an absent selected turn as
+an unclassified pending source,
 call `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
 `reason`, `provider`, `conversation_id`, `id` and `prompt_sha256`. The server
 resolves the original, source and actor; caller-supplied originals, sources,
@@ -1990,6 +2082,16 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
+The PM window opens **Tasks**, a read-only preview of saved request tasks. It
+shows unfinished work first, including parent relationships, assignees, waiting
+reasons, next actions, and pending PM reassessment. **Include completed** also
+shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows the total and any requests awaiting classification. Long summaries are
+shortened; the saved tasks remain complete. A read failure retains the last
+confirmed list with a warning. Task editing, automatic intake, and history import
+are not available in this preview. **Reports** and **Execution log** remain
+available from the same toolbar.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
@@ -2005,6 +2107,9 @@ and references. **Copy** includes both. Unchanged observations create no new car
 including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
+Decision reports show two to four numbered choices with the recommendation and
+its reason. Use **Execution log** to reply with a choice number or your own answer;
+**Copy** includes the numbered choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected
@@ -2506,6 +2611,9 @@ the target and temporary volumes above the configured build-artifact GC floor;
 `verification.disk_budget_bytes` overrides the measured per-run byte budget.
 The default reservation is 5,904,433,337 bytes (about 5.5 GiB) on each distinct
 volume, based on measured target and temporary growth plus 20% headroom.
+If a volume cannot fit its reservation plus the GC floor even when empty,
+`verify.run` refuses immediately and reports its path, reserve, floor, total, and
+free bytes. Move the affected Cargo target or `TMPDIR` to a larger filesystem.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 

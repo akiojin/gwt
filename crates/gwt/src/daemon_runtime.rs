@@ -1397,6 +1397,29 @@ pub(crate) fn handle_runtime_state_prepared(
         return Ok(None);
     }
     let session = runtime_state::handle_with_input_prepared(event, input)?;
+    emit_runtime_state_notice(event, input, session.clone());
+    Ok(session)
+}
+
+pub(crate) fn handle_runtime_state_owned(
+    event: &str,
+    input: &str,
+    completion: Option<&runtime_state::HookCompletionContext>,
+) -> Result<Option<Session>, HookError> {
+    let session = runtime_state::handle_with_input_owned(event, input, completion)?;
+    if completion.is_some_and(runtime_state::HookCompletionContext::runtime_was_published) {
+        emit_runtime_state_notice(event, input, session.clone());
+    }
+    Ok(session)
+}
+
+fn emit_runtime_state_notice(event: &str, input: &str, session: Option<Session>) {
+    crate::cli::hook::diagnostics::record_handler_duration(
+        event,
+        "hook-live/budget-entry",
+        Duration::ZERO,
+        "ok",
+    );
     // Hook-live is a best-effort notification after the authoritative runtime
     // state write. A missing GUI must not consume half of the aggregate
     // UserPromptSubmit budget before the Board and obligation handlers run.
@@ -1406,24 +1429,51 @@ pub(crate) fn handle_runtime_state_prepared(
         )
     });
     let live_started = Instant::now();
-    emit_live_event_fail_open(
+    let notice = RuntimeHookEvent::from_hook(
+        RuntimeHookEventKind::RuntimeState,
         Some(event),
-        RuntimeHookEvent::from_hook(
-            RuntimeHookEventKind::RuntimeState,
-            Some(event),
-            runtime_state::status_for_event(event).map(str::to_string),
-            None,
-            session.clone(),
-            parse_hook_event_best_effort(input),
-        ),
+        runtime_state::status_for_event(event).map(str::to_string),
+        None,
+        session,
+        parse_hook_event_best_effort(input),
     );
+    crate::cli::hook::diagnostics::record_handler_duration(
+        event,
+        "hook-live/event-build",
+        live_started.elapsed(),
+        "ok",
+    );
+    emit_live_event_fail_open(Some(event), notice);
     crate::cli::hook::diagnostics::record_handler_duration(
         event,
         "runtime-state/live-emit",
         live_started.elapsed(),
         "ok",
     );
-    Ok(session)
+}
+
+pub(crate) fn handle_blocked_stop_runtime_state_owned(
+    input: &str,
+    completion: Option<&runtime_state::HookCompletionContext>,
+) -> Result<(), HookError> {
+    let Some(completion) = completion else {
+        return Ok(());
+    };
+    let Some(session) = completion.finish_stop(true)? else {
+        return Ok(());
+    };
+    emit_live_event_fail_open(
+        Some("Stop"),
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some("Stop"),
+            Some("Running".into()),
+            Some("blocked-stop".into()),
+            Some(session),
+            parse_hook_event_best_effort(input),
+        ),
+    );
+    Ok(())
 }
 
 pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
@@ -1657,7 +1707,7 @@ fn emit_live_event_with_policy(
     target: &HookForwardTarget,
     policy: HookLiveRetryPolicy,
 ) -> Result<(), String> {
-    target.validate()?;
+    profile_hook_live_phase(event, "hook-live/target-validation", || target.validate())?;
 
     let readiness_delivery = is_readiness_delivery(event);
     let overall_timeout = if readiness_delivery {
@@ -1744,6 +1794,12 @@ fn run_hook_live_retry(
     mut now: impl FnMut() -> Instant,
     mut wait: impl FnMut(Duration),
 ) -> Result<(), String> {
+    crate::cli::hook::diagnostics::record_handler_duration(
+        event.source_event.as_deref().unwrap_or("unknown"),
+        "hook-live/attempt-entry",
+        Duration::ZERO,
+        "ok",
+    );
     let started = now();
     let diagnostic = |message: String, attempts: usize, at: Instant| {
         format!(

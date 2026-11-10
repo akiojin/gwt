@@ -1,4 +1,8 @@
 //! Exact owner-local Session/PTY installation and publication.
+#[path = "project_catalog.rs"]
+mod project_catalog;
+pub(crate) use project_catalog::owner_host_project_catalog;
+
 use super::workspace::{save_resumed_workspace_projection, save_start_work_workspace_projection};
 use super::{launch_finalization::*, launch_payload::*, ActiveLaunchHandshakeCleanup};
 use crate::launch_runtime::same_worktree_path;
@@ -550,6 +554,33 @@ pub(crate) fn prepare_owner_saved_session_restore(
     }
     *config = crate::session_launch::launch_config_from_persisted_session(&restore.source);
     config.automatic_restore = restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+    if config.automatic_restore && !restore.source.review_dispatch {
+        // Saved Issue links outlive Monitor launches. Re-resolve the owner from
+        // the exact saved window; an unprovable owner stays observation-only.
+        config.linked_issue_number = if is_pm {
+            None
+        } else {
+            match crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                root,
+            )) {
+                Ok(prefs) => {
+                    let monitor = crate::IssueMonitorState::with_prefs(
+                        crate::IssueMonitorConfig::default(),
+                        prefs,
+                    );
+                    restore.placeholders.iter().find_map(|row| {
+                        let id =
+                            format!("{}::{}", gwt_core::paths::project_scope_hash(root), row.id);
+                        super::monitor::restored_issue_number(&monitor, &restore.source, &id, row)
+                    })
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "restored Issue owner unavailable; keeping launch unlinked");
+                    None
+                }
+            }
+        };
+    }
     if restore.origin == gwt_agent::SessionLaunchOrigin::UserRestart {
         config.launch_route = gwt_agent::LaunchRoute::Manual;
     }
@@ -572,8 +603,8 @@ pub(crate) fn prepare_owner_saved_session_restore(
             member_root,
             sessions_dir,
             &token,
-            restore.source.linked_issue_number,
-            restore.source.linked_issue_number.and_then(|number| {
+            config.linked_issue_number,
+            config.linked_issue_number.and_then(|number| {
                 crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
             }),
             None,
@@ -2169,11 +2200,7 @@ pub fn prepare_host_update_drain_launch_hold(
     project_roots: &[PathBuf],
 ) -> Result<Option<String>, String> {
     let pending = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
-        !manifest.auto_apply_deferred
-            && gwt_core::update::pending_version_is_newer(
-                &manifest.version,
-                env!("CARGO_PKG_VERSION"),
-            )
+        gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
     });
     let mut hold = None;
     for project_root in project_roots {
@@ -2181,17 +2208,30 @@ pub fn prepare_host_update_drain_launch_hold(
             &crate::issue_monitor_prefs_path_for_repo_path(project_root),
         )
         .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
-        if let Some(drain) = prefs.update_drain.filter(|drain| {
+        if let Some(drain) = prefs.effective_update_drain().filter(|drain| {
             pending
                 .as_ref()
                 .is_some_and(|manifest| manifest.version == drain.version)
         }) {
             hold.get_or_insert_with(|| {
+                let release = if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
+                    format!(
+                        "release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                        drain.version
+                    )
+                } else {
+                    format!(
+                        "{} in {}",
+                        crate::UPDATE_DRAIN_RELEASE_OPERATION,
+                        project_root.display()
+                    )
+                };
                 format!(
-                    "Host update_drain for v{} in {} holds new agent launches; release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                    "Host update_drain for v{} in {} since {} holds new agent launches; {}",
                     drain.version,
                     project_root.display(),
-                    drain.version,
+                    drain.since,
+                    release,
                 )
             });
         }
@@ -3074,41 +3114,48 @@ pub(crate) fn owner_host_project_roots(project_root: &Path) -> Result<Vec<PathBu
             .map(|tab| tab.project_root)
             .collect::<Vec<_>>();
     roots.push(project_root.into());
-    let projects = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
-        Ok(projects) => Some(projects),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    if let Some(projects) = projects {
-        for project in projects {
-            let project = project.map_err(|error| error.to_string())?;
-            let descriptors = match std::fs::read_dir(project.path().join("runtime/daemon")) {
-                Ok(descriptors) => descriptors,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.to_string()),
-            };
-            for descriptor in descriptors {
-                let descriptor = descriptor.map_err(|error| error.to_string())?;
-                if descriptor
-                    .path()
-                    .extension()
-                    .is_none_or(|extension| extension != "json")
-                {
-                    continue;
-                }
-                if let Some(endpoint) = std::fs::read(descriptor.path()).ok().and_then(|bytes| {
-                    serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&bytes).ok()
-                }) {
-                    if endpoint.scope.target == gwt_core::daemon::RuntimeTarget::Host {
-                        roots.push(endpoint.scope.project_root);
-                    }
-                }
-            }
-        }
-    }
+    let (catalog_roots, metrics) =
+        owner_host_project_catalog().map_err(|error| error.to_string())?;
+    tracing::debug!(target: "gwt::project_catalog", ?metrics, "host project catalog observed");
+    roots.extend(catalog_roots);
     roots.sort();
     roots.dedup();
     Ok(roots)
+}
+
+#[cfg(test)]
+mod project_catalog_tests {
+    use super::owner_host_project_roots;
+    use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+    #[test]
+    fn owner_host_project_roots_excludes_missing_roots_and_dead_hosts() {
+        let arena = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(arena.path());
+        let current = arena.path().join("current");
+        let live = arena.path().join("live");
+        let dead = arena.path().join("dead");
+        let missing = arena.path().join("removed-test-root");
+        for root in [&current, &live, &dead] {
+            std::fs::create_dir(root).unwrap();
+        }
+        for (name, root, pid) in [
+            ("live", &live, std::process::id()),
+            ("dead", &dead, 0),
+            ("missing", &missing, std::process::id()),
+        ] {
+            let scope = RuntimeScope::new(name, "host", root.clone(), RuntimeTarget::Host).unwrap();
+            let path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+            persist_endpoint(
+                &path,
+                &DaemonEndpoint::new(scope, pid, "test".into(), "test".into(), "test".into()),
+            )
+            .unwrap();
+        }
+        let mut expected = vec![current.clone(), dunce::canonicalize(live).unwrap()];
+        expected.sort();
+        assert_eq!(owner_host_project_roots(&current).unwrap(), expected);
+    }
 }
 
 /// Facts read from the exact Worktree's execution diagnosis.
@@ -3634,10 +3681,16 @@ pub fn restore_saved_session_work_terminality(
     project_root: &Path,
     window_id: Option<&str>,
 ) -> RestoreAdmission {
-    if session.linked_issue_number.is_none() {
-        // A Session with no Issue link has no Work whose terminality this
-        // predicate can read (a PM pane, a manual launch). Restore keeps
-        // the "everything the user did not explicitly close" rule.
+    if session.linked_issue_number.is_none()
+        || crate::pm_registry::registered_pm_worktree_authority(
+            project_root,
+            &session.id,
+            &session.worktree_path,
+        )
+    {
+        // The registered PM owns no implementation Work, even if an old link
+        // remains. Unlinked manual launches likewise have no Work to inspect.
+        // Keep the "everything the user did not explicitly close" rule.
         return RestoreAdmission::Admit;
     }
     let facts = read_terminal_window_facts(

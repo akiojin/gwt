@@ -3034,20 +3034,43 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         "completion is emitted by the worker callback: {events:#?}"
     );
     drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    // A legitimate prefs refresh can add a preparation callback before the
+    // exact live holder's physical submit is scheduled.
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            prefs.priority_order.push(9001);
+            Ok(())
+        },
+    )
+    .expect("change unrelated queue priority before handoff revalidation");
     fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ));
-    // Both the outer facts callback and the nested answer adapter emit their
-    // own verified telemetry job; only the remaining task is the owner RPC.
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
-    assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
+        .handle_issue_monitor_launch_prepared(prepared);
+    // Settle freshness callbacks before holding the actual answer RPC.
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
             if window_id == &holder_window_id
     ));
+    let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     let before_owner = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -3298,7 +3321,28 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    assert!(matches!(
+        fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &holder_window_id
+    ));
+    let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     // Apply the real GUI canvas before the held answer RPC. An unobserved
     // canvas must not make a claim pass merely because it ran first.
     let context = fixture.runtime.test_context();
@@ -3492,7 +3536,18 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&retry_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&retry_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    let diagnostics = (1..retry_tasks.lock().expect("retry tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&retry_tasks, &diagnostics);
     assert_eq!(
         retry_tasks.lock().unwrap().len(),
         1,
@@ -5420,7 +5475,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         },
     );
     runtime.handle_launch_wizard_action(
@@ -5508,7 +5563,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     );
     let profile = prefs.launch_profile.expect("saved launch profile");
     assert_eq!(profile.agent_id, "codex");
-    assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(profile.model.as_deref(), Some("gpt-6-luna"));
     assert_eq!(profile.reasoning.as_deref(), Some("high"));
     assert!(profile.skip_permissions);
 }
@@ -6434,7 +6489,7 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         let unfinished = source.worktree_path.join("unfinished.txt");
         fs::write(&unfinished, "uncommitted work").unwrap();
         owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds actual provider startup; its rendered Ready marker is the input barrier.
+            // test-hygiene: allow-wall-clock-deadline Bounds actual provider readiness and durable launch ACK before release input.
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let snapshot = owner
@@ -6449,13 +6504,24 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
                         .unwrap_or_default()
                         .contains("quota-fixture-ready")
                     {
-                        break;
+                        let acknowledged = owner
+                            .command(OwnerCommand::AcknowledgeMonitorLaunch {
+                                id: id.clone(),
+                                incarnation: pane.incarnation,
+                                issue_number: 3165,
+                                delivery_id: None,
+                            })
+                            .await
+                            .unwrap();
+                        if acknowledged["acknowledged"] == true {
+                            break;
+                        }
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("actual quota provider must be ready before release input");
+            .expect("actual quota provider must be ready and ACKed before release input");
         });
         let mut close_events = owner.subscribe();
         owner_fixture_block_on(
@@ -6678,8 +6744,8 @@ fn app_runtime_monitor_live_native_writer_survives_waits_and_read_errors() {
             fixture
                 .runtime
                 .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
-            Some(window_id.clone()),
-            "{status:?}"
+            None,
+            "{status:?}: native writer reservation alone cannot send an owner ACK"
         );
     }
     fixture

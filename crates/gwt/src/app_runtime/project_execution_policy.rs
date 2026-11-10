@@ -184,7 +184,10 @@ impl AppRuntime {
         );
         let mut events = self.restore_prepared_open_project_windows(&context.tab_id, restores);
         events.extend(self.startup_auto_resume_ready_events());
-        if self.agent_maintenance.busy {
+        // Issue #5379: while the worker evaluates queued restores, the PM
+        // ensure waits for the drain's tail so a restored PM Session is seen
+        // as live by the singleton gate before a fresh PM is spawned.
+        if self.agent_maintenance.busy || self.startup_auto_resume_admission_in_flight {
             if !self.pending_startup_pm_tabs.contains(&context.tab_id) {
                 self.pending_startup_pm_tabs.push(context.tab_id.clone());
             }
@@ -711,7 +714,7 @@ impl AppRuntime {
         let retry_operation_id = operation_id.clone();
         let result = self.blocking_tasks.try_spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
-                let owner = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await?;
+                let (owner, _gui_presence) = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await?;
                 owner.command(gwt::project_runtime::events::OwnerCommand::ProjectExecutionChoose { request, caller_session_id: None, expected_view_set_revision: Some(preview.view_revision) }).await
             }));
             proxy.send(UserEvent::ProjectExecutionChoiceCompleted(Box::new(ProjectExecutionChoiceCompleted { context: completion_context, client_id, operation_id, closing_receipts: preview.view_receipts, result })));
