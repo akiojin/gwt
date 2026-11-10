@@ -13,6 +13,25 @@ test.describe("Agent window scrollback lifecycle", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("mouse motion cannot return history review to the live screen", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    await emitTerminalText(page, id, numberedLines("tracking", 1200) + "\x1b[?1003h\x1b[?1006h");
+    await waitForScrollableTerminal(page, id);
+    await expectWheelMovesScrollback(page, id, true, 1000);
+    const before = await terminalScrollMetrics(page, id);
+    const inputs = await terminalInputs(page, id);
+    const box = await agentTile(page, id).locator(".xterm-screen").boundingBox();
+    await page.mouse.move(box!.x + 40, box!.y + 40);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect((await terminalScrollMetrics(page, id)).viewportY).toBe(before.viewportY);
+    expect(await terminalInputs(page, id), "history coordinates stay local").toEqual(inputs);
+    await scrollTerminalToBottom(page, id);
+    await page.mouse.move(box!.x + 80, box!.y + 80);
+    await expect.poll(async () => (await terminalInputs(page, id)).length).toBeGreaterThan(inputs.length);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("keeps wheel scrollback alive after hidden-visible cycles and Plan-mode idle", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
 
@@ -144,7 +163,9 @@ test.describe("Agent window scrollback lifecycle", () => {
   });
 
   for (const { id, provider, tracking } of [
-    { id: "agent-1", provider: "Codex", tracking: "\x1b[?1003h\x1b[?1006h" },
+    // Codex 0.167.0 --no-alt-screen on Windows ConPTY emits normal-screen
+    // redraws without mouse tracking. ANY tracking is covered separately above.
+    { id: "agent-1", provider: "Codex", tracking: "" },
     { id: "agent-2", provider: "Claude Code", tracking: "\x1b[?1002h\x1b[?1006h" },
     { id: "shell-1", provider: "Shell", tracking: "" },
   ]) {
@@ -154,6 +175,10 @@ test.describe("Agent window scrollback lifecycle", () => {
       const errors = await openAgentsFixture(page, info.project.name);
       await setActiveAgentTab(page, id);
       await emitTerminalText(page, id, numberedLines(provider, 1200) + tracking);
+      if (provider === "Codex") {
+        // The real startup/resize trace uses ED2, not ED3 or RIS.
+        await emitTerminalText(page, id, "\x1b[H\x1b[2J" + numberedLines("Codex redraw", 40));
+      }
       if (tracking) {
         const inputs = await terminalInputs(page, id);
         await agentTile(page, id).locator(".xterm-screen").click();
@@ -233,6 +258,11 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     await setActiveAgentTab(page, "agent-2");
     await emitTerminalText(page, "agent-2", "\x1b[?1049h\x1b[Hfullscreen claude\r\n");
     await expect.poll(() => terminalScrollMetrics(page, "agent-2")).toMatchObject({ hidden: false, baseY: 0 });
+    // baseY is also zero before parsing. Settle output-driven activation
+    // before blur so its queued focus is not attributed to the gesture.
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-2")))
+      .toContain("fullscreen claude");
+    await expectPendingRefresh(page, "agent-2", false);
 
     await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
     const before = (await terminalInputs(page, "agent-2")).length;
