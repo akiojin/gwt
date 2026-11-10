@@ -321,7 +321,6 @@ crates/gwt/src/cli/daemon/server.rs|shutdown_rejects_pending_and_queued_control_
 crates/gwt/src/cli/daemon/server.rs|spawn_issue_monitor_effect|while!Path::new(&release).exists()&&Instant::now()<deadline|1
 crates/gwt/src/cli/daemon/server.rs|spawn_issue_monitor_scan|letdeadline=Instant::now()+ISSUE_MONITOR_SCAN_TIMEOUT|1
 crates/gwt/src/cli/daemon/server.rs|startup_marker_lock_timeout_remains_retryable_without_changing_authority|assert!(started.elapsed()<CONTENDED_BUDGET*8)|1
-crates/gwt/src/cli/daemon/server.rs|startup_retries_expired_attempt_with_free_lock_and_missing_fence|let_expired=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_secs(1),)|1
 crates/gwt/src/cli/daemon/server.rs|startup_retry_blocking_queue_wait_respects_total_budget|letqueued=tokio::time::timeout(HANG_GUARD,submitted.notified()).await|1
 crates/gwt/src/cli/daemon/server.rs|startup_retry_blocking_queue_wait_respects_total_budget|letstatus=tokio::time::timeout(HANG_GUARD,hub.wait_for_issue_monitor_status()).await|1
 crates/gwt/src/cli/daemon/server.rs|startup_retry_blocking_queue_wait_respects_total_budget|tokio::time::timeout(HANG_GUARD,worker).await.expect().expect()|1
