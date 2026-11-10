@@ -579,6 +579,26 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".works-source-note")).toBeVisible();
   });
 
+  test("Agents recovers lost registration catalogs on reconnect without losing the name draft", async ({ page }, info) => {
+    await page.evaluate(() => (window as any).__worksAgentsFixture.holdCatalogs());
+    await openRail(page, "agents");
+    const name = roster(page).getByLabel("Name for new member", { exact: true });
+    const tool = roster(page).getByRole("combobox", { name: "Tool for new member", exact: true });
+    const register = roster(page).locator('.roster-capacity [data-action="add"]');
+    await name.fill("Maple");
+    await expect(tool).toBeDisabled();
+    await expect(register).toBeDisabled();
+    await name.evaluate(node => { (window as any).__catalogDraftInput = node; });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reconnectCatalogs());
+    await expect(tool.locator("option")).toHaveText(["Codex", "Claude Code"]);
+    await expect(tool).toBeEnabled();
+    await expect(register).toBeEnabled();
+    await expect(name).toHaveValue("Maple");
+    expect(await name.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
+    expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual([]);
+    await page.screenshot({ path: info.outputPath("agents-reconnected-catalogs.png") });
+  });
+
   test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
     await openRail(page, "agents");
     const name = roster(page).getByRole("textbox", { name: "Display name", exact: true });
@@ -765,6 +785,7 @@ async function installWorksAgentsBackend(page: Page) {
     const rejectedScheduleRevisions: any[] = [];
     let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
     let pendingSchedule: any = null, pendingRename: any = null, deferredRename = false, firstRenameReceipt: any = null;
+    let holdCatalogs = false;
     const planned = [
       { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
@@ -822,10 +843,10 @@ async function installWorksAgentsBackend(page: Page) {
             this.emit({ kind: "system_settings_updated", language: message.language, works_preview_lines: worksPreviewLines });
           } else this.emit({ kind: "system_settings_error", message: "Invalid fixture Works output lines" });
         }
-        if (message.kind === "list_supported_agents") this.emit({ kind: "supported_agent_list", agents: [
+        if (message.kind === "list_supported_agents" && !holdCatalogs) this.emit({ kind: "supported_agent_list", agents: [
           { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
         ] });
-        if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
+        if (message.kind === "list_custom_agents" && !holdCatalogs) this.emit({ kind: "custom_agent_list", agents: [] });
         if (message.kind === "agent_roster") {
           if (message.action.kind === "rename") {
             if (deferredRename) pendingRename = message;
@@ -849,6 +870,8 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      holdCatalogs() { holdCatalogs = true; },
+      reconnectCatalogs() { holdCatalogs = false; socket.close(); },
       deferRename() { deferredRename = true; },
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
       replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },
