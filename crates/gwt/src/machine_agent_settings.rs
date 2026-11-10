@@ -239,25 +239,29 @@ pub(crate) fn migration_before_project_save(project_path: &Path) -> io::Result<(
     {
         ensure_migrated()?;
         let project = match fs::read_to_string(project_path) {
-            Ok(content) => serde_json::from_str::<serde_json::Value>(&content).ok(),
+            Ok(content) => {
+                serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(&content)
+                    .ok()
+                    .map(|fields| {
+                        // Inspect only the migration header; histories and launch
+                        // ledgers need no allocation or deserialization on every save.
+                        fields
+                            .get("agent_roster")
+                            .is_some_and(|roster| roster.get() != "null")
+                            || (fields.get("max_active_agents").is_some_and(|value| {
+                                serde_json::from_str::<u64>(value.get()).ok() == Some(1)
+                            }) && fields.get("last_auto_max_active_agents").is_some_and(
+                                |value| serde_json::from_str::<u64>(value.get()).is_ok(),
+                            ) && !fields.contains_key("max_active_agents_mode")
+                                && !fields.contains_key("max_active_last_change"))
+                    })
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        if project.is_some_and(|value| {
-            // This shape is written only after the machine policy was made
-            // durable. A roster keeps its own capacity keys instead of
-            // deleting legacy machine settings, so it needs no recheck either.
-            value
-                .get("agent_roster")
-                .is_some_and(|roster| !roster.is_null())
-                || (value.get("max_active_agents").and_then(|n| n.as_u64()) == Some(1)
-                    && value
-                        .get("last_auto_max_active_agents")
-                        .and_then(|n| n.as_u64())
-                        .is_some()
-                    && value.get("max_active_agents_mode").is_none()
-                    && value.get("max_active_last_change").is_none())
-        }) {
+        // This shape is written only after the machine policy was made durable.
+        // A roster keeps its own capacity keys and needs no recheck either.
+        if project == Some(true) {
             return Ok(());
         }
         let _lock = lock()?;
