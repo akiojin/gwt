@@ -1,12 +1,14 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
+/// The returned guard pins the GUI control budget for the calling test thread:
+/// these fixtures assert the committed drain outcome through a real daemon ACK,
+/// not how fast a loaded runner answers within the 200ms hot-path deadline.
+#[must_use = "the control budget pin is released when the guard drops"]
 fn insert_monitored_update_pane(
     runtime: &mut AppRuntime,
     id: &str,
 ) -> gwt_core::deadline_budget::ScopedDeadlineBudget {
-    // These tests assert control outcomes, not the GUI's IPC latency. Retain
-    // the caller-thread pin through every publish and the explicit cleanup.
     let control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
         &gwt::daemon_publisher::ISSUE_MONITOR_CONTROL_BUDGET,
     );

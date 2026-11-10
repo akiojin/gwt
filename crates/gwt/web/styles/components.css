@@ -5964,6 +5964,14 @@ button.workspace-board-ref:focus-visible {
 .pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
 .pm-chat button:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; }
+.pm-chat__chat { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; }
+.pm-chat__conversation { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); }
+.pm-chat__bubble { max-width: min(80%, 48rem); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface-elevated); }
+.pm-chat__bubble--user { align-self: flex-end; border-color: var(--color-focus-ring); border-end-end-radius: var(--radius-sm); }
+.pm-chat__bubble--assistant { align-self: flex-start; border-inline-start: 2px solid var(--color-role-pm); border-end-start-radius: var(--radius-sm); }
+.pm-chat__bubble .pm-chat__text > :first-child { margin-top: 0; }
+.pm-chat__bubble .pm-chat__text > :last-child { margin-bottom: 0; }
+.pm-chat__bubble pre, .pm-chat__bubble table { max-width: 100%; overflow-x: auto; }
 .pm-chat__tasks { flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; padding-bottom: var(--space-3); }
 .pm-chat__task-list { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
 .pm-chat__task { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
