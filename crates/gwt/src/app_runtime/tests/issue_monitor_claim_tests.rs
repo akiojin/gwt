@@ -1,6 +1,70 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
+#[test]
+fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let request = super::super::DeferredIssueMonitorLaunch {
+        project_root: repo,
+        issue_number: 6934,
+        linked_issue_kind: LinkedIssueKind::Issue,
+        delivery_id: Some("failed-owner-delivery".into()),
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    };
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let dispatch =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(CaptureTracingLayer {
+            events: captured.clone(),
+        }));
+    let notifications = tracing::dispatcher::with_default(&dispatch, || {
+        let mut notifications = Vec::new();
+        for reason in [
+            "publish ack timeout; exact cleanup remains pending",
+            "owner endpoint unavailable",
+        ] {
+            for _ in 0..601 {
+                notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+                    context.clone(),
+                    request.clone(),
+                    reason.into(),
+                    None,
+                ));
+            }
+        }
+        notifications
+    });
+    let errors = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            event.level == Level::ERROR
+                && event.target == "gwt.launch.timing"
+                && event.fields.get("message").is_some_and(|message| {
+                    message == "Issue Monitor launch did not reach an owner pane"
+                })
+        })
+        .count();
+    assert_eq!(
+        errors, 2,
+        "each new failure reason is logged once, including after a reason change"
+    );
+    assert_eq!(
+        notifications
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
+            .count(),
+        1202,
+        "notification aggregation retains its existing raw observation path"
+    );
+}
+
 fn commit_issue_monitor_preparations(
     runtime: &mut AppRuntime,
     queued: &BlockingTestTaskQueue,

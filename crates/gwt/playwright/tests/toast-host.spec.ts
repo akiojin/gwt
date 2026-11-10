@@ -15,7 +15,7 @@ import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt, readLiveHubCatalog } from "./_helpers/live-gwt";
 
-test("Issue #6659 removes attention for unmounted and mounted windows while preserving history (isolated checkout)", async ({ page }, testInfo) => {
+test("Issue #6659 / Issue #6932 removes resolved Agent Error rows for unmounted and mounted windows (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
   const errors: string[] = [];
@@ -101,7 +101,7 @@ test("Issue #6659 removes attention for unmounted and mounted windows while pres
   await publish();
   await expect(toast(orphan.id)).toHaveCount(0);
   await expect(toast(keeper.id)).toHaveCount(1);
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(1);
 
   snapshot.tabs[0].workspace.windows = [mounted];
   await publish();
@@ -109,20 +109,20 @@ test("Issue #6659 removes attention for unmounted and mounted windows while pres
   await expect(page.locator(`.workspace-window[data-id="${mounted.id}"]`)).toHaveCount(1);
   await expect(toast(mounted.id)).toHaveCount(1);
   await publish();
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(2);
   snapshot.tabs[0].workspace.windows = [];
   await publish();
   await expect(toast(mounted.id)).toHaveCount(0);
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(1);
 
   for (let cycle = 0; cycle < 3; cycle += 1) {
     snapshot.tabs[1].workspace.windows = [orphan, keeper];
     await publish();
     await diagnose(orphan.id);
     await expect(toast(orphan.id)).toHaveCount(1);
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(2);
     await publish();
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(2);
     snapshot.tabs[1].workspace.windows = [keeper];
     await publish();
     await expect(toast(orphan.id)).toHaveCount(0);
@@ -135,10 +135,7 @@ test("Issue #6659 removes attention for unmounted and mounted windows while pres
   } });
   await expect(alerts).toHaveCount(0);
   await page.locator("#op-notifications-button").click();
-  await expect(rows).toHaveCount(3);
-  await expect(rows.filter({ hasText: orphan.id })).toHaveCount(1);
-  await expect(rows.filter({ hasText: mounted.id })).toHaveCount(1);
-  await expect(rows.filter({ hasText: keeper.id })).toHaveCount(1);
+  await expect(rows).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const screenshot = testInfo.outputPath(`removed-window-attention-${theme}.png`);
   await page.screenshot({ path: screenshot, fullPage: true });
@@ -241,7 +238,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await expect(alerts).toContainText(successor.id);
   await status(successor.id, "error", "Retry scheduled", true);
   await expect(alerts).toHaveCount(0);
-  await expect(rows).toHaveAttribute("data-resolved", "true");
+  await expect(rows).toHaveCount(0);
   await status(real.id, "error", "Process exited with status 1");
   unprovenSuccessor.runtime_started_at_ms = 3000;
   await inject(page, { kind: "workspace_state", workspace: snapshot });
@@ -251,7 +248,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await status(successor.id, "running", null);
   await expect(alerts).toHaveCount(1);
   await expect(alerts).toContainText(real.id);
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(1);
   await expect(page.locator("#op-notifications-button .op-rail__badge")).toHaveText("1");
 
   const startedAt = new Date().toISOString();
@@ -267,7 +264,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
     await status(recoveredOld.id, "error", "Retained old local diagnostic");
     await expect(alerts).toHaveCount(1);
     await expect(alerts).toContainText(real.id);
-    await expect(rows).toHaveCount(2);
+    await expect(rows).toHaveCount(1);
     expect(errors, "console and page errors").toEqual([]);
     cycles++;
     if (soakSeconds > 0 && cycles % 6 === 0) {
@@ -284,7 +281,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   expect(errors).toEqual([]);
 });
 
-test("Monitor notifications coalesce launch requests and preserve other events (isolated checkout)", async ({ page }, testInfo) => {
+test("Issue #6932 Monitor notifications group repeated failures and continued/stalled diagnoses (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
   const errors: string[] = [];
@@ -348,6 +345,31 @@ test("Monitor notifications coalesce launch requests and preserve other events (
   await expect(rows).toHaveCount(0);
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await expect(drawer).toBeHidden();
+  const failure = { kind: "issue_monitor_toast", level: "error",
+    message: "issue monitor scan failed at open-pr-readback stage: GitHub connection failed" };
+  for (let i = 0; i < 5; i++) await inject(page, failure);
+  await expect(rows).toHaveCount(1);
+  await expect(rows.locator(".notification-center__count")).toHaveText("×5");
+  await bell.click();
+  await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  for (const disposition of ["stale_readback", "previous_candidates"]) {
+    const message = `scan continued: candidate-load failed (continued_with_${disposition}): offline`;
+    await inject(page, { ...failure, message });
+    await inject(page, { kind: "issue_monitor_status", status: { enabled: true, state: "error",
+      queue_len: 0, active_count: 0, max_active_agents: 1, last_error: message } });
+  }
+  await expect(rows).toHaveCount(0);
+  const stalled = "Issue Monitor scan stalled; last scan at 2026-11-09T00:00:00Z; previous failure: issue #42: needs_human: decision needed";
+  await inject(page, { ...failure, message: stalled });
+  await bell.click();
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await inject(page, { ...failure, message: stalled.replace("00:00:00Z", "00:01:00Z") });
+  await expect(rows).toHaveCount(1);
+  await expect(badge).toBeHidden();
+  await inject(page, { ...failure, message: stalled.replace("#42", "#43") });
+  await expect(rows).toHaveCount(2);
+  await expect(badge).toHaveText("1");
   expect(errors).toEqual([]);
 });
 
@@ -893,7 +915,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(issueWindow.locator(".knowledge-monitor-error")).toHaveCount(0);
     await expect(issueWindow.locator(".surface-error-indicator")).toHaveCount(0);
 
-    const status = (lastError: string | null) => ({
+    const status = (lastError: string | null, recordedAt = "2026-11-09T00:00:00Z") => ({
       kind: "issue_monitor_status",
       status: {
         enabled: true,
@@ -906,10 +928,12 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
         launch_profile_source: "saved",
         launch_profile_summary: "codex / host",
         last_error: lastError,
+        last_error_source: lastError ? "scan_failure" : null,
+        last_scan_error: lastError ? { message: lastError, phase: "candidate-load", recorded_at: recordedAt } : null,
       },
     });
 
-    await inject(page, status("issue #3785: gh issue list: github_rate_limited"));
+    await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
     const badge = page.locator("#op-notifications-button .op-rail__badge");
     await expect(badge).toHaveText("1");
     await expect(badge).toHaveAttribute("data-has-error", "true");
@@ -917,12 +941,12 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(issueWindow.locator(".surface-error-indicator")).toHaveCount(0);
     await expect(issueWindow.locator(".knowledge-status.error")).toHaveCount(0);
 
-    // A changed error text is a new occurrence of the same key: one row, x2.
-    await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
+    // A later scan failure with the same cause updates one row to x2.
+    await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)", "2026-11-09T00:01:00Z"));
     await page.locator("#op-notifications-button").click();
     const drawer = page.locator("#notification-center");
     await expect(drawer).toHaveAttribute("data-open", "true");
-    const row = drawer.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
+    const row = drawer.locator('.notification-center__item[data-error-key^="issue-monitor:"]').filter({ hasText: "issue #3785: gh issue list: github_rate_limited (retry)" });
     await expect(row).toHaveCount(1);
     await expect(row).toHaveAttribute("data-level", "error");
     await expect(row.locator(".notification-center__count")).toHaveText("\u00d72");
@@ -934,8 +958,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(row).toHaveAttribute("data-resolved", "true");
     await expect(badge).toBeHidden();
 
-    const rendered = await page.evaluate(() => {
-      const rowNode = document.querySelector('.notification-center__item[data-error-key="issue-monitor:last_error"]') as HTMLElement;
+    const rendered = await row.evaluate((rowNode) => {
       return {
         theme: document.documentElement.getAttribute("data-theme"),
         rim: getComputedStyle(rowNode).borderLeftColor,

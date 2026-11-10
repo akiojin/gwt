@@ -7357,34 +7357,36 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     fetch_linked_prs_bulk_via_gh_with_observer(
         numbers,
-        |query| {
-            let hub = gwt_core::process_console::global();
-            let output = gwt_core::process_console::spawn_logged_blocking(
-                &hub,
-                gwt_core::process_console::ProcessKind::Gh,
-                "gh",
-                &[
-                    "api",
-                    "graphql",
-                    "-f",
-                    &format!("query={query}"),
-                    "-f",
-                    &format!("owner={owner}"),
-                    "-f",
-                    &format!("repo={repo}"),
-                ],
-                gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
-            )?;
-            if !output.success() {
-                return Err(io::Error::other(format!(
-                    "gh api graphql failed: {}",
-                    output.stderr.trim()
-                )));
-            }
-            Ok(output.stdout)
-        },
+        |query| run_linked_prs_bulk_query(owner, repo, query),
         observe,
     )
+}
+
+fn run_linked_prs_bulk_query(owner: &str, repo: &str, query: &str) -> io::Result<String> {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("repo={repo}"),
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh api graphql failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(output.stdout)
 }
 
 /// Injectable core of [`fetch_linked_prs_bulk_via_gh_observing`]: `run` executes one
@@ -7406,26 +7408,127 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
     mut observe: impl FnMut(u64, &[LinkedPrSummary]),
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     let mut linked = std::collections::BTreeMap::new();
-    // Start every chunk before continuing deep timelines, so one long history
-    // cannot hide unrelated first-page results behind its continuation failure.
-    let mut chunks: std::collections::VecDeque<_> = numbers
-        .chunks(LINKED_PR_BULK_CHUNK)
-        .map(|chunk| {
-            (
-                chunk.to_vec(),
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeSet::new(),
-                std::collections::BTreeMap::<u64, LinkedPrAccumulator>::new(),
-            )
-        })
-        .collect();
-    while let Some((pending, mut cursors, mut seen_cursors, mut prs_by_issue)) = chunks.pop_front()
-    {
+    let mut read = LinkedPrBulkRead::default();
+    read.sync_numbers(numbers, LINKED_PR_BULK_CHUNK);
+    while !read.is_empty() {
+        read.read_next_with(&mut run, |number, prs| {
+            observe(number, prs);
+            linked.insert(number, prs.to_vec());
+        })?;
+    }
+    Ok(linked)
+}
+
+/// Resumable bulk timelines. Each turn issues at most one GraphQL request and
+/// publishes only complete histories. The caller owns freshness and supplies
+/// only cache misses when synchronizing the next turn's candidates.
+#[derive(Default)]
+pub(crate) struct LinkedPrBulkRead {
+    chunks: std::collections::VecDeque<LinkedPrReadChunk>,
+}
+
+#[derive(Clone, Default)]
+struct LinkedPrReadChunk {
+    numbers: Vec<u64>,
+    cursors: std::collections::BTreeMap<u64, String>,
+    seen_cursors: std::collections::BTreeSet<(u64, String)>,
+    prs_by_issue: std::collections::BTreeMap<u64, LinkedPrAccumulator>,
+}
+
+impl LinkedPrBulkRead {
+    pub(crate) fn sync_numbers(&mut self, numbers: &[u64], chunk_size: usize) {
+        let requested: std::collections::BTreeSet<_> = numbers.iter().copied().collect();
+        for chunk in &mut self.chunks {
+            chunk.numbers.retain(|number| requested.contains(number));
+            chunk.cursors.retain(|number, _| requested.contains(number));
+            chunk
+                .seen_cursors
+                .retain(|(number, _)| requested.contains(number));
+            chunk
+                .prs_by_issue
+                .retain(|number, _| requested.contains(number));
+        }
+        self.chunks.retain(|chunk| !chunk.numbers.is_empty());
+        let mut queued: std::collections::BTreeSet<_> = self
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.numbers.iter().copied())
+            .collect();
+        let missing: Vec<_> = numbers
+            .iter()
+            .copied()
+            .filter(|number| queued.insert(*number))
+            .collect();
+        for chunk in missing.chunks(chunk_size.clamp(1, LINKED_PR_BULK_CHUNK)) {
+            self.chunks.push_back(LinkedPrReadChunk {
+                numbers: chunk.to_vec(),
+                ..Default::default()
+            });
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub(crate) fn read_next(
+        &mut self,
+        owner: &str,
+        repo: &str,
+        observe: impl FnMut(u64, &[LinkedPrSummary]),
+    ) -> io::Result<()> {
+        self.read_next_with(
+            |query| run_linked_prs_bulk_query(owner, repo, query),
+            observe,
+        )
+    }
+
+    fn read_next_with(
+        &mut self,
+        mut run: impl FnMut(&str) -> io::Result<String>,
+        mut observe: impl FnMut(u64, &[LinkedPrSummary]),
+    ) -> io::Result<()> {
+        let Some(original) = self.chunks.pop_front() else {
+            return Ok(());
+        };
+        // A transport failure must retry with its original cursor and summaries.
+        let mut next = original.clone();
+        match next.read_page(&mut run, &mut observe) {
+            Ok(()) => {
+                // Other first pages run before this chunk's deep continuation.
+                if !next.numbers.is_empty() {
+                    self.chunks.push_back(next);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.chunks
+                    .push_back(if error.kind() == io::ErrorKind::InvalidData {
+                        // An invalid cursor or history cannot recover by replaying it.
+                        LinkedPrReadChunk {
+                            numbers: original.numbers,
+                            ..Default::default()
+                        }
+                    } else {
+                        original
+                    });
+                Err(error)
+            }
+        }
+    }
+}
+
+impl LinkedPrReadChunk {
+    fn read_page(
+        &mut self,
+        run: &mut impl FnMut(&str) -> io::Result<String>,
+        observe: &mut impl FnMut(u64, &[LinkedPrSummary]),
+    ) -> io::Result<()> {
         gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-        let query = if cursors.is_empty() {
-            linked_prs_bulk_query(&pending)
+        let query = if self.cursors.is_empty() {
+            linked_prs_bulk_query(&self.numbers)
         } else {
-            linked_prs_bulk_query_with_cursors(&pending, &cursors)
+            linked_prs_bulk_query_with_cursors(&self.numbers, &self.cursors)
         };
         let stdout = run(&query)?;
         let value: serde_json::Value = serde_json::from_str(&stdout)
@@ -7440,7 +7543,7 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
         gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
         let repository = value.get("data").and_then(|v| v.get("repository"));
         let mut next = Vec::new();
-        for number in &pending {
+        for number in &self.numbers {
             let invalid = || {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -7451,7 +7554,7 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                 .and_then(|v| v.get(format!("i{number}")))
                 .filter(|v| !v.is_null())
             else {
-                if cursors.contains_key(number) {
+                if self.cursors.contains_key(number) {
                     return Err(invalid());
                 }
                 continue;
@@ -7461,7 +7564,7 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                 .get("nodes")
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(invalid)?;
-            prs_by_issue
+            self.prs_by_issue
                 .entry(*number)
                 .or_default()
                 .extend(nodes, *number);
@@ -7475,10 +7578,10 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                         .and_then(serde_json::Value::as_str)
                         .filter(|cursor| !cursor.trim().is_empty())
                         .ok_or_else(invalid)?;
-                    if !seen_cursors.insert((*number, cursor.to_string())) {
+                    if !self.seen_cursors.insert((*number, cursor.to_string())) {
                         return Err(invalid());
                     }
-                    cursors.insert(*number, cursor.to_string());
+                    self.cursors.insert(*number, cursor.to_string());
                     next.push(*number);
                     continue;
                 }
@@ -7487,15 +7590,14 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
                         == Some(false) => {}
                 _ => return Err(invalid()),
             }
-            let prs = prs_by_issue.remove(number).unwrap_or_default().prs;
+            let prs = self.prs_by_issue.remove(number).unwrap_or_default().prs;
             observe(*number, &prs);
-            linked.insert(*number, prs);
+            self.cursors.remove(number);
+            self.seen_cursors.retain(|(issue, _)| issue != number);
         }
-        if !next.is_empty() {
-            chunks.push_back((next, cursors, seen_cursors, prs_by_issue));
-        }
+        self.numbers = next;
+        Ok(())
     }
-    Ok(linked)
 }
 
 /// Parse the issue-timeline GraphQL response into linked-PR summaries.
@@ -7534,7 +7636,7 @@ pub(crate) fn parse_linked_pr_timeline(
 
 /// Retain summaries, not raw timeline nodes and PR bodies, between pages.
 /// The single-page parser uses the same first-occurrence/OR merge contract.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct LinkedPrAccumulator {
     index: std::collections::BTreeMap<u64, usize>,
     prs: Vec<LinkedPrSummary>,
@@ -18687,6 +18789,116 @@ command = "my-agent-cli"
 
         assert!(error.to_string().contains("not found"));
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn linked_pr_bulk_read_resumes_one_small_page_per_scan_and_keeps_retry_state() {
+        let numbers: Vec<u64> = (1..=80).collect();
+        let mut pending = LinkedPrBulkRead::default();
+        let mut linked = std::collections::BTreeMap::new();
+        let mut queries = Vec::new();
+        for turn in 0..19 {
+            let missing: Vec<_> = numbers
+                .iter()
+                .copied()
+                .filter(|number| !linked.contains_key(number))
+                .collect();
+            pending.sync_numbers(&missing, 5);
+            let before = queries.len();
+            let result = pending.read_next_with(
+                    |query| {
+                        queries.push(query.to_owned());
+                        if turn == 16 {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid cursor"));
+                        }
+                        let repository: serde_json::Map<_, _> = numbers
+                            .iter()
+                            .filter(|number| query.contains(&format!("i{number}: issue(")))
+                            .map(|number| {
+                                let continuation = query.contains("after:");
+                                let unfinished = *number == 1 && !continuation;
+                                let nodes = if *number == 1 {
+                                    vec![serde_json::json!({
+                                        "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                                        "source": {"__typename": "PullRequest",
+                                            "number": if continuation { 102 } else { 101 }, "state": "OPEN"}
+                                    })]
+                                } else {
+                                    vec![]
+                                };
+                                (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                    "nodes": nodes, "pageInfo": {
+                                        "hasNextPage": unfinished, "endCursor": "next"
+                                    }
+                                }}))
+                            })
+                            .collect();
+                        Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                    },
+                    |number, prs| {
+                        linked.insert(number, prs.to_vec());
+                    },
+                );
+            if turn == 16 {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(queries.len() - before, 1, "turn {turn} is one API call");
+            assert!(queries.last().unwrap().matches(": issue(").count() <= 5);
+            if turn < 18 {
+                assert!(!linked.contains_key(&1), "partial history stays unknown");
+            }
+        }
+        assert!(pending.is_empty());
+        assert_eq!(linked.len(), 80);
+        assert_eq!(
+            linked[&1].iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![101, 102]
+        );
+        assert!(queries[15].contains("i80: issue("));
+        assert!(queries[16].contains("after: \"next\""));
+        assert!(
+            !queries[17].contains("after:"),
+            "invalid cursor restarts its history"
+        );
+
+        pending.sync_numbers(&[81, 82], 5);
+        let failed_query = std::cell::RefCell::new(String::new());
+        assert!(pending
+            .read_next_with(
+                |query| {
+                    *failed_query.borrow_mut() = query.to_owned();
+                    Err(io::Error::other("offline"))
+                },
+                |_, _| panic!("failure cannot publish new evidence"),
+            )
+            .is_err());
+        assert_eq!(linked.len(), 80, "previous completed histories survive");
+        pending.sync_numbers(&[82], 5);
+        pending
+            .read_next_with(
+                |query| {
+                    assert!(
+                        !query.contains("i81: issue("),
+                        "removed candidates are dropped"
+                    );
+                    assert!(query.contains("i82: issue("));
+                    assert!(failed_query.borrow().contains("i82: issue("));
+                    Ok(
+                        serde_json::json!({"data": {"repository": {"i82": {"timelineItems": {
+                            "nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                        }}}}})
+                        .to_string(),
+                    )
+                },
+                |number, prs| {
+                    linked.insert(number, prs.to_vec());
+                },
+            )
+            .unwrap();
+        assert!(pending.is_empty());
+        assert!(linked.contains_key(&82));
     }
 
     /// SPEC #4093 AC-7: the completion probe reads every candidate's linked

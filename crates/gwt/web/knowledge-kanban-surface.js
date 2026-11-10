@@ -2,6 +2,7 @@ import { isContainedPlacement } from "./agent-kanban-surface.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { renderUiContent } from "./ui-content.js";
+import { monitorDiagnostic } from "./agent-completion-notifications.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
@@ -1054,17 +1055,22 @@ export function createKnowledgeKanbanSurface({
         return meanings[primary.key] || `Reported issue state: ${primary.label}.`;
       }
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
-      // is re-broadcast constantly, so only a CHANGED text is a new event) and
+      // is re-broadcast constantly; only a new diagnosis or failed scan counts) and
       // remember which of the two sources changed last for the summary line.
-      const ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
+      let ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
       let reportedIssueMonitorError = "";
       let issueMonitorErrorSequence = 0;
       let surfaceErrorSequence = 0;
 
       function issueMonitorErrorText() {
-        return typeof issueMonitorModel.read().status?.last_error === "string"
-          ? issueMonitorModel.read().status.last_error.trim()
-          : "";
+        return currentMonitorDiagnostic()?.message || "";
+      }
+
+      function currentMonitorDiagnostic() {
+        const status = issueMonitorModel.read().status;
+        return monitorDiagnostic({ message: status?.last_error,
+          kind: status?.last_error_source,
+          stage: status?.last_error_source === "scan_failure" ? status.last_scan_error?.phase : undefined });
       }
 
       // Issue #3628 (AC-5) / SPEC #3885 FR-022: the fleet outage used to be a
@@ -1092,13 +1098,22 @@ export function createKnowledgeKanbanSurface({
       function syncIssueMonitorErrorReport() {
         syncIssueMonitorBlackoutReport();
         syncIssueMonitorCapacityReport();
-        const lastError = issueMonitorErrorText();
-        if (lastError === reportedIssueMonitorError) return;
-        reportedIssueMonitorError = lastError;
-        if (lastError) {
+        const diagnostic = currentMonitorDiagnostic();
+        const status = issueMonitorModel.read().status;
+        const occurrence = diagnostic ? JSON.stringify([diagnostic.key, diagnostic.message,
+          !diagnostic.stalled && status.last_error_source === "scan_failure"
+            ? status.last_scan_error?.recorded_at || status.last_scan_at : ""]) : "";
+        if (occurrence === reportedIssueMonitorError) return;
+        const previousKey = reportedIssueMonitorError && ISSUE_MONITOR_ERROR_KEY;
+        reportedIssueMonitorError = occurrence;
+        if (diagnostic) {
+          if (previousKey && previousKey !== diagnostic.key) resolveSurfaceError(previousKey);
+          ISSUE_MONITOR_ERROR_KEY = diagnostic.key;
           surfaceErrorSequence += 1;
           issueMonitorErrorSequence = surfaceErrorSequence;
-          reportSurfaceError({ key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: lastError });
+          const notice = { key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: diagnostic.message };
+          if (diagnostic.stalled) reportSurfaceNotice({ ...notice, level: "error" });
+          else reportSurfaceError(notice);
         } else {
           resolveSurfaceError(ISSUE_MONITOR_ERROR_KEY);
         }
@@ -1454,6 +1469,9 @@ export function createKnowledgeKanbanSurface({
           const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
+        const refillGuidance = element.querySelector('[data-role="monitor-refill-guidance"]');
+        if (refillGuidance) refillGuidance.hidden = !issueMonitorModel.read().status.terminal_queue_auto_refill
+          || Boolean(issueMonitorModel.read().status.enabled);
 
       }
 
@@ -3541,10 +3559,18 @@ export function createKnowledgeKanbanSurface({
             },
           });
           let empty = column.querySelector(".knowledge-empty");
-          if (!items.length && !empty) {
-            empty = createNode("div", "knowledge-empty", phase === "queued"
-              ? "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above." : `No ${phase} items`);
-            column.appendChild(empty);
+          if (!items.length) {
+            if (!empty) {
+              empty = createNode("div", "knowledge-empty");
+              column.appendChild(empty);
+            }
+            const refill = issueMonitorModel.read().status.terminal_queue_auto_refill;
+            const stopped = !issueMonitorModel.read().status.enabled;
+            empty.textContent = phase === "queued"
+              ? (refill && stopped ? "Start the Monitor to begin Auto-refill."
+                : refill ? "Auto-refill adds eligible Backlog issues on the next Monitor scan."
+                  : "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above.")
+              : `No ${phase} items`;
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
           const refuses = phase === "active" || phase === "done";
@@ -5418,6 +5444,7 @@ export function createKnowledgeKanbanSurface({
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>
                     <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                   </div>
+                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the Monitor to begin Auto-refill.</p>
                 </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
@@ -5503,7 +5530,7 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
-              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; 0 disables refill."],
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the Monitor to begin Auto-refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
               ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],

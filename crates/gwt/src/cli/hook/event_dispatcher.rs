@@ -62,10 +62,14 @@ fn handle_with_observation(
     mark_playwright_hook_dispatcher_entry();
     diagnostics::begin_event();
     let _deadline = enter_event_deadline(event, started);
-    *completion = super::runtime_state::begin_hook_event(worktree_root, event, input);
+    *completion = run_value(event, "begin-hook-event", || {
+        super::runtime_state::begin_hook_event(worktree_root, event, input)
+    });
     let completion = completion.as_ref();
-    let is_pm = IntentBoundaryEvent::from_name(event).is_some()
-        && super::is_resident_pm_session(worktree_root, current_session);
+    let is_pm = run_value(event, "pm-session-check", || {
+        IntentBoundaryEvent::from_name(event).is_some()
+            && super::is_resident_pm_session(worktree_root, current_session)
+    });
     let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root, completion),
         "UserPromptSubmit" => {
@@ -214,7 +218,15 @@ fn handle_user_prompt_submit(
 ) -> Result<HookOutput, HookError> {
     // PM reporting has its own settlement path; ordinary producing obligations
     // deliberately remain unarmed in this window.
-    super::pm_reporting::handle_user_prompt_submit(worktree_root, input)?;
+    let reporting_started = Instant::now();
+    let reporting = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
+    diagnostics::record_handler_duration(
+        event,
+        "pm-reporting-prompt",
+        reporting_started.elapsed(),
+        if reporting.is_ok() { "ok" } else { "error" },
+    );
+    reporting?;
     // Start the three bookkeeping writes together. The exact delivery ACK must
     // precede the live RuntimeState notice: the Host uses it to release retained
     // input even while paused. Other writes overlap RuntimeState and Board work;

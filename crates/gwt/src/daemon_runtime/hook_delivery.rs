@@ -64,26 +64,33 @@ fn deliver_journaled(
     event: &RuntimeHookEvent,
     send: &mut impl FnMut(&RuntimeHookEvent) -> Result<(), String>,
 ) -> io::Result<Result<(), String>> {
-    fs::create_dir_all(path.parent().expect("delivery path has a parent"))?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.with_extension("lock"))?;
+    let lock = super::profile_hook_live_phase(event, "hook-live/journal-prepare", || {
+        fs::create_dir_all(path.parent().expect("delivery path has a parent"))?;
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))
+    })?;
     // Serialize this Session only, including its bounded POST, so an older
     // attempt cannot clear or replay state after a newer hook has delivered it.
-    fs2::FileExt::lock_exclusive(&lock)?;
-    let mut state: DeliveryState = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => DeliveryState::default(),
-        Err(error) => return Err(error),
-    };
+    super::profile_hook_live_phase(event, "hook-live/journal-lock", || {
+        fs2::FileExt::lock_exclusive(&lock)
+    })?;
+    let mut state: DeliveryState =
+        super::profile_hook_live_phase(event, "hook-live/journal-read", || match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DeliveryState::default()),
+            Err(error) => Err(error),
+        })?;
     if event.kind == RuntimeHookEventKind::RuntimeState {
         state.pending = Some(event.clone());
         state.health.pending_runtime_state = true;
         // Publish before attempting the POST; process exit cannot discard it.
-        state.save(path)?;
+        super::profile_hook_live_phase(event, "hook-live/journal-pending-save", || {
+            state.save(path)
+        })?;
     }
     let mut result = Ok(());
     if let Some(pending) = state.pending.as_ref() {
@@ -98,7 +105,7 @@ fn deliver_journaled(
         state.observe(&result);
     }
     state.health.pending_runtime_state = state.pending.is_some();
-    state.save(path)?;
+    super::profile_hook_live_phase(event, "hook-live/journal-health-save", || state.save(path))?;
     Ok(result)
 }
 
@@ -153,7 +160,12 @@ mod tests {
 
     #[test]
     fn issue_4905_later_forward_recovers_failed_runtime_state_and_health() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join("hook-profile.jsonl");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile);
         let path = home.path().join("runtime/123/session-test.json");
         let runtime = event(RuntimeHookEventKind::RuntimeState, Some("Running"));
         for _ in 0..2 {
@@ -177,6 +189,22 @@ mod tests {
         assert_eq!(health.consecutive_failures, 0);
         assert!(!health.pending_runtime_state);
         assert!(health.last_success_at.is_some());
+        assert!(
+            profile.exists(),
+            "journal stages must be observable without a live Host"
+        );
+        let records: Vec<serde_json::Value> = fs::read_to_string(profile)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for stage in ["prepare", "lock", "read", "pending-save", "health-save"] {
+            let name = format!("hook-live/journal-{stage}");
+            assert!(
+                records.iter().any(|record| record["handler"] == name),
+                "missing {name}"
+            );
+        }
     }
 
     #[test]

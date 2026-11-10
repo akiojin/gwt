@@ -1356,7 +1356,7 @@ test.describe("Issue Bridge load recovery", () => {
       "Details in notifications",
     );
     await bar.locator('[data-action="monitor-diagnostics"]').click();
-    const errorNotice = page.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
+    const errorNotice = page.locator('.notification-center__item[data-error-key^="issue-monitor:"]').filter({ hasText: "issue #3785: scan failed" });
     await expect(errorNotice).toBeFocused();
     await expect(errorNotice).toContainText("issue #3785: scan failed");
     await page.getByRole("button", { name: "Close notifications", exact: true }).click();

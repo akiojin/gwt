@@ -91,6 +91,8 @@ pub fn record_handler_duration(event: &str, handler: &str, duration: Duration, s
         "handler": normalized_handler(handler),
         "status": normalized_status(status),
         "duration_ms": duration.as_secs_f64() * 1000.0,
+        "remaining_budget_ms": gwt_core::operation_deadline::current()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64() * 1000.0),
         "occurred_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     });
     if EVENT_IN_FLIGHT.with(Cell::get) {
@@ -153,6 +155,9 @@ fn normalized_status(value: &str) -> &'static str {
 
 fn normalized_handler(value: &str) -> &'static str {
     match value {
+        "begin-hook-event" => "begin-hook-event",
+        "pm-session-check" => "pm-session-check",
+        "pm-reporting-prompt" => "pm-reporting-prompt",
         "runtime-state" => "runtime-state",
         // Issue #3777: `runtime-state` substages. Each name is a fixed literal
         // so the profile stays content-free while showing which read or
@@ -162,6 +167,15 @@ fn normalized_handler(value: &str) -> &'static str {
         "runtime-state/pending-resume" => "runtime-state/pending-resume",
         "runtime-state/state-write" => "runtime-state/state-write",
         "runtime-state/live-emit" => "runtime-state/live-emit",
+        "hook-live/budget-entry" => "hook-live/budget-entry",
+        "hook-live/event-build" => "hook-live/event-build",
+        "hook-live/target-validation" => "hook-live/target-validation",
+        "hook-live/attempt-entry" => "hook-live/attempt-entry",
+        "hook-live/journal-prepare" => "hook-live/journal-prepare",
+        "hook-live/journal-lock" => "hook-live/journal-lock",
+        "hook-live/journal-read" => "hook-live/journal-read",
+        "hook-live/journal-pending-save" => "hook-live/journal-pending-save",
+        "hook-live/journal-health-save" => "hook-live/journal-health-save",
         "hook-live/client-init" => "hook-live/client-init",
         "hook-live/resolve" => "hook-live/resolve",
         "hook-live/connect" => "hook-live/connect",

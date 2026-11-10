@@ -545,6 +545,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         const codexScript = join(bin, process.platform === "win32" ? "codex.cjs" : "codex");
         const claudeScript = join(bin, process.platform === "win32" ? "claude.cjs" : "claude");
         let provider = await readFile(codexScript, "utf8");
+        provider = provider.replace("const at = new Date().toISOString();", `
+process.env.GWT_HOOK_PROFILE_PATH = path.join(process.env.HOME, 'hook-' + process.env.GWT_SESSION_ID + '.jsonl');
+const at = new Date().toISOString();`);
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
@@ -780,6 +783,14 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     } finally {
       try {
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
+        const profiles = (await readdir(fixture.home)).filter(name => /^hook-[0-9a-f-]+\.jsonl$/.test(name));
+        for (const name of profiles) {
+          await info.attach(name, { body: await readFile(join(fixture.home, name)), contentType: "application/x-ndjson" });
+        }
+        expect(profiles.length, "retain per-Session hook timings before runner cleanup").toBeGreaterThanOrEqual(5);
+        for (const session of new Set((await fixture.launches()).map(launch => launch.gwt_session_id))) {
+          expect(profiles, `retain hook timings for launched Session ${session}`).toContain(`hook-${session}.jsonl`);
+        }
       } finally { await fixture.stop(); }
     }
   });

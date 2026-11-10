@@ -13,6 +13,44 @@ test.describe("Agent window scrollback lifecycle", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("mouse motion cannot return history review to the live screen", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    const history = numberedLines("tracking", 1200).replace(/tracking \d+/g,
+      line => `\x1b]8;;https://example.com\x1b\\${line}\x1b]8;;\x1b\\`);
+    await emitTerminalText(page, id, history + "\x1b[?1003h\x1b[?1006h");
+    await waitForScrollableTerminal(page, id);
+    await expectWheelMovesScrollback(page, id, true, 1000);
+    const before = await terminalScrollMetrics(page, id);
+    const inputs = await terminalInputs(page, id);
+    const box = await agentTile(page, id).locator(".xterm-screen").boundingBox();
+    await page.mouse.move(box!.x + 40, box!.y + 40);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect((await terminalScrollMetrics(page, id)).viewportY).toBe(before.viewportY);
+    expect(await terminalInputs(page, id), "history coordinates stay local").toEqual(inputs);
+    await expect(agentTile(page, id).locator(".xterm-screen")).toHaveClass(/xterm-cursor-pointer/);
+    await scrollTerminalToBottom(page, id);
+    await page.mouse.move(box!.x + 80, box!.y + 80);
+    await expect.poll(async () => (await terminalInputs(page, id)).length).toBeGreaterThan(inputs.length);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("Codex inline redraw without mouse tracking retains history", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    // Codex 0.167.0 on Windows ConPTY emits ED2 without mouse tracking.
+    await emitTerminalText(page, id, numberedLines("Codex", 1200));
+    await emitTerminalText(page, id, "\x1b[H\x1b[2J" + numberedLines("Codex redraw", 40));
+    await waitForScrollableTerminal(page, id);
+    const metrics = await terminalScrollMetrics(page, id);
+    expect(metrics.bufferLength - metrics.rows).toBeGreaterThanOrEqual(1000);
+    // Windows overrides wheel deltas; native xterm normalizes a large delta
+    // to a notch elsewhere. Tracking history below still verifies 1,000 lines.
+    const windows = await page.evaluate(() => /\bWin/i.test(navigator.platform));
+    await expectWheelMovesScrollback(page, id, true, windows ? 1000 : 1);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("keeps wheel scrollback alive after hidden-visible cycles and Plan-mode idle", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
 
@@ -59,6 +97,53 @@ test.describe("Agent window scrollback lifecycle", () => {
     await expectPendingRefresh(page, "agent-1", false);
     await waitForScrollableTerminal(page, "agent-1");
     await expectWheelMovesScrollback(page, "agent-1");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("stopped and interrupted scrolling stays local while keyboard input remains enabled", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    const box = await agentTile(page, id).boundingBox();
+    expect(box).not.toBeNull();
+    // Position before enabling mouse tracking: pointer motion remains input.
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    const wheel = async () => {
+      await page.mouse.wheel(0, -96);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    };
+
+    for (const state of ["stopped", "interrupted"]) {
+      await emitTerminalText(page, id, "\x1b[?1049h\x1b[?1003l\x1b[?1006l\x1b[HRetained terminal\r\n");
+      await emitBackendEvent(page, { kind: "window_state", window_id: id, state });
+      await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveAttribute("data-agent-state", state);
+      await expect.poll(() => terminalScrollMetrics(page, id)).toMatchObject({ baseY: 0, hidden: false });
+      const before = await terminalInputs(page, id);
+      await wheel();
+      expect(await terminalInputs(page, id), `${state} wheel must not send fallback keys`).toEqual(before);
+      await emitTerminalText(page, id, `\x1b[?1003h\x1b[?1006h${state} tracking ready\r\n`);
+      await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-1")))
+        .toContain(`${state} tracking ready`);
+      await wheel();
+      expect(await terminalInputs(page, id), `${state} wheel must not send mouse reports`).toEqual(before);
+
+      await emitTerminalText(page, id, "\x1b[?1003l\x1b[?1006l\x1b[?1049l" + numberedLines(state, 150));
+      await waitForScrollableTerminal(page, id);
+      await expectWheelMovesScrollback(page, id, true);
+      const input = agentTile(page, id).locator(".xterm-helper-textarea");
+      await input.focus();
+      const beforeTyping = (await terminalInputs(page, id)).length;
+      await page.keyboard.type("x");
+      await expect.poll(async () => (await terminalInputs(page, id)).slice(beforeTyping)).toContain("x");
+      await page.screenshot({ path: info.outputPath(`scroll-${state}.png`) });
+    }
+
+    await emitTerminalText(page, id, "\x1b[?1049h\x1b[HRunning terminal\r\n");
+    await emitBackendEvent(page, { kind: "window_state", window_id: id, state: "running" });
+    await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveAttribute("data-agent-state", "running");
+    await expect.poll(() => terminalScrollMetrics(page, id)).toMatchObject({ baseY: 0 });
+    const before = (await terminalInputs(page, id)).length;
+    await wheel();
+    await expect.poll(async () => (await terminalInputs(page, id)).slice(before)).toContain("\x1b[5~");
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
@@ -186,6 +271,11 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     await setActiveAgentTab(page, "agent-2");
     await emitTerminalText(page, "agent-2", "\x1b[?1049h\x1b[Hfullscreen claude\r\n");
     await expect.poll(() => terminalScrollMetrics(page, "agent-2")).toMatchObject({ hidden: false, baseY: 0 });
+    // baseY is also zero before parsing. Settle output-driven activation
+    // before blur so its queued focus is not attributed to the gesture.
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-2")))
+      .toContain("fullscreen claude");
+    await expectPendingRefresh(page, "agent-2", false);
 
     await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
     const before = (await terminalInputs(page, "agent-2")).length;
