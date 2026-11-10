@@ -2000,7 +2000,10 @@ impl AppRuntime {
                 .persisted()
                 .windows
                 .iter()
-                .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
+                .find(|window| {
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && window.session_id.as_deref() == Some(session.id.as_str())
+                })
                 .map(|window| window.id.clone())
         });
         let mut events = Vec::new();
