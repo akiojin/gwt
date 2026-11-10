@@ -4,6 +4,7 @@ param(
   [ValidateSet('baseline','after')][string]$Phase = 'after',
   [string]$EvidenceDirectory,
   [switch]$Sequential,
+  [switch]$LaunchAcceptance,
   [ValidateRange(1,10)][int]$LaunchCount = 10,
   [switch]$CargoLoad,
   [switch]$PostAckDiagnostics,
@@ -12,6 +13,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'This harness requires Windows and PowerShell 7.' }
+if ($LaunchAcceptance) {
+  if ($CargoLoad -or $PostAckDiagnostics -or $PSBoundParameters.ContainsKey('LaunchCount')) { throw 'LaunchAcceptance uses six retained panes, ten single launches and two concurrent launches.' }
+  $Sequential = $true
+}
 if (($CargoLoad -or $PSBoundParameters.ContainsKey('LaunchCount')) -and -not $Sequential) { throw 'LaunchCount and CargoLoad require Sequential.' }
 if ($PostAckDiagnostics -and (-not $Sequential -or -not $CargoLoad -or $LaunchCount -ne 2)) { throw 'PostAckDiagnostics requires Sequential, CargoLoad and LaunchCount 2; run each theme in a fresh fixture.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -20,7 +25,7 @@ $gwtd = Join-Path $repoRoot 'target/debug/gwtd.exe'
 foreach ($binary in @($gwt,$gwtd)) { if (-not (Test-Path -LiteralPath $binary)) { throw 'Build this checkout: cargo build -p gwt --bin gwt --bin gwtd' } }
 $checkHome = Join-Path ([IO.Path]::GetTempPath()) ('gwt-launch-5596-' + [guid]::NewGuid())
 if (-not $EvidenceDirectory) {
-  $owner = if ($Sequential) { 'issue-6096' } else { 'issue-5596' }
+  $owner = if ($LaunchAcceptance) { 'issue-7016' } elseif ($Sequential) { 'issue-6096' } else { 'issue-5596' }
   $EvidenceDirectory = Join-Path $repoRoot "target/verification/$owner/$Phase"
 }
 $EvidenceDirectory = [IO.Path]::GetFullPath($EvidenceDirectory)
@@ -163,13 +168,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let delivery: gwt::issue_monitor::PendingIssueMonitorLaunchDelivery = serde_json::from_str(&input)?;
+    let value: serde_json::Value = serde_json::from_str(&input)?;
+    let values = match value {
+        serde_json::Value::Array(values) if fixture["launch_acceptance"].is_object() && values.len() == 2 => values,
+        value if !value.is_array() => vec![value],
+        _ => return Err("only the launch acceptance fixture admits a two-delivery batch".into()),
+    };
+    let deliveries = values.into_iter().map(serde_json::from_value)
+        .collect::<Result<Vec<gwt::issue_monitor::PendingIssueMonitorLaunchDelivery>, _>>()?;
+    let delivery = &deliveries[0];
     let expected = fixture["expected_deliveries"].as_array().ok_or("missing fixture deliveries")?;
     let index = expected.iter().position(|row| row["issue_number"] == delivery.issue_number
         && row["delivery_id"] == delivery.delivery_id && row["claim_id"] == delivery.claim_id)
         .ok_or("delivery is not owned by this fixture")?;
-    if delivery.claim_owner != "fixture" || delivery.branch_name != format!("work/issue-{}", delivery.issue_number) {
-        return Err("foreign delivery refused".into());
+    for (offset, delivery) in deliveries.iter().enumerate() {
+        let row = expected.get(index + offset).ok_or("unexpected delivery batch")?;
+        if row["issue_number"] != delivery.issue_number || row["delivery_id"] != delivery.delivery_id
+            || row["claim_id"] != delivery.claim_id || delivery.claim_owner != "fixture"
+            || delivery.branch_name != format!("work/issue-{}", delivery.issue_number) {
+            return Err("foreign delivery refused".into());
+        }
     }
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
@@ -185,16 +203,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // Match the durable state produced by apply_confirmed_claim. A live
         // daemon rebase imports active reservations from launching_issues.
-        prefs.launching_issues.push(gwt::issue_monitor::IssueMonitorLaunchingIssue {
-            issue_number: delivery.issue_number,
-            claimed_at: Some(delivery.created_at.clone()),
-        });
-        prefs.claim_identities.push(gwt::issue_monitor::IssueMonitorClaimIdentity {
-            issue_number: delivery.issue_number,
-            claim_id: delivery.claim_id.clone(),
-            owner: delivery.claim_owner.clone(),
-        });
-        prefs.pending_launch_deliveries.push(delivery.clone());
+        for delivery in &deliveries {
+            prefs.launching_issues.push(gwt::issue_monitor::IssueMonitorLaunchingIssue {
+                issue_number: delivery.issue_number,
+                claimed_at: Some(delivery.created_at.clone()),
+            });
+            prefs.claim_identities.push(gwt::issue_monitor::IssueMonitorClaimIdentity {
+                issue_number: delivery.issue_number,
+                claim_id: delivery.claim_id.clone(),
+                owner: delivery.claim_owner.clone(),
+            });
+            prefs.pending_launch_deliveries.push(delivery.clone());
+        }
         Ok(())
     })?;
     // Match the ordinary CLI path: wake the owning daemon and require its ACK.
@@ -224,7 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   $environment.PATH = "$checkHome/bin;$($environment.PATH)"
   $environment.GWT_TEST_GH = "$checkHome/bin/gh.exe"
   $environment.GWT_TEST_GH_SANDBOX = '1'
-  $fixtureCount = if ($Sequential) { $LaunchCount } else { 12 }
+  $fixtureCount = if ($LaunchAcceptance) { 18 } elseif ($Sequential) { $LaunchCount } else { 12 }
   $issues = @(1..$fixtureCount | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@(@{name='gwt-queued'});comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 5 -AsArray))
   # Read-only loopback owner API. Every unsupported/mutating request fails locally.
@@ -263,7 +283,8 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   # Admission now reads the machine policy, rather than legacy project fields.
   # Seed only this disposable HOME before the first status/migration read.
   [void](New-Item -ItemType Directory -Path "$checkHome/.gwt/machine-state" -Force)
-  [IO.File]::WriteAllText("$checkHome/.gwt/machine-state/agent-settings.json", '{"mode":"manual","manual_limit":12,"last_change":null}')
+  $capacity = if ($LaunchAcceptance) { 18 } else { 12 }
+  [IO.File]::WriteAllText("$checkHome/.gwt/machine-state/agent-settings.json", (@{mode='manual';manual_limit=$capacity;last_change=$null} | ConvertTo-Json -Compress))
   $status = Invoke-IsolatedGwtd 'issue.monitor.status'
   $key = $status.project_store.hash
   if ($key -notmatch '^[a-zA-Z0-9_-]+$') { throw 'Canonical fixture ProjectKey unavailable.' }
@@ -292,7 +313,12 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 8 -AsArray))
   # Queue admission and upstream claim creation are outside this acceptance run.
   $initialDeliveries = if ($Sequential) { @() } else { $deliveries }
-  $initialPrefs = @{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=@($initialDeliveries)}
+  $initialPrefs = @{enabled=$true;autonomous_mode=$false;max_active_agents=$capacity;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=@($initialDeliveries)}
+  if ($LaunchAcceptance) {
+    # Retained historical context has no admission or process authority. Match
+    # the observed production prefs size without copying the user's state.
+    $initialPrefs.priority_reason_note = @{reason=('offline retained history ' * 48000);priority_order=@();recorded_at='2026-10-16T00:00:00Z'}
+  }
   $initialPrefs.launching_issues = @($initialDeliveries | ForEach-Object { @{issue_number=$_.issue_number;claimed_at=$_.created_at} })
   $initialPrefs.claim_identities = @($initialDeliveries | ForEach-Object { @{issue_number=$_.issue_number;claim_id=$_.claim_id;owner=$_.claim_owner} })
   [IO.File]::WriteAllText("$state/issue-monitor.json", ($initialPrefs | ConvertTo-Json -Depth 8))
@@ -307,6 +333,10 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $sourcePaths = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/launch_runtime/base_freshness.rs','crates/gwt/src/cli/gwtd_resolver.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/paths.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
     'crates/gwt/web/app.js','crates/gwt/web/terminal-viewport-reflow.js',
     'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs')
+  if ($LaunchAcceptance) {
+    $sourcePaths += @('crates/gwt/src/cli/daemon/server.rs','crates/gwt/src/project_runtime/owner.rs',
+      'crates/gwt/src/project_runtime/launch.rs','crates/gwt/src/project_runtime/installation.rs','crates/gwt/src/project_runtime/monitor.rs')
+  }
   if ($PostAckDiagnostics) {
     $sourcePaths += @('scripts/diagnostics/issue-6422-processes.ps1','crates/gwt/playwright/tests/issue-6422-post-ack-live.spec.ts',
       'crates/gwt-terminal/src/pty.rs','crates/gwt-terminal/src/pty/process_group.rs','crates/gwt-core/src/process_tree.rs','crates/gwt-core/src/process_tree/job_cpu.rs')
@@ -318,6 +348,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   }
   $expectedDeliveries = @($deliveries | ForEach-Object { @{issue_number=$_.issue_number;delivery_id=$_.delivery_id;claim_id=$_.claim_id} })
   $fixture = @{phase=$Phase;sequential=[bool]$Sequential;launch_count=$fixtureCount;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
+  if ($LaunchAcceptance) { $fixture.launch_acceptance = @{warmup_count=6;single_count=10;concurrent_count=2;capacity=$capacity;initial_prefs_bytes=(Get-Item -LiteralPath "$state/issue-monitor.json").Length} }
   $fixture.checkout_daemon = $gwtd
   $fixture.hook_generation_fallback = $hookBin
   $fixture.daemon_sha256 = (Get-FileHash -LiteralPath $gwtd -Algorithm SHA256).Hash
@@ -449,6 +480,7 @@ fn main() -> std::io::Result<()> {
   $start.Environment['GWT_PLAYWRIGHT_BASE_URL'] = $url
   $start.Environment['GWT5596_HOME'] = $checkHome
   if ($Sequential) { $start.Environment['GWT5596_SEQUENTIAL'] = '1' }
+  if ($LaunchAcceptance) { $start.Environment['GWT5596_LAUNCH_ACCEPTANCE'] = '1' }
   $start.Environment['GWT5596_LAUNCH_COUNT'] = [string]$fixtureCount
   $start.Environment['GWT_PLAYWRIGHT_NODE_MODULES'] = Join-Path $depsRoot 'node_modules'
   $start.Environment['NODE_OPTIONS'] = "--require `"$($resolver.Replace('\','/'))`""

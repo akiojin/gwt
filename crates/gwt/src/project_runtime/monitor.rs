@@ -564,6 +564,15 @@ impl MonitorLaunch {
     ) -> Result<Option<IssueMonitorAgentFailureSource>, String> {
         self.check_current()?;
         let issue = self.issue()?;
+        let launch_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_publication",
+            issue_number = issue, delivery_id = self.feedback.issue_monitor_delivery_id.as_deref().unwrap_or("none"),
+            window_id = %self.id);
+        let _launch_span = launch_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start(if ready {
+            "window_publish_ack"
+        } else {
+            "window_publish"
+        });
         let before = self.read_monitor()?;
         // OFF revokes existing reservations, not the materialized owner. Auto
         // may already be OFF while a valid manual reservation awaits its ACK.
@@ -573,6 +582,7 @@ impl MonitorLaunch {
         }
         if ready {
             if let Some(source) = self.confirmed_source(&before) {
+                phase.finish();
                 return Ok(Some(source));
             }
         }
@@ -689,6 +699,7 @@ impl MonitorLaunch {
             }
         }
         if !ready {
+            phase.finish();
             return Ok(None);
         }
         self.check_current()?;
@@ -770,6 +781,7 @@ impl MonitorLaunch {
         if !source.matches(&monitor, &self.id) || monitor.live_claim_id(issue) != expected_claim {
             return Err("Monitor ACK did not bind the exact owner pane".into());
         }
+        phase.finish();
         Ok(Some(source))
     }
 

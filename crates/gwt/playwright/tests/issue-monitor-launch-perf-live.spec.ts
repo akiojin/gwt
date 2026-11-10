@@ -8,12 +8,14 @@ import { gotoLiveGwt, sendLiveGwtEvent } from './_helpers/live-gwt';
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || '';
 const HOME = process.env.GWT5596_HOME || '';
 const SEQUENTIAL = process.env.GWT5596_SEQUENTIAL === '1';
+const LAUNCH_ACCEPTANCE = process.env.GWT5596_LAUNCH_ACCEPTANCE === '1';
 const LAUNCH_COUNT = Number(process.env.GWT5596_LAUNCH_COUNT || '10');
 test.skip(!BASE || !HOME, 'requires scripts/verify-issue-5596.ps1');
 test.use({ headless: false });
-test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launches finish within 120 seconds each`
+test(LAUNCH_ACCEPTANCE ? 'Issue #7016: six retained panes, ten single launches and two concurrent launches meet their deadlines'
+  : SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launches finish within 120 seconds each`
   : 'Issue #5596: twelve admitted launches keep completion handlers within budget', async ({ page }, info) => {
-  test.setTimeout(SEQUENTIAL ? 1_400_000 : 600_000);
+  test.setTimeout(LAUNCH_ACCEPTANCE ? 2_400_000 : SEQUENTIAL ? 1_400_000 : 600_000);
   const fixture = JSON.parse(await readFile(join(HOME, 'fixture.json'), 'utf8'));
   const count = fixture.sequential ? fixture.launch_count ?? 10 : 12;
   const theme = info.project.name.includes('light') ? 'light' : 'dark';
@@ -94,6 +96,28 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
     expect(await launches(), 'exactly the admitted provider receipts remain after measurement').toHaveLength(count);
     expect(errors, 'zero console/page errors').toEqual([]);
     expect(measurement.failed_issue_rows, 'no failed Issues deliveries').toEqual([]);
+    if (fixture.launch_acceptance) {
+      await expect.poll(async () => {
+        measurement = await observe(fixture);
+        const acceptance = await launchAcceptanceEvidence(fixture, measurement);
+        return acceptance.phase_coverage.every((coverage: any) => coverage.missing.length === 0);
+      }, { timeout: 30_000, message: 'correlated launch phase logs are flushed after the final durable ACK' }).toBe(true);
+      expect(errors, 'zero console/page errors through phase-log convergence').toEqual([]);
+      const acceptance = await launchAcceptanceEvidence(fixture, measurement);
+      expect(fixture.launch_acceptance.initial_prefs_bytes, 'production-sized retained prefs').toBeGreaterThanOrEqual(1_100_000);
+      expect(acceptance.single_launches).toHaveLength(10);
+      expect(acceptance.single_p95_ms, 'ten single launches with six retained panes have p95 at most 60 seconds').toBeLessThanOrEqual(60_000);
+      expect(acceptance.concurrent_launches).toHaveLength(2);
+      expect(acceptance.concurrent_launches[0].enqueued_at, 'both deliveries were enqueued together').toBe(acceptance.concurrent_launches[1].enqueued_at);
+      for (const receipt of [...acceptance.single_launches, ...acceptance.concurrent_launches]) {
+        expect(receipt.retained_window_count, 'six real warmup panes remain running').toBe(6);
+        expect(receipt.complete).toBe(true);
+        expect(receipt.elapsed_ms).toBeLessThan(120_000);
+      }
+      for (const coverage of acceptance.phase_coverage) {
+        expect(coverage.missing, `issue/delivery-correlated completed phases for #${coverage.issue_number}`).toEqual([]);
+      }
+    }
     await info.attach(`launch-performance-${theme}`, { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
     passed = true;
   } finally {
@@ -113,7 +137,8 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
         missing_shell_image: /pwsh\.dll.*(?:not exist|not found)/i.test(output) };
     }), measurement.durable_launch_ack_rows.filter((row: any) => row.window_id).map((row: any) => row.window_id));
     const evidence = {
-      issue: fixture.cargo_load ? 6393 : fixture.sequential ? 6096 : 5596, phase: fixture.phase, theme, passed, fixture, ...measurement,
+      issue: fixture.launch_acceptance ? 7016 : fixture.cargo_load ? 6393 : fixture.sequential ? 6096 : 5596, phase: fixture.phase, theme, passed, fixture, ...measurement,
+      launch_acceptance: fixture.launch_acceptance ? await launchAcceptanceEvidence(fixture, measurement) : undefined,
       cargo_load_period: fixture.cargo_load ? cargoLoadPeriod : undefined,
       terminal_diagnostics: terminalDiagnostics,
       sequential_launches: fixture.sequential ? JSON.parse(await readFile(join(HOME, 'sequential-launches.json'), 'utf8').catch(() => '[]')) : undefined,
@@ -141,26 +166,34 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
         cwd: fixture.project, timeout: 30_000, windowsHide: true,
       }, error => error ? reject(error) : resolve());
     });
-    for (const expected of fixture.expected_deliveries) {
+    for (const [index, expected] of fixture.expected_deliveries.entries()) {
+      const retainedWindowCount = fixture.launch_acceptance && index >= 6
+        ? await assertRetainedWarmupPanes(page, receipts.slice(0, 6)) : undefined;
       const loadBefore = fixture.cargo_load ? await cargoLoadSample(fixture) : undefined;
-      const enqueuedAt = new Date().toISOString();
+      // The final pair shares one actual enqueue and one deadline, even when
+      // the production materializer serializes its physical launches.
+      const secondConcurrent = fixture.launch_acceptance && index === 17;
+      const enqueuedAt = secondConcurrent ? receipts[16].enqueued_at : new Date().toISOString();
       const receipt: any = { ...expected, enqueued_at: enqueuedAt, complete: false, cargo_load_before: loadBefore,
+        retained_window_count: retainedWindowCount,
         timing_boundary: fixture.cargo_load ? 'durable-materialization-and-ready-native-window' : 'authenticated-provider-handoff' };
       receipts.push(receipt);
       await writeFile(receiptsPath, JSON.stringify(receipts, null, 2));
       try {
         // The helper links this checkout's production locked prefs mutation.
         // No shell, external GitHub write or whole-file read/replace is used.
-        await new Promise<void>((resolve, reject) => {
+        if (!secondConcurrent) await new Promise<void>((resolve, reject) => {
           const child = execFile(join(HOME, 'bin/enqueue.exe'), [], {
             cwd: fixture.project, timeout: 120_000, windowsHide: true,
           }, (error, _stdout, stderr) => error
             ? reject(new Error(`fixture enqueue failed: ${stderr.trim() || error.message}`))
             : resolve());
-          child.stdin!.end(JSON.stringify({
-            ...expected, branch_name: `work/issue-${expected.issue_number}`, linked_issue_kind: 'issue',
+          const delivery = (entry: any) => ({
+            ...entry, branch_name: `work/issue-${entry.issue_number}`, linked_issue_kind: 'issue',
             claim_owner: 'fixture', launch_session_strategy: 'fresh_required', created_at: enqueuedAt,
-          }));
+          });
+          child.stdin!.end(JSON.stringify(fixture.launch_acceptance && index === 16
+            ? fixture.expected_deliveries.slice(16).map(delivery) : delivery(expected)));
         });
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await expect.poll(async () => {
@@ -238,6 +271,47 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
         .toBeGreaterThan(before.find((entry: any) => entry.pid === receipt.cargo_load_before.workload.pid)?.cpu_ms);
     }
   }
+}
+
+async function assertRetainedWarmupPanes(page: any, warmup: any[]): Promise<number> {
+  expect(warmup, 'six real launches precede the timed acceptance batch').toHaveLength(6);
+  const providers = await launches();
+  for (const receipt of warmup) {
+    const provider = providers.find(provider => provider.session_id === receipt.session_id);
+    expect(provider, 'each retained pane has its own provider process').toBeTruthy();
+    expect(() => process.kill(provider.pid, 0), 'retained provider process remains alive').not.toThrow();
+  }
+  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+  await sendLiveGwtEvent(page, { kind: 'list_windows' });
+  await expect.poll(() => page.evaluate(({ sessions, cursor }: any) => {
+    const reply = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) =>
+      entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
+    return sessions.filter((session: string) => reply?.payload.windows?.some((window: any) =>
+      window.session_id === session && ['running', 'idle'].includes(window.status))).length;
+  }, { sessions: warmup.map(receipt => receipt.session_id), cursor }), {
+    timeout: 30_000, message: 'six retained implementation panes are bound and running before the next launch',
+  }).toBe(6);
+  return 6;
+}
+
+async function launchAcceptanceEvidence(fixture: any, measurement: any): Promise<any> {
+  const receipts = JSON.parse(await readFile(join(HOME, 'sequential-launches.json'), 'utf8').catch(() => '[]'));
+  const singles = receipts.slice(6, 16);
+  const elapsed = singles.map((receipt: any) => receipt.elapsed_ms).filter(Number.isFinite).sort((a: number, b: number) => a - b);
+  const required = ['claim', 'worktree', 'runner_health', 'pty_spawn', 'window_publish_ack'];
+  return {
+    warmup_launches: receipts.slice(0, 6), single_launches: singles, concurrent_launches: receipts.slice(16, 18),
+    single_p95_ms: elapsed.length === 10 ? elapsed[Math.ceil(elapsed.length * 0.95) - 1] : null,
+    phase_coverage: fixture.expected_deliveries.map((expected: any) => {
+      const phases = (measurement.launch_phase_rows || []).filter((row: any) => {
+        const identity = Object.assign({}, ...(row.spans || []), row.span || {}, row.fields || {});
+        return identity.issue_number === expected.issue_number && identity.delivery_id === expected.delivery_id
+          && row.fields?.state === 'finished' && Number.isFinite(row.fields?.elapsed_ms);
+      });
+      return { ...expected, missing: required.filter(phase => !phases.some((row: any) => row.fields.phase === phase)), rows: phases };
+    }),
+    limitations: 'Offline confirmed upstream claims are seeded. Timings start at the locked delivery enqueue and include daemon scan wake, owner claim, real worktree preparation, PTY spawn, authenticated provider handoff and durable window ACK. Both themes inspect the same retained live batch; model execution and upstream GitHub claim latency are excluded.',
+  };
 }
 
 async function setCargoLoad(fixture: any, active: boolean): Promise<any> {

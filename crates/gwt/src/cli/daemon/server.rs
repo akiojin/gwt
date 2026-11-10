@@ -122,15 +122,22 @@ const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
 pub(super) struct ScopedIssueMonitorPrefsTimeout(
     // Retain the guard until scope exit so Drop restores the budget; no field read is needed.
     #[allow(dead_code)] gwt_core::deadline_budget::ScopedDeadlineBudget,
+    #[allow(dead_code)] gwt_core::deadline_budget::ScopedDeadlineBudget,
 );
 
 #[cfg(test)]
 impl ScopedIssueMonitorPrefsTimeout {
     fn set(timeout: Duration) -> Self {
-        Self(gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
-            &ISSUE_MONITOR_PREFS_BUDGET,
-            timeout,
-        ))
+        Self(
+            gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+                &ISSUE_MONITOR_PREFS_BUDGET,
+                timeout,
+            ),
+            gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+                &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+                timeout,
+            ),
+        )
     }
 }
 
@@ -140,9 +147,9 @@ pub(super) fn pin_prefs_hang_guard() -> ScopedIssueMonitorPrefsTimeout {
     ScopedIssueMonitorPrefsTimeout::set(gwt_core::deadline_budget::HANG_GUARD)
 }
 
-/// The single seam for the prefs read-lock-modify-write budget.
+/// The budget for short startup, scan, and shutdown prefs transactions.
 ///
-/// Issue #4033: every prefs transaction must go through this accessor. A test
+/// Issue #4033: those prefs transactions must go through this accessor. A test
 /// that asserts on a transaction's *outcome* is otherwise asserting on how
 /// fast the runner's filesystem happened to be that minute, and a loaded CI
 /// host silently converts a passing state machine into a failing one. SPEC
@@ -4646,7 +4653,10 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration(
         prefs_path,
         monitor,
         accepted,
-        issue_monitor_prefs_timeout(),
+        // Accepted controls already run off the GUI thread and owe a durable
+        // receipt. Repeatedly spending the short prefs budget can otherwise
+        // starve the entire control lane before any launch claim commits.
+        crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
         || {},
     )
 }
@@ -10524,6 +10534,106 @@ fn issue_4783_scan_commit_does_not_restore_a_binding_removed_by_verified_ownersh
 #[cfg(test)]
 mod scan_failure_contract_tests {
     use super::test_monitor_with_prefs;
+
+    #[test]
+    fn issue_7016_slow_launch_claim_commits_and_receipt_replay_is_idempotent() {
+        use std::{cell::RefCell, rc::Rc, time::Duration};
+
+        use gwt_core::deadline_budget::ScopedDeadlineBudget;
+        use gwt_core::operation_deadline::{
+            NamedFileLock, ScopedNamedLockContentionObserver, ScopedOperationClock,
+        };
+        use gwt_core::test_support::ScopedGwtHome;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _prefs_budget = ScopedDeadlineBudget::pin(
+            &super::ISSUE_MONITOR_PREFS_BUDGET,
+            super::ISSUE_MONITOR_PREFS_BUDGET.default_value(),
+        );
+        let _control_budget = ScopedDeadlineBudget::pin(
+            &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+            crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.default_value(),
+        );
+        let start = std::time::Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        let now = chrono::Utc::now().to_rfc3339();
+        let prefs_path = home.path().join("issue-monitor.json");
+        let mut monitor = super::test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[7016], "test", &now);
+        monitor.record_candidate(crate::IssueMonitorIssue {
+            number: 7016,
+            title: "launch claim".into(),
+            labels: vec!["bug".into()],
+            state: crate::IssueMonitorIssueState::Open,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            author_login: None,
+            body: None,
+            url: None,
+            updated_at: None,
+        });
+        assert!(monitor.apply_confirmed_claim(7016, "claim", "host/session", "effect", &now));
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let accepted = super::AcceptedIssueMonitorControl::new(
+            super::IssueMonitorControl::ClaimLaunchDelivery {
+                issue_number: 7016,
+                delivery_id: "launch:effect".into(),
+                materializer_id: "gui".into(),
+                materializer_pid: std::process::id(),
+                materializer_window_id: "tab::agent".into(),
+            },
+        );
+        let lock_path = prefs_path.with_extension("lock");
+        let holder = Rc::new(RefCell::new(Some(
+            NamedFileLock::acquire(&lock_path, "test prefs holder").unwrap(),
+        )));
+        let advanced_clock = Rc::new(RefCell::new(None));
+        let _contention = ScopedNamedLockContentionObserver::set(&lock_path, {
+            let holder = holder.clone();
+            let advanced_clock = advanced_clock.clone();
+            move || {
+                holder.borrow_mut().take();
+                *advanced_clock.borrow_mut() =
+                    Some(ScopedOperationClock::set(start + Duration::from_secs(1)));
+            }
+        });
+
+        assert!(matches!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                accepted.clone(),
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(advanced_clock.borrow().is_some(), "contention was observed");
+        let committed = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let delivery = &committed.pending_launch_deliveries[0];
+        assert_eq!(delivery.materializer_id.as_deref(), Some("gui"));
+        assert_eq!(
+            delivery.materializer_window_id.as_deref(),
+            Some("tab::agent")
+        );
+        assert_eq!(
+            committed.last_control_receipt.as_ref().unwrap().control_id,
+            accepted.control_id
+        );
+        let bytes = std::fs::read(&prefs_path).unwrap();
+        assert!(matches!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                accepted,
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), bytes);
+    }
 
     #[test]
     fn settings_failure_does_not_revoke_an_independent_scan_commit() {
@@ -20377,6 +20487,8 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let _worker_prefs_budget =
             ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        let _worker_control_budget =
+            ScopedEnvVar::set("GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS", "60000");
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
@@ -20568,6 +20680,8 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let _worker_prefs_budget =
             ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        let _worker_control_budget =
+            ScopedEnvVar::set("GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS", "60000");
         // Issue #6877 AC-2: scan 2 is a timer-only scan that must observe the
         // rewritten candidate list through the fake gh; keep its reads live.
         let _periodic_read_max_age = ScopedEnvVar::set(
@@ -22794,6 +22908,8 @@ exit 1
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _worker_prefs_budget =
             ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        let _worker_control_budget =
+            ScopedEnvVar::set("GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS", "60000");
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         let _home = ScopedGwtHome::set(&home);

@@ -5407,7 +5407,17 @@ impl OwnerState {
         let linked_issue_number = config.linked_issue_number;
         #[cfg(any(test, feature = "test-gh-guard"))]
         let test_pty_start_gate = self.test_pty_start_gate.clone();
+        let launch_requested = std::time::Instant::now();
         spawn_owner_worker(move || {
+            let launch_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_owner_launch",
+                issue_number = linked_issue_number,
+                delivery_id = metadata.launch_feedback_context.as_ref()
+                    .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()).unwrap_or("none"),
+                window_id = %id, operation_id = %operation_id);
+            let _launch_span = launch_span.enter();
+            tracing::info!(target: "gwt.launch.timing", phase = "owner_dispatch", state = "finished",
+                elapsed_ms = launch_requested.elapsed().as_secs_f64() * 1000.0, "Issues owner launch phase");
+            let owner_phase = super::launch::LaunchPhaseTimer::start("owner_materialization");
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
             );
@@ -5667,6 +5677,7 @@ impl OwnerState {
                         gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
                     );
                     preparation.map_err(AgentLaunchError::from)?;
+                    let phase = super::launch::LaunchPhaseTimer::start("owner_admission");
                     let host_project_roots = super::installation::owner_host_project_roots(&root)
                         .map_err(AgentLaunchError::from)?;
                     let mut admitted = super::installation::prepare_owner_agent_admission(
@@ -5687,6 +5698,7 @@ impl OwnerState {
                         &mut config,
                     )
                     .map_err(AgentLaunchError::from)?;
+                    phase.finish();
                     input.workspace_resume_context = admitted.workspace_resume_context.take();
                     input.launch_feedback_context = admitted.launch_feedback_context.take();
                     input.pending_pm_project_root = config
@@ -6418,6 +6430,11 @@ impl OwnerState {
                         .and_then(|success| success.capability_token.as_deref())
                         .and_then(|token| issuer.grant_for_test(token)),
                 });
+            }
+            if completion.result.is_ok() {
+                owner_phase.finish();
+            } else {
+                drop(owner_phase);
             }
             if let Err(error) = sender.send(OwnerMessage::AgentPrepared(Box::new(completion))) {
                 if let OwnerMessage::AgentPrepared(mut prepared) = error.0 {
@@ -10689,6 +10706,11 @@ impl OwnerState {
                             snapshot: None,
                             snapshot_tabs: Default::default(),
                         };
+                        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+                            issue_number = claim.issue_number, delivery_id = %claim.delivery_id,
+                            window_id = %claim.materializer_window_id);
+                        let _claim_span = claim_span.enter();
+                        let phase = super::launch::LaunchPhaseTimer::start("claim");
                         if !claim
                             .claim_from_worker()
                             .map_err(|error| error.to_string())?
@@ -10698,6 +10720,7 @@ impl OwnerState {
                                     .into(),
                             );
                         }
+                        phase.finish();
                     }
                 }
                 launch.commit_launch(ready)

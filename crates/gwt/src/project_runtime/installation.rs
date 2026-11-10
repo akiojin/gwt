@@ -1022,6 +1022,7 @@ pub fn install_agent_launch(
     };
     // This function already runs on a blocking worker. Keep the file guard
     // entirely within the physical spawn, never across a GUI event handoff.
+    let phase = super::launch::LaunchPhaseTimer::start("pty_spawn");
     let spawn = if monitor_admission {
         crate::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
@@ -1049,6 +1050,7 @@ pub fn install_agent_launch(
             });
         }
     };
+    phase.finish();
     input.failed_launch = Some(Box::new(PreparedAgentLaunchSuccess {
         project_root: input.project_root.clone(),
         active_session: active.clone(),
@@ -2345,6 +2347,11 @@ impl IssueMonitorLaunchClaimInput {
     pub fn claim_or_reuse(
         &self,
     ) -> Result<bool, crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+            issue_number = self.issue_number, delivery_id = %self.delivery_id,
+            window_id = %self.materializer_window_id);
+        let _claim_span = claim_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start("claim");
         let prefs = crate::load_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&self.project_root),
         )
@@ -2359,9 +2366,14 @@ impl IssueMonitorLaunchClaimInput {
                 crate::process::host_process_start_time(self.materializer_pid),
             )
         {
+            phase.finish();
             return Ok(true);
         }
-        self.claim_from_worker()
+        let result = self.claim_from_worker();
+        if result.is_ok() {
+            phase.finish();
+        }
+        result
     }
 
     fn matches_durable_claim(&self, prefs: &crate::IssueMonitorPrefs) -> bool {
