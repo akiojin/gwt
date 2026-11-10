@@ -25881,11 +25881,12 @@ impl IssueMonitorState {
             self.record_launch_window_timeout(issue_number, message, now);
             return;
         }
-        // Capacity admission and concurrent fetch races are not failed attempts.
+        // Implementation capacity admission and fetch races are not failed attempts.
         // Keep them queued behind the existing transient infrastructure backoff.
         if gwt_agent::is_transient_launch_failure(&message)
             || (state == MonitorInboxState::LaunchFailed
-                && message.starts_with("Issue Monitor max_active reached ("))
+                && message.starts_with("Issue Monitor max_active reached (")
+                && !self.review_failure_applies(issue_number, state, now))
         {
             self.record_transient_launch_retry(issue_number, message, now);
             return;
@@ -49439,7 +49440,8 @@ mod tests {
         );
         assert!(monitor.is_autonomous_in_flight(7));
 
-        monitor.record_launch_failed(7, "Independent review could not start");
+        let failure = "Issue Monitor max_active reached (8/8) before launching Issue #7";
+        monitor.record_launch_failed(7, failure);
 
         // Issue #4815 AC-1: the review's failure is the review ladder's, not
         // the implementation's. The record returns to Implementing (the PR
@@ -49472,10 +49474,15 @@ mod tests {
             Some(MonitorInboxState::Launched),
             "the implementation stays launched (not re-queued, not parked)"
         );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the implementation keeps its slot"
+        );
         assert!(monitor
             .inbox_item(7)
             .and_then(|item| item.error_message.clone())
-            .is_some_and(|error| error.contains("Independent review could not start")));
+            .is_some_and(|error| error.contains(failure)));
     }
 
     #[test]
