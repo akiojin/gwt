@@ -51,7 +51,7 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null };
+      requestTasks: null, requestTasksError: null, conversation: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -103,12 +103,27 @@ export function createPmWindowModel() {
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
             detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
               body_html: report.details_html || '' } : null })) };
+      } else if (event.kind === 'pm_conversation') {
+        // The host already resolved the session's native record and drops reads
+        // of a replaced PM; this guard only keeps a late reply off a rebound window.
+        if (!previous || event.session_id !== previous.sessionId || !event.snapshot) return state;
+        const snapshot = event.snapshot;
+        const conversation = { availability: snapshot.availability || 'unavailable', detail: snapshot.detail || null,
+          messages: (snapshot.messages || []).map(message => ({ id: message.id, role: message.role,
+            content: message.role === 'assistant'
+              ? { type: 'markdown', body: message.text || '', body_html: message.text_html || '' }
+              : { type: 'text', body: message.text || '' } })) };
+        if (JSON.stringify(conversation) === JSON.stringify(previous.conversation)) return state;
+        next = { ...next, conversation };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
       return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
     });
     return needsResync;
+  }
+  function requestPmConversation(windowId) {
+    return model.read().windows[windowId]?.sessionId ? { kind: 'load_pm_conversation', id: windowId } : null;
   }
   function removePmWindowState(windowId) {
     requests.delete(windowId);
@@ -119,11 +134,11 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -131,6 +146,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let activeView = 'tasks';
   let includeCompleted = false;
   let tasksDigest = '';
+  let chatDigest;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -148,11 +164,20 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const toolbar = element('div', 'pm-chat__toolbar');
   toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', 'PM view');
+  const chatButton = element('button', '', 'Chat');
   const tasksButton = element('button', '', 'Tasks');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  tasksButton.type = reportsButton.type = logButton.type = 'button';
-  toolbar.append(tasksButton, reportsButton, logButton);
+  chatButton.type = tasksButton.type = reportsButton.type = logButton.type = 'button';
+  toolbar.append(chatButton, tasksButton, reportsButton, logButton);
+  const chatBody = element('section', 'pm-chat__chat');
+  chatBody.setAttribute('aria-label', 'PM conversation');
+  const chatNotice = element('p', 'pm-chat__notice');
+  chatNotice.setAttribute('role', 'status');
+  const chatLog = element('div', 'pm-chat__conversation');
+  chatLog.setAttribute('role', 'log');
+  chatLog.setAttribute('aria-label', 'PM conversation messages');
+  chatBody.append(chatNotice, chatLog);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
   const tasksHeader = element('div', 'pm-chat__history-header');
@@ -191,7 +216,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   transcript.setAttribute('aria-label', 'PM reports');
   historyHeader.append(element('h2', '', 'Reports'), filter);
   body.append(currentCard, historyHeader, notice, transcript);
-  root.append(toolbar, tasksBody, body);
+  root.append(toolbar, tasksBody, body, chatBody);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -214,13 +239,20 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     logs = value === 'log';
     body.hidden = value !== 'reports';
     tasksBody.hidden = value !== 'tasks';
+    chatBody.hidden = value !== 'chat';
     root.classList.toggle('pm-chat--logs', logs);
+    chatButton.setAttribute('aria-pressed', String(value === 'chat'));
     tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
     reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
     if (value === 'reports') restoreScroll();
+    if (value === 'chat') {
+      chatBody.scrollTop = chatBody.scrollHeight;
+      onChatVisible();
+    }
   }
+  const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
   const showReports = () => showView('reports');
   const showLog = () => showView('log');
@@ -278,6 +310,27 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       ? `Task data could not be refreshed.${overview ? ` Showing the last confirmed list. Last confirmed summary (stale): ${summary}` : ''} ${error} Reopen Tasks after the store is recovered.`
       : summary;
     if (tasksNotice.textContent !== noticeText) tasksNotice.textContent = noticeText;
+  }
+  function renderChat(conversation) {
+    const nextDigest = JSON.stringify(conversation);
+    if (chatDigest === nextDigest) return;
+    chatDigest = nextDigest;
+    const following = chatBody.scrollHeight - chatBody.clientHeight - chatBody.scrollTop <= 32;
+    const messages = conversation?.availability === 'ready' ? conversation.messages : [];
+    chatLog.replaceChildren(...messages.map(message => {
+      const user = message.role === 'user';
+      const bubble = element('article', `pm-chat__bubble pm-chat__bubble--${user ? 'user' : 'assistant'}`);
+      bubble.dataset.messageId = message.id;
+      bubble.dataset.role = user ? 'user' : 'assistant';
+      bubble.setAttribute('aria-label', user ? 'You' : 'PM');
+      bubble.append(renderUiContent(document, message.content, 'pm-chat__text'));
+      return bubble;
+    }));
+    chatNotice.textContent = !conversation ? 'Loading PM conversation…'
+      : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
+        : messages.length ? '' : 'No conversation yet. Use the execution log to talk with PM.';
+    chatNotice.hidden = !chatNotice.textContent;
+    if (following) chatBody.scrollTop = chatBody.scrollHeight;
   }
   function renderCurrent(current) {
     const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
@@ -360,6 +413,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
     renderTasks(state);
+    renderChat(state.conversation);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
     const reports = state.reports;
@@ -432,6 +486,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
+    chatDigest = undefined;
+    chatLog.replaceChildren();
     includeCompleted = false;
     completedButton.setAttribute('aria-pressed', 'false');
     transcript.replaceChildren();
@@ -447,6 +503,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     expandedReports.clear();
     body.removeEventListener('scroll', rememberScroll);
     resizeObserver?.disconnect();
+    chatButton.removeEventListener('click', showChat);
     tasksButton.removeEventListener('click', showTasks);
     completedButton.removeEventListener('click', filterTasks);
     reportsButton.removeEventListener('click', showReports);
@@ -455,6 +512,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }
+  chatButton.addEventListener('click', showChat);
   reportsButton.addEventListener('click', showReports);
   tasksButton.addEventListener('click', showTasks);
   completedButton.addEventListener('click', filterTasks);
@@ -462,5 +520,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showTasks();
-  return { update, setSession, showTasks, showReports, dispose };
+  return { update, setSession, showChat, showTasks, showReports, dispose,
+    isChatVisible: () => !disposed && activeView === 'chat' };
 }
