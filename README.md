@@ -2110,6 +2110,12 @@ confirmed list with a warning. Task editing, automatic intake, and history impor
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 
+The PM window's **Chat** view shows the PM conversation as chat bubbles: your
+messages on the right and PM replies on the left, with PM Markdown (headings,
+lists, tables, and code) formatted. It reads the PM session's own conversation
+record and omits tool calls, hook notes, and automatic prompts. It is read-only
+in this release; use **Execution log** to talk with PM.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
