@@ -10,7 +10,7 @@
 //! been orphaned by a project-store split had no CLI route out at all —
 //! `pane.close`, `issue.monitor.stop` and `pm.message.send` each refused for a
 //! different reason, leaving GUI clicks as the only way to stop an agent that
-//! was still rewriting the repository's Issue Monitor state. It is deliberately
+//! was still rewriting the repository's Issues state. It is deliberately
 //! durable-only: it takes PM authority away and makes the session
 //! unrestorable, which is what stops the resident loop, without depending on a
 //! running GUI or a live pane connection.
@@ -80,7 +80,7 @@ pub enum PmCommand {
     },
     /// `pm.status` — optional explicit `project_root`; defaults to the
     /// current repository path (container/bare setups must pass it
-    /// explicitly, same convention as the Issue Monitor queue operations).
+    /// explicitly, same convention as Issues queue operations).
     Status {
         project_root: Option<String>,
     },
@@ -802,7 +802,7 @@ pub(super) fn run<E: CliEnv>(
                 )))
             })?;
             // SPEC-3431 FR-009 diagnostic visibility: report whether THIS
-            // caller holds PM privilege, so a refused Issue Monitor ON has a
+            // caller holds PM privilege, so a refused Issues ON has a
             // one-command explanation.
             let caller_session = ambient_session_id();
             let mut report = pm_registry::pm_status_report_for_caller(
@@ -1438,7 +1438,7 @@ pub(crate) fn ambient_session_id() -> Option<String> {
 /// SPEC #4778 AC-1.
 ///
 /// The resident PM is the user's standing delegate, so it is the one JSON
-/// caller that may turn the Issue Monitor back on. Authority is proved the same
+/// caller that may turn Issues back on. Authority is proved the same
 /// way `pm.stop` proves it — an ambient Session id that appears in this
 /// repository's PM registrations — so a stray envelope from any other process
 /// still cannot flip the switch.

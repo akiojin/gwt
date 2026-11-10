@@ -252,7 +252,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
         .collect();
     assert!(
         !paths.contains(&"/issue-monitor-surface.js"),
-        "the retired independent Issue Monitor asset must not be served"
+        "the retired independent Issues asset must not be served"
     );
 
     let html = app_js();
@@ -262,7 +262,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         !html.contains("surface === \"issue-monitor\""),
-        "the canvas must not mount a second Issue Monitor surface"
+        "the canvas must not mount a second Issues surface"
     );
     assert!(
         html.contains("preset === \"issue_monitor\"") && html.contains("return \"knowledge\";"),
@@ -290,15 +290,15 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         html.contains("case \"issue_monitor_status\""),
-        "app.js must handle issue monitor status events"
+        "app.js must handle Issues status events"
     );
     assert!(
         html.contains("case \"issue_monitor_inbox\""),
-        "app.js must handle issue monitor inbox events"
+        "app.js must handle Issues inbox events"
     );
     assert!(
         html.contains("case \"issue_monitor_toast\""),
-        "app.js must handle issue monitor toast events"
+        "app.js must handle Issues toast events"
     );
 }
 
@@ -317,7 +317,7 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     );
     assert!(
         surface_js.contains("issue_monitor_queue_move"),
-        "Issue Monitor must send terminal queue move events"
+        "Issues must send terminal queue move events"
     );
     assert!(
         surface_js.contains("↑")
@@ -328,7 +328,7 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     );
     assert!(
         surface_js.contains("Start") && surface_js.contains("Stop"),
-        "Issue Monitor processing control must use Start/Stop labels"
+        "Issues processing control must use Start/Stop labels"
     );
     assert!(
         surface_js.contains("Agent settings")
@@ -354,9 +354,13 @@ fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
         "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
+        settings_js.contains(r#"labels.setAttribute("role", "group")"#)
+            && settings_js.contains(r#"checkbox.type = "checkbox""#)
+            && settings_js.contains("settings-label-options")
+            && settings_js.contains("createRepositoryLabelChip")
+            && settings_js.contains("get_repository_labels")
             && settings_js.contains("settings-field")
-            && settings_js.contains("settings-input")
+            && !settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
             && !surface_js
                 .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#),
         "allowed labels must use existing Operator Settings controls instead of inline Issue details"
@@ -1495,7 +1499,7 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
     // say which face it was. Each face now carries its own label.
     assert!(
         js.contains(r#"issue: "Issue""#)
-            && js.contains(r#"issue_monitor: "Issue Monitor""#)
+            && js.contains(r#"issue_monitor: "Issues""#)
             && js.contains(r#"spec: "SPEC""#),
         "expected the three Issue-family presets to carry distinguishable role labels",
     );
@@ -1669,7 +1673,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*let replayedReleaseNotesId = null;\s*let replayedRecoveryCenterId = null;\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*if \(pending\.message\.kind === "load_recovery_center"\) replayedRecoveryCenterId = pending\.message\.request_id;\s*\}\s*recoveryCenterController\?\.reconnect\(replayedRecoveryCenterId\);"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*let replayedReleaseNotesId = null;\s*let replayedRecoveryCenterId = null;\s*const replayedWorkAdvisoryIds = \[\];\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*if \(pending\.message\.kind === "load_recovery_center"\) replayedRecoveryCenterId = pending\.message\.request_id;\s*if \(pending\.message\.kind === "request_work_advisory"\) replayedWorkAdvisoryIds\.push\(pending\.message\.request_id\);\s*\}\s*resyncWorkAdvisory\(replayedWorkAdvisoryIds\);\s*recoveryCenterController\?\.reconnect\(replayedRecoveryCenterId\);"#,
     )
     .expect("valid regex");
 

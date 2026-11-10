@@ -172,7 +172,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
     view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
     setControlExplanation(view.autonomyStatus,
-      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.`, "pm-autonomy-status");
+      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.`, "pm-autonomy-status");
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -314,7 +314,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     pauseToggle.dataset.role = "pm-pause-toggle";
     section.appendChild(pauseToggle);
     section.appendChild(el("p", "settings-help",
-      "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged."));
+      "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged."));
 
     const pendingChip = el(
       "p",
@@ -393,7 +393,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
 
     for (const [control, text, key] of [
       [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
-      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.", "pm-pause-toggle"],
+      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.", "pm-pause-toggle"],
       [pendingChip, PROFILE_HELP, "pm-pending-chip"],
       [agentSelect, PROFILE_HELP, "pm-agent-select"],
       [modelInput, PROFILE_HELP, "pm-model-input"],

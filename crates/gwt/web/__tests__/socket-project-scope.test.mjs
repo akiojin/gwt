@@ -54,7 +54,7 @@ function fixture({ routeProjectKey = null } = {}) {
     closeProjectController: { connectionLost() { context.closeResetCount += 1; }, reconnect() {} },
     projectViewReadiness: { connectionLost() {} }, projectExecutionPolicy: { connectionLost() {}, applyStatus() {} },
     projectPageMetadata: { resetConnection() {}, reportAttention() { context.attentionReportCount += 1; } },
-    requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
+    requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(), rosterHost: null,
     activeWorkspace: () => ({ windows: [{ id: "pane-a" }] }),
     resyncCalls: [],
     resyncBoardLogs: (ids) => context.resyncCalls.push(["board-logs", ...ids]),
@@ -92,6 +92,7 @@ function fixture({ routeProjectKey = null } = {}) {
     },
     clearTimeout() {}, clearPickerPending() {},
     cloneSearchResyncs: [], resyncCloneProjectSearch: query => context.cloneSearchResyncs.push(query),
+    advisoryResyncs: [], resyncWorkAdvisory: ids => context.advisoryResyncs.push([...ids]),
     setConnectionState(connected) { context.connectionStates.push(connected); }, syncRunningBranchCleanups() {},
     dispatcherOptions: [],
     disposedDispatchers: 0,
@@ -155,6 +156,40 @@ test("Project hub reconnect passes the flushed search to its recovery owner", ()
   context.connectHubSocket();
   sockets[1].open();
   assert.equal(JSON.stringify(context.cloneSearchResyncs), JSON.stringify([['fixture'], []]), 'a lost sent reply is recovered after a fresh connection');
+});
+
+test("project reconnect refreshes the open Agents registration catalogs without replaying registration", () => {
+  const { context, sockets } = fixture({ routeProjectKey: '0123456789abcdef' });
+  context.connectSocket(); const first = sockets.at(-1); first.open();
+  context.rosterHost = {};
+  context.send({ kind: 'list_supported_agents' });
+  context.send({ kind: 'list_custom_agents' });
+  context.send({ kind: 'agent_roster', action: { kind: 'add', agent_id: 'codex', name: 'Maple' }, expected_revision: 3 });
+  first.close();
+  context.reconnectCallbacks.shift()(); const second = sockets.at(-1); second.open();
+  const catalogs = socket => socket.sent.filter(message => ['list_supported_agents', 'list_custom_agents'].includes(message.kind)).map(message => message.kind);
+  assert.deepEqual(catalogs(second), ['list_supported_agents', 'list_custom_agents']);
+  assert.equal(second.sent.some(message => message.kind === 'agent_roster' && message.action.kind !== 'read'), false);
+  context.connectSocket(true); const third = sockets.at(-1); third.open();
+  assert.deepEqual(catalogs(third), ['list_supported_agents', 'list_custom_agents']);
+  context.rosterHost = null;
+  third.close(); context.reconnectCallbacks.shift()(); const fourth = sockets.at(-1); fourth.open();
+  assert.deepEqual(catalogs(fourth), [], 'a closed Agents surface adds no catalog reads');
+});
+
+test("project reconnect gives the advisory owner only IDs actually flushed on that connection", () => {
+  const { context, sockets, select } = fixture();
+  context.connectSocket(); sockets[0].open();
+  select("0123456789abcdef");
+  context.send({ kind: "request_work_advisory", request_id: 1, query: "first" });
+  context.send({ kind: "request_work_advisory", request_id: 2, query: "current" });
+  context.pendingMessages.push({ projectKey: "fedcba9876543210", message: { kind: "request_work_advisory", request_id: 3 } });
+  sockets[1].open();
+  assert.deepEqual(context.advisoryResyncs.at(-1), [1, 2]);
+  context.advisoryResyncs.length = 0;
+  context.connectSocket(true); sockets[2].open();
+  assert.deepEqual(context.advisoryResyncs, [[]], "forced recovery also retries a lost read once");
+  assert.equal(context.pendingMessages.length, 1, "foreign project work remains queued");
 });
 
 test("offline input is discarded while queued control messages retain project scope", () => {

@@ -262,7 +262,7 @@ fn status_json_with_local(
     });
     if deferred && can_apply {
         payload["owner_action"] = serde_json::json!(format!(
-            "automatic apply of v{} is deferred; Issue Monitor launches resume; apply the staged update in the GUI when ready",
+            "automatic apply of v{} is deferred; Issues launches resume; apply the staged update in the GUI when ready",
             pending.as_ref().unwrap().version,
         ));
     } else if payload_missing || current_failure {
@@ -271,14 +271,14 @@ fn status_json_with_local(
         );
     } else if can_apply && overdue {
         payload["owner_action"] = serde_json::json!(format!(
-            "drain evaluation observation is overdue; inspect update_wait for the last recorded blocker and next evaluation; run {} while staged/waiting to defer it and resume Issue Monitor launches; an already committed helper cannot be cancelled",
+            "drain evaluation observation is overdue; inspect update_wait for the last recorded blocker and next evaluation; run {} while staged/waiting to defer it and resume Issues launches; an already committed helper cannot be cancelled",
             defer_operation.as_deref().unwrap_or_default(),
         ));
     } else if can_apply {
         // Issue #5062 AC-3: a drain holds new launches until it applies, so
         // name the control that defers the update and resumes launches.
         payload["owner_action"] = serde_json::json!(format!(
-            "apply the pending update in the GUI after the active work has drained; inspect update_wait for the current blocker; to defer the update and resume Issue Monitor launches, run {} while staged/waiting; an already committed helper cannot be cancelled",
+            "apply the pending update in the GUI after the active work has drained; inspect update_wait for the current blocker; to defer the update and resume Issues launches, run {} while staged/waiting; an already committed helper cannot be cancelled",
             defer_operation.as_deref().unwrap_or_default(),
         ));
     }

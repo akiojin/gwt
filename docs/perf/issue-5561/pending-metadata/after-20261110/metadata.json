@@ -1,0 +1,16 @@
+{
+  "limitation": "Four deterministic command PTYs and changing checkout history; not real-model fleet. Compare requested Rust bytes separately from native/JS/private commitment. Prior observation used a different diagnostic allocator and base.",
+  "head": "564effe5e6bfca66ff797b1c95d7428141c720c2",
+  "binary_sha256": "c9097c42036c0f8c08af0e456559cf22b0e3a35421ce73c0779722669be0aa15",
+  "source_sha256": {
+    "docs/perf/issue-5561/pending-metadata/live-allocator.rs": "4b92e4beb3fa38b9aedb5302ce264051513062b38f61df09f01bb7823b8d8fc6",
+    "crates/gwt/src/main.rs": "527386391b8f4b81b5c2b96e1db3f70b305886c946185e9debc2ed852cd77722",
+    "crates/gwt/src/work_events_ingest.rs": "1347e361ce855d7bb83679c4979345d20a1c511eea83ea74c7e319b51caf4512",
+    "scripts/verify-runtime-memory-budget.ps1": "311ad525012c041f33ff52372d572cf7116fd296482bff5d84a55bf25b59590e",
+    "crates/gwt/playwright/tests/runtime-memory-budget-live.spec.ts": "84caac8c91c7b92bd23f8b2c3974754f759b74b802997e8d45643f6d8ec7b168"
+  },
+  "started_at": "2026-11-10T04:55:10.5706500Z",
+  "allocator_sha256": "7ca5558b6db18ce29bccff956aa86851ef054451642ed1a888b29738b92f453c",
+  "allocator_bytes": 24343411,
+  "archive": "Lossless gzip; content-free original allocator bytes. Runtime/fixture account paths alone are redacted."
+}

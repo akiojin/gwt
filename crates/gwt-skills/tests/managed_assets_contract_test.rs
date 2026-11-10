@@ -434,7 +434,7 @@ fn browser_check_embedded_seed_disables_automatic_agents() {
         .filter(|line| line.trim_start().starts_with('{'))
         .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
         .collect();
-    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs.len(), 2, "seed both PM and Issues preferences");
     assert_eq!(prefs[0]["settings"]["auto_start"], false);
     assert_eq!(prefs[1]["enabled"], false);
     assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);

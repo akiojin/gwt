@@ -175,15 +175,18 @@ impl RunOutcomeCounts {
 
 /// The run's headline status. `INTERRUPTED` is reported only when every
 /// command that did not pass was killed from outside; any real failure keeps
-/// the run a `FAIL`.
+/// the run a `FAIL`. A passing subset of a registered plan is not `PASS`.
 pub(crate) fn run_status_label(
     all_passed: bool,
+    registered_plan_uncovered: bool,
     quarantined: bool,
     commands: &[VerificationCommandResult],
 ) -> &'static str {
     let counts = RunOutcomeCounts::of(commands);
     if counts.environment_incompatible > 0 && counts.failed == 0 {
         "ENVIRONMENT_INCOMPATIBLE"
+    } else if all_passed && registered_plan_uncovered {
+        "PLAN_NOT_COVERED"
     } else if all_passed {
         "PASS"
     } else if quarantined {
@@ -7481,14 +7484,22 @@ pub(super) fn run_with_response<E: CliEnv>(
             if let Some(result) = &record.user_verification_result {
                 out.push_str(&format!("User Verification Result: {result}\n"));
             }
-            let command_outcome_accepted =
-                record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
+            let registered_plan_uncovered =
+                record.verification_plan_snapshot.is_some() && !record.plan_covered;
+            let command_outcome_accepted = (record.all_passed && !registered_plan_uncovered)
+                || evidence == EvidenceStatus::FreshWithQuarantine;
             *response = Some(RunResponse::for_record(&record, command_outcome_accepted));
             out.push_str(&RunOutcomeCounts::of(&record.commands).summary());
+            if registered_plan_uncovered {
+                for command in &record.planned_missing {
+                    out.push_str(&format!("verify: planned command missing: {command}\n"));
+                }
+            }
             out.push_str(&format!(
                 "verify: {status} — record {id} ({count} command(s), owner {owner})\n",
                 status = run_status_label(
                     record.all_passed,
+                    registered_plan_uncovered,
                     evidence == EvidenceStatus::FreshWithQuarantine,
                     &record.commands,
                 ),
@@ -10018,10 +10029,17 @@ fn default_integration_test_builds_a_guarded_binary() {
         let interrupted = [result(0, None), result(-1, Some(9))];
         let mixed = [result(1, None), result(-1, Some(9))];
 
-        assert_eq!(run_status_label(true, false, &interrupted), "PASS");
-        assert_eq!(run_status_label(false, true, &mixed), "QUARANTINED");
-        assert_eq!(run_status_label(false, false, &interrupted), "INTERRUPTED");
-        assert_eq!(run_status_label(false, false, &mixed), "FAIL");
+        assert_eq!(run_status_label(true, false, false, &interrupted), "PASS");
+        assert_eq!(
+            run_status_label(true, true, false, &interrupted),
+            "PLAN_NOT_COVERED"
+        );
+        assert_eq!(run_status_label(false, false, true, &mixed), "QUARANTINED");
+        assert_eq!(
+            run_status_label(false, false, false, &interrupted),
+            "INTERRUPTED"
+        );
+        assert_eq!(run_status_label(false, false, false, &mixed), "FAIL");
         assert_eq!(
             RunOutcomeCounts::of(&mixed).summary(),
             "verify: outcome — 0 passed, 1 failed, 1 interrupted by external signal\n"
@@ -10044,7 +10062,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         }))
         .unwrap();
         assert_eq!(
-            run_status_label(false, false, std::slice::from_ref(&result)),
+            run_status_label(false, false, false, std::slice::from_ref(&result)),
             "ENVIRONMENT_INCOMPATIBLE"
         );
         assert_eq!(RunOutcomeCounts::of(&[result]).failed, 0);
@@ -12519,13 +12537,14 @@ fn default_integration_test_builds_a_guarded_binary() {
         )
         .unwrap();
         assert_eq!(code, 0, "{out}");
+        assert!(out.contains("verify: PASS"), "{out}");
         assert_eq!(
             crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob"),
             vec![crate::cli::action_obligation::ObligationKind::Implementation],
             "plan-less run must not settle obligations"
         );
 
-        // Registered plan + covering run settles.
+        // A passing subset of a registered plan is not an accepted run.
         save_plan(
             dir.path(),
             &VerificationPlanRecord::from(VerificationPlanData {
@@ -12533,7 +12552,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 session_id: "sess-ob".to_string(),
                 owner_number: None,
                 execution_binding: None,
-                commands: vec!["git --version".to_string()],
+                commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
@@ -12555,7 +12574,29 @@ fn default_integration_test_builds_a_guarded_binary() {
             }),
         )
         .unwrap();
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("verify: PLAN_NOT_COVERED"), "{out}");
+        assert!(out.contains("git --exec-path"), "{out}");
+        assert!(load(dir.path()).unwrap().unwrap().all_passed);
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob"),
+            vec![crate::cli::action_obligation::ObligationKind::Implementation],
+        );
+
+        // A covering run settles the registered plan's obligations.
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap();
         assert_eq!(code, 0, "{out}");
+        assert!(out.contains("verify: PASS"), "{out}");
         assert!(
             crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob").is_empty(),
             "plan-covering run must settle implementation obligations"
@@ -13020,7 +13061,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             )
             .expect("the actual publication must satisfy the receiver's wire envelope")
         else {
-            panic!("command progress must use the Issue Monitor control channel");
+            panic!("command progress must use Issues control channel");
         };
         assert_eq!(payload["source_pid"], std::process::id());
         assert_eq!(event["event"], "control");

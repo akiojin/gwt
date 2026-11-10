@@ -1099,6 +1099,11 @@ pub enum FrontendEvent {
         #[serde(default)]
         request_id: Option<u64>,
     },
+    /// Read the current project's label catalog; refresh explicitly bypasses its cache.
+    GetRepositoryLabels {
+        #[serde(default)]
+        refresh: bool,
+    },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },
@@ -2080,7 +2085,7 @@ pub struct ActiveWorkItemView {
 }
 
 /// Read-only membership measured from this GUI host's current agent children.
-/// This does not grant launch, close, or Issue Monitor slot authority.
+/// This does not grant launch, close, or Issues slot authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalAgentActivityView {
     pub project_key: String,
@@ -2651,6 +2656,12 @@ pub enum BackendEvent {
     IssueMonitorAllowedLabelsWriteFailed {
         request_id: u64,
         outcome_unknown: bool,
+    },
+    RepositoryLabels {
+        project_root: String,
+        labels: Vec<crate::issue_cache::RepositoryLabel>,
+        loaded: bool,
+        error: Option<String>,
     },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
@@ -3602,6 +3613,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "repository_labels",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_inbox",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -4058,6 +4074,7 @@ impl BackendEvent {
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }
+            BackendEvent::RepositoryLabels { .. } => "repository_labels",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorQueueResult { .. } => "issue_monitor_queue_result",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",

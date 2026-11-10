@@ -254,7 +254,7 @@ async function assertIssuesLayout(page: Page): Promise<void> {
   await expect(controls.locator("legend")).toHaveText(["Launch control", "Refill", "Target"]);
   await expect(controls.locator(":scope > :first-child")).toContainText("Project settings");
   const rows = controls.locator(".settings-field");
-  await expect(rows).toHaveCount(5);
+  await expect(rows).toHaveCount(4);
   const bounds = await rows.evaluateAll(elements => elements.map(element => {
     const row = element.getBoundingClientRect();
     const label = element.firstElementChild!.getBoundingClientRect();
@@ -296,6 +296,22 @@ test.describe("Issue #5322 Settings", () => {
       const errors: string[] = [];
       const workspaceFrames: Array<Record<string, unknown>> = [];
       for (const [index, current] of [page, pageB].entries()) {
+        // Keep these projects remote-free: only the external label catalog is
+        // a fixture; settings reads, writes and project isolation stay real.
+        await current.addInitScript(({ root, labels }) => {
+          const originalSend = WebSocket.prototype.send;
+          WebSocket.prototype.send = function (data) {
+            if (typeof data === "string" && JSON.parse(data)?.kind === "get_repository_labels") {
+              queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+                kind: "repository_labels", project_root: root, labels, loaded: true, error: null,
+              }) })));
+              return;
+            }
+            return originalSend.call(this, data);
+          };
+        }, { root: index ? b.root : a.root, labels: index
+          ? [{ name: "project-b", color: "0075ca" }]
+          : [{ name: "auto-merge", color: "008672" }, { name: "bug", color: "d73a4a" }] });
         current.on("pageerror", error => errors.push(error.message));
         current.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
         current.on("websocket", socket => {
@@ -339,10 +355,11 @@ test.describe("Issue #5322 Settings", () => {
         const issuesB = panel(pageB, "issues");
         await expect(autonomous(pageB)).not.toBeChecked();
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveCount(0);
-        await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
+        await expect(issuesB.getByRole("group", { name: "Allowed labels", exact: true })
+          .getByRole("checkbox", { name: "project-b", exact: true })).toBeChecked();
 
         // AC-1/2: opening an existing Settings window selects, focuses and
-        // reveals Issues execution settings. The Monitor gear uses the same route.
+        // reveals Issues execution settings. The Issues gear uses the same route.
         const originalWindow = await settings(page).getAttribute("data-id");
         expect(originalWindow).toBeTruthy();
         await openSettings(page, "agents");
@@ -391,7 +408,7 @@ test.describe("Issue #5322 Settings", () => {
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(false);
         await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
 
-        // Edit the remaining project-local controls while Monitor is stopped.
+        // Edit the remaining project-local controls while Issues is stopped.
         await autonomous(page).click();
         await expect.poll(async () => (await readPreferences(a)).autonomous_mode).toBe(true);
         await expect(autonomous(page)).toBeFocused();
@@ -399,12 +416,15 @@ test.describe("Issue #5322 Settings", () => {
         await expect.poll(async () => (await readPreferences(a)).terminal_queue_auto_refill).toBe(true);
         await editNumber(issues.getByLabel("Refill limit", { exact: true }), "5");
         await expect.poll(async () => (await readPreferences(a)).terminal_queue_auto_refill_limit).toBe(5);
-        await issues.getByLabel("Allowed labels", { exact: true }).fill("auto-merge, bug");
-        await issues.getByLabel("Allowed labels", { exact: true }).press("Tab");
+        const labels = issues.getByRole("group", { name: "Allowed labels", exact: true });
+        await expect(labels.getByRole("checkbox", { name: "auto-merge", exact: true })).toBeChecked();
+        await labels.getByRole("checkbox", { name: "bug", exact: true }).click();
+        await expect(labels.getByRole("checkbox", { name: "bug", exact: true })).toBeEnabled();
         await expect.poll(async () => (await readPreferences(a)).allowed_labels).toEqual(["auto-merge", "bug"]);
         await expect(autonomous(pageB)).not.toBeChecked();
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveCount(0);
-        await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
+        await expect(issuesB.getByRole("group", { name: "Allowed labels", exact: true })
+          .getByRole("checkbox", { name: "project-b", exact: true })).toBeChecked();
 
         // AC-4/5: read full stored profiles, edit, reorder, remove and add.
         await openSettings(page, "agents");
@@ -557,7 +577,8 @@ test.describe("Issue #5322 Settings", () => {
         await expect(issues.getByLabel("Max active", { exact: true })).toHaveCount(0);
         await expect(issues.getByRole("checkbox", { name: "Auto-refill", exact: true })).toBeChecked();
         await expect(issues.getByLabel("Refill limit", { exact: true })).toHaveValue("5");
-        await expect(issues.getByLabel("Allowed labels", { exact: true })).toHaveValue("auto-merge, bug");
+        await expect(labels.getByRole("checkbox", { name: "auto-merge", exact: true })).toBeChecked();
+        await expect(labels.getByRole("checkbox", { name: "bug", exact: true })).toBeChecked();
         await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
         await openSettings(page, "agents");
         await expect(agents.locator("fieldset[data-agent-id]").first()).toHaveAttribute("data-agent-id", "claude");
@@ -569,7 +590,8 @@ test.describe("Issue #5322 Settings", () => {
         await openSettings(pageB, "issues");
         await expect(autonomous(pageB)).not.toBeChecked();
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveCount(0);
-        await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
+        await expect(issuesB.getByRole("group", { name: "Allowed labels", exact: true })
+          .getByRole("checkbox", { name: "project-b", exact: true })).toBeChecked();
         const finalA = await readPreferences(a), finalB = await readPreferences(b);
         for (const key of ["enabled", "autonomous_mode", "max_active_agents", "max_active_agents_mode", "terminal_queue_auto_refill", "terminal_queue_auto_refill_limit", "allowed_labels", "launch_profiles"]) {
           expect(finalB[key], `Project B preserves ${key}`).toEqual(originalB[key]);

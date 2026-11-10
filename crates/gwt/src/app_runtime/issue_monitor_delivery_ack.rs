@@ -70,22 +70,22 @@ impl AppRuntime {
         }
         let Some(address) = self.window_lookup.get(window_id) else {
             tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
-                reason = "window lookup missing", "Issue Monitor cannot acknowledge pane");
+                reason = "window lookup missing", "Issues cannot acknowledge pane");
             return Vec::new();
         };
         let Some(context) = self.project_context(&address.tab_id) else {
             tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
-                reason = "project context missing", "Issue Monitor cannot acknowledge pane");
+                reason = "project context missing", "Issues cannot acknowledge pane");
             return Vec::new();
         };
         if !super::same_worktree_path(&context.project_root, project_root) {
             tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
-                reason = "project root changed", "Issue Monitor cannot acknowledge pane");
+                reason = "project root changed", "Issues cannot acknowledge pane");
             return Vec::new();
         }
         let Some(runtime) = self.runtimes.get(window_id) else {
             tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
-                reason = "owner runtime missing", "Issue Monitor cannot acknowledge pane");
+                reason = "owner runtime missing", "Issues cannot acknowledge pane");
             return Vec::new();
         };
         let identity = LaunchDeliveryAckIdentity {

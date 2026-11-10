@@ -19,7 +19,7 @@ test.beforeEach(async ({ page }, info) => {
   page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
-  if ((info.title.includes("Issue catalog bursts") || info.title.includes("Monitor list bursts"))) {
+  if ((info.title.includes("Issue catalog bursts") || info.title.includes("Issues list bursts"))) {
     await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
   }
   const narrowSettings = info.title.startsWith("T24 ");
@@ -390,8 +390,8 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
     const paneBox = (await pane.boundingBox())!;
     const shellBox = (await root.locator(".issue-list-shell").boundingBox())!;
     expect(Math.abs(paneBox.width - shellBox.width), "default Kanban uses the full list width").toBeLessThan(2);
-    const statusBox = (await root.getByRole("group", { name: "Monitor status", exact: true }).boundingBox())!;
-    const controlsBox = (await root.getByRole("group", { name: "Monitor controls", exact: true }).boundingBox())!;
+    const statusBox = (await root.getByRole("group", { name: "Issues status", exact: true }).boundingBox())!;
+    const controlsBox = (await root.getByRole("group", { name: "Issues controls", exact: true }).boundingBox())!;
     expect(statusBox.y + statusBox.height, "status precedes actions").toBeLessThanOrEqual(controlsBox.y);
     const filterBox = (await root.locator(".workspace-toolbar").boundingBox())!;
     expect(controlsBox.y + controlsBox.height, "actions precede filters").toBeLessThanOrEqual(filterBox.y);
@@ -572,11 +572,18 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
   await settings.locator('[data-settings-tab="issues"]').click();
   await expect(left).toHaveAttribute("data-surface", "issues");
   await expect(right).toHaveAttribute("data-surface", "settings");
-  const labels = controls.getByLabel("Allowed labels", { exact: true });
-  await labels.fill("bug, draft");
+  const labels = controls.getByRole("group", { name: "Allowed labels", exact: true });
+  const bug = labels.getByRole("checkbox", { name: "bug", exact: true });
+  const draft = labels.getByRole("checkbox", { name: "draft", exact: true });
+  await bug.click();
+  await expect(bug).toBeEnabled();
+  await expect(bug).toBeChecked();
+  await draft.click();
+  await expect(draft).toBeEnabled();
   await confirm(page, [3, 4]);
-  await expect(labels).toHaveValue("bug, draft");
-  await expect(labels).toBeFocused();
+  await expect(bug).toBeChecked();
+  await expect(draft).toBeChecked();
+  await expect(draft).toBeFocused();
   await expect(search).toHaveValue("First");
   await expect(root.locator(".knowledge-detail-title")).toHaveText("First backlog issue");
   await settings.locator('[data-settings-tab="system"]').click();
@@ -595,7 +602,8 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
   await expect(settings).toBeVisible();
   await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
   await settings.locator('[data-settings-tab="issues"]').click();
-  await expect(controls.getByLabel("Allowed labels", { exact: true })).toHaveValue("bug, draft");
+  await expect(bug).toBeChecked();
+  await expect(draft).toBeChecked();
   const autonomous = controls.getByRole("checkbox", { name: "Autonomous", exact: true });
   await autonomous.scrollIntoViewIfNeeded();
   await expect(autonomous).toBeInViewport({ ratio: 1 });
@@ -638,8 +646,8 @@ test("pending SessionStart diagnosis clears when late readiness arrives", async 
 
 test("Issue #5415 failed initial startup requeues once and releases its Active slot", async ({ page }) => {
   // Runtime/Rust tests prove the timeout and exact authority cleanup. This
-  // protocol projection proves the resulting Monitor recovery is visible.
-  const diagnosis = "Issue Monitor startup timed out after 180s: initial prompt was not submitted; last output: Could not read Windows sandbox configuration and requirements from the app server.; gwt retries this launch automatically without spending an attempt";
+  // protocol projection proves the resulting Issues recovery is visible.
+  const diagnosis = "Issues startup timed out after 180s: initial prompt was not submitted; last output: Could not read Windows sandbox configuration and requirements from the app server.; gwt retries this launch automatically without spending an attempt";
   await confirm(page, [3, 4], { enabled: true, state: "active", active_count: 1 });
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launched" }]));
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
@@ -691,7 +699,7 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await expect(row(page, 3)).toContainText("Enriched queued issue");
   await expect(page.locator(".knowledge-row")).toHaveCount(6);
   await assertInbox();
-  // Settle the projection/Monitor refresh after the initial load completes.
+  // Settle the projection/Issues refresh after the initial load completes.
   // Its background render must not repair the deliberate one-shot fault while
   // the failure notice is being inspected.
   const priorLoads = await page.evaluate(() => (window as any).__queueMessages
@@ -938,12 +946,12 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
     ]);
   });
   const root=page.locator(".issue-bridge-root");
-  const status=root.getByRole("group",{name:"Monitor status",exact:true});
-  const controls=root.getByRole("group",{name:"Monitor controls",exact:true});
+  const status=root.getByRole("group",{name:"Issues status",exact:true});
+  const controls=root.getByRole("group",{name:"Issues controls",exact:true});
   const filter=root.locator(".workspace-toolbar");
   await expect(status.locator("button,input,select")).toHaveCount(0);
   await expect(status.locator(".issue-monitor-stat-label")).toHaveText([
-    "Monitor","Agent slots","Queued","Backlog","Verification slots","Last scan"]);
+    "Issues","Agent slots","Queued","Backlog","Verification slots","Last scan"]);
   await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
   await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
   await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
@@ -969,7 +977,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
     await expect(row(page,number)).toHaveCSS("border-left-width","3px");
     expect(await row(page,number).locator(".knowledge-row-number").evaluate(node=>node.nextElementSibling?.className)).toBe("knowledge-row-title");
   }
-  await expect(row(page,3).locator(".issue-card-label")).toHaveText("spec");
+  await expect(row(page,3).locator(".issue-card-label")).toHaveText("gwt-spec");
   await expect(row(page,5).locator(".issue-card-updated + .issue-agent-status")).toHaveCount(1);
   const theme=info.project.name.includes("light")?"light":"dark";
   await page.setViewportSize({width:1600,height:1400});
@@ -1006,18 +1014,18 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   const modeBox=await page.locator(".knowledge-view-mode").boundingBox();
   expect(Math.abs(searchBox!.y-modeBox!.y), "search and view mode share one filter row").toBeLessThan(2);
   await expect(page.locator('[data-action="monitor-settings"]')).toHaveAttribute("aria-label", "Issues settings");
-  const controls = page.getByRole("group", {name:"Monitor controls",exact:true});
+  const controls = page.getByRole("group", {name:"Issues controls",exact:true});
   await expect(controls.locator('[data-action="monitor-settings"]')).toHaveText("⚙ Issues settings");
   await expect(controls.getByRole("switch", {name:"Auto-refill",exact:true})).toBeVisible();
   const refillBox = await controls.locator('[data-action="monitor-auto-refill"]').boundingBox();
   const autonomousBox = await controls.locator('[data-action="monitor-autonomous"]').boundingBox();
   expect(Math.abs(refillBox!.y-autonomousBox!.y), "refill and autonomous share the same controls row").toBeLessThan(2);
   for (const button of await controls.getByRole("button").all()) {
-    expect(await button.innerText(), "every Monitor action has visible words").toMatch(/[A-Za-z]/);
+    expect(await button.innerText(), "every Issues action has visible words").toMatch(/[A-Za-z]/);
   }
   await expect(page.locator('[data-action="refresh-knowledge"]')).toHaveText("↻ Refresh");
-  await expect(page.getByRole("group",{name:"Monitor status",exact:true})).toBeVisible();
-  await expect(page.getByRole("group",{name:"Monitor controls",exact:true})).toBeVisible();
+  await expect(page.getByRole("group",{name:"Issues status",exact:true})).toBeVisible();
+  await expect(page.getByRole("group",{name:"Issues controls",exact:true})).toBeVisible();
   const pane=page.locator(".issue-bridge-root .knowledge-list-pane");
   await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","true");
   const fullWidth=(await pane.boundingBox())!.width;
@@ -1227,7 +1235,7 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
 });
 
-test("Monitor list bursts render once while controls remain synchronous", async ({ page }) => {
+test("Issues list bursts render once while controls remain synchronous", async ({ page }) => {
   // The board can mount before its independently delivered live census.
   // Freeze rendering only after that initial authoritative snapshot is applied.
   await expect(page.locator('.issue-bridge-root [data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
@@ -1670,7 +1678,7 @@ test("Issue #4499 a card missing at drop time explains why it cannot move", asyn
 });
 
 test("auto-refill starts off and toggle and limit use server-confirmed values", async ({ page }) => {
-  const controls = page.getByRole("group", {name:"Monitor controls",exact:true});
+  const controls = page.getByRole("group", {name:"Issues controls",exact:true});
   const toggle=controls.getByRole("switch",{name:"Auto-refill",exact:true});
   await confirm(page,[3,4],{terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:3});
   await expect(toggle).toHaveAttribute("aria-checked","false");
@@ -1760,7 +1768,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       {number:4,title:"Auto-refilled issue",monitor_state:"queued",queue_position:2,queued_by:"auto-refill"},
       {number:5,title:"Running issue",monitor_state:"launched"},{number:6,title:"Completed issue",state:"closed"},
     ].map(entry=>({state:"open",labels:[],is_spec:false,linked_branch_count:0,related_work_refs:[],...entry}));
-    if (inboxFirst) Object.assign(status, {state:"error",last_error:"stale unbound Monitor pane"});
+    if (inboxFirst) Object.assign(status, {state:"error",last_error:"stale unbound Issues pane"});
     class FixtureSocket extends EventTarget {
       static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3;
       readyState=0;
@@ -1849,6 +1857,10 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             max_active_agents_override:message.max_active_agents,
             max_active_agents_mode:message.max_active_agents == null ? "auto" : "manual"});
           this.emit({kind:"issue_monitor_status",status});
+        }
+        else if(message.kind==="get_repository_labels") {
+          this.emit({kind:"repository_labels",project_root:"/fixture",loaded:true,error:null,
+            labels:[{name:"bug",color:"d73a4a"},{name:"draft",color:"0075ca"}]});
         }
         else if(message.kind==="set_issue_monitor_allowed_labels") {
           status.allowed_labels=message.allowed_labels;

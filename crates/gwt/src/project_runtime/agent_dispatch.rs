@@ -3272,8 +3272,9 @@ fn issue_monitor_scan_now_events(
                     ),
                 )
                 .map_err(|error| {
-                    if error.to_string()
-                == crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR
+                    if matches!(&error,
+                        crate::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(message)
+                        if message == crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR)
             {
                 "scan_already_in_flight".to_string()
             } else {

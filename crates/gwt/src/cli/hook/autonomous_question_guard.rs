@@ -27,7 +27,7 @@ pub const QUESTION_HANDOFF_SUMMARY: &str =
 /// decision stays deterministic and testable.
 pub struct QuestionGuardInputs<'a> {
     pub context: AutonomousExecutionContext,
-    /// Issue Monitor control-plane prefs for the owning project.
+    /// Issues control-plane prefs for the owning project.
     pub prefs_path: &'a Path,
     /// Agent/provider identifier of the asking session.
     pub provider: &'a str,
@@ -77,8 +77,8 @@ pub fn evaluate_and_record(event: &HookEvent, inputs: &QuestionGuardInputs<'_>) 
 
 fn deny_detail(handoff: &AutonomousQuestionHandoff, recorded: bool) -> String {
     let mut detail = format!(
-        "This session was launched unattended by the gwt Issue Monitor for Issue #{issue}, so no human is \
-watching it. Question tools would block the session and hold the Issue Monitor's active slot until the \
+        "This session was launched unattended by the gwt Issues for Issue #{issue}, so no human is \
+watching it. Question tools would block the session and hold Issues' active slot until the \
 stuck timeout expires, so the question was converted into a NeedsHuman handoff instead.\n\n\
 Handoff id: {handoff_id}\n\
 Reason code: {reason}\n\
@@ -90,12 +90,12 @@ Question: {question}\n\n",
     );
     if !recorded {
         detail.push_str(
-            "WARNING: the handoff could not be written to the Issue Monitor control plane. The question is \
+            "WARNING: the handoff could not be written to Issues control plane. The question is \
 still refused; report this failure in your closing summary so the owner Issue is not silently lost.\n\n",
         );
     } else {
         detail.push_str(
-            "The handoff is queued for the Issue Monitor. Recording it does not confirm a NeedsHuman \
+            "The handoff is queued for Issues. Recording it does not confirm a NeedsHuman \
 park or slot release; inspect issue.monitor.status for the current state.\n\n",
         );
     }

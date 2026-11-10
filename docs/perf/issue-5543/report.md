@@ -37,7 +37,7 @@ arguments, including the canonical reporter, are forwarded by the script.
 
 The fixture copies the Issue cache, Sessions, Work ledger and Issue links into
 a fixed seed. Each GUI receives a fresh HOME and an independent copy. PM and
-Issue Monitor are disabled, background indexing is disabled, and the startup
+Issues are disabled, background indexing is disabled, and the startup
 restore acknowledgement is suppressed so copied Sessions cannot launch real
 agents. Application load requests and replies use the real WebSocket/backend.
 Only the runtime-code directory is shared. The fixture stops its own GUI PID.
