@@ -559,13 +559,120 @@ class IssueTtlTests(unittest.TestCase):
             self.assertEqual(result.get("mode"), "incremental", result)
             self.assertEqual(result["newly_embedded"], 2)
             db = root / "index/abc1234567890def/issues"
-            client, collection = runner._open_chroma_collection(runner.resolve_active_store(db), "issues")
-            try:
-                records = collection.get()
-                self.assertEqual(set(records["ids"]), {"1", "2", "4"})
-                self.assertIn("Changed\nnew body", records["documents"])
-            finally:
-                runner._close_chroma_client(client)
+            records = self._visible_issue_records(db)
+            self.assertEqual(set(records), {"1", "2", "4"})
+            self.assertEqual(records["2"], "Changed\nnew body")
+
+    def _store_records(self, store: Path) -> dict:
+        client, collection = runner._open_chroma_collection(store, "issues")
+        try:
+            got = collection.get()
+            return dict(zip(got["ids"], got["documents"]))
+        finally:
+            runner._close_chroma_client(client)
+
+    def _visible_issue_records(self, db: Path) -> dict:
+        """The logical record set readers see: base minus shadowed plus delta."""
+        records = self._store_records(runner.resolve_active_store(db))
+        delta = runner._issue_delta_state(db)
+        if delta is not None:
+            for record_id in delta["shadowed"]:
+                records.pop(record_id, None)
+            records.update(self._store_records(delta["store"]))
+        return records
+
+    def test_incremental_refresh_writes_only_changed_records_as_a_delta(self):
+        """Issue #6979 AC-1: an Issue refresh never re-copies unchanged records."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            for number in range(1, 41):
+                self._write_cached_issue(cache, number, f"Issue {number}", f"body {number}", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertEqual(runner.action_index_issues_v2(**args)["newly_embedded"], 40)
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+            base_store = runner.resolve_active_store(db)
+            # Byte snapshots would be meaningless: Chroma replays its unsynced
+            # log tail into the HNSW files on every reader open.
+            base_before = self._store_records(base_store)
+
+            self._write_cached_issue(cache, 2, "Changed", "new body", [])
+            import shutil
+            shutil.rmtree(cache / "3")
+            self._write_cached_issue(cache, 41, "Added", "added body", [])
+            copied = []
+            copy = runner._copy_unchanged_records
+
+            def record_copy(*copy_args, **copy_kwargs):
+                count = copy(*copy_args, **copy_kwargs)
+                copied.append(count)
+                return count
+
+            with mock.patch.object(runner, "_copy_unchanged_records", side_effect=record_copy):
+                result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["mode"], "incremental", result)
+            self.assertEqual(result["indexed"], 40, result)
+            self.assertEqual(result["newly_embedded"], 2, result)
+            self.assertEqual(sum(copied), 0, "no unchanged record may be copied into the delta")
+
+            # The base generation is neither replaced nor rewritten.
+            self.assertEqual(runner.resolve_active_store(db), base_store)
+            self.assertEqual(self._store_records(base_store), base_before)
+            delta = runner._issue_delta_state(db)
+            self.assertIsNotNone(delta)
+            self.assertEqual(set(self._store_records(delta["store"])), {"2", "41"})
+            self.assertEqual(set(delta["shadowed"]), {"2", "3"})
+
+            records = self._visible_issue_records(db)
+            self.assertEqual(len(records), 40)
+            self.assertNotIn("3", records)
+            self.assertEqual(records["2"], "Changed\nnew body")
+            health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+            self.assertTrue(health["healthy"], health)
+            self.assertEqual(health["document_count"], 40)
+            search = runner.action_search_multi_v2(
+                args["repo_hash"], None, tmp, "Changed new body", 40, ["issues"], db_root=args["db_root"])
+            numbers = [item["number"] for item in search["issueResults"]]
+            self.assertEqual(len(numbers), len(set(numbers)), search)
+            self.assertNotIn(3, numbers, search)
+            self.assertEqual(numbers[0], 2, search)
+
+            # A later refresh carries the earlier delta forward by reusing its
+            # embeddings and only encodes the newly changed record.
+            self._write_cached_issue(cache, 5, "Changed again", "fifth body", [])
+            result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["newly_embedded"], 1, result)
+            self.assertEqual(runner.resolve_active_store(db), base_store)
+            self.assertEqual(self._store_records(base_store), base_before)
+            delta = runner._issue_delta_state(db)
+            self.assertEqual(set(self._store_records(delta["store"])), {"2", "5", "41"})
+            self.assertEqual(len(self._visible_issue_records(db)), 40)
+            self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
+
+    def test_delta_beyond_threshold_compacts_into_a_new_base(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            for number in range(1, 11):
+                self._write_cached_issue(cache, number, f"Issue {number}", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+            base_store = runner.resolve_active_store(db)
+            for number in (1, 2, 3):
+                self._write_cached_issue(cache, number, f"Changed {number}", "new", [])
+            with mock.patch.object(runner, "ISSUE_DELTA_MIN_RECORDS", 2):
+                result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["newly_embedded"], 3, result)
+            self.assertNotEqual(runner.resolve_active_store(db), base_store)
+            self.assertIsNone(runner._issue_delta_state(db))
+            records = self._visible_issue_records(db)
+            self.assertEqual(len(records), 10)
+            self.assertEqual(records["1"], "Changed 1\nnew")
+            self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
 
     def test_spec_chunks_share_the_issue_store_and_filter_before_top_k(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
