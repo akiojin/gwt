@@ -632,6 +632,11 @@ signal で停止できます。
   が既定の選択肢となり、新規起動を保留して既存作業の終了まで待ちます。
   代わりに `Restart now` を明示確認すると、稼働中 agent を停止して直ちに再起動します。
 
+特定の窓の cleanup が失敗すると、他の稼働中の窓の接続を保ったまま30秒後に一度再試行します。
+待ち時間は `~/.gwt/config.toml` の `[project_owner].reconciliation_timeout_secs` に
+正の秒数を指定して変更できます。再試行も失敗した場合は、その窓の exact cleanup を保留し、
+`errors.list` に `needs_human` 診断を記録します。
+
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
 Work Item Knowledge Bridge は frontend から GitHub API response を直接描画せず、
