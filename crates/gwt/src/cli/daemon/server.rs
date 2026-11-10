@@ -28564,6 +28564,12 @@ exit 1
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // This fixture requires a live fake-gh block even if an earlier scan
+        // warmed the endpoint cache shared by blocking worker threads.
+        let _periodic_read_max_age = ScopedEnvVar::set(
+            "GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS",
+            "0",
+        );
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create home");

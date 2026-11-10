@@ -89,3 +89,39 @@ TTL 延長だけではこの迂回は直らず、新しい永続 cache は不要
 CPU と旧 PM 判定の出典は
 [owner comment](https://github.com/akiojin/gwt/issues/6877#issuecomment-6731427158)。
 単体テストや配送だけで owner 全体を close しない。
+
+## PR #6928 macOS CI の引継ぎ（2026-11-10）
+
+サラ・カトウ / Codex。`origin/develop=1cc2b8ed9ec46e553459987a3183cdb83a827c03`
+を merge し、既存の未配信 source と fixture 修正を保全した。
+
+RED は [macOS CI run 42568128843](https://github.com/akiojin/gwt/actions/runs/42568128843)。
+`cargo test -p gwt --lib daemon -- --test-threads=1` の479件が成功し、
+`routine_retry_fences_a_scan_captured_while_the_control_is_pending` だけが
+`routine pending state keeps scan progress alive` で失敗した。
+既存の長い native TMPDIR 検証内で、fake-gh 開始 marker が現れなかった。
+
+worker の endpoint cache は blocking thread 間で共有される。
+`ScopedGwtHome` は thread-local で `spawn_blocking` へ伝播せず、
+list cache は先行テストの結果を再利用し得る。linked PR cache も
+owner/repo/Issue をキーとする process-global cache である。
+自動再試行を cache 許容にしたことで、fixture の「必ず gh が起動する」
+という前提が成立しなくなった。CI の実 cache-hit 自体は記録されていないため、
+どの endpoint が hit したかを実測済みとは主張しない。
+
+timeout 延長や cache key の変更ではなく、この既存 fixture だけ
+`GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS=0` に固定する。
+0 は read max age を `None` にし、queue-labelled Issue read が必ず
+fake-gh を通る。既存の env lock 内で guard を保持し、heartbeat の durable
+commit / ACK / single-flight assertion と production TTL は維持する。
+独立レビューで blocker はなかった。Windows ではこの Unix 専用 fixture を
+実行できないため、GREEN の判定には修正 head の macOS CI 成功が必要となる。
+
+統合後の canonical pre-pr `vrr-483d4d873e5048ad92e52625c766a801` は
+7工程 PASS。daemon/worker 136件、cherry cache 2件、test hygiene 37件が成功し、
+maintenance helper 1件は ignored。fmt / clippy / checkout driver 復元も成功した。
+これは commit 前の記録であり、最終 head の fresh 検証と必須 CI は別途確認する。
+
+Owner の AC-2（更新後 fleet の gh 起動数）、AC-4（6 agent の CPU）、
+AC-5（60分比較）は引き続き未証明。今回の CI 修正と source 配送で
+達成扱いにせず、Issue #6877 は OPEN を維持する。
