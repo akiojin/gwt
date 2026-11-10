@@ -191,47 +191,12 @@ impl IssueMonitorPrefs {
     }
 }
 
-/// Issue #7027: why `tool` cannot start on this host, judged without
-/// spawning it. An unknown tool fails open. Credentials stay with the
-/// launch-time `provider_unauthenticated` gate, which owns the auth probe.
-fn tool_launch_exclusion(tool: &str, resolves: impl Fn(&str) -> bool) -> Option<String> {
-    let id = gwt_agent::resolve_agent_id(tool)?;
-    let command = gwt_agent::builtin_agent_descriptors()
-        .iter()
-        .find(|descriptor| descriptor.id == id)?
-        .command;
-    (!resolves(command)).then(|| format!("cli_not_found({command})"))
-}
-
-/// Resolve the CLI in the active profile's launch environment, the same one
-/// launches and installed-agent detection use. An unreadable profile fails open.
-fn host_tool_launch_exclusion(tool: &str) -> Option<String> {
-    // Unit tests inject verdicts into `reconcile`; the host has no fixture CLI.
-    if cfg!(test) {
-        return None;
-    }
-    let (env, remove_env) = crate::profile_dispatch::config_path()
-        .map_err(|error| error.to_string())
-        .and_then(|path| {
-            gwt_agent::LaunchEnvironment::from_active_profile(
-                &path,
-                gwt_agent::LaunchRuntimeTarget::Host,
-            )
-        })
-        .ok()?
-        .into_parts();
-    tool_launch_exclusion(tool, |command| {
-        gwt_agent::resolve_direct_runner_with_effective_env(command, &env, &remove_env, None)
-            .is_some()
-    })
-}
-
 /// Issue #7027: why an enabled member cannot take automatic work, or `None`
-/// when a pooled profile is bound to it with its own tool and that tool starts.
+/// when a pooled profile is bound to it with its own tool. Whether that tool
+/// starts stays with the launch path, which resolves the exact command.
 fn automatic_member_ineligibility(
     pool: &[IssueMonitorLaunchProfile],
     member: &AgentMember,
-    launchable: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let Some(profile) = pool
         .iter()
@@ -251,7 +216,7 @@ fn automatic_member_ineligibility(
             member.agent_id.as_deref().unwrap_or("none")
         ));
     }
-    launchable(&profile.agent_id)
+    None
 }
 
 /// Build preferences only; reservations never acquire claims or authorize launches.
@@ -261,7 +226,6 @@ fn reconcile(
     specs: &BTreeMap<u64, u64>,
     historical: &BTreeMap<u64, String>,
     host: &str,
-    launchable: &dyn Fn(&str) -> Option<String>,
 ) -> io::Result<BTreeMap<String, String>> {
     let Some(roster) = prefs.agent_roster.as_ref() else {
         return Ok(BTreeMap::new());
@@ -288,7 +252,7 @@ fn reconcile(
             })
     }) {
         match bound
-            .then(|| automatic_member_ineligibility(&pool, member, launchable))
+            .then(|| automatic_member_ineligibility(&pool, member))
             .flatten()
         {
             Some(reason) if member.assignment.is_none() => {
@@ -551,7 +515,7 @@ pub fn mutate_project_agent_schedule(
                 prefs.agent_issue_schedule.advance()?;
             }
         } else {
-            reconcile(prefs, &specs, &historical, &host, &host_tool_launch_exclusion)?;
+            reconcile(prefs, &specs, &historical, &host)?;
         }
         Ok(())
     }).map_err(|error| error.to_string())?;
@@ -595,7 +559,6 @@ impl IssueMonitorState {
             &specs,
             &historical,
             &crate::process::current_hostname(),
-            &host_tool_launch_exclusion,
         )?;
         self.agent_issue_schedule = prefs.agent_issue_schedule;
         Ok(())
@@ -838,14 +801,7 @@ mod tests {
                 .agent_member_id
                 .clone()
         };
-        reconcile(
-            &mut automatic,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let selected_target_kept = owner(&automatic, 41) == *member;
         let unrelated_moved = owner(&automatic, 43) == roster.members[1].agent_member_id;
 
@@ -862,26 +818,12 @@ mod tests {
             .find(|entry| entry.issue_number == 43)
             .unwrap()
             .agent_member_id = member.clone();
-        reconcile(
-            &mut automatic,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let pinned_plan_moved = owner(&automatic, 43) == roster.members[1].agent_member_id;
         assignment.issue_number = Some(100);
         assignment.session_id = None;
         automatic.agent_roster.as_mut().unwrap().members[1].assignment = Some(assignment);
-        reconcile(
-            &mut automatic,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let pinned_destination_skipped = owner(&automatic, 42) == roster.members[1].agent_member_id;
         assert!(selected_target_kept && unrelated_moved && pinned_plan_moved && pinned_destination_skipped,
             "selected target kept={selected_target_kept}, ordinary busy plan moved={unrelated_moved}, unrelated pinned plan moved={pinned_plan_moved}, pinned destination skipped={pinned_destination_skipped}");
@@ -1515,7 +1457,6 @@ mod tests {
             &BTreeMap::from([(41, 41)]),
             &BTreeMap::new(),
             &host,
-            &|_| None,
         )
         .unwrap();
         let reservation = prefs
@@ -1551,14 +1492,7 @@ mod tests {
             .find(|entry| entry.issue_number == 41)
             .unwrap()
             .reason = AgentScheduleReason::AssignedByYou;
-        reconcile(
-            &mut manual,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut manual, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let manual = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), manual);
         assert_eq!(
             manual.scheduled_agent_member_id(41),
@@ -1568,14 +1502,7 @@ mod tests {
         assert!(manual.agent_schedule_launch_exclusion(41).is_some());
 
         let revision = prefs.agent_issue_schedule.revision;
-        reconcile(
-            &mut prefs,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
         assert!(monitor.agent_schedule_launch_exclusion(41).is_none());
         assert_eq!(
@@ -1595,14 +1522,7 @@ mod tests {
         );
         let planned = prefs.agent_issue_schedule.clone();
         prefs = serde_json::from_value(serde_json::to_value(&prefs).unwrap()).unwrap();
-        reconcile(
-            &mut prefs,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         assert_eq!(prefs.agent_issue_schedule, planned);
 
         let busy = crate::agent_names::reserve_project_member(
@@ -1617,14 +1537,7 @@ mod tests {
         .unwrap();
         let mut all_busy = prefs.clone();
         all_busy.agent_roster.as_mut().unwrap().members[0] = busy;
-        reconcile(
-            &mut all_busy,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut all_busy, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         assert_eq!(all_busy.agent_issue_schedule, planned);
         prefs
             .terminal_queues
@@ -1633,14 +1546,7 @@ mod tests {
             .entries
             .retain(|entry| entry.number == 42);
         prefs.agent_roster.as_mut().unwrap().members[1].enabled = false;
-        reconcile(
-            &mut prefs,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let snapshot = prefs.agent_schedule_snapshot(&host).unwrap();
         assert_eq!(snapshot.members[0].issues.len(), 1);
         assert_eq!(
@@ -1885,14 +1791,7 @@ mod tests {
         for entry in &mut prefs.agent_issue_schedule.reservations {
             entry.host_id = "old-host".into();
         }
-        reconcile(
-            &mut prefs,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
         assert!(
             monitor
@@ -1906,14 +1805,7 @@ mod tests {
             3
         );
         let mut adopted = monitor.prefs();
-        reconcile(
-            &mut adopted,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        reconcile(&mut adopted, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         assert!(
             adopted
                 .agent_issue_schedule
@@ -1990,14 +1882,7 @@ mod tests {
     fn issue_7027_busy_claude_plan_moves_to_idle_pooled_codex_members() {
         let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
         let host = crate::process::current_hostname();
-        let ineligible = reconcile(
-            &mut prefs,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|_| None,
-        )
-        .unwrap();
+        let ineligible = reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         assert_eq!(
             ineligible,
             BTreeMap::from([(
@@ -2024,17 +1909,14 @@ mod tests {
     }
 
     #[test]
-    fn issue_7027_unlaunchable_idle_members_are_named_in_the_exclusion() {
+    fn issue_7027_ineligible_idle_members_are_named_in_the_exclusion() {
         let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
         let host = crate::process::current_hostname();
-        let ineligible = reconcile(
-            &mut prefs,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &host,
-            &|tool| (tool == "codex").then(|| "cli_not_found(codex)".to_string()),
-        )
-        .unwrap();
+        // The codex members now run grok, which their pooled profiles do not.
+        for member in &mut prefs.agent_roster.as_mut().unwrap().members[1..4] {
+            member.agent_id = Some("grok".into());
+        }
+        let ineligible = reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.agent_schedule_ineligible = ineligible;
         let busy = roster.members[0].agent_member_id.as_str();
@@ -2045,7 +1927,10 @@ mod tests {
             "{reason}"
         );
         for member in &roster.members[1..4] {
-            let named = format!("{}=cli_not_found(codex)", member.agent_member_id);
+            let named = format!(
+                "{}=tool_mismatch(profile codex, member grok)",
+                member.agent_member_id
+            );
             assert!(reason.contains(&named), "{reason}");
         }
         let grok = format!(
@@ -2057,19 +1942,6 @@ mod tests {
             reason.contains("issue.monitor.schedule.reassign"),
             "{reason}"
         );
-    }
-
-    #[test]
-    fn issue_7027_tool_launch_exclusion_names_a_missing_cli() {
-        assert_eq!(
-            tool_launch_exclusion("codex", |_| false),
-            Some("cli_not_found(codex)".into())
-        );
-        assert_eq!(
-            tool_launch_exclusion("codex", |command| command == "codex"),
-            None
-        );
-        assert_eq!(tool_launch_exclusion("not-a-tool", |_| false), None);
     }
 
     #[test]
