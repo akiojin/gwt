@@ -31,6 +31,8 @@ fn spawn_owner_worker<T: Send + 'static>(
     let home = gwt_core::test_support::gwt_home_override();
     #[cfg(any(test, feature = "test-gh-guard"))]
     let clock = gwt_core::operation_deadline::ScopedOperationClock::current();
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    let control_budget = crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     thread::spawn(move || {
         let _dispatch = tracing::dispatcher::set_default(&dispatch);
@@ -40,6 +42,11 @@ fn spawn_owner_worker<T: Send + 'static>(
             .map(gwt_core::test_support::ScopedGwtHome::set);
         #[cfg(any(test, feature = "test-gh-guard"))]
         let _clock = clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        let _control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+            &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+            control_budget,
+        );
         work()
     })
 }
@@ -11403,6 +11410,29 @@ pub(crate) fn close_runtime(
     }
     tracing::info!(target: "gwt.pane.teardown", window_id = %id, incarnation = runtime.incarnation, stage = "close_finalizer", outcome = "completed", "pane close finalizer completed");
     Ok(())
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn owner_worker_preserves_the_scoped_durable_control_budget() {
+        use gwt_core::deadline_budget::{ScopedDeadlineBudget, HANG_GUARD};
+
+        for expected in [std::time::Duration::ZERO, HANG_GUARD] {
+            let _budget = ScopedDeadlineBudget::pin(
+                &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+                expected,
+            );
+            let actual = spawn_owner_worker(|| {
+                crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve()
+            })
+            .join()
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

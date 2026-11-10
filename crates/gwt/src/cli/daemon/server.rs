@@ -1071,6 +1071,10 @@ async fn run_bound_server(
         }
     }
 
+    // Refuse new/backlogged connections before waiting for owner publishers:
+    // their handshakes cannot complete once this loop stops accepting.
+    drop(listener);
+
     // Re-broadcast shutdown after the accept loop exits. This closes the small
     // startup race where Notify::notify_waiters can occur before the worker has
     // registered its waiter.
