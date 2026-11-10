@@ -21772,9 +21772,9 @@ exit 1
             .expect("seed prefs");
         let before = fs::read(&prefs_path).expect("seeded bytes");
         let loaded = {
-            let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                Instant::now() - Duration::from_secs(1),
-            );
+            let expiry = Instant::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expiry);
+            let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expiry);
             super::load_issue_monitor_state_for_daemon(
                 &prefs_path,
                 crate::IssueMonitorConfig::default(),
