@@ -27,6 +27,7 @@ import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "/hook-center-panel.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { createRepositoryLabelChip } from "./ui-content.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 
 function renderUpdateSettingsStatus(panel, status) {
@@ -235,8 +236,11 @@ export function mountProjectManagerSettingsPanel(
 }
 
 function renderIssuesSettingsPanel(panel, options) {
-  const { project, status, send, launchControls = [] } = options;
+  const { project, status, send, launchControls = [], catalog = {} } = options;
   const document = panel.ownerDocument;
+  const labelsScrollTop = panel.querySelector(".settings-label-options")?.scrollTop ?? 0;
+  const focusedLabel = panel.dataset.pendingLabelFocus ?? (panel.contains(document.activeElement) ? document.activeElement?.dataset.repositoryLabel : undefined);
+  const restoreRefreshFocus = panel.contains(document.activeElement) && document.activeElement?.dataset.action === "refresh-repository-labels";
   panel.replaceChildren();
   const heading = document.createElement("h3");
   heading.className = "settings-section-heading";
@@ -318,9 +322,78 @@ function renderIssuesSettingsPanel(panel, options) {
   };
   refill.addEventListener("change", saveRefill);
   limit.addEventListener("change", saveRefill);
-  const labels = field(group("Target"), "Allowed labels", "text", (status?.allowed_labels || []).join(", "));
-  setControlExplanation(labels, "Comma-separated labels. Only matching issues enter the launch queue.", "settings-allowed-labels");
-  labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
+  const target = group("Target");
+  const labels = document.createElement("div");
+  labels.className = "settings-label-options";
+  labels.setAttribute("role", "group");
+  labels.setAttribute("aria-label", "Allowed labels");
+  setControlExplanation(labels, "Only matching issues enter the launch queue. Select one or more repository labels, or clear all selections to allow every label.", "settings-allowed-labels");
+  const help = document.createElement("p");
+  help.className = "settings-help";
+  help.textContent = "Match any selected label. No selection allows all labels.";
+  target.appendChild(help);
+  target.appendChild(labels);
+  const labelKey = name => name.replace(/[A-Z]/g, character => character.toLowerCase());
+  const selected = new Set(status?.allowed_labels || []);
+  const available = new Map((catalog.labels || []).map(label => [labelKey(label.name), label]));
+  const names = [...available.values()].map(label => label.name)
+    .concat([...selected].filter(name => !available.has(labelKey(name))));
+  for (const name of names) {
+    const label = document.createElement("label");
+    label.className = "settings-label-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.setAttribute("aria-label", name);
+    checkbox.dataset.repositoryLabel = name;
+    const wasSelected = [...selected].some(value => labelKey(value) === labelKey(name));
+    checkbox.checked = wasSelected;
+    checkbox.disabled = options.labelsPending === true;
+    checkbox.addEventListener("change", () => {
+      const next = [...selected].filter(value => labelKey(value) !== labelKey(name));
+      if (checkbox.checked) next.push(name);
+      checkbox.checked = wasSelected;
+      panel.dataset.pendingLabelFocus = name;
+      for (const input of labels.querySelectorAll("input")) input.disabled = true;
+      send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: next });
+    });
+    label.appendChild(checkbox);
+    label.appendChild(createRepositoryLabelChip(document, name, available.get(labelKey(name))?.color));
+    if (catalog.loaded && !available.has(labelKey(name))) {
+      const missing = document.createElement("span");
+      missing.className = "settings-help";
+      missing.textContent = "Unavailable on GitHub";
+      label.appendChild(missing);
+    }
+    labels.appendChild(label);
+  }
+  if (!names.length) {
+    const empty = document.createElement("p");
+    empty.className = "settings-help";
+    empty.textContent = catalog.loaded ? "This repository has no labels." : "Loading repository labels…";
+    labels.appendChild(empty);
+  }
+  if (catalog.error) {
+    const error = document.createElement("p");
+    error.className = "settings-help";
+    error.setAttribute("role", "alert");
+    error.textContent = catalog.error;
+    target.appendChild(error);
+  }
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "wizard-button is-compact";
+  refresh.textContent = "Refresh labels";
+  refresh.dataset.action = "refresh-repository-labels";
+  refresh.setAttribute("aria-label", "Refresh repository labels");
+  refresh.addEventListener("click", () => send({ kind: "get_repository_labels", refresh: true }));
+  target.appendChild(refresh);
+  if (restoreRefreshFocus) refresh.focus({ preventScroll: true });
+  else if (focusedLabel !== undefined && !options.labelsPending) {
+    const replacement = [...labels.querySelectorAll("input")].find(input => input.dataset.repositoryLabel === focusedLabel);
+    (replacement || refresh).focus({ preventScroll: true });
+    delete panel.dataset.pendingLabelFocus;
+  }
+  labels.scrollTop = labelsScrollTop;
 }
 
 function renderCandidateSaveError(panel, event) {
@@ -997,6 +1070,7 @@ export function createSettingsSurface({
         renderSystemPanelInAllSettingsWindows(state, true);
       });
       let nextProfilesRequest = 0;
+      let nextLabelsRequest = 0;
       const issueSettingsModel = createUiStateStore({}, { scheduleFrame });
       issueSettingsModel.subscribeFrame(state => {
         const root = activeProjectTab()?.project_root;
@@ -1067,6 +1141,12 @@ export function createSettingsSurface({
           // Project WebSockets own mutation authority. Never replay this
           // window's edit through a different active project's connection.
           if (!root || activeProjectTab()?.project_root !== root) return;
+          if (message.kind === "set_issue_monitor_allowed_labels") {
+            message.request_id = ++nextLabelsRequest;
+            issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root],
+              labelsExpected: message.allowed_labels, labelsRequestId: message.request_id,
+            } }));
+          }
           if (message.kind === "issue_monitor_profiles_set") {
             message.request_id = ++nextProfilesRequest;
             const panel = body.querySelector("[data-settings-candidates]");
@@ -1086,17 +1166,39 @@ export function createSettingsSurface({
             && document.activeElement?.matches(section === "agents" ? "input, select, textarea, button" : "input:not([type=checkbox]), select, textarea");
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
-            project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
+            project, status: current.status, catalog: current.catalog, labelsPending: Array.isArray(current.labelsExpected), profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
             availableMembers,
           });
         }
         focusedLaunchControl?.focus({ preventScroll: true });
         body.settingsExplanations?.refresh();
       }
+      function applySettingsRepositoryLabels(event) {
+        if (!event.project_root) return;
+        issueSettingsModel.update(state => ({ ...state, [event.project_root]: {
+          ...state[event.project_root], catalog: !event.loaded && state[event.project_root]?.catalog?.loaded
+            ? { ...state[event.project_root].catalog, error: event.error } : event,
+        } }));
+      }
+      function applySettingsLabelsFailure(event) {
+        issueSettingsModel.update(state => {
+          const root = event.project_root || Object.keys(state).find(key => state[key]?.labelsRequestId === event.request_id);
+          if (!root || (event.request_id != null && event.request_id !== state[root]?.labelsRequestId)) return state;
+          return { ...state, [root]: { ...state[root], labelsExpected: null, labelsRequestId: null } };
+        });
+      }
       function applyIssueSettingsStatus(status, projectRoot) {
         if (!projectRoot) return;
         globalUpdateModel.update(state => ({ ...state, drains: { ...state.drains, [projectRoot]: status.update_drain } }));
-        issueSettingsModel.update(state => ({ ...state, [projectRoot]: { ...state[projectRoot], status } }));
+        issueSettingsModel.update(state => {
+          const current = state[projectRoot] || {};
+          const keys = values => (values || []).map(value => value.replace(/[A-Z]/g, character => character.toLowerCase())).sort();
+          const confirmed = !current.labelsExpected || JSON.stringify(keys(status.allowed_labels)) === JSON.stringify(keys(current.labelsExpected));
+          return { ...state, [projectRoot]: { ...current, status,
+            labelsExpected: confirmed ? null : current.labelsExpected,
+            labelsRequestId: confirmed ? null : current.labelsRequestId,
+          } };
+        });
       }
       function applyIssueMonitorProfiles(event) {
         const root = event.project_root;
@@ -1233,6 +1335,7 @@ export function createSettingsSurface({
       function requestSettingsSnapshots(recovering = false) {
         if (activeProjectTab()?.project_root) {
           send({ kind: "list_issue_monitor" });
+          send({ kind: "get_repository_labels", refresh: false });
           send({ kind: "get_issue_monitor_profiles" });
           send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
         }
@@ -2696,6 +2799,8 @@ export function createSettingsSurface({
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
+        applySettingsRepositoryLabels,
+        applySettingsLabelsFailure,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,

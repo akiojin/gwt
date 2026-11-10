@@ -1,4 +1,4 @@
-/** Issue #5596: real Monitor delivery completion + PTY handoff, offline providers. */
+/** Issue #5596: real Issues delivery completion + PTY handoff, offline providers. */
 import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
@@ -44,7 +44,7 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
       await Promise.all(providers.map(provider => writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n')));
       return providers.length;
     }, {
-      timeout: 300_000, message: `${count} real local provider PTYs from persisted Monitor deliveries`,
+      timeout: 300_000, message: `${count} real local provider PTYs from persisted Issues deliveries`,
     }).toBe(count);
     const providers = await launches();
     expect(new Set(providers.map(entry => entry.session_id)).size).toBe(count);
@@ -93,7 +93,7 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
     }
     expect(await launches(), 'exactly the admitted provider receipts remain after measurement').toHaveLength(count);
     expect(errors, 'zero console/page errors').toEqual([]);
-    expect(measurement.failed_issue_rows, 'no failed Monitor deliveries').toEqual([]);
+    expect(measurement.failed_issue_rows, 'no failed Issues deliveries').toEqual([]);
     await info.attach(`launch-performance-${theme}`, { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
     passed = true;
   } finally {
@@ -169,7 +169,7 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
             // admission handshake while we measure windows independently.
             await Promise.all((await launches()).map(provider => writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n')));
             const measurement = await observe(fixture);
-            expect(measurement.failed_issue_rows, 'no failed Monitor deliveries under Cargo load').toEqual([]);
+            expect(measurement.failed_issue_rows, 'no failed Issues deliveries under Cargo load').toEqual([]);
             const ack = measurement.durable_launch_ack_rows.find((ack: any) => ack.issue_number === expected.issue_number);
             if (!ack?.window_id || ack.confirmation_delivery_id !== expected.delivery_id
               || ack.confirmation_claim_id !== expected.claim_id || ack.launched_claim_id !== expected.claim_id

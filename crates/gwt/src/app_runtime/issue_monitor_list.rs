@@ -117,7 +117,7 @@ impl AppRuntime {
             let status =
                 serde_json::from_value::<gwt::IssueMonitorAgentStatus>(value).map_err(|error| {
                     IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                        "invalid daemon Issue Monitor status: {error}"
+                        "invalid daemon Issues status: {error}"
                     ))
                 })?;
             // Older live daemons supply their projection through subscriber frames.

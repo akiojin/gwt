@@ -1637,7 +1637,7 @@ impl BoardDaemonSubscriberRegistry {
                     materializer_ready,
                 ) {
                     tracing::info!(project_root = %context.project_root.display(), materializer_ready,
-                        "Issue Monitor subscriber role changed");
+                        "Issues subscriber role changed");
                     entry.insert((context, materializer_ready, subscriber));
                 }
             }
@@ -2195,7 +2195,7 @@ enum UserEvent {
         local_branches: Option<std::collections::HashSet<String>>,
     },
     /// Issue #4378 AC-2: the startup generation reaper finished on the
-    /// blocking worker; Issue Monitor launch deliveries held meanwhile replay.
+    /// blocking worker; Issues launch deliveries held meanwhile replay.
     StartupGenerationReaperCompleted,
     WorkspaceProjectionChanged {
         project_root: PathBuf,
@@ -2308,7 +2308,7 @@ enum UserEvent {
     PmWakeDeliveryComplete(app_runtime::pm::PmWakeDelivery),
     IssueMonitorScheduledScanPrepared(Box<app_runtime::PreparedScheduledIssueMonitorScan>),
     /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
-    /// Issue Monitor launch the daemon already released (daemon → GUI).
+    /// Issues launch the daemon already released (daemon → GUI).
     IssueMonitorIdlePaneClose {
         window_id: String,
         issue_number: Option<u64>,
@@ -3452,7 +3452,7 @@ mod tests {
                 assert_eq!(actual_project_root, project_root);
                 assert_eq!(*actual, status);
             }
-            other => panic!("unexpected issue monitor status event: {other:?}"),
+            other => panic!("unexpected Issues status event: {other:?}"),
         }
 
         let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
@@ -3487,7 +3487,7 @@ mod tests {
                     gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
                 );
             }
-            other => panic!("unexpected issue monitor launch event: {other:?}"),
+            other => panic!("unexpected Issues launch event: {other:?}"),
         }
 
         let legacy_launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
@@ -3537,7 +3537,7 @@ mod tests {
                 assert_eq!(actual_project_root, project_root);
                 assert_eq!(actual_dispatch, dispatch);
             }
-            other => panic!("unexpected issue monitor review event: {other:?}"),
+            other => panic!("unexpected Issues review event: {other:?}"),
         }
     }
 
@@ -4889,6 +4889,7 @@ mod tests {
             pending_launch_delivery_acks: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_launch_attempts: std::collections::HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
@@ -10166,7 +10167,7 @@ fn main() -> std::io::Result<()> {
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
     // of file descriptors at roughly 80 concurrent agents — after which PTY
-    // creation, daemon connect, Issue Monitor prefs reads and tokio runtime
+    // creation, daemon connect, Issues prefs reads and tokio runtime
     // builds all fail with `Too many open files`. Raise the ceiling before any
     // pane can spawn, and record the value the process actually ended up with.
     log_startup_fd_limit(gwt_core::fd_limit::raise_soft_fd_limit());
@@ -10348,7 +10349,7 @@ fn main() -> std::io::Result<()> {
                 }
             })
         {
-            tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+            tracing::error!(%error, "failed to start Issues scheduled tick thread");
         }
     }
     {
@@ -10368,7 +10369,7 @@ fn main() -> std::io::Result<()> {
                 std::thread::sleep(interval);
             })
         {
-            tracing::error!(%error, "failed to start Issue Monitor claim renewal tick thread");
+            tracing::error!(%error, "failed to start Issues claim renewal tick thread");
         }
     }
     // Issue #3633: the GUI is the subject that keeps a runtime daemon alive.

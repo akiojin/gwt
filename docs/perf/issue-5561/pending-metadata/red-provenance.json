@@ -1,0 +1,8 @@
+{
+  "representation": "SourceKey + binary generated fingerprint; intentionally non-interning SourceKey::capture scaffold",
+  "command": "cargo test -p gwt --bin gwt work_events_ingest::tests::pending_source_metadata_shares_alias_text_and_round_trips -- --exact --nocapture",
+  "source_sha256": "91999036712823c8f940a91b2886e0c239cb03655af2bc4e54df1eaf500640fd",
+  "baseline_command": "cargo test -p gwt --bin gwt work_events_ingest::tests:: -- --nocapture",
+  "baseline_result": "53 passed; 0 failed",
+  "expected": "RED: aliases must share the shard suffix"
+}

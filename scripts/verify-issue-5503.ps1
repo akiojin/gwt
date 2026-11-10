@@ -235,7 +235,7 @@ Module._resolveFilename = function(request, parent, ...rest) {
     $specs = if ($CandidateSettings) { @(
         'settings-issues-live.spec.ts', 'issue-monitor-candidate-pool-live.spec.ts',
         'issue-monitor-candidate-pool.spec.ts', '--grep',
-        'Issue #5787|Issue Monitor candidate pool|candidate selection rejects unknown'
+        'Issue #5787|Issues candidate pool|candidate selection rejects unknown'
     ) } else { @('provider-usage.spec.ts') }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
         --output $artifacts `

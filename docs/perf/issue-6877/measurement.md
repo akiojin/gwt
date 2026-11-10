@@ -18,6 +18,86 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## GUI の stale refresh 迂回（2026-11-10、次スライス）
+
+アヤ・ミウラ / Codex。開始時の fetch 後 HEAD と origin/develop はともに
+`4e39a85b426128c056342eed95767fb17918d8cd`、branch-only commit は0。
+PR #6976 までの source は配送済みで、既存修正を再実装しない。
+最新 SPEC #4093 の spec / plan / tasks を読み、FR-6877-4 と
+T-6877-R10〜R12 に今回の境界を記録した。
+
+### 残存する根因と最小 Plan
+
+GUI の index worker と knowledge bridge は stale-only refresh を使うが、
+その wrapper は明示 refresh と同じ live-only 経路を呼ぶ。
+途中で失敗すると full-refresh marker が stale のままなので、
+Monitor が取得済みの general REST page も次の GUI retry が再取得する。
+
+TTL 延長は迂回を直さず、新しい cache / single-flight 層を必要とする
+証拠もない。既存900秒 page reuse に stale-only wrapper を接続する。
+full-refresh 失敗の error ledger 記録、元の取得時刻、新しい targeted
+snapshot、queue と明示 refresh の live read は維持する。
+実装と既存回帰の変更は issue_cache.rs に限定する。
+
+Goal はこの背景更新の重複取得を止めること。Non-goals / untouched は
+UI、queue / prelaunch の live 確認、TTL / deadline / scheduling、
+authority、実稼働 fleet の停止・差替え、他の SPEC backlog。
+受け入れは実 stale helper の RED/GREEN、既存 cache / hygiene と
+fresh canonical pre-pr、Ready Refs PR、必須 CI / auto-merge / develop 包含。
+rollback はこの呼出経路修正の revert だけで、migration はない。
+
+Acceptance Surface: backend の REST cache 再利用。描画、対話、UI 出力形式を
+変更せず、今回の assertion はプロセス呼出回数・取得時刻・snapshot の保持。
+frontend の E2E をこのキャッシュ契約の代替証拠にしない。
+
+### 実稼働 baseline と source の区別
+
+gwt.log.2026-11-10 の20:50:00以上21:00:00未満 JST、600秒を有限集計した。
+issue_monitor_scan の project_root が E:\gwt の gh start は113回
+（timelines34、issues23、同じ5 PR の lifecycle 各10回、open/closed pulls各3回）。
+ログに親 PID はないため GUI の直接子プロセス数とは扱わない。
+
+実行中 GUI は installed v9.157.0、PID20748、起動15:29:09 JST。
+GUI SHA-256 は
+`BE0BE99D085F76F61D842F9D9CCADF01FDAD60104F00873C7022A9B5E1819B06`。
+owner daemon PID25664 は15:29:44 JST 起動、installed gwtd SHA-256 は
+`0287D626F58A2BFC71436BAAD0D84365DD1BD10935B77CE65F5E93A502B9F52C`。
+この baseline は今回の source 修正後の値ではない。600秒の連続6 agent
+稼働、同条件の5分 / 60分 CPU 比較も今回の集計では証明していない。
+
+AC-1/3 の既配送状態を維持し、AC-2 の20回/10分、AC-4 の6 agent CPU、
+AC-5 の時間差は未チェックのまま。単体テストや PR の配送で代用しない。
+
+### 回帰とレビュー
+
+既存の Windows failed-refresh 回帰は変更前に1件 PASS。
+同じ fixture に scratch Git remote を設定し、Monitor 失敗後の retry と
+成功を本物の stale-only helper へ置き換えると、旧実装で general page
+取得が3回（期待1回）となり RED。queue 不可用時の失敗と stale marker、
+新しい targeted snapshot の保持、queue 3回・明示 refresh 後の general
+2回 / queue 4回という既存の assertion は維持した。
+
+修正は stale-only helper の既存 page reuse 接続と full-refresh 失敗記録の
+共用。Monitor の budget deferral 例外と明示 refresh は変えない。
+独立した確定差分レビューは blocker0。
+
+修正後の Windows issue_cache 全21件が PASS（retries0）。拡張した回帰も
+general1回、queue3回、明示 refresh 後general2回 / queue4回で GREEN。
+full-refresh 失敗の ledger、Monitor budget deferral の例外、SPEC comment
+取得、targeted refresh と freshness metadata の既存回帰も成功した。
+
+コミット前 canonical pre-pr `vrr-a477dad05e154967a5aadd6cd8efe182` は
+7工程 PASS（登録6工程と runner 自身の driver 復元）。cache21件・hygiene37件
+成功、maintenance helper1件は既存の skip。fmt、変更crateの Clippy、通常
+driver 復元も成功。これは最終 HEAD の証跡ではなく、配送時に fresh 記録と
+必須 CI を確認する。ローカル full coverage は CI-backed pre-pr 方針で未測定。
+
+Launch mode: autonomous
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## 実ログ
 
 installed v9.155.2 の構造化ログ `gwt.log.2026-11-09` の

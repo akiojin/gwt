@@ -1,0 +1,8 @@
+{"type":"session_meta","payload":{"id":"conversation","cwd":"/work/project"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","id":"codex-developer","content":[{"type":"input_text","text":"Internal developer"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","id":"codex-human","content":[{"type":"input_text","text":"Human question"},{"type":"input_text","text":"Additional context"}]}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"event-human","content":[{"type":"text","text":"Duplicate human event","text_elements":[]}]}}}
+{"type":"response_item","payload":{"type":"custom_tool_call","status":"completed","id":"codex-tool_call","name":"fixture_tool","input":"{}","call_id":"fixture-call"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","id":"codex-tool_output","output":"\u001b[32m⏺ Bash(fixture)\n⎿ internal tool output\u001b[0m"}}
+{"type":"response_item","payload":{"type":"reasoning","id":"codex-reasoning","summary":[{"type":"summary_text","text":"Private reasoning"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","status":"completed","id":"codex-answer","content":[{"type":"output_text","text":"Assistant reply"}]}}

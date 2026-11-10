@@ -1,0 +1,14 @@
+{
+  "recovered_on": "2026-11-10",
+  "checkout_sha_reported_by_fixture": "53ce8f07808c661ea604ad87b664e70efca669e9",
+  "source_worktree_count": 726,
+  "workload": "Four deterministic command PTYs; real checkout Work history; fresh HOME; headed Chromium dark; requested 3600 seconds",
+  "source_provenance_limit": "Recovered fixture records the committed checkout and binary path but not the binary hash or complete uncommitted diagnostic source. The old target artifacts are unavailable. This observation is not a controlled matched product comparison.",
+  "recovery": "The fixture deliberately stores durable evidence in LocalApplicationData/Temp, which differs from this session's process TEMP. Original content-free allocator and symbol-map bytes are preserved; runtime/fixture account path components alone are replaced by <user-home>.",
+  "original_files": [
+    {"name":"allocation-snapshots.jsonl","sha256":"1c05c37ff22830014d59b045244e9ef6ffd3dd7f9ef6a1d2b838ab7063b82ca7","bytes":1988564},
+    {"name":"runtime-memory-dark.json","sha256":"3a3049b72a926e51081950fa3f76965da685eea1460d67943667b43bf875464e","bytes":138488},
+    {"name":"shutdown.json","sha256":"2b9db418840a54c16910a7ca8bd475de0412f2df71d98262efff0a54e22cc9ea","bytes":131},
+    {"name":"allocation-snapshots.jsonl.symbol-map.json","sha256":"f5482595f6d7312556eabe09fd278634576c6a91c9d89674823b604e7799d2fd","bytes":356887}
+  ]
+}

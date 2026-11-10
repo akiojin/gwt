@@ -1,4 +1,4 @@
-//! SPEC #3200 — Issue Monitor Autonomous Mode: strong automated merge gate.
+//! SPEC #3200 — Issues Autonomous Mode: strong automated merge gate.
 //! Composes CI required-check existence + gwt-verify matrix + independent review
 //! into a fail-closed, reviewed-SHA-bound gate. Populated in Phase 3 (Gap #1/#6).
 //!
@@ -56,6 +56,25 @@ impl AcceptanceCriteria {
     /// missing block is never vacuously complete (fail-closed).
     pub fn all_checked(&self) -> bool {
         self.machine_checkable && self.unchecked.is_empty()
+    }
+
+    /// Only explicit tags may defer remaining work for production measurement.
+    /// Unknown or mixed implementation criteria must keep the work runnable.
+    pub fn only_measurement_remaining(&self) -> bool {
+        self.machine_checkable
+            && !self.unchecked.is_empty()
+            && self.unchecked.iter().all(|id| {
+                let mut matching = self
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion_id, _)| criterion_id == id)
+                    .peekable();
+                matching.peek().is_some()
+                    && matching.all(|(_, text)| {
+                        let text = text.to_ascii_lowercase();
+                        text.contains("(measurement)") || text.contains("[measurement]")
+                    })
+            })
     }
 
     /// Actionable rejection reason naming the missing element (Issue #3930
@@ -565,6 +584,14 @@ pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_6994_duplicate_ids_cannot_borrow_a_measurement_tag() {
+        let criteria = classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [x] AC-1: (measurement) observe results\n- [ ] AC-1: implement the fix\n",
+        );
+        assert!(!criteria.only_measurement_remaining());
+    }
 
     #[test]
     fn register_spec_body_template_is_autonomy_eligible() {

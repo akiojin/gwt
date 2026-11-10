@@ -430,7 +430,7 @@ impl WindowRegistry {
         }
         let issue_window_id = self
             .issue_preview_host_window_id()
-            .ok_or("no Issue or Issue Monitor window is open")?;
+            .ok_or("no Issue or Issues window is open")?;
 
         self.place_agent_window_in_issue_preview(id, &issue_window_id, issue_number);
         Ok(())

@@ -1,7 +1,7 @@
 // SPEC #3206 v2 — notification center: bell + unread badge + history drawer.
 //
 // Every notification the operator can miss (agent completion / attention /
-// Board mention / autonomous Issue Monitor events / surface errors) is
+// Board mention / autonomous Issues events / surface errors) is
 // recorded here regardless of whether a transient toast was shown (FR-011).
 // The center is a pure sink (FR-016): it never decides whether to fire and it
 // never dedups the callers' singleton ids — the history is one row per notice.

@@ -1,4 +1,4 @@
-/* Issue #5500: observe the real checkout sampler without changing Monitor
+/* Issue #5500: observe the real checkout sampler without changing Issues
  * controls. Rust tests cover exact fanout suppression and saved authority. */
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -38,7 +38,7 @@ test("Issue #5500: live sampler renews the machine snapshot and renders capacity
     const latest = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
       .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status);
     // Large target trees advance over bounded sampler ticks, independently of
-    // the stopped Monitor. Do not wait for unchanged WebSocket retransmission.
+    // the stopped Issues. Do not wait for unchanged WebSocket retransmission.
     await expect.poll(latest, { timeout: 600_000 }).toMatchObject({
       enabled: false, max_active_agents_override: null,
       agent_capacity: { measurement_complete: true },

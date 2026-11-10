@@ -39,9 +39,9 @@ async function isolatedCli() {
   };
 }
 
-test.describe("Issue Monitor automatic tiers", () => {
+test.describe("Issues automatic tiers", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
-  // The real disabled Monitor fallback can spend up to 60 seconds scanning.
+  // The real disabled Issues fallback can spend up to 60 seconds scanning.
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
@@ -76,7 +76,7 @@ test.describe("Issue Monitor automatic tiers", () => {
       }
       try {
         // Opening the Issue surface requests its status. A second explicit
-        // request queues another full scan on a fresh disabled Monitor.
+        // request queues another full scan on a fresh disabled Issues.
         const status = await page.waitForFunction(() => {
           const frame = ((window as any).__gwtPlaywrightMessages ?? []).find((entry: any) =>
             entry.payload.kind === "issue_monitor_status"

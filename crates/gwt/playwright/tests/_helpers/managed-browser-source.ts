@@ -144,7 +144,7 @@ export async function startManagedBrowserSource(browser: Browser, info: TestInfo
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
-    // This source needs an ordinary managed provider, not a Monitor delivery.
+    // This source needs an ordinary managed provider, not a Issues delivery.
     // Launch through the same manual wizard as the exact-relaunch live tests.
     async function wizard(message: unknown, requireOpen = false) {
       const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);

@@ -1,6 +1,6 @@
 //! Completion accounting for a gwt-spec Issue's `tasks` section (Issue #4146).
 //!
-//! The Issue Monitor's readiness and the SPEC audit both need one answer to
+//! Issues' readiness and the SPEC audit both need one answer to
 //! "how much of this `tasks` section is actually done?". Counting only
 //! Markdown checkbox rows made checkbox-less task rows invisible to the total:
 //! #3700 carried 10 `[x]` rows plus 51 plain `- ` task rows, read as

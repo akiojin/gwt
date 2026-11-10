@@ -1,0 +1,19 @@
+   Compiling gwt v9.155.2 (E:\gwt\work\issue-5561\crates\gwt)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 51s
+     Running unittests src\main.rs (target\debug\deps\gwt-cd7f209d695cd546.exe)
+
+running 1 test
+
+thread 'work_events_ingest::tests::pending_source_metadata_shares_alias_text_and_round_trips' (40132) panicked at crates\gwt\src\work_events_ingest.rs:1768:9:
+aliases must share the shard suffix
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test work_events_ingest::tests::pending_source_metadata_shares_alias_text_and_round_trips ... FAILED
+
+failures:
+
+failures:
+    work_events_ingest::tests::pending_source_metadata_shares_alias_text_and_round_trips
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2070 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p gwt --bin gwt`

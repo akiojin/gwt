@@ -23,7 +23,7 @@ The wider fleet CPU target remains owned by Issue #5385 / SPEC #5390.
 ## Conditions
 
 - Windows, debug builds from this checkout, 1440 x 900, no reduced motion.
-- Fresh HOME per process; PM auto-start and Issue Monitor disabled.
+- Fresh HOME per process; PM auto-start and Issues disabled.
 - Eight real Shells left idle at their prompts, then a five-second settling wait
   and a requested ten-second observation, in dark and light themes.
 - Automatic background indexing is disabled for the primary comparison with

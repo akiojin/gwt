@@ -33,7 +33,7 @@ fn guard_pm_owner_check(
     evidence.validate().map_err(SpecOpsError::Validation)
 }
 
-/// Issue #3873: refuse to write an autonomous-candidate body the Issue Monitor
+/// Issue #3873: refuse to write an autonomous-candidate body Issues
 /// cannot read.
 ///
 /// An Issue carrying the `auto-merge` label opts into autonomous execution, and
@@ -582,7 +582,7 @@ fn issue_monitor_project_root<E: CliEnv>(
         io_as_api_error(io::Error::new(
             error.kind(),
             format!(
-                "Issue Monitor project_root {} is unavailable: {error}",
+                "Issues project_root {} is unavailable: {error}",
                 requested.display()
             ),
         ))
@@ -591,7 +591,7 @@ fn issue_monitor_project_root<E: CliEnv>(
         return Err(io_as_api_error(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Issue Monitor project_root {} is not a directory",
+                "Issues project_root {} is not a directory",
                 requested.display()
             ),
         )));
@@ -853,7 +853,7 @@ const DEGRADED_CACHE_STATE: &str = "degraded_cache";
 
 /// Issue #4413 AC-2: qualify an error carried by a rebuilt projection.
 ///
-/// A live monitor reports a wiped candidate set as `issue monitor inbox
+/// A live monitor reports a wiped candidate set as `Issues inbox
 /// population shrank: N -> 0` (#4184). Handing back that same sentence for
 /// "nobody answered, so this was rebuilt from preferences and the local Issue
 /// cache" makes the outage and its own absence one response — which is how a
@@ -861,7 +861,7 @@ const DEGRADED_CACHE_STATE: &str = "degraded_cache";
 /// verifying the #4184 fix reads a pass and a failure identically.
 fn degraded_projection_error(error: String) -> String {
     format!(
-        "[{DEGRADED_CACHE_STATE}: no live Issue Monitor answered; \
+        "[{DEGRADED_CACHE_STATE}: no live Issues answered; \
          rebuilt from preferences and the local Issue cache] {error}"
     )
 }
@@ -1226,7 +1226,7 @@ fn session_row_mismatch(
     })
 }
 
-/// The Issue Monitor projection `issue.monitor.status` reports: the daemon's
+/// Issues projection `issue.monitor.status` reports: the daemon's
 /// published status while one is live, otherwise a projection rebuilt from
 /// prefs and the local Issue cache.
 pub(crate) fn load_monitor_agent_status(
@@ -1518,7 +1518,7 @@ fn run_monitor_question_answer<E: CliEnv>(
         if !candidate.answer_autonomous_handoff(handoff_id, answer, &now) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no open Issue Monitor question with handoff_id {handoff_id}"),
+                format!("no open Issues question with handoff_id {handoff_id}"),
             ));
         }
         let issue_number = candidate
@@ -1657,7 +1657,7 @@ fn monitor_priority_reply(
 ) -> serde_json::Value {
     let mut reply = serde_json::json!({
         "priority_order": prefs.priority_order,
-        "note": "priority_order only orders Issues already in the Issue Monitor inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
+        "note": "priority_order only orders Issues already in Issues inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
     });
     attach_priority_reason_note(&mut reply, prefs);
     if let Ok((status, _)) = load_monitor_agent_status(project_root, 0) {
@@ -2267,9 +2267,7 @@ fn monitor_client_source_repository<E: CliEnv>(
         let client =
             crate::issue_monitor_worker::github_remote_owner_and_repo(env.repo_path()).ok()?;
         if !target.0.eq_ignore_ascii_case(&client.0) || !target.1.eq_ignore_ascii_case(&client.1) {
-            tracing::warn!(
-                "Issue Monitor target/client repository mismatch; refusing source evidence"
-            );
+            tracing::warn!("Issues target/client repository mismatch; refusing source evidence");
             return None;
         }
     }
@@ -2908,7 +2906,7 @@ fn github_backoff_windows(now: chrono::DateTime<chrono::Utc>) -> Vec<serde_json:
 /// Issue #3923 AC-1 / Issue #3961 AC-3: list every provider quota hold in
 /// force with the evidence it was formed from.
 ///
-/// Read from the durable prefs — the store every Issue Monitor process
+/// Read from the durable prefs — the store every Issues process
 /// persists to and the file the PM inspects — so the list can never disagree
 /// with that file the way a live projection served by a daemon that predates
 /// the hold fields did (it answered `[]` while the file held two providers).
@@ -3041,7 +3039,7 @@ fn run_monitor_release_idle<E: CliEnv>(
             &serde_json::json!({
                 "status": "refused",
                 "reason": "no_live_classification",
-                "detail": "no live Issue Monitor driver is publishing the window classification; \
+                "detail": "no live Issues driver is publishing the window classification; \
                            start the GWT app for this project and retry",
             })
             .to_string(),
@@ -3269,7 +3267,7 @@ fn run_monitor_quota_hold_clear_inner<E: CliEnv>(
                 &provider,
                 quota_hold_clear_publish_refusal(&error),
                 &format!(
-                    "the live Issue Monitor daemon did not adopt the release ({error}); \
+                    "the live Issues daemon did not adopt the release ({error}); \
                      a daemon that predates this control rejects it — restart the GWT app and retry"
                 ),
             );
@@ -3297,7 +3295,7 @@ fn run_monitor_quota_hold_clear_inner<E: CliEnv>(
             &format!(
                 "{delivery} accepted the release but the durable prefs do not carry it \
                  (fence recorded: {}, provider still held: {still_held}); the process owning \
-                 the Issue Monitor state may predate this operation — restart the GWT app and retry",
+                 Issues state may predate this operation — restart the GWT app and retry",
                 after.provider_quota_hold_releases.contains_key(&provider)
             ),
         );
@@ -4675,12 +4673,12 @@ fn apply_monitor_config_set(
     if let Some(enabled) = enabled {
         candidate
             .set_enabled_with_effect_revocation(enabled)
-            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+            .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
     }
     if let Some(autonomous_mode) = autonomous_mode {
         candidate
             .set_autonomous_mode_with_effect_revocation(autonomous_mode)
-            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+            .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
     }
     if max_active.is_some() || max_active_auto {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -4693,7 +4691,7 @@ fn apply_monitor_config_set(
     if let Some(auto_close_merged_issues) = auto_close_merged_issues {
         candidate
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
-            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+            .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
     }
     if let Some(launch_agent) = launch_agent {
         candidate
@@ -4759,7 +4757,7 @@ fn validate_monitor_config_set(
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "at least one Issue Monitor config field is required",
+            "at least one Issues config field is required",
         ));
     }
     // Issue #3814: policy lives in the command handler so both JSON dispatch
@@ -4772,7 +4770,7 @@ fn validate_monitor_config_set(
     if !caller_is_resident_pm && (enabled == Some(true) || autonomous_mode == Some(true)) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "enabling Issue Monitor or autonomous mode requires an explicit GUI action, or the \
+            "enabling Issues or autonomous mode requires an explicit GUI action, or the \
              resident PM for this repository",
         ));
     }
@@ -4885,7 +4883,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }) {
             gwt_core::update::defer_pending_update(&pending.version).map_err(|error| {
                 io_as_api_error(io::Error::other(format!(
-                    "Host update v{} could not be deferred; this request did not save Issue Monitor configuration: {error}",
+                    "Host update v{} could not be deferred; this request did not save Issues configuration: {error}",
                     pending.version,
                 )))
             })?;
@@ -5050,7 +5048,7 @@ fn apply_monitor_tiers_set(
     }
     prefs
         .advance_effect_authority_epoch()
-        .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+        .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     monitor.set_launch_tiers(auto, tiers.unwrap_or_default());
@@ -5247,7 +5245,7 @@ fn apply_monitor_profiles_set(
     // previous pool must not commit under the new one.
     candidate
         .advance_effect_authority_epoch()
-        .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+        .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
     candidate.set_launch_profile_pool(profiles.to_vec());
     *prefs = candidate.prefs();
     Ok(())
@@ -5289,7 +5287,7 @@ fn set_monitor_profiles(
     if expected_profiles_token.is_some_and(|expected| expected != monitor_profiles_token(&saved)) {
         return Err(io_as_api_error(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "Issue Monitor profiles changed since observation; re-read issue.monitor.profiles and reconsider the pool before retrying",
+            "Issues profiles changed since observation; re-read issue.monitor.profiles and reconsider the pool before retrying",
         )));
     }
     // Capture exactly the token's pool/head. The unchanged daemon/fallback
@@ -5358,7 +5356,7 @@ fn resolve_monitor_wait_issue_number(
 // replay an ambiguous ACK timeout or write around the daemon's authority.
 const MONITOR_WAIT_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Issue #3844: whether `number` has a live launch in the Issue Monitor that
+/// Issue #3844: whether `number` has a live launch in Issues that
 /// owns `project_root` — the daemon snapshot when one is running, the
 /// persisted prefs otherwise.
 fn monitor_launch_is_live(
@@ -5528,7 +5526,7 @@ fn mutate_monitor_wait_with_subject<T>(
     })
 }
 
-/// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
+/// Issue #3844 AC-1/AC-2: tell Issues that the current launch is
 /// waiting (`reason`, `resume_condition`) or has resumed (`clear`). The daemon
 /// records the declaration on the issue's autonomous record, where stuck
 /// detection honours it for at most [`crate::AUTONOMOUS_WAIT_MAX_SECS`] and the
@@ -5565,7 +5563,7 @@ fn run_monitor_wait<E: CliEnv>(
                 "number": number,
                 "status": "refused",
                 "refusal": "not_launched",
-                "detail": "no live Issue Monitor launch owns this issue; only the running agent of a launched issue can declare a wait",
+                "detail": "no live Issues launch owns this issue; only the running agent of a launched issue can declare a wait",
             })
             .to_string(),
         );
@@ -5653,7 +5651,7 @@ fn run_monitor_wait<E: CliEnv>(
 }
 
 /// Issue #4286: whether `number` currently carries a wait declaration in the
-/// Issue Monitor that owns `project_root` — the daemon snapshot when one is
+/// Issues that owns `project_root` — the daemon snapshot when one is
 /// running, the persisted prefs otherwise.
 fn monitor_wait_is_declared(
     project_root: &std::path::Path,
@@ -5741,7 +5739,7 @@ fn run_monitor_wait_invalidate<E: CliEnv>(
                 "number": number,
                 "status": "refused",
                 "refusal": "not_waiting",
-                "detail": "this issue carries no wait declaration in the Issue Monitor; nothing to invalidate",
+                "detail": "this issue carries no wait declaration in Issues; nothing to invalidate",
             })
             .to_string(),
         );
@@ -13831,7 +13829,7 @@ mod tests {
                 // reported a cadence — the healthy-looking snapshot that made
                 // the stall unobservable. There is no scan to report, and the
                 // stall says why.
-                "scan_stall": "Issue Monitor has never completed a scan for this project; no driver is running",
+                "scan_stall": "Issues has never completed a scan for this project; no driver is running",
             })
         );
     }
@@ -16088,7 +16086,7 @@ command = "my-agent-cli"
                 },
                 &mut out,
             )
-            .expect("the resident PM may turn the Issue Monitor on");
+            .expect("the resident PM may turn Issues on");
         }
 
         let mut status_out = String::new();
@@ -16663,7 +16661,7 @@ command = "my-agent-cli"
     /// Issue #4200 AC-1 / AC-3 / AC-5: revoking a launch releases its execution
     /// generation, so the Issue can be launched again.
     ///
-    /// Before this, `issue.monitor.stop` only ever touched Issue Monitor prefs.
+    /// Before this, `issue.monitor.stop` only ever touched Issues prefs.
     /// The generation stayed Active under a holder whose durable Session still
     /// read `Running` — the state a launch that died before its agent ever ran
     /// leaves behind — so every evidence-based release route refused and the
@@ -16850,7 +16848,7 @@ command = "my-agent-cli"
         );
     }
 
-    /// Issue #4413: a status read with no live Issue Monitor to answer, and a
+    /// Issue #4413: a status read with no live Issues to answer, and a
     /// scan cadence long past its interval — the shape the fleet was
     /// misdiagnosed from.
     fn degraded_status_json(tmp: &TempDir) -> serde_json::Value {
@@ -16922,10 +16920,10 @@ command = "my-agent-cli"
             );
         }
 
-        let shrink = "issue monitor inbox population shrank: 297 -> 0; removed issues: [1]";
+        let shrink = "Issues inbox population shrank: 297 -> 0; removed issues: [1]";
         let degraded = degraded_projection_error(shrink.to_string());
         assert!(
-            !degraded.starts_with("issue monitor inbox population shrank"),
+            !degraded.starts_with("Issues inbox population shrank"),
             "the bare #4184 wording must never lead a degraded error: {degraded}"
         );
         assert!(
@@ -20380,7 +20378,7 @@ command = "my-agent-cli"
             tmp.path(),
             &repo,
             gwt_core::daemon::DaemonFrame::Error {
-                message: "unknown issue monitor control".to_string(),
+                message: "unknown Issues control".to_string(),
             },
         );
 
@@ -20406,7 +20404,7 @@ command = "my-agent-cli"
             refused["detail"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("unknown issue monitor control"),
+                .contains("unknown Issues control"),
             "the daemon's reason reaches the caller: {refused}"
         );
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs");

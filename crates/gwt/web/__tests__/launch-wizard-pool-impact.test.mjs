@@ -1,8 +1,8 @@
-// Issue #4079 AC-2 — the Issue Monitor Agent Settings form always writes
+// Issue #4079 AC-2 — Issues Agent Settings form always writes
 // candidate 1 of the launch candidate pool. When another provider already sits
 // at index 0 the switch has to be visible before it is committed, otherwise the
 // save looks like it did nothing (the reported symptom: picking Codex left the
-// Monitor launching Claude).
+// Issues launching Claude).
 //
 // Source-pattern contract tests (matching launch-wizard-model-fallback.test.mjs):
 // they pin the wiring between the backend view field and the surface.

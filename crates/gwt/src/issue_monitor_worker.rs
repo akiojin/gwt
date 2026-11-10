@@ -131,7 +131,7 @@ fn fetch_open_linked_prs_for_monitor(
                 target: "gwt.issue_monitor.scan",
                 completed_issues = linked.len(),
                 pending = !pending.is_empty(),
-                "Issue Monitor incremental timeline readback"
+                "Issues incremental timeline readback"
             );
             Ok(linked)
         },
@@ -273,7 +273,7 @@ pub(crate) fn record_scan_failure_ledger(
         tracing::info!(
             stage = phase,
             continuation,
-            "Issue Monitor readback budget deferred"
+            "Issues readback budget deferred"
         );
         return;
     }
@@ -331,13 +331,13 @@ pub(crate) fn observe_optional_readback<T, E: fmt::Display>(
     if deferred {
         tracing::info!(
             project_root = %project_root.display(), operation, consecutive = count,
-            "Issue Monitor optional readback deferred"
+            "Issues optional readback deferred"
         );
         if count == 3 {
             tracing::warn!(
                 project_root = %project_root.display(), operation, consecutive = count,
                 error = error.as_deref().unwrap_or_default(),
-                "Issue Monitor readback repeatedly deferred; preserving previous observations"
+                "Issues readback repeatedly deferred; preserving previous observations"
             );
         }
     }
@@ -448,7 +448,7 @@ impl LoadedIssueMonitorCandidates {
     }
 }
 
-/// External stage owned by one side-effect-free Issue Monitor scan proposal.
+/// External stage owned by one side-effect-free Issues scan proposal.
 /// The stage is retained in errors so operators and tests can distinguish the
 /// boundary that failed instead of observing a lossy bool/None/default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,7 +519,7 @@ impl fmt::Display for IssueMonitorScanFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "issue monitor scan failed at {} stage: {}",
+            "Issues scan failed at {} stage: {}",
             self.stage, self.detail
         )
     }
@@ -728,7 +728,7 @@ where
         stage = stage.as_str(),
         duration_ms = started.elapsed().as_secs_f64() * 1_000.0,
         success = result.is_ok(),
-        "Issue Monitor readback stage"
+        "Issues readback stage"
     );
     result
 }
@@ -765,7 +765,7 @@ impl IssueMonitorScanTiming {
             target: "gwt.issue_monitor.scan",
             stage = self.phase,
             state = "started",
-            "Issue Monitor scan stage"
+            "Issues scan stage"
         );
     }
 
@@ -777,7 +777,7 @@ impl IssueMonitorScanTiming {
             duration_ms = elapsed.as_secs_f64() * 1_000.0,
             remaining_budget_ms = ?gwt_core::operation_deadline::current().map(|deadline|
                 deadline.saturating_duration_since(gwt_core::operation_deadline::now()).as_millis()),
-            "Issue Monitor scan stage"
+            "Issues scan stage"
         );
     }
 }
@@ -1462,7 +1462,7 @@ pub fn reconcile_issue_monitor_windows_with_observations(
             released = ?outcome.released,
             rebound = ?outcome.rebound,
             pane_closes = ?outcome.pane_closes,
-            "released idle Issue Monitor windows"
+            "released idle Issues windows"
         );
     }
     outcome
@@ -1492,7 +1492,7 @@ pub fn issue_monitor_daemon_payloads(
                     event: "toast".to_string(),
                     payload: serde_json::json!({
                         "level": "info",
-                        "message": "Issue Monitor launch requested",
+                        "message": "Issues launch requested",
                         "issue_number": request.issue_number,
                     }),
                 });
@@ -1565,12 +1565,12 @@ pub fn issue_monitor_read_only_daemon_payloads(
     vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(status).expect("issue monitor status serializes"),
+            payload: serde_json::to_value(status).expect("Issues status serializes"),
         },
         IssueMonitorDaemonPayload {
             event: "inbox".to_string(),
             payload: serde_json::to_value(monitor.inbox_view_at(&now))
-                .expect("issue monitor inbox serializes"),
+                .expect("Issues inbox serializes"),
         },
     ]
 }
@@ -2343,7 +2343,7 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
         let result = load_cached_issue_monitor_candidates(cache_root);
         if let Err(error) = &result {
             tracing::warn!(
-                "issue monitor cache fallback failed for {}: {error}",
+                "Issues cache fallback failed for {}: {error}",
                 cache_root.display()
             );
         }
@@ -3050,7 +3050,7 @@ pub fn reconcile_issue_monitor_merges(
     if !merged.is_empty() {
         tracing::info!(
             issues = ?merged,
-            "issue monitor reconciled merged work deliveries and freed active slots"
+            "Issues reconciled merged work deliveries and freed active slots"
         );
     }
 
@@ -3067,7 +3067,7 @@ pub fn reconcile_issue_monitor_merges(
                 if monitor.record_untracked_completion(issue_number) {
                     tracing::info!(
                         issue = issue_number,
-                        "issue monitor recovered a completion its launch tracking had lost"
+                        "Issues recovered a completion its launch tracking had lost"
                     );
                     merged.push(issue_number);
                 }
@@ -3083,7 +3083,7 @@ pub fn reconcile_issue_monitor_merges(
                 tracing::warn!(
                     issue = issue_number,
                     error = %error,
-                    "issue monitor untracked completion probe failed; issue stays launchable"
+                    "Issues untracked completion probe failed; issue stays launchable"
                 );
             }
         }
@@ -3268,7 +3268,7 @@ const DEFAULT_BASE_BRANCH_FALLBACK: &str = "main";
 /// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
 pub fn resolve_default_base_branch(repo_path: &Path) -> String {
     try_resolve_default_base_branch(repo_path).unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "issue monitor default base branch unavailable");
+        tracing::warn!(error = %error, "Issues default base branch unavailable");
         DEFAULT_BASE_BRANCH_FALLBACK.to_string()
     })
 }
@@ -3336,7 +3336,7 @@ pub fn apply_autonomous_eligibility(
 ) {
     if let Err(error) = try_apply_autonomous_eligibility(monitor, issues, repo_slug, repo_path, now)
     {
-        tracing::warn!(error = %error, "issue monitor autonomous eligibility scan failed");
+        tracing::warn!(error = %error, "Issues autonomous eligibility scan failed");
     }
 }
 
@@ -3427,7 +3427,7 @@ pub fn advance_autonomous_in_flight(
     if let Err(error) =
         try_advance_autonomous_in_flight(monitor, issues, repo_slug, repo_path, daemon_secret, now)
     {
-        tracing::warn!(error = %error, "issue monitor autonomous progress scan failed");
+        tracing::warn!(error = %error, "Issues autonomous progress scan failed");
     }
 }
 
@@ -3513,7 +3513,7 @@ pub(crate) fn try_advance_autonomous_in_flight_with_inventory(
                 issue = issue_number,
                 stage = %failure.stage,
                 error = %failure.detail,
-                "issue monitor readback degraded; keeping the previous value"
+                "Issues readback degraded; keeping the previous value"
             );
             degradations.push(IssueMonitorScanDegradation::new(
                 failure,
@@ -3590,7 +3590,7 @@ fn read_open_pr_inventory(
                 stage = %failure.stage,
                 error = %failure.detail,
                 implementing,
-                "issue monitor open-PR inventory degraded; keeping the previous phases"
+                "Issues open-PR inventory degraded; keeping the previous phases"
             );
             degradations.push(IssueMonitorScanDegradation::new(
                 failure,
@@ -3712,7 +3712,7 @@ fn advance_one_autonomous_issue(
                         issue = issue_number,
                         pr,
                         reason = %hold.reason,
-                        "issue monitor: review dispatch held"
+                        "Issues: review dispatch held"
                     );
                     monitor.hold_review_dispatch(issue_number, hold);
                     return Ok(());
@@ -3768,7 +3768,7 @@ fn advance_one_autonomous_issue(
                             issue = issue_number,
                             pr,
                             reason = %hold.reason,
-                            "issue monitor: review dispatch held"
+                            "Issues: review dispatch held"
                         );
                     }
                 }
@@ -3987,7 +3987,7 @@ fn advance_one_autonomous_issue(
                         issue = issue_number,
                         pr,
                         exit = ?exit,
-                        "issue monitor: delivery left the merge-watch unmerged"
+                        "Issues: delivery left the merge-watch unmerged"
                     );
                     monitor.exit_delivering(issue_number, pr, exit, now);
                 }
@@ -6416,7 +6416,7 @@ pub(crate) mod tests {
         assert_eq!(status.payload["state"], "error");
         assert_eq!(
             status.payload["last_error"],
-            "Issue Monitor scan stalled; last scan at 2000-01-01T00:00:00Z"
+            "Issues scan stalled; last scan at 2000-01-01T00:00:00Z"
         );
         assert_eq!(status.payload["last_scan_at"], "2000-01-01T00:00:00Z");
     }
@@ -10464,7 +10464,7 @@ mod remote_read_cache_tests {
             for _ in 0..3 {
                 defer();
             }
-            let warning = "Issue Monitor readback repeatedly deferred";
+            let warning = "Issues readback repeatedly deferred";
             assert_eq!(
                 std::fs::read_to_string(&log)
                     .unwrap()
@@ -10808,7 +10808,7 @@ mod live_readonly_stage_observation {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("valid trace JSON"))
             .filter(|row| {
-                row["fields"]["message"] == "Issue Monitor readback stage"
+                row["fields"]["message"] == "Issues readback stage"
                     && row["fields"]["stage"] == "open-pr-readback"
             })
             .map(|row| {

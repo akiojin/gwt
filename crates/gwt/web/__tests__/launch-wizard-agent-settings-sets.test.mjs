@@ -1,4 +1,4 @@
-// Issue #4911 — the Issue Monitor settings form repeats the Agent Settings
+// Issue #4911 — Issues settings form repeats the Agent Settings
 // block once per launch candidate. The backend owns the set list (order, which
 // set is open, why `＋` / `−` are unavailable), so the surface must render that
 // view and send the four set actions rather than keep a list of its own.
@@ -71,7 +71,7 @@ test("the sets are styled with Operator design tokens only", () => {
 });
 
 
-test("Issue Monitor settings selects member identity while generic launch keeps provider selection", () => {
+test("Issues settings selects member identity while generic launch keeps provider selection", () => {
   assert.match(surface, /launchWizard\.issue_monitor_pool[\s\S]*?launchWizard\.agent_member_options/);
   assert.match(surface, /launchWizard\.selected_agent_member_id/);
   assert.match(surface, /kind:\s*"set_agent_member",\s*agent_member_id:\s*value/);

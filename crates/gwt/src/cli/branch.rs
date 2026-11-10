@@ -3,7 +3,7 @@
 //! `branch.prune_merged` sweeps the `work/issue-*` remote branches that a
 //! merged pull request left behind. It shares
 //! [`gwt_git::merged_branch_prune::prune_merged_branches`] — and therefore the
-//! candidate rules — with the Issue Monitor's post-delivery prune, so the bulk
+//! candidate rules — with Issues' post-delivery prune, so the bulk
 //! sweep can never delete something the delivery hook would have kept.
 
 use gwt_git::merged_branch_prune::{

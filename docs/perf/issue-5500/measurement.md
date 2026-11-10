@@ -3,7 +3,7 @@
 ## Method
 
 - Windows, debug checkout binaries, `--no-tray --no-open`, fresh HOME.
-- One open checkout project; PM auto-start and Issue Monitor disabled.
+- One open checkout project; PM auto-start and Issues disabled.
 - Both runs copy the same frozen Session fixture: 3,435 runtime JSON files,
   1,612,683 bytes. The source Session directory is never modified.
 - Identify the owned GUI's `gwt-agent-capacity` thread using
