@@ -35,6 +35,22 @@ test.describe("Agent window scrollback lifecycle", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  test("Codex inline redraw without mouse tracking retains history", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    // Codex 0.167.0 on Windows ConPTY emits ED2 without mouse tracking.
+    await emitTerminalText(page, id, numberedLines("Codex", 1200));
+    await emitTerminalText(page, id, "\x1b[H\x1b[2J" + numberedLines("Codex redraw", 40));
+    await waitForScrollableTerminal(page, id);
+    const metrics = await terminalScrollMetrics(page, id);
+    expect(metrics.bufferLength - metrics.rows).toBeGreaterThanOrEqual(1000);
+    // Windows overrides wheel deltas; native xterm normalizes a large delta
+    // to a notch elsewhere. Tracking history below still verifies 1,000 lines.
+    const windows = await page.evaluate(() => /\bWin/i.test(navigator.platform));
+    await expectWheelMovesScrollback(page, id, true, windows ? 1000 : 1);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("keeps wheel scrollback alive after hidden-visible cycles and Plan-mode idle", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
 
@@ -166,9 +182,7 @@ test.describe("Agent window scrollback lifecycle", () => {
   });
 
   for (const { id, provider, tracking } of [
-    // Codex 0.167.0 --no-alt-screen on Windows ConPTY emits normal-screen
-    // redraws without mouse tracking. ANY tracking is covered separately above.
-    { id: "agent-1", provider: "Codex", tracking: "" },
+    { id: "agent-1", provider: "Codex", tracking: "\x1b[?1003h\x1b[?1006h" },
     { id: "agent-2", provider: "Claude Code", tracking: "\x1b[?1002h\x1b[?1006h" },
     { id: "shell-1", provider: "Shell", tracking: "" },
   ]) {
@@ -178,10 +192,6 @@ test.describe("Agent window scrollback lifecycle", () => {
       const errors = await openAgentsFixture(page, info.project.name);
       await setActiveAgentTab(page, id);
       await emitTerminalText(page, id, numberedLines(provider, 1200) + tracking);
-      if (provider === "Codex") {
-        // The real startup/resize trace uses ED2, not ED3 or RIS.
-        await emitTerminalText(page, id, "\x1b[H\x1b[2J" + numberedLines("Codex redraw", 40));
-      }
       if (tracking) {
         const inputs = await terminalInputs(page, id);
         await agentTile(page, id).locator(".xterm-screen").click();
