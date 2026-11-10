@@ -199,6 +199,11 @@ impl Grid {
         self.scrollback_offset = rows.min(self.scrollback.len());
     }
 
+    pub fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.scrollback_offset = 0;
+    }
+
     pub fn write_contents(&self, contents: &mut String) {
         let mut wrapping = false;
         for row in self.visible_rows() {
@@ -796,11 +801,15 @@ impl Grid {
     }
 
     pub fn scroll_up(&mut self, count: u16) {
+        self.scroll_up_with_history(count, !self.scroll_region_active());
+    }
+
+    fn scroll_up_with_history(&mut self, count: u16, record_history: bool) {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
-            if self.scrollback_len > 0 && !self.scroll_region_active() {
+            if self.scrollback_len > 0 && record_history {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -860,7 +869,9 @@ impl Grid {
         self.pos.row = self.pos.row.saturating_add(count);
         let lines = self.row_clamp_bottom(in_scroll_region);
         if in_scroll_region {
-            self.scroll_up(lines);
+            // Like xterm, line advances at the screen top enter history even
+            // when a partial scroll region keeps a footer fixed.
+            self.scroll_up_with_history(lines, self.scroll_top == 0);
             lines
         } else {
             0

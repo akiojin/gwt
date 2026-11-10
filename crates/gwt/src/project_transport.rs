@@ -503,19 +503,27 @@ const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
 
 #[cfg(test)]
 thread_local! {
-    static ACTIVE_WORK_PATCH_SERIALIZATIONS: std::cell::Cell<usize> =
+    static DEFERRED_SERIALIZATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    static ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER:
+    static DEFERRED_SERIALIZATION_OBSERVER:
         std::cell::RefCell<Option<Arc<dyn Fn() + Send + Sync>>> =
         const { std::cell::RefCell::new(None) };
 }
 
+/// Large events whose JSON encoding must not run on the GUI producer thread.
+/// The client sender materializes them once, outside every queue mutex.
+fn defers_serialization(event: &BackendEvent) -> bool {
+    matches!(
+        event,
+        BackendEvent::ActiveWorkProjectionPatch { .. } | BackendEvent::TerminalSnapshot { .. }
+    )
+}
+
 #[cfg(test)]
-fn observe_active_work_patch_serialization(event: &BackendEvent) {
-    if matches!(event, BackendEvent::ActiveWorkProjectionPatch { .. }) {
-        ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
-        let observer =
-            ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER.with(|observer| observer.borrow().clone());
+fn observe_deferred_serialization(event: &BackendEvent) {
+    if defers_serialization(event) {
+        DEFERRED_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let observer = DEFERRED_SERIALIZATION_OBSERVER.with(|observer| observer.borrow().clone());
         if let Some(observer) = observer {
             observer();
         }
@@ -524,11 +532,21 @@ fn observe_active_work_patch_serialization(event: &BackendEvent) {
 
 fn serialize_backend_event(event: &BackendEvent) -> Arc<str> {
     #[cfg(test)]
-    observe_active_work_patch_serialization(event);
+    observe_deferred_serialization(event);
     Arc::from(serde_json::to_string(event).expect("backend event json"))
 }
 
 fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
+    prepare_outbound_with_payload(
+        event,
+        SharedOutboundPayload::Serialized(serialize_backend_event(event)),
+    )
+}
+
+fn prepare_outbound_with_payload(
+    event: &crate::BackendEvent,
+    payload: SharedOutboundPayload,
+) -> PreparedOutbound {
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id, terminal_pane) = match event {
         crate::BackendEvent::TerminalOutput { id, .. } => {
@@ -544,7 +562,7 @@ fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: SharedOutboundPayload::Serialized(serialize_backend_event(event)),
+        payload,
         kind,
         coalesce_key,
         repair_pane_id,
@@ -609,30 +627,23 @@ pub fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
 }
 
 fn prepare_owned_outbound(outbound: OutboundEvent) -> PreparedOutbound {
-    if !matches!(
-        outbound.event,
-        BackendEvent::ActiveWorkProjectionPatch { .. }
-    ) || outbound.knowledge_wire_metadata.is_some()
-    {
+    if !defers_serialization(&outbound.event) || outbound.knowledge_wire_metadata.is_some() {
         return prepare_outbound_event(&outbound);
     }
-    let kind = outbound.event.event_kind();
     let stream_seq = outbound.terminal_stream_seq;
     let event = outbound.event;
-    // Issue #4411: keep this exact patch at its existing FIFO position,
-    // but encode it once on the sender instead of the GUI producer. The
-    // consumed closure releases its structured snapshot after encoding.
-    PreparedOutbound {
-        payload: SharedOutboundPayload::Deferred(Arc::new(LazyLock::new(Box::new(move || {
+    // Issues #4411 / #5379: keep this exact event at its existing FIFO
+    // position and routing identity, but encode it once on the sender instead
+    // of the GUI producer. The consumed closure releases its structured
+    // payload after encoding.
+    let mut prepared =
+        prepare_outbound_with_payload(&event, SharedOutboundPayload::Serialized(Arc::from("")));
+    prepared.payload =
+        SharedOutboundPayload::Deferred(Arc::new(LazyLock::new(Box::new(move || {
             serialize_backend_event(&event)
-        })))),
-        kind,
-        coalesce_key: None,
-        repair_pane_id: None,
-        class: queue_class_for_kind(kind),
-        terminal_pane: None,
-        stream_seq,
-    }
+        }))));
+    prepared.stream_seq = stream_seq;
+    prepared
 }
 
 struct QueuedOutbound {
@@ -4391,7 +4402,7 @@ mod tests {
             .iter()
             .map(|event| serde_json::to_string(event).expect("expected JSON"))
             .collect();
-        ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(0));
+        DEFERRED_SERIALIZATIONS.with(|count| count.set(0));
         hub.dispatch(
             events
                 .into_iter()
@@ -4399,7 +4410,7 @@ mod tests {
                 .collect(),
         );
         assert_eq!(
-            ACTIVE_WORK_PATCH_SERIALIZATIONS.with(std::cell::Cell::get),
+            DEFERRED_SERIALIZATIONS.with(std::cell::Cell::get),
             0,
             "GUI producer must enqueue the patch without encoding it"
         );
@@ -4407,9 +4418,9 @@ mod tests {
         for (queue, encodings) in [(first, 1), (second, 0)] {
             let expected = expected.clone();
             std::thread::spawn(move || {
-                ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(0));
+                DEFERRED_SERIALIZATIONS.with(|count| count.set(0));
                 let observed_queue = queue.clone();
-                ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER.with(|observer| {
+                DEFERRED_SERIALIZATION_OBSERVER.with(|observer| {
                     *observer.borrow_mut() = Some(Arc::new(move || {
                         assert!(
                             observed_queue.state.try_lock().is_ok(),
@@ -4424,7 +4435,7 @@ mod tests {
                 );
                 assert!(repairs.is_empty());
                 assert_eq!(
-                    ACTIVE_WORK_PATCH_SERIALIZATIONS.with(std::cell::Cell::get),
+                    DEFERRED_SERIALIZATIONS.with(std::cell::Cell::get),
                     encodings,
                     "both clients must share one consumer encoding"
                 );
@@ -4432,6 +4443,32 @@ mod tests {
             .join()
             .expect("consumer assertions");
         }
+    }
+
+    #[test]
+    fn client_hub_defers_terminal_snapshot_encoding_off_the_gui_producer() {
+        // Issue #5379: a full-scrollback snapshot is ~850KB of JSON; encoding
+        // it per target on the tao thread blocked the GUI loop past 100ms.
+        let hub = ClientHub::default();
+        let queue = hub.register_scoped("client".into(), ClientScope::Project(project_a()));
+        let event = BackendEvent::TerminalSnapshot {
+            id: "pane".into(),
+            data_base64: "QUJD".into(),
+        };
+        let expected = serde_json::to_string(&event).expect("expected JSON");
+        DEFERRED_SERIALIZATIONS.with(|count| count.set(0));
+        hub.dispatch(vec![
+            OutboundEvent::project(project_a(), event).with_terminal_stream_seq(Some(7))
+        ]);
+        assert_eq!(
+            DEFERRED_SERIALIZATIONS.with(std::cell::Cell::get),
+            0,
+            "GUI producer must enqueue the snapshot without encoding it"
+        );
+        let (payloads, repairs) = drain_all(&queue);
+        assert_eq!(payloads, vec![expected]);
+        assert!(repairs.is_empty());
+        assert_eq!(DEFERRED_SERIALIZATIONS.with(std::cell::Cell::get), 1);
     }
 
     #[test]

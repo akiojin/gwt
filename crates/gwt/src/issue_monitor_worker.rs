@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -72,6 +72,71 @@ impl<T: Clone> RemoteReadCache<T> {
 
 static LINKED_PR_READS: RemoteReadCache<Vec<crate::cli::LinkedPrSummary>> = RemoteReadCache::new();
 static PR_LIFECYCLE_READS: RemoteReadCache<PrLifecycle> = RemoteReadCache::new();
+
+/// Launch discovery spreads cold and deep timelines over scans. Completion
+/// probes below retain their separate, strict full-read contract.
+const OPEN_PR_TIMELINE_CHUNK: usize = 5;
+type PendingTimelineReads =
+    HashMap<String, (Instant, Arc<Mutex<crate::cli::issue::LinkedPrBulkRead>>)>;
+static PENDING_TIMELINE_READS: OnceLock<Mutex<PendingTimelineReads>> = OnceLock::new();
+
+fn fetch_open_linked_prs_for_monitor(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
+) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>> {
+    let now = Instant::now();
+    fetch_linked_prs_bulk_for_monitor_with(
+        owner,
+        repo,
+        numbers,
+        monitor_read_max_age(),
+        now,
+        observe,
+        |missing, observe| {
+            let pending = {
+                let mut reads = PENDING_TIMELINE_READS
+                    .get_or_init(Default::default)
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Discard idle histories, without resetting an active long
+                // queue before its later pages have had a turn.
+                reads.retain(|_, (started, _)| {
+                    now.saturating_duration_since(*started) <= ISSUE_MONITOR_PERIODIC_READ_MAX_AGE
+                });
+                if reads.len() >= REMOTE_READ_CACHE_CAPACITY {
+                    reads.clear();
+                }
+                let entry = reads
+                    .entry(format!(
+                        "{}/{}",
+                        owner.to_ascii_lowercase(),
+                        repo.to_ascii_lowercase()
+                    ))
+                    .or_insert_with(|| (now, Arc::new(Mutex::new(Default::default()))));
+                entry.0 = now;
+                entry.1.clone()
+            };
+            let mut pending = pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.sync_numbers(missing, OPEN_PR_TIMELINE_CHUNK);
+            let mut linked = BTreeMap::new();
+            pending.read_next(owner, repo, |number, prs| {
+                observe(number, prs);
+                linked.insert(number, prs.to_vec());
+            })?;
+            tracing::info!(
+                target: "gwt.issue_monitor.scan",
+                completed_issues = linked.len(),
+                pending = !pending.is_empty(),
+                "Issue Monitor incremental timeline readback"
+            );
+            Ok(linked)
+        },
+    )
+}
 
 fn monitor_read_max_age() -> Option<Duration> {
     gwt_git::gh_rest::monitor_read_max_age_secs()
@@ -199,6 +264,19 @@ pub(crate) fn record_scan_failure_ledger(
     message: &str,
     continuation: Option<&str>,
 ) {
+    // A continuation describes an optional read, not a failed scan. Aborts
+    // (no continuation), data faults and unrelated maintenance retain errors.
+    if continuation.is_some()
+        && matches!(phase, "open-pr-readback" | "merge-reconciliation")
+        && is_readback_budget_deferral(message)
+    {
+        tracing::info!(
+            stage = phase,
+            continuation,
+            "Issue Monitor readback budget deferred"
+        );
+        return;
+    }
     let mut context = BTreeMap::from([("stage".into(), phase.into())]);
     if let Some(continuation) = continuation {
         context.insert("continuation".into(), continuation.into());
@@ -215,6 +293,55 @@ pub(crate) fn record_scan_failure_ledger(
     if let Err(error) = gwt_core::error_ledger::record(row) {
         tracing::warn!(error = %error, "error ledger append failed");
     }
+}
+
+pub(crate) fn is_readback_budget_deferral(message: &str) -> bool {
+    message.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
+        || message.contains("scan budget reserved for the launch stage")
+}
+
+/// Warn once on the third consecutive budget deferral of the same operation.
+/// Its ordinary error/abort path remains responsible for real failures.
+pub(crate) fn observe_optional_readback<T, E: fmt::Display>(
+    project_root: &Path,
+    operation: &str,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    static STREAKS: OnceLock<Mutex<HashMap<(std::path::PathBuf, String), u32>>> = OnceLock::new();
+    let error = result.as_ref().err().map(ToString::to_string);
+    let deferred = error.as_deref().is_some_and(is_readback_budget_deferral);
+    let count = {
+        let mut streaks = STREAKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (project_root.to_path_buf(), operation.to_string());
+        if deferred {
+            if streaks.len() >= REMOTE_READ_CACHE_CAPACITY {
+                streaks.clear();
+            }
+            let count = streaks.entry(key).or_default();
+            *count = count.saturating_add(1);
+            *count
+        } else {
+            streaks.remove(&key);
+            0
+        }
+    };
+    if deferred {
+        tracing::info!(
+            project_root = %project_root.display(), operation, consecutive = count,
+            "Issue Monitor optional readback deferred"
+        );
+        if count == 3 {
+            tracing::warn!(
+                project_root = %project_root.display(), operation, consecutive = count,
+                error = error.as_deref().unwrap_or_default(),
+                "Issue Monitor readback repeatedly deferred; preserving previous observations"
+            );
+        }
+    }
+    result
 }
 
 /// Only an exact current, live Active holder can extend an existing claim.
@@ -1886,9 +2013,13 @@ fn load_open_pr_launch_observations(
     // discovery fails. Read them first, and reuse each PR's result this scan.
     let mut readbacks = BTreeMap::new();
     let fetch = |number| {
-        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-            fetch_pr_lifecycle_for_monitor(repo_path, number)
-        })
+        observe_optional_readback(
+            repo_path,
+            &format!("open-pr-lifecycle:{number}"),
+            run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+                fetch_pr_lifecycle_for_monitor(repo_path, number)
+            }),
+        )
         .map_err(|error| {
             record_scan_failure_ledger(
                 repo_path,
@@ -1910,17 +2041,25 @@ fn load_open_pr_launch_observations(
                 .or_insert_with(|| fetch(hold.pr_number));
         }
     }
-    let branches = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
-    });
+    let branches = observe_optional_readback(
+        repo_path,
+        "open-pr-inventory",
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+        }),
+    );
     observe_inventory(&branches);
     let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
     let mut linked = BTreeMap::new();
-    let linked_result = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        fetch_linked_prs_bulk_for_monitor(owner, repo, &numbers, |issue, prs| {
-            linked.insert(issue, prs.to_vec());
-        })
-    });
+    let linked_result = observe_optional_readback(
+        repo_path,
+        "open-pr-timelines",
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            fetch_open_linked_prs_for_monitor(owner, repo, &numbers, |issue, prs| {
+                linked.insert(issue, prs.to_vec());
+            })
+        }),
+    );
     if let Err(error) = &branches {
         record_scan_failure_ledger(
             repo_path,
@@ -1928,7 +2067,9 @@ fn load_open_pr_launch_observations(
             &error.to_string(),
             Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
         );
-        tracing::warn!(%error, "open PR branch discovery failed; preserving prior launch holds");
+        if !is_readback_budget_deferral(&error.detail) {
+            tracing::warn!(%error, "open PR branch discovery failed; preserving prior launch holds");
+        }
     }
     if let Err(error) = &linked_result {
         record_scan_failure_ledger(
@@ -1937,7 +2078,9 @@ fn load_open_pr_launch_observations(
             &error.to_string(),
             Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
         );
-        tracing::warn!(%error, completed_issues = linked.len(), "linked PR discovery incomplete; preserving unobserved launch holds");
+        if !is_readback_budget_deferral(&error.detail) {
+            tracing::warn!(%error, completed_issues = linked.len(), "linked PR discovery incomplete; preserving unobserved launch holds");
+        }
     }
     let related = candidates
         .iter()
@@ -2040,12 +2183,14 @@ fn collect_open_pr_launch_observations(
                 }
                 Ok(_) => {} // Closed or merged: release this PR's hold.
                 result => {
-                    tracing::warn!(
-                        issue,
-                        pr = number,
-                        ?result,
-                        "PR lifecycle unobserved; preserving prior launch hold"
-                    );
+                    if !matches!(&result, Err(error) if is_readback_budget_deferral(error)) {
+                        tracing::warn!(
+                            issue,
+                            pr = number,
+                            ?result,
+                            "PR lifecycle unobserved; preserving prior launch hold"
+                        );
+                    }
                     unknown = true;
                 }
             }
@@ -2085,11 +2230,13 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
             // answered the list, so the scan owns the TTL here; a refusal is
             // already a `cache_refresh_failure` ledger row and the pass goes on.
             if let Err(error) = refresh_issue_cache_for_scan_if_stale(repo_path, &cache_root) {
-                tracing::warn!(
-                    cache_root = %cache_root.display(),
-                    %error,
-                    "issue cache full refresh failed; scanning with the live list"
-                );
+                if !is_readback_budget_deferral(&error) {
+                    tracing::warn!(
+                        cache_root = %cache_root.display(),
+                        %error,
+                        "issue cache full refresh failed; scanning with the live list"
+                    );
+                }
             }
             // Cold launch consumers reconstruct source evidence from this cache.
             // Publish the listed facts before committing their Live observation.
@@ -2290,9 +2437,13 @@ pub fn refresh_issue_cache_for_scan_if_stale(
     {
         return Ok(false);
     }
-    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
-        crate::issue_cache::sync_issue_cache_from_remote_for_monitor(repo_path, cache_root)
-    })
+    observe_optional_readback(
+        repo_path,
+        "issue-cache-refresh",
+        run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+            crate::issue_cache::sync_issue_cache_from_remote_for_monitor(repo_path, cache_root)
+        }),
+    )
     .map_err(|error| error.to_string())?;
     Ok(true)
 }
@@ -9041,6 +9192,9 @@ pub(crate) mod tests {
     /// exhausted one — the production fan-out failure this Issue is about.
     #[test]
     fn a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window() {
+        use gwt_core::operation_deadline::{now, ScopedOperationClock, ScopedOperationDeadline};
+        use std::time::{Duration, Instant};
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9048,47 +9202,50 @@ pub(crate) mod tests {
             "GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS",
             "50",
         );
-        let scan_window = std::time::Duration::from_secs(30);
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + scan_window,
-        );
+        let started = Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let scan_window = Duration::from_secs(30);
+        let _scan_deadline = ScopedOperationDeadline::enter(started + scan_window);
 
         let observed = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
             let remaining = gwt_core::operation_deadline::current()
                 .expect("the readback runs under a deadline")
-                .saturating_duration_since(std::time::Instant::now());
+                .saturating_duration_since(now());
             Ok::<_, String>(remaining)
         })
         .expect("the stage itself succeeds");
 
-        assert!(
-            observed <= std::time::Duration::from_millis(50),
-            "the call must see its own budget, got {observed:?}"
+        assert_eq!(
+            observed,
+            // test-hygiene: allow-short-duration Logical budget under the fixed operation clock; no real-time wait.
+            Duration::from_millis(50),
+            "the call must see its own budget"
         );
 
         // The scan window is intact afterwards, so the next candidate is not
         // paying for this one.
         let remaining = gwt_core::operation_deadline::current()
             .expect("the scan deadline is restored")
-            .saturating_duration_since(std::time::Instant::now());
-        assert!(
-            remaining > std::time::Duration::from_secs(20),
-            "the shared scan window must survive one readback, got {remaining:?}"
+            .saturating_duration_since(now());
+        assert_eq!(
+            remaining, scan_window,
+            "the shared scan window must survive one readback"
         );
     }
 
     /// Issue #3933: the fan-out yields before it eats the launch stage's budget.
     #[test]
     fn the_readback_fan_out_stops_while_the_launch_stage_still_has_budget() {
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
         assert!(
             readback_fan_out_has_budget(),
             "no ambient deadline imposes no fan-out limit"
         );
 
-        let _almost_spent = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + ISSUE_MONITOR_LAUNCH_RESERVE
-                - std::time::Duration::from_millis(1),
-        );
+        let started = std::time::Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let _almost_spent = ScopedOperationDeadline::enter(started + ISSUE_MONITOR_LAUNCH_RESERVE);
 
         assert!(
             !readback_fan_out_has_budget(),
@@ -10247,6 +10404,80 @@ mod remote_read_cache_tests {
     use super::*;
     use std::cell::Cell;
 
+    #[test]
+    fn optional_readback_budget_deferrals_do_not_become_scan_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        for _ in 0..5 {
+            record_scan_failure_ledger(
+                &root,
+                "open-pr-readback",
+                "process deadline expired",
+                Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
+            );
+        }
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+
+        record_scan_failure_ledger(
+            &root,
+            "open-pr-readback",
+            "invalid GitHub response",
+            Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
+        );
+        record_scan_failure_ledger(&root, "outer-watchdog", "process deadline expired", None);
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 2, "data failures and aborted scans stay errors");
+    }
+
+    #[test]
+    fn optional_readback_warns_once_per_consecutive_degradation_and_resets() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("warnings.log");
+        let output = std::fs::File::create(&log).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || output.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let defer = || {
+                observe_optional_readback(
+                    temp.path(),
+                    "open-pr-timelines",
+                    Err::<(), _>("process deadline expired"),
+                )
+                .unwrap_err();
+            };
+            defer();
+            defer();
+            assert!(std::fs::read_to_string(&log).unwrap().is_empty());
+            for _ in 0..3 {
+                defer();
+            }
+            let warning = "Issue Monitor readback repeatedly deferred";
+            assert_eq!(
+                std::fs::read_to_string(&log)
+                    .unwrap()
+                    .matches(warning)
+                    .count(),
+                1
+            );
+            observe_optional_readback(temp.path(), "open-pr-timelines", Ok::<_, &str>(())).unwrap();
+            for _ in 0..3 {
+                defer();
+            }
+            assert_eq!(
+                std::fs::read_to_string(&log)
+                    .unwrap()
+                    .matches(warning)
+                    .count(),
+                2
+            );
+        });
+    }
+
     fn summary(number: u64) -> crate::cli::LinkedPrSummary {
         crate::cli::LinkedPrSummary {
             number,
@@ -10400,5 +10631,217 @@ mod remote_read_cache_tests {
         )
         .unwrap();
         assert_eq!(expired, 10, "an expired entry is read again");
+    }
+}
+
+#[cfg(test)]
+mod live_readonly_stage_observation {
+    use super::*;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    /// Opt-in isolated readonly live-stage run; never executes scan effects.
+    #[test]
+    #[ignore = "requires GWT_LIVE_MONITOR_REPO, GWT_LIVE_MONITOR_SECONDS and GWT_LIVE_MONITOR_OUTPUT"]
+    fn issue_6954_live_readonly_stages() {
+        let repo_path = std::path::PathBuf::from(
+            std::env::var_os("GWT_LIVE_MONITOR_REPO").expect("explicit live repository opt-in"),
+        );
+        let seconds: u64 = std::env::var("GWT_LIVE_MONITOR_SECONDS")
+            .expect("explicit observation duration")
+            .parse()
+            .expect("duration in seconds");
+        let output = std::path::PathBuf::from(
+            std::env::var_os("GWT_LIVE_MONITOR_OUTPUT").expect("explicit output directory"),
+        );
+        assert!(repo_path.is_absolute() && repo_path.is_dir());
+        assert!(output.is_absolute() && seconds > 0);
+        let output = output.join(format!("run-{}", uuid::Uuid::new_v4()));
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Capture the real repository's settings before isolating all writes.
+        let prefs = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo_path),
+        )
+        .expect("read source preferences");
+        let (owner, repo) = github_remote_owner_and_repo(&repo_path).expect("GitHub repository");
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _real = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _markers: Vec<_> = ["GWT_TEST_GH", "GWT_TEST_GH_SANDBOX", "GWT_FAKE_GH_MODE"]
+            .into_iter()
+            .map(ScopedEnvVar::unset)
+            .collect();
+        std::fs::create_dir_all(&output).unwrap();
+        let trace = output.join("live-stage.jsonl");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&trace)
+            .expect("use a fresh output directory");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || file.try_clone().unwrap())
+            .finish();
+        let _tracing = tracing::subscriber::set_default(subscriber);
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_slug(&owner, &repo);
+        let template =
+            IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+        let started = Instant::now();
+        let duration = Duration::from_secs(seconds);
+        let mut iterations = 0;
+        // test-hygiene: allow-wall-clock-deadline This opt-in probe measures an actual host observation window.
+        while started.elapsed() < duration {
+            let tick = Instant::now();
+            {
+                let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    // test-hygiene: allow-wall-clock-deadline Match the production scan ceiling while measuring real GitHub reads.
+                    Instant::now() + Duration::from_secs(60),
+                );
+                let _age = gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(
+                    ISSUE_MONITOR_PERIODIC_READ_MAX_AGE,
+                );
+                let listing = gwt_git::issue::fetch_issue_monitor_listing(&owner, &repo);
+                let _refresh = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root);
+                let issues = match listing {
+                    Ok(listing) => {
+                        issue_monitor_candidates_with_readiness_and_refresh_limit(
+                            Some(&repo_path),
+                            listing.issues,
+                            &cache_root,
+                            0,
+                            |_| unreachable!(),
+                        )
+                        .0
+                    }
+                    Err(error) => {
+                        record_scan_failure_ledger(
+                            &repo_path,
+                            "candidate-load",
+                            &error.to_string(),
+                            None,
+                        );
+                        Vec::new()
+                    }
+                };
+                let (_, _, linked) = load_open_pr_launch_observations(
+                    &repo_path,
+                    &owner,
+                    &repo,
+                    &issues,
+                    &prefs,
+                    &mut |_| {},
+                );
+                // These domain methods only update this clone. No effect executor,
+                // settlement, pruning, claims, launch or persisted Monitor is used.
+                let mut monitor = template.clone();
+                for issue in issues {
+                    monitor.record_candidate(issue);
+                }
+                let merged = observe_optional_readback(
+                    &repo_path,
+                    "merge-reconciliation",
+                    run_budgeted_readback_stage(IssueMonitorScanStage::MergeReconciliation, || {
+                        reconcile_issue_monitor_merges(
+                            &mut monitor,
+                            &repo_path,
+                            &owner,
+                            &repo,
+                            &linked,
+                        )
+                    }),
+                );
+                if let Err(error) = merged {
+                    record_scan_failure_ledger(
+                        &repo_path,
+                        error.stage.as_str(),
+                        &error.to_string(),
+                        Some(IssueMonitorScanContinuation::PreviousCandidates.as_str()),
+                    );
+                }
+                if let Err(error) = ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn) {
+                    record_scan_failure_ledger(
+                        &repo_path,
+                        "readonly-stage-window",
+                        &error.to_string(),
+                        None,
+                    );
+                }
+            }
+            iterations += 1;
+            println!("isolated readonly live-stage run: iteration={iterations} elapsed_s={:.1} full_hour={}",
+                started.elapsed().as_secs_f64(), seconds >= 3600);
+            // test-hygiene: allow-wall-clock-deadline Live sampling cadence is deliberate; this does not order fixture assertions.
+            std::thread::sleep(
+                Duration::from_secs(30)
+                    .saturating_sub(tick.elapsed())
+                    .min(duration.saturating_sub(started.elapsed())),
+            );
+        }
+        let errors = gwt_core::error_ledger::list_since(None).unwrap();
+        let failures = errors
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.kind,
+                    gwt_core::error_ledger::ErrorKind::ScanFailure
+                        | gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+                )
+            })
+            .count();
+        std::fs::write(
+            output.join("errors.json"),
+            serde_json::to_vec_pretty(&errors).unwrap(),
+        )
+        .unwrap();
+        let mut samples: Vec<(f64, bool)> = std::fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid trace JSON"))
+            .filter(|row| {
+                row["fields"]["message"] == "Issue Monitor readback stage"
+                    && row["fields"]["stage"] == "open-pr-readback"
+            })
+            .map(|row| {
+                (
+                    row["fields"]["duration_ms"].as_f64().unwrap(),
+                    row["fields"]["success"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        samples.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let failed = samples.iter().filter(|sample| !sample.1).count();
+        let p95 = (!samples.is_empty()).then(|| samples[(samples.len() * 95).div_ceil(100) - 1].0);
+        let max = samples.last().map(|sample| sample.0);
+        std::fs::write(
+            output.join("observation.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "isolated readonly live-stage run", "requested_seconds": seconds,
+                "source_commit": env!("GWT_BUILD_COMMIT"), "repository": repo_path,
+                "elapsed_seconds": started.elapsed().as_secs_f64(), "full_hour": seconds >= 3600,
+                "iterations": iterations, "scan_cache_failures": failures,
+                "open_pr_readback": {"samples": samples.len(), "failed": failed,
+                    "p95_ms": p95, "max_ms": max}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        println!("isolated readonly live-stage run: elapsed_s={:.1} iterations={iterations} scan_cache_failures={failures} open_samples={} open_failed={failed} p95_ms={p95:?} max_ms={max:?} trace={}", started.elapsed().as_secs_f64(), samples.len(), trace.display());
+        assert_eq!(
+            failures, 0,
+            "scan/cache failure evidence saved before verdict"
+        );
+        assert_eq!(failed, 0, "open PR readbacks must all succeed");
+        if seconds >= 3600 {
+            assert!(
+                !samples.is_empty(),
+                "full-hour run must observe open PR stages"
+            );
+            assert!(
+                p95.is_some_and(|value| value < 3000.0),
+                "open PR p95={p95:?} ms"
+            );
+        }
     }
 }

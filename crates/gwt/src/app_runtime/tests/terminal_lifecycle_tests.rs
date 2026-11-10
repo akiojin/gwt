@@ -4442,6 +4442,7 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
                 control_id: "control-1".into(),
                 should_scan: true,
                 authority_changed: false,
+                window_close_applied_at: None,
             }),
             last_scan_at: Some("2026-10-24T00:00:00Z".into()),
             ..gwt::IssueMonitorPrefs::default()

@@ -4834,23 +4834,31 @@ impl AppRuntime {
         ]
     }
 
-    fn schedule_issue_monitor_launch_failure(
+    pub(super) fn schedule_issue_monitor_launch_failure(
         &mut self,
         context: super::ProjectContext,
         request: super::DeferredIssueMonitorLaunch,
         error: String,
         _failed_attempt: Option<gwt::AutonomousHandoffDeliveryAttempt>,
     ) -> Vec<OutboundEvent> {
-        tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
-            delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
-            "Issue Monitor launch did not reach an owner pane");
+        let repeated = self
+            .issue_monitor_launch_failure_causes
+            .insert(context.project_root.clone(), error.clone())
+            .as_deref()
+            == Some(error.as_str());
+        if !repeated {
+            tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
+                delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
+                "Issue Monitor launch did not reach an owner pane");
+        }
         self.issue_monitor_launch_preparations
             .remove(&issue_monitor_launch_preparation_key(&context, &request));
         if let Some(delivery_id) = request.delivery_id {
-            if !matches!(
-                self.issue_monitor_launch_deliveries.get(&delivery_id),
-                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. })
-            ) {
+            if let Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message, .. }) =
+                self.issue_monitor_launch_deliveries.get_mut(&delivery_id)
+            {
+                *message = error.clone();
+            } else {
                 self.issue_monitor_launch_deliveries.insert(
                     delivery_id,
                     super::IssueMonitorLaunchDeliveryState::LaunchFailed {

@@ -939,11 +939,9 @@ mod project_owner_tests {
                 validate_project_owner_health(unavailable_health.clone(), &probe_endpoint);
             unavailable_health["draining"] = false.into();
             unavailable_health["reconciliation_required"] = true.into();
-            assert!(
-                draining.is_err()
-                    && validate_project_owner_health(unavailable_health, &probe_endpoint).is_err(),
-                "an exact owner awaiting drain or reconciliation is degraded"
-            );
+            assert!(draining.is_err(), "an actual owner shutdown refuses new attachment");
+            assert!(validate_project_owner_health(unavailable_health, &probe_endpoint).is_ok(),
+                "one failed retirement must not disconnect the GUI and shut down unrelated live panes");
             transport.shutdown().await;
             tokio::task::spawn_blocking(move || {
                 let (_, rx) = identity;
@@ -1084,7 +1082,7 @@ pub(crate) async fn inspect_project_owner(
     validate_project_owner_health(value, endpoint)
 }
 
-fn validate_project_owner_health(
+pub(crate) fn validate_project_owner_health(
     value: serde_json::Value,
     endpoint: &DaemonEndpoint,
 ) -> Result<ProjectOwnerIdentity, String> {
@@ -1095,8 +1093,6 @@ fn validate_project_owner_health(
         identity: ProjectOwnerIdentity,
         #[serde(default)]
         draining: bool,
-        #[serde(default)]
-        reconciliation_required: bool,
     }
     let health: Health = serde_json::from_value(value)
         .map_err(|_| "Project health identity is missing or invalid".to_string())?;
@@ -1109,8 +1105,11 @@ fn validate_project_owner_health(
     {
         return Err("Project execution owner identity did not match discovery".into());
     }
-    if health.draining || health.reconciliation_required {
-        return Err("Project execution owner is draining or requires reconciliation".into());
+    // A retained exact cleanup does not revoke the live owner's identity.
+    // Disconnecting here drops GUI presence and can shut down unrelated panes.
+    // The owner fences the affected operation while its finalizer reconciles.
+    if health.draining {
+        return Err("Project execution owner is draining".into());
     }
     Ok(health.identity)
 }

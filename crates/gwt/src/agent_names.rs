@@ -688,7 +688,17 @@ pub(crate) fn observed_project_member_seeds(
             continue;
         };
         let source = if let Some(key) = session.repo_hash.as_deref() {
-            gwt_core::repo_hash::ProjectKey::parse(key).map_err(|error| error.to_string())?
+            let recorded =
+                gwt_core::repo_hash::ProjectKey::parse(key).map_err(|error| error.to_string())?;
+            if observed.project_root.exists()
+                && recorded != gwt_core::paths::project_scope_hash(&observed.project_root)
+            {
+                return Err(format!(
+                    "Live Agent Session project identity changed: {}; restore its original project identity before roster migration",
+                    session.id
+                ));
+            }
+            recorded
         } else {
             gwt_core::paths::project_scope_hash(&observed.project_root)
         }
@@ -3558,6 +3568,32 @@ mod tests {
     #[test]
     fn rosterless_live_members_are_seeded_before_another_project_activates() {
         with_rosterless_live_sources(|first, sessions, retained| {
+            let registry_before = std::fs::read(crate::agent_registry::path()).ok();
+            let source_paths: Vec<_> = std::iter::once(first.to_path_buf())
+                .chain(retained.iter().map(|(root, _, _)| root.clone()))
+                .map(|root| crate::issue_monitor_prefs_path_for_repo_path(&root))
+                .collect();
+            let sources_before: Vec<_> = source_paths
+                .iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect();
+            let original = retained[0].1.clone();
+            retained[0].1.repo_hash = Some(gwt_core::paths::project_scope_hash(first).to_string());
+            retained[0].1.save(sessions).unwrap();
+            let session_path = sessions.join(format!("{}.toml", original.id));
+            let stale_session = std::fs::read(&session_path).unwrap();
+            let error = read_project_roster(first, sessions).unwrap_err();
+            assert!(error.contains("Live Agent Session project identity changed"));
+            assert_eq!(std::fs::read(&session_path).unwrap(), stale_session);
+            assert_eq!(
+                std::fs::read(crate::agent_registry::path()).ok(),
+                registry_before
+            );
+            for (path, bytes) in source_paths.iter().zip(&sources_before) {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes);
+            }
+            std::fs::write(&session_path, &retained[0].2).unwrap();
+            retained[0].1 = original;
             let roster = read_project_roster(first, sessions).unwrap();
             assert_eq!(
                 roster.members.len(),

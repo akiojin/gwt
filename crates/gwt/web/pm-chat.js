@@ -6,6 +6,22 @@ function reportDetailsMarkdown(structured) {
     .filter(Boolean).join('\n\n');
 }
 
+// Stored summary text participates in journal replay validation. Format the
+// choices for display without rewriting that durable body or its receipt.
+function reportDisplayText(report) {
+  const summary = report.structured?.summary;
+  const decision = report.kind === 'decision' && summary?.decision;
+  if (!decision) return report.body || '';
+  const lines = [summary.result];
+  for (const [label, key] of [['Impact', 'impact'], ['Owner', 'owner'], ['Next', 'next_action']]) {
+    if (summary[key]) lines.push(`${label}: ${summary[key]}`);
+  }
+  lines.push(`Decision: ${decision.question}`, `Recommended: ${decision.recommendation} (${decision.reason})`,
+    ...decision.options.map((option, index) => `${index + 1}. ${option}`),
+    'Reply with the option number, or Other: your own answer.');
+  return lines.join('\n');
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
@@ -83,7 +99,7 @@ export function createPmWindowModel() {
           requestTasksError: taskError,
           current: event.error ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
-            content: report.structured ? { type: 'text', body: report.body || '' }
+            content: report.structured ? { type: 'text', body: reportDisplayText(report) }
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
             detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
               body_html: report.details_html || '' } : null })) };
@@ -368,7 +384,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         copy.addEventListener('click', async () => {
           try {
             await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}`
-              : [report.body, report.structured ? reportDetailsMarkdown(report.structured) : ''].filter(Boolean).join('\n\n'));
+              : [report.content.body, report.structured ? reportDetailsMarkdown(report.structured) : ''].filter(Boolean).join('\n\n'));
             if (!disposed) copy.textContent = 'Copied';
           } catch {
             if (!disposed) {

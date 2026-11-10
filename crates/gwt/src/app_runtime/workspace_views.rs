@@ -4403,8 +4403,12 @@ impl AppRuntime {
             )];
         }
         let read = matches!(action, gwt::agent_names::AgentRosterAction::Read);
-        let pm_capture = read.then(|| self.pm_status_read_capture(context)).flatten();
-        let pm_unavailable = (read && pm_capture.is_none()).then(|| self.pm_status_event(context));
+        let select_pm = matches!(action, gwt::agent_names::AgentRosterAction::SelectPm { .. });
+        let pm_capture = (read || select_pm)
+            .then(|| self.pm_status_read_capture(context))
+            .flatten();
+        let pm_unavailable =
+            ((read || select_pm) && pm_capture.is_none()).then(|| self.pm_status_event(context));
         let choices = self.member_tuning_choices(&context.project_root);
         let context_owned = context.clone();
         let reply_to = client_id.clone();
@@ -4504,8 +4508,10 @@ impl AppRuntime {
                     request_id: reply_request_id,
                 }
             };
+            let selected_pm = select_pm
+                && matches!(&event, BackendEvent::AgentRoster { roster, .. } if roster.error.is_none());
             let mut events = vec![OutboundEvent::reply(&reply_to, event)];
-            if read {
+            if read || selected_pm {
                 let status = if let Some((root, running)) = pm_capture {
                     gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
                         &sessions_dir,
@@ -4514,7 +4520,7 @@ impl AppRuntime {
                         running.as_ref(),
                     )
                 } else {
-                    pm_unavailable.expect("unavailable project status captured before Read")
+                    pm_unavailable.expect("unavailable project status captured before roster request")
                 };
                 events.push(OutboundEvent::reply(&reply_to, status));
             }

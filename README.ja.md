@@ -632,6 +632,11 @@ signal で停止できます。
   が既定の選択肢となり、新規起動を保留して既存作業の終了まで待ちます。
   代わりに `Restart now` を明示確認すると、稼働中 agent を停止して直ちに再起動します。
 
+特定の窓の cleanup が失敗すると、他の稼働中の窓の接続を保ったまま30秒後に一度再試行します。
+待ち時間は `~/.gwt/config.toml` の `[project_owner].reconciliation_timeout_secs` に
+正の秒数を指定して変更できます。再試行も失敗した場合は、その窓の exact cleanup を保留し、
+`errors.list` に `needs_human` 診断を記録します。
+
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
 Work Item Knowledge Bridge は frontend から GitHub API response を直接描画せず、
@@ -1929,6 +1934,8 @@ PM の更新は共通の短い概要で表示し、**Details** を開くと説�
 **Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
 切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
 1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
+判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Execution log** で
+番号または自由文を回答できます。**Copy** には番号付き選択肢と詳細を含めます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、

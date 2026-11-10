@@ -1522,7 +1522,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           if (hubSocket !== connection) return;
           if (socket === connection) handleSocketOpen();
           else connection.send(JSON.stringify({ kind: "frontend_ready" }));
-          for (const message of pendingHubMessages.splice(0)) connection.send(JSON.stringify(message));
+          const replayedCloneSearchQueries = [];
+          for (const message of pendingHubMessages.splice(0)) {
+            connection.send(JSON.stringify(message));
+            if (message.kind === "github_repository_search") replayedCloneSearchQueries.push(message.query);
+          }
+          resyncCloneProjectSearch(replayedCloneSearchQueries);
         });
         connection.addEventListener("message", (event) => {
           if (hubSocket === connection) dispatcher.handle(event);
@@ -3438,6 +3443,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             } finally {
               terminalOutputBatcher.schedulePending(windowId);
             }
+            if (window.__gwtPlaywrightTestBridge === true) {
+              runtime.playwrightSnapshotApplied = runtime.playwrightSnapshotAccepted ?? 0;
+            }
           },
           onError: (error, stage) => {
             console.warn(`terminal snapshot ${stage} failed for ${windowId}`, error);
@@ -3542,6 +3550,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
+        if (runtime && window.__gwtPlaywrightTestBridge === true) {
+          runtime.playwrightSnapshotAccepted = (runtime.playwrightSnapshotAccepted ?? 0) + 1;
+        }
         terminalOutputBatcher.beginSnapshot(windowId);
         pendingSnapshotMap.set(windowId, base64);
         if (base64 && runtime) {
@@ -4245,6 +4256,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const {
         sendOpenProjectDialog,
         closeCloneProjectModal,
+        resyncCloneProjectSearch,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -6269,6 +6281,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               isReady: runtime?.isReady ?? null,
               readOnly: runtime?.readOnly ?? null,
               viewportRefreshPending: runtime?.viewportRefreshPending === true,
+              snapshotAccepted: runtime?.playwrightSnapshotAccepted ?? 0,
+              snapshotApplied: runtime?.playwrightSnapshotApplied ?? 0,
+              snapshotPending: runtime?.snapshotWriteCoordinator?.shouldDeferOutput() ?? false,
               cols: terminal?.cols ?? 0,
               rows: terminal?.rows ?? 0,
               baseY: buffer?.baseY ?? 0,
@@ -6302,6 +6317,27 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               }
             }
             return lines.join("\n");
+          },
+          logicalBufferLines(windowId) {
+            const buffer = terminalMap.get(windowId)?.terminal?.buffer?.active;
+            if (!buffer) return { lines: [], scrollbackLineCount: 0 };
+            const lines = [];
+            const ends = [];
+            for (let index = 0; index < buffer.length; index += 1) {
+              const line = buffer.getLine(index);
+              if (!line) continue;
+              const text = line.translateToString(true);
+              if (line.isWrapped && lines.length) {
+                lines[lines.length - 1] += text;
+              } else {
+                lines.push(text);
+              }
+              ends[lines.length - 1] = index;
+            }
+            return {
+              lines,
+              scrollbackLineCount: ends.filter((end) => end < buffer.baseY).length,
+            };
           },
         });
       }

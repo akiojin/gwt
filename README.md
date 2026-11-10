@@ -677,6 +677,12 @@ Common windows include:
   and waits for the existing work to finish. Confirming `Restart now` instead
   stops active agents and restarts gwt immediately.
 
+If an exact pane cleanup fails, gwt retries it once after 30 seconds while
+keeping other running panes connected. Set a positive
+`[project_owner].reconciliation_timeout_secs` in `~/.gwt/config.toml` to change
+that delay. A failed retry leaves its exact cleanup pending and records a
+`needs_human` diagnostic in `errors.list`.
+
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
@@ -2117,6 +2123,9 @@ and references. **Copy** includes both. Unchanged observations create no new car
 including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
+Decision reports show two to four numbered choices with the recommendation and
+its reason. Use **Execution log** to reply with a choice number or your own answer;
+**Copy** includes the numbered choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected

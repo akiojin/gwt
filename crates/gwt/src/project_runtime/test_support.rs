@@ -368,14 +368,27 @@ impl ProjectOwnerHarness {
     }
 
     pub async fn start(root: &std::path::Path) -> Result<Self, String> {
-        Self::start_mode(root, false).await
+        Self::start_mode(root, false, gwt_core::deadline_budget::HANG_GUARD).await
     }
 
     pub async fn start_with_monitor(root: &std::path::Path) -> Result<Self, String> {
-        Self::start_mode(root, true).await
+        Self::start_with_monitor_control_budget(root, gwt_core::deadline_budget::HANG_GUARD).await
     }
 
-    async fn start_mode(root: &std::path::Path, with_monitor: bool) -> Result<Self, String> {
+    /// Deadline-contract fixtures can retain a finite publication refusal
+    /// while ordinary outcome fixtures wait for the real daemon ACK.
+    pub async fn start_with_monitor_control_budget(
+        root: &std::path::Path,
+        control_budget: std::time::Duration,
+    ) -> Result<Self, String> {
+        Self::start_mode(root, true, control_budget).await
+    }
+
+    async fn start_mode(
+        root: &std::path::Path,
+        with_monitor: bool,
+        control_budget: std::time::Duration,
+    ) -> Result<Self, String> {
         let root = root.to_path_buf();
         let fixture_root = root.clone();
         let home = gwt_config::home::user_home().ok_or("fixture user home unavailable")?;
@@ -383,7 +396,7 @@ impl ProjectOwnerHarness {
         let mut fixture = tokio::task::spawn_blocking(move || {
             let _dispatch = tracing::dispatcher::set_default(&dispatch);
             let _home = gwt_core::test_support::ScopedGwtHome::set(&home);
-            Self::bind(&fixture_root, with_monitor)
+            Self::bind(&fixture_root, with_monitor, control_budget)
         })
         .await
         .map_err(|error| error.to_string())??;
@@ -406,7 +419,17 @@ impl ProjectOwnerHarness {
         Ok(fixture)
     }
 
-    fn bind(root: &std::path::Path, with_monitor: bool) -> Result<Self, String> {
+    fn bind(
+        root: &std::path::Path,
+        with_monitor: bool,
+        control_budget: std::time::Duration,
+    ) -> Result<Self, String> {
+        // Pin before spawning the actor so cleanup workers inherit the
+        // fixture's explicit outcome or deadline-contract budget.
+        let _control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+            &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+            control_budget,
+        );
         // A physical owner can attach to its controller's accepted view.
         // Other owner fixtures model an already opened Project; policy
         // rejection tests remove that receipt rather than bypassing admission.

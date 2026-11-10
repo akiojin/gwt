@@ -841,6 +841,8 @@ pub struct IssueMonitorControlReceipt {
     pub should_scan: bool,
     #[serde(default)]
     pub authority_changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_close_applied_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12372,6 +12374,9 @@ impl IssueMonitorState {
                 self.provider_quota_hold_releases.contains_key(provider)
                     && !self.provider_quota_holds.contains_key(provider)
             }) {
+                record.attempts = 0;
+                record.non_agent_attempts = 0;
+                record.last_failure_message = None;
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
@@ -12842,6 +12847,9 @@ impl IssueMonitorState {
                 .and_then(normalize_issue_monitor_provider)
                 .is_some_and(|held| held == provider);
             if held_by_provider {
+                record.attempts = 0;
+                record.non_agent_attempts = 0;
+                record.last_failure_message = None;
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
@@ -15407,6 +15415,12 @@ impl IssueMonitorState {
 
     fn completion_anomaly(&self, item: &IssueMonitorInboxItem) -> (bool, Option<String>) {
         if self.released_completed_reason(item.issue.number).is_some() {
+            return (false, None);
+        }
+        // A slice merge is not completion while its Session still owns the launch.
+        if self.active_launches.contains(&item.issue.number)
+            && self.process_held_issues.contains(&item.issue.number)
+        {
             return (false, None);
         }
         if item.issue.state != IssueMonitorIssueState::Open {
@@ -21750,7 +21764,8 @@ impl IssueMonitorState {
     /// the slot stays held and the row stays `launched`, so the claim-TTL
     /// expiry cannot relaunch the same Issue into the same worktree against
     /// the session that still holds its execution authority. Completion
-    /// evidence that does complete the Issue is applied regardless.
+    /// evidence that does complete the Issue is applied regardless of the
+    /// pane, but an active process-held Session retains its launch until exit.
     fn record_issue_completion_with_live_pane(
         &mut self,
         issue_number: u64,
@@ -21771,13 +21786,15 @@ impl IssueMonitorState {
             .as_ref()
             .map(Self::issue_completion_decision)
             .unwrap_or(IssueCompletionDecision::Unknown);
-        if decision != IssueCompletionDecision::Complete
-            && live_pane
-            && self.active_launches.contains(&issue_number)
+        // Both branch reconciliation and the Delivering worker enter here.
+        // Session evidence also vetoes release when the canvas is unavailable.
+        if self.active_launches.contains(&issue_number)
+            && (self.process_held_issues.contains(&issue_number)
+                || (decision != IssueCompletionDecision::Complete && live_pane))
         {
             tracing::info!(
                 issue_number,
-                "issue monitor kept a live launch through a partial merged delivery"
+                "issue monitor kept a live launch through a merged delivery"
             );
             return false;
         }
@@ -26074,9 +26091,13 @@ impl IssueMonitorState {
             self.record_launch_window_timeout(issue_number, message, now);
             return;
         }
-        // A remote-tracking ref race between concurrent fetches is neither an
-        // agent failure nor an attempt: retry behind a short backoff in every mode.
-        if gwt_agent::is_transient_launch_failure(&message) {
+        // Implementation capacity admission and fetch races are not failed attempts.
+        // Keep them queued behind the existing transient infrastructure backoff.
+        if gwt_agent::is_transient_launch_failure(&message)
+            || (state == MonitorInboxState::LaunchFailed
+                && message.starts_with("Issue Monitor max_active reached (")
+                && !self.review_failure_applies(issue_number, state, now))
+        {
             self.record_transient_launch_retry(issue_number, message, now);
             return;
         }
@@ -40563,11 +40584,24 @@ mod tests {
         assert_eq!(legacy.last_control_receipt, None);
         assert_eq!(IssueMonitorPrefs::default().last_control_receipt, None);
 
+        let legacy_receipt: IssueMonitorControlReceipt =
+            serde_json::from_value(serde_json::json!({
+                "control_id": "legacy-control", "should_scan": true,
+            }))
+            .expect("pre-application-time receipt deserializes");
+        assert_eq!(legacy_receipt.window_close_applied_at, None);
+        assert!(serde_json::to_value(legacy_receipt)
+            .unwrap()
+            .get("window_close_applied_at")
+            .is_none());
         let receipt = IssueMonitorControlReceipt {
             control_id: uuid::Uuid::new_v4().to_string(),
             should_scan: true,
             authority_changed: false,
+            window_close_applied_at: Some("2026-09-01T00:03:00Z".into()),
         };
+        let receipt: IssueMonitorControlReceipt =
+            serde_json::from_value(serde_json::to_value(receipt).unwrap()).unwrap();
         let restored = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -44989,9 +45023,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("issue-monitor.json");
         fs::write(&path, b"original").expect("seed canonical bytes");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
-        );
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         let error = super::durable_atomic_write(&path, b"replacement")
             .expect_err("expired deadline must reject the canonical rename");
@@ -49836,7 +49870,8 @@ mod tests {
         );
         assert!(monitor.is_autonomous_in_flight(7));
 
-        monitor.record_launch_failed(7, "Independent review could not start");
+        let failure = "Issue Monitor max_active reached (8/8) before launching Issue #7";
+        monitor.record_launch_failed(7, failure);
 
         // Issue #4815 AC-1: the review's failure is the review ladder's, not
         // the implementation's. The record returns to Implementing (the PR
@@ -49869,10 +49904,15 @@ mod tests {
             Some(MonitorInboxState::Launched),
             "the implementation stays launched (not re-queued, not parked)"
         );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the implementation keeps its slot"
+        );
         assert!(monitor
             .inbox_item(7)
             .and_then(|item| item.error_message.clone())
-            .is_some_and(|error| error.contains("Independent review could not start")));
+            .is_some_and(|error| error.contains(failure)));
     }
 
     #[test]
@@ -51639,6 +51679,11 @@ mod tests {
         monitor.record_candidate(issue(42));
         monitor.complete_active_launch(42, "tab-1::agent-42");
         let evidence = quota_hold_evidence_fixture();
+        let record = monitor.autonomous_record_mut(42);
+        record.attempts = 3;
+        record.non_agent_attempts = 3;
+        record.last_failure_message = Some(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE.into());
+        monitor.record_attempt(43);
 
         assert_eq!(
             monitor.try_hold_provider_usage_limit(
@@ -51701,6 +51746,18 @@ mod tests {
                 .autonomous_record(42)
                 .and_then(|record| record.retry_not_before.clone()),
             None
+        );
+        let released = monitor.autonomous_record(42).unwrap();
+        assert_eq!(
+            released.attempts, 0,
+            "quota release grants a fresh retry budget"
+        );
+        assert_eq!(released.non_agent_attempts, 0);
+        assert_eq!(released.last_failure_message, None);
+        assert_eq!(
+            monitor.attempt_count(43),
+            1,
+            "unrelated history is preserved"
         );
         let prefs = monitor.prefs();
         assert!(prefs.provider_quota_holds.is_empty());
@@ -51916,6 +51973,7 @@ mod tests {
         daemon.set_gui_connected(true);
         daemon.record_candidate(issue(42));
         daemon.complete_active_launch(42, "tab-1::agent-42");
+        daemon.record_attempt(42);
         assert_eq!(
             daemon.try_hold_provider_usage_limit(
                 42,
@@ -51943,8 +52001,14 @@ mod tests {
             "a hold released on disk must not be re-stamped by a process that still holds it"
         );
         assert!(daemon.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"));
+        assert_eq!(
+            daemon.attempt_count(42),
+            0,
+            "the release survives prefs rebase"
+        );
 
         daemon.complete_active_launch(42, "tab-1::agent-43");
+        daemon.record_attempt(42);
         assert_eq!(
             daemon.try_hold_provider_usage_limit(
                 42,
@@ -51958,6 +52022,11 @@ mod tests {
             IssueMonitorProviderUsageLimitOutcome::Held
         );
         daemon.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            daemon.attempt_count(42),
+            1,
+            "a newer hold keeps its retry history"
+        );
         assert_eq!(
             daemon
                 .prefs()
@@ -52160,6 +52229,41 @@ mod tests {
         assert_eq!(item.state, MonitorInboxState::Queued);
         assert_eq!(item.error_message.as_deref(), Some(message.as_str()));
         assert!(!monitor.retry_ready(4153, now));
+    }
+
+    #[test]
+    fn max_active_refusal_requeues_even_with_an_exhausted_attempt_budget() {
+        let now = "2026-11-10T00:47:09Z";
+        let message = "Issue Monitor max_active reached (8/8) before launching Issue #5379";
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(5379, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        monitor.complete_active_launch(5379, "tab-1::preparing-5379");
+        monitor.set_autonomous_phase(5379, AutonomousPhase::Implementing);
+        let record = monitor.autonomous_record_mut(5379);
+        record.attempts = 3;
+        record.last_failure_message = Some(message.into());
+
+        monitor.record_launch_failed_at(5379, message, now);
+
+        assert_eq!(
+            monitor.inbox_item(5379).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.queue.contains(&5379));
+        assert_eq!(monitor.attempt_count(5379), 3, "capacity is not an attempt");
+        assert_eq!(
+            monitor.autonomous_record(5379).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(!monitor.failed_issues.contains_key(&5379));
+        assert!(
+            !monitor.retry_ready(5379, now),
+            "capacity retries are backed off"
+        );
     }
 
     #[test]
@@ -54276,6 +54380,92 @@ mod tests {
             0,
             "removing the finished pane frees its slot"
         );
+    }
+
+    #[test]
+    fn issue_6972_merge_retains_a_process_held_launch_until_session_exit() {
+        let now = "2026-06-26T01:00:00Z";
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.config.max_active = 1;
+        monitor.record_candidate(issue(43));
+        let branch = monitor.active_launched_branches()[0].1.clone();
+        let merged = BTreeSet::from([branch.clone()]);
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        monitor.record_merged_deliveries(&BTreeMap::from([(
+            branch,
+            merged_delivery(7, "delivered", "2026-06-26T00:30:00Z"),
+        )]));
+
+        // The Delivering worker calls this directly, without a canvas snapshot.
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert!(monitor.active_launches.contains(&42));
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::agent-42")
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(!monitor.queue.contains(&42));
+        assert!(monitor.next_launch_request(now).is_none());
+        let row = &monitor.agent_status_at(now).inbox[0];
+        assert!(!row.recoverable_merged);
+        assert_eq!(row.completion_reason, None);
+
+        // Ordinary branch reconciliation and repeated scans must retain it too.
+        assert!(monitor
+            .reconcile_merged_branches_at(&merged, now)
+            .is_empty());
+        monitor.record_merged(42);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        assert_eq!(monitor.reconcile_merged_branches_at(&merged, now), vec![42]);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.active_launches.contains(&42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.agent_status_at(now).inbox[0]
+                .completion_reason
+                .as_deref(),
+            Some("delivered_by_pr_7")
+        );
+    }
+
+    #[test]
+    fn issue_6972_completed_issue_waits_for_process_held_session_exit() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .unwrap()
+            .issue
+            .state = IssueMonitorIssueState::Closed;
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Merged
+        );
+        assert_eq!(monitor.active_count(), 0);
     }
 
     /// Issue #4852 AC-3 (negative half): with no pane on a fresh snapshot, or

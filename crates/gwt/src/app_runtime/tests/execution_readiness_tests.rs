@@ -1145,11 +1145,22 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let prepty = matches!(failure, "direct" | "worker" | "prepty-replay");
-        let fixture = owner_monitor_fresh_fixture(
+        let deferred = matches!(
+            failure,
+            "replay" | "readiness-replay" | "replacement" | "startup-timeout-replay"
+        );
+        // test-hygiene: allow-wall-clock-deadline These negative cases require a finite daemon refusal while the canonical prefs lock is deliberately held.
+        let control_budget = if deferred {
+            Duration::from_secs(5)
+        } else {
+            gwt_core::deadline_budget::HANG_GUARD
+        };
+        let fixture = owner_monitor_fresh_fixture_with_control_budget(
             temp.path(),
             &format!("fresh-monitor-{failure}"),
             true,
             prepty,
+            control_budget,
         );
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
         let id = fixture.captured.id.clone();
@@ -1245,10 +1256,6 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             fixture.shutdown();
             continue;
         }
-        let deferred = matches!(
-            failure,
-            "replay" | "readiness-replay" | "replacement" | "startup-timeout-replay"
-        );
         // New/retried held-phase transactions use 250ms; started transactions
         // retain the budget captured before the holder was acquired.
         let held_prefs_budget =
@@ -1313,7 +1320,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             // test-hygiene: allow-wall-clock-deadline Bounds the exact real owner physical-close result; that receipt determines whether the Monitor commit remains pending.
             let close_error = fixture.executor.block_on(async {
                 // test-hygiene: allow-wall-clock-deadline Bounds an actual owner physical close or canonical failure ACK; the receipt and durable source establish ordering.
-                tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                     loop {
                         if let OwnerEvent::Closed {
                             id: closed,

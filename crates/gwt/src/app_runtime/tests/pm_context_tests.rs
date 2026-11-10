@@ -2057,7 +2057,7 @@ fn pm_crash_records_backoff_and_respawns() {
     let lifecycle_events = owner_fixture_block_on(async {
         let mut events = Vec::new();
         // test-hygiene: allow-wall-clock-deadline actual child exit and owner lifecycle response hang guard
-        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+        let completed = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = source.recv().await.expect("actual owner lifecycle");
                 let done = matches!(&event, gwt::project_runtime::events::OwnerEvent::PmLifecycle { outcome, .. } if outcome.session_id == session_id);
@@ -2203,7 +2203,7 @@ fn pm_crash_with_unreadable_registration_preserves_durable_state() {
     let (exited, health, retained, events) = owner_fixture_block_on(async {
         let mut events = Vec::new();
         // test-hygiene: allow-wall-clock-deadline actual child exit and exact owner status hang guard; no elapsed-time assertion establishes ownership
-        let exited = tokio::time::timeout(Duration::from_secs(15), async {
+        let exited = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = source.recv().await.map_err(|error| error.to_string())?;
                 let done = matches!(&event, OwnerEvent::Status {
@@ -3450,19 +3450,62 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
     )
     .unwrap()
     .member;
+    let roster = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    let added = gwt::agent_names::mutate_project_roster(
+        &repo,
+        &runtime.sessions_dir,
+        gwt::agent_names::AgentRosterAction::Add {
+            agent_id: Some("codex".into()),
+            name: Some("Selected PM".into()),
+            pm_eligible: true,
+        },
+        Some(roster.revision),
+    )
+    .unwrap();
+    let selected = added.members.last().unwrap();
+    assert_ne!(selected.agent_member_id, member.agent_member_id);
     let context = runtime.project_contexts()[0].clone();
     let path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
     fs::write(&path, b"unreadable PM profile").unwrap();
-    for (id, available) in [("unknown-read", false), ("repaired-read", true)] {
-        if available {
+    for (id, available, action) in [
+        (
+            "unknown-read",
+            false,
+            gwt::agent_names::AgentRosterAction::Read,
+        ),
+        (
+            "repaired-read",
+            true,
+            gwt::agent_names::AgentRosterAction::Read,
+        ),
+        (
+            "selected-profile",
+            true,
+            gwt::agent_names::AgentRosterAction::SelectPm {
+                member_id: selected.agent_member_id.clone(),
+            },
+        ),
+        (
+            "stale-selection",
+            true,
+            gwt::agent_names::AgentRosterAction::SelectPm {
+                member_id: member.agent_member_id.clone(),
+            },
+        ),
+    ] {
+        if id == "repaired-read" {
             gwt::pm_registry::save_pm_prefs(&path, &gwt::pm_registry::PmPrefs::default()).unwrap();
         }
+        let expected_revision =
+            matches!(action, gwt::agent_names::AgentRosterAction::SelectPm { .. })
+                .then_some(added.revision);
+        let registry_before = fs::read(gwt::agent_registry::path()).unwrap();
         assert!(runtime
             .handle_frontend_event(
                 "read-client".into(),
                 FrontendEvent::AgentRoster {
-                    action: gwt::agent_names::AgentRosterAction::Read,
-                    expected_revision: None,
+                    action,
+                    expected_revision,
                     project_key: Some(context.project_key.to_string()),
                     request_id: Some(id.into()),
                 }
@@ -3488,13 +3531,39 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
             unreachable!()
         };
         assert_eq!(captured, context);
+        assert!(events.iter().all(
+            |event| matches!(&event.target, DispatchTarget::Client(client) if client == "read-client")
+        ));
+        let roster = events.iter().find_map(|event| match &event.event {
+            BackendEvent::AgentRoster { roster, .. } => Some(roster),
+            _ => None,
+        });
+        if id == "stale-selection" {
+            assert!(roster
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("changed"));
+            assert!(events
+                .iter()
+                .all(|event| !matches!(event.event, BackendEvent::PmStatus { .. })));
+            assert_eq!(
+                fs::read(gwt::agent_registry::path()).unwrap(),
+                registry_before
+            );
+            continue;
+        }
+        if id == "selected-profile" {
+            assert!(roster.unwrap().error.is_none());
+        }
         let status = events
             .iter()
             .find_map(|event| match &event.event {
                 BackendEvent::PmStatus { .. } => Some(&event.event),
                 _ => None,
             })
-            .expect("ordinary Read must refresh the PM editor without a PM transition");
+            .expect("Read and successful PM selection must refresh the PM editor");
         match status {
             BackendEvent::PmStatus {
                 project_key,
@@ -3510,7 +3579,11 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
                 if available {
                     assert_eq!(
                         configured_member_id.as_deref(),
-                        Some(member.agent_member_id.as_str())
+                        Some(if id == "selected-profile" {
+                            selected.agent_member_id.as_str()
+                        } else {
+                            member.agent_member_id.as_str()
+                        })
                     );
                     assert!(profile_revision.is_some());
                 } else {

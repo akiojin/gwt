@@ -1092,6 +1092,33 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_snapshot_clears_history_without_erasing_visible_screen() {
+        let mut source = vt100::Parser::new(3, 8, 32);
+        source.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let visible = source.screen().clone();
+        source.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(source.screen().scrollback(), 2);
+
+        source.process(b"\x1b[3J");
+
+        assert_eq!(source.screen().scrollback(), 0);
+        assert_eq!(screen_at_oldest_scrollback(source.screen()).scrollback(), 0);
+        assert_eq!(
+            source.screen().contents_formatted(),
+            visible.contents_formatted()
+        );
+        assert_eq!(source.screen().cursor_position(), visible.cursor_position());
+        let replay = replay_snapshot(&source, 32);
+        assert_eq!(screen_at_oldest_scrollback(replay.screen()).scrollback(), 0);
+        assert_eq!(replay.screen().contents(), visible.contents());
+
+        source.process(b"\r\nsix");
+        let oldest = screen_at_oldest_scrollback(source.screen());
+        assert_eq!(oldest.scrollback(), 1);
+        assert_eq!(oldest.contents(), "three\nfour\nfive");
+    }
+
+    #[test]
     fn test_semantic_snapshot_round_trips_cursor_movement_and_erase() {
         let mut source = vt100::Parser::new(4, 12, 32);
         source.process(b"alpha\r\nbravo\r\ncharlie");
@@ -1547,6 +1574,35 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_snapshot_preserves_top_anchored_partial_region_history() {
+        let mut source = vt100::Parser::new(4, 8, 32);
+        source.process(b"one\r\ntwo\r\nthree\r\nstatus");
+        source.process(b"\x1b[1;3r\x1b[3;1H\r\n\x1b[r");
+
+        assert_eq!(source.screen().contents(), "two\nthree\n\nstatus");
+        let oldest = screen_at_oldest_scrollback(source.screen());
+        assert_eq!(oldest.scrollback(), 1);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+        assert_eq!(replay_oldest.scrollback(), 1);
+        assert_eq!(replay_oldest.contents(), oldest.contents());
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+
+        let mut explicit_scroll = vt100::Parser::new(4, 8, 32);
+        explicit_scroll.process(b"one\r\ntwo\r\nthree\r\nstatus\x1b[1;3r\x1b[1S");
+        assert_eq!(
+            explicit_scroll.screen().contents(),
+            source.screen().contents()
+        );
+        assert_eq!(
+            screen_at_oldest_scrollback(explicit_scroll.screen()).scrollback(),
+            0,
+            "explicit partial-region scroll must retain its existing no-history behavior"
+        );
+    }
+
+    #[test]
     fn test_semantic_snapshot_preserves_scroll_region_for_lf_continuation() {
         let mut source = vt100::Parser::new(5, 8, 32);
         source.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
@@ -1556,6 +1612,8 @@ mod tests {
         source.process(b"\nX");
         replay.process(b"\nX");
 
+        assert_eq!(screen_at_oldest_scrollback(source.screen()).scrollback(), 0);
+        assert_eq!(screen_at_oldest_scrollback(replay.screen()).scrollback(), 0);
         assert_eq!(replay.screen().contents(), source.screen().contents());
         assert_eq!(
             replay.screen().cursor_position(),
@@ -1603,6 +1661,8 @@ mod tests {
 
         source.process(b"\x1b8R\nN");
         replay.process(b"\x1b8R\nN");
+        source.process(b"\x1b[3J");
+        replay.process(b"\x1b[3J");
         assert!(replay.screen().alternate_screen());
         assert_eq!(replay.screen().contents(), source.screen().contents());
         assert_eq!(

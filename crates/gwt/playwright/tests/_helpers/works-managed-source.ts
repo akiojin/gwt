@@ -143,7 +143,12 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
         if (hook.type !== 'command') continue;
         const result = cp.spawnSync('/bin/sh',['-c',hook.command],{cwd:sourceRoot,env:process.env,input,encoding:'utf8',timeout:30000});
         observation.hook = {status:result.status,signal:result.signal,blocked:/"decision"\s*:\s*"block"/.test(result.stdout ?? ''),error_code:result.error?.code ?? null};
-        if (result.error || result.status !== 0 || observation.hook.blocked) throw new Error('generated_hook_refused');
+        if (result.error || result.status !== 0 || observation.hook.blocked) {
+          const stdout = result.stdout ?? '', stderr = result.stderr ?? '';
+          Object.assign(observation.hook, {stdout:stdout.slice(0,16384),stderr:stderr.slice(0,16384),
+            stdout_truncated:stdout.length > 16384,stderr_truncated:stderr.length > 16384});
+          throw new Error('generated_hook_refused');
+        }
         count++;
       }
       if (!count) throw new Error('generated_hook_missing');
@@ -169,7 +174,8 @@ export async function startWorksManagedSource(browser: Browser, info: TestInfo) 
       observation.consumer = {status:checked.status,signal:checked.signal,error_code:checked.error?.code ?? null};
       try { Object.assign(observation,JSON.parse((checked.stdout ?? '').trim().split(/\r?\n/).at(-1))); } catch {}
       if (checked.error || checked.status !== 0) throw new Error('canonical_consumer_refused');
-    } catch(error) { observation.failure_stage = stage; observation.failed = true; }
+    } catch(error) { observation.failure_stage = stage; observation.failed = true;
+      observation.error = String(error?.message ?? error).slice(0,1024); }
     fs.writeFileSync(path.join(process.env.HOME,'works-preflight-'+process.env.GWT_SESSION_ID+'.json'),JSON.stringify(observation));
     console.log('GWT_WORKS_PREFLIGHT_RECORDED');
     return;
