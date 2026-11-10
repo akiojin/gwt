@@ -6608,3 +6608,12 @@ body.route-body {
   color: var(--color-text-muted);
   font-size: var(--type-sm);
 }
+
+/* GitHub label color is validated external metadata; layout uses Operator tokens. */
+.issue-card-labels { min-width: 0; flex-wrap: nowrap; overflow: hidden; align-items: center; }
+.issue-card-label { min-width: 0; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; border-color: var(--github-label-color, var(--color-border)); background: color-mix(in srgb, var(--github-label-color, var(--color-surface)) 18%, var(--color-surface)); color: var(--color-text); }
+.issue-card-label-overflow { flex: none; font-size: var(--type-xs); color: var(--color-text-muted); }
+.issue-card-provenance { flex: none; }
+.settings-label-options { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); max-height: 18rem; overflow-y: auto; }
+.settings-label-option { display: flex; align-items: center; gap: var(--space-1); max-width: 100%; }
+.settings-label-option .issue-card-label { max-width: 30ch; }

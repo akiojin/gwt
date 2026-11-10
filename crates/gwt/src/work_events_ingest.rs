@@ -155,14 +155,74 @@ impl WorkEventsIngestSummary {
 
 #[derive(Debug)]
 struct PendingWorkEventsSource {
-    key: String,
-    fingerprint: String,
+    key: SourceKey,
+    fingerprint: [u8; 32],
     content: Arc<str>,
     container: Option<Arc<WorkspaceExecutionContainerRef>>,
     reload_from_worktree: bool,
 }
 
-type SourceFingerprints = Vec<(String, String)>;
+/// The same event shard appears in many worktree/ref groups. Keep the exact
+/// group and suffix independently so those aliases can share their text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SourceKey {
+    group: Arc<str>,
+    suffix: Arc<str>,
+}
+
+impl SourceKey {
+    fn capture(key: &str, parts: &mut HashSet<Arc<str>>) -> Self {
+        let (group, suffix) = Self::split(key).expect("generated Work source key has its group");
+        let mut intern = |part: &str| {
+            if let Some(existing) = parts.get(part) {
+                return Arc::clone(existing);
+            }
+            let shared: Arc<str> = Arc::from(part);
+            parts.insert(Arc::clone(&shared));
+            shared
+        };
+        Self {
+            group: intern(group),
+            suffix: intern(suffix),
+        }
+    }
+
+    fn split(key: &str) -> Option<(&str, &str)> {
+        let group = source_group(key);
+        Some((group, key.strip_prefix(group)?))
+    }
+
+    fn parts(&self) -> (&str, &str) {
+        (&self.group, &self.suffix)
+    }
+
+    fn restore(&self) -> String {
+        let mut key = String::with_capacity(self.group.len() + self.suffix.len());
+        key.push_str(&self.group);
+        key.push_str(&self.suffix);
+        key
+    }
+}
+
+/// Only freshly derived SHA-256 values enter this representation. Persisted
+/// fingerprints remain arbitrary strings at the existing store boundary.
+fn compact_source_fingerprint(fingerprint: &str) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(fingerprint, &mut bytes).expect("derived source fingerprint is SHA-256");
+    bytes
+}
+
+fn restore_source_fingerprint(fingerprint: &[u8; 32]) -> String {
+    hex::encode(fingerprint)
+}
+
+fn source_fingerprint_matches(fingerprint: &[u8; 32], stored: &str) -> bool {
+    let mut encoded = [0; 64];
+    hex::encode_to_slice(fingerprint, &mut encoded).expect("SHA-256 hex buffer has fixed size");
+    stored.as_bytes() == encoded
+}
+
+type SourceFingerprints = Vec<(SourceKey, [u8; 32])>;
 type ReloadedWorkEventsSources = (Vec<SharedWorkEventsSource>, SourceFingerprints);
 
 #[cfg(test)]
@@ -365,6 +425,7 @@ fn work_event_source_kind_for_ref_path(path: &str) -> gwt_core::Result<WorkEvent
 fn load_pending_sources_for_rebuild(
     pending_sources: Vec<PendingWorkEventsSource>,
     worktree_entries: &[gwt::worktree_inventory::WorktreeEntry],
+    source_key_parts: &mut HashSet<Arc<str>>,
 ) -> gwt_core::Result<ReloadedWorkEventsSources> {
     let mut contents = Vec::with_capacity(pending_sources.len());
     let mut fingerprints = Vec::with_capacity(pending_sources.len());
@@ -399,8 +460,11 @@ fn load_pending_sources_for_rebuild(
             // The scan took metadata before this content read: a write racing
             // the read leaves the older fingerprint behind, so the next pass
             // reads the source again.
-            let fingerprint = source_fingerprint(&source.metadata, source.container.as_deref());
-            let key = source.key();
+            let fingerprint = compact_source_fingerprint(&source_fingerprint(
+                &source.metadata,
+                source.container.as_deref(),
+            ));
+            let key = SourceKey::capture(&source.key(), source_key_parts);
             let cached = prelock_reads
                 .remove(&key)
                 .filter(|(previous, _)| previous == &fingerprint)
@@ -592,6 +656,7 @@ where
     let mut rebuild_required = projection_requires_rebuild
         || !store.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
     let mut pending_sources = Vec::new();
+    let mut source_key_parts = HashSet::new();
     let mut source_discovery_failed = false;
     // Issue #4397: the state is kept per source group (one per worktree, one
     // per origin ref). A group whose snapshot matches the stored one is
@@ -665,10 +730,15 @@ where
             if !rebuild_required && !new_local_keys.contains(key) {
                 continue;
             }
-            let fingerprint = discovered
-                .get(key)
-                .cloned()
-                .unwrap_or_else(|| source_fingerprint_in_context(&source.metadata, &group.context));
+            let fingerprint = discovered.get(key).map_or_else(
+                || {
+                    compact_source_fingerprint(&source_fingerprint_in_context(
+                        &source.metadata,
+                        &group.context,
+                    ))
+                },
+                |fingerprint| compact_source_fingerprint(fingerprint),
+            );
             before_source_read(&source.events_path);
             let content = match read_shared_work_event_source(
                 &source.events_path,
@@ -683,7 +753,7 @@ where
                 }
             };
             pending_sources.push(PendingWorkEventsSource {
-                key: key.clone(),
+                key: SourceKey::capture(key, &mut source_key_parts),
                 fingerprint,
                 content,
                 container: source.container.clone(),
@@ -830,8 +900,8 @@ where
                                 }
                             };
                             pending_sources.push(PendingWorkEventsSource {
-                                key,
-                                fingerprint,
+                                key: SourceKey::capture(&key, &mut source_key_parts),
+                                fingerprint: compact_source_fingerprint(&fingerprint),
                                 content,
                                 container: scan.container.clone(),
                                 reload_from_worktree: false,
@@ -907,7 +977,7 @@ where
         // sources may be added.
         let available = pending_sources
             .iter()
-            .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
+            .map(|source| (source.key.parts(), &source.fingerprint))
             .collect::<HashMap<_, _>>();
         let known_groups = store
             .group_names()
@@ -917,7 +987,9 @@ where
         let shared_incomplete = known_groups.iter().any(|group| {
             store.group_sources(group).is_none_or(|sources| {
                 sources.iter().any(|(key, fingerprint)| {
-                    available.get(key.as_str()).copied() != Some(fingerprint.as_str())
+                    !SourceKey::split(key)
+                        .and_then(|key| available.get(&key))
+                        .is_some_and(|current| source_fingerprint_matches(current, fingerprint))
                 })
             })
         });
@@ -967,12 +1039,13 @@ where
                 let expected_sources = summary.load_error.as_ref().map(|_| {
                     pending_sources
                         .iter()
-                        .map(|source| (source.key.clone(), source.fingerprint.clone()))
+                        .map(|source| (source.key.clone(), source.fingerprint))
                         .collect::<SourceFingerprints>()
                 });
                 let loaded = load_pending_sources_for_rebuild(
                     std::mem::take(&mut pending_sources),
                     worktree_entries,
+                    &mut source_key_parts,
                 )?;
                 if let Some((error, expected_sources)) =
                     summary.load_error.as_ref().zip(expected_sources.as_ref())
@@ -982,12 +1055,11 @@ where
                     let available = loaded
                         .1
                         .iter()
-                        .map(|(key, value)| (key, value))
+                        .map(|(key, value)| (key.parts(), value))
                         .collect::<HashMap<_, _>>();
-                    if expected_sources
-                        .iter()
-                        .any(|(key, fingerprint)| available.get(key).copied() != Some(fingerprint))
-                    {
+                    if expected_sources.iter().any(|(key, fingerprint)| {
+                        available.get(&key.parts()).copied() != Some(fingerprint)
+                    }) {
                         let mut error = error.clone();
                         error.message.push_str(
                             "; recovery refused: an event source disappeared or changed before intake",
@@ -1040,13 +1112,14 @@ where
                 report,
                 pending_sources
                     .iter()
-                    .map(|source| (source.key.clone(), source.fingerprint.clone()))
+                    .map(|source| (source.key.clone(), source.fingerprint))
                     .collect(),
                 local_fingerprint,
             )
         })
     };
     drop(pending_sources);
+    drop(source_key_parts);
     phases.mark("intake");
     match intake {
         Ok((report, shared_fingerprints, local_fingerprint)) => {
@@ -1161,12 +1234,12 @@ fn group_additions<'a>(
 fn record_scanned_groups(
     store: &mut WorkEventsIntakeStore,
     scanned_groups: &BTreeMap<String, ScannedGroup>,
-    ingested: &[(String, String)],
+    ingested: &[(SourceKey, [u8; 32])],
 ) {
-    let mut ingested_by_group = HashMap::<&str, Vec<&(String, String)>>::new();
+    let mut ingested_by_group = HashMap::<&str, Vec<&(SourceKey, [u8; 32])>>::new();
     for source in ingested {
         ingested_by_group
-            .entry(source_group(&source.0))
+            .entry(&source.0.group)
             .or_default()
             .push(source);
     }
@@ -1180,7 +1253,7 @@ fn record_scanned_groups(
         let mut updated = (!additions.is_empty()).then(|| previous.clone());
         if let Some(sources) = updated.as_mut() {
             for (key, fingerprint) in additions {
-                sources.insert(key.clone(), fingerprint.clone());
+                sources.insert(key.restore(), restore_source_fingerprint(fingerprint));
             }
         }
         let sources = updated.as_ref().unwrap_or(previous);
@@ -1210,13 +1283,15 @@ fn record_rebuilt_groups(
     store: &mut WorkEventsIntakeStore,
     discovered_groups: &BTreeMap<String, (String, bool)>,
     scanned_groups: &BTreeMap<String, ScannedGroup>,
-    ingested: Vec<(String, String)>,
+    ingested: SourceFingerprints,
 ) {
     store.clear();
     let mut groups = BTreeMap::<String, BTreeMap<String, String>>::new();
     for (key, fingerprint) in ingested {
-        let group = source_group(&key).to_owned();
-        groups.entry(group).or_default().insert(key, fingerprint);
+        groups
+            .entry(key.group.to_string())
+            .or_default()
+            .insert(key.restore(), restore_source_fingerprint(&fingerprint));
     }
     for name in discovered_groups.keys() {
         groups.entry(name.clone()).or_default();
@@ -1651,10 +1726,15 @@ mod tests {
 
     #[test]
     fn rebuild_loader_transfers_ref_source_allocations() {
-        let key = "ref:refs/remotes/origin/main:.gwt/work/events.jsonl".to_string();
-        let fingerprint = "validated-ref-fingerprint".to_string();
-        let key_allocation = key.as_ptr();
-        let fingerprint_allocation = fingerprint.as_ptr();
+        let mut parts = HashSet::new();
+        let key = SourceKey::capture(
+            "ref:refs/remotes/origin/main:.gwt/work/events.jsonl",
+            &mut parts,
+        );
+        let fingerprint =
+            compact_source_fingerprint(&source_fingerprint_in_context("raw", "context"));
+        let group_allocation = Arc::clone(&key.group);
+        let suffix_allocation = Arc::clone(&key.suffix);
         let pending = vec![PendingWorkEventsSource {
             key,
             fingerprint,
@@ -1663,12 +1743,48 @@ mod tests {
             reload_from_worktree: false,
         }];
 
-        let (contents, fingerprints) = load_pending_sources_for_rebuild(pending, &[]).unwrap();
+        let (contents, fingerprints) =
+            load_pending_sources_for_rebuild(pending, &[], &mut parts).unwrap();
 
         assert_eq!(contents.len(), 1);
         assert_eq!(fingerprints.len(), 1);
-        assert_eq!(fingerprints[0].0.as_ptr(), key_allocation);
-        assert_eq!(fingerprints[0].1.as_ptr(), fingerprint_allocation);
+        assert!(Arc::ptr_eq(&fingerprints[0].0.group, &group_allocation));
+        assert!(Arc::ptr_eq(&fingerprints[0].0.suffix, &suffix_allocation));
+        assert_eq!(fingerprints[0].1, fingerprint);
+    }
+
+    #[test]
+    fn pending_source_metadata_shares_alias_text_and_round_trips() {
+        let mut parts = HashSet::new();
+        let first_key = r"worktree:C:\repo\one\.gwt\work\events\ab\abcd.jsonl";
+        let second_key = r"worktree:C:\repo\two\.gwt\work\events\ab\abcd.jsonl";
+        let first = SourceKey::capture(first_key, &mut parts);
+        let second = SourceKey::capture(second_key, &mut parts);
+        let repeated = SourceKey::capture(first_key, &mut parts);
+        assert!(
+            Arc::ptr_eq(&first.suffix, &second.suffix),
+            "aliases must share the shard suffix"
+        );
+        assert!(
+            Arc::ptr_eq(&first.group, &repeated.group),
+            "sources must share the group prefix"
+        );
+        assert_eq!(first.restore(), first_key);
+        assert_eq!(second.restore(), second_key);
+        let ref_key = "ref:refs/remotes/origin/topic:.gwt/work/events/ab/abcd.jsonl";
+        assert_eq!(SourceKey::capture(ref_key, &mut parts).restore(), ref_key);
+        let original = source_fingerprint_in_context("raw", "context");
+        let compact = compact_source_fingerprint(&original);
+        assert_eq!(restore_source_fingerprint(&compact), original);
+        assert!(source_fingerprint_matches(&compact, &original));
+        assert!(!source_fingerprint_matches(
+            &compact,
+            &original.to_uppercase()
+        ));
+        assert!(!source_fingerprint_matches(
+            &compact,
+            "legacy-arbitrary-fingerprint"
+        ));
     }
 
     #[test]

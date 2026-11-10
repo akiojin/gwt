@@ -6841,13 +6841,24 @@ fn validate_existing_issue_monitor_prefs_schema(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(value) => value,
-        Err(error) if error.is_syntax() || error.is_eof() => return Ok(()),
-        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
-    };
-    if let Some(actual) = value.get("schema_version") {
-        let actual = serde_json::from_value(actual.clone())
+    // Only the schema header is needed here. Building a second complete Value
+    // tree for a large Monitor history consumes the short writer deadline.
+    let fields: BTreeMap<String, &serde_json::value::RawValue> =
+        match serde_json::from_str(&content) {
+            Ok(fields) => fields,
+            Err(error) if error.is_syntax() || error.is_eof() => return Ok(()),
+            Err(error) => {
+                // Full-snapshot saves historically replace valid non-object JSON.
+                if serde_json::from_str::<serde_json::Value>(&content)
+                    .is_ok_and(|value| !value.is_object())
+                {
+                    return Ok(());
+                }
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+            }
+        };
+    if let Some(actual) = fields.get("schema_version") {
+        let actual = serde_json::from_str(actual.get())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         validate_issue_monitor_prefs_schema_version(actual)?;
     }
@@ -7032,19 +7043,41 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
         }
     }
     let tmp = unique_prefs_tmp_path(path);
+    let started = std::time::Instant::now();
+    let remaining_budget_ms = gwt_core::operation_deadline::current().map(|deadline| {
+        deadline
+            .saturating_duration_since(gwt_core::operation_deadline::now())
+            .as_millis()
+    });
+    let mut stage = "scratch write";
+    let mut stage_started = started;
+    let mut written = started;
+    let mut synced = started;
+    let mut renamed = started;
     let result = (|| {
         let mut scratch = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&tmp)?;
         scratch.write_all(content)?;
+        written = std::time::Instant::now();
+        stage = "scratch sync";
+        stage_started = written;
         scratch.sync_all()?;
+        synced = std::time::Instant::now();
+        stage = "rename deadline check";
+        stage_started = synced;
         // Deadline-aware transactions may spend their remaining budget on
         // serialization or scratch fsync. Recheck immediately before the
         // canonical rename so an expired proposal cannot become visible after
         // its acceptance boundary.
         gwt_core::operation_deadline::ensure_remaining("Issue Monitor durable rename")?;
+        stage = "rename";
+        stage_started = std::time::Instant::now();
         fs::rename(&tmp, path)?;
+        renamed = std::time::Instant::now();
+        stage = "parent sync";
+        stage_started = renamed;
         #[cfg(test)]
         if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE")
             .is_some_and(|target| Path::new(&target) == path)
@@ -7059,6 +7092,26 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
         }
         sync_parent_directory(path)
     })();
+    let finished = std::time::Instant::now();
+    let elapsed = finished.duration_since(started);
+    if result.is_err() || elapsed >= std::time::Duration::from_millis(100) {
+        let stage_ms = finished.duration_since(stage_started).as_secs_f64() * 1000.0;
+        tracing::info!(
+            target: "gwt.issue_monitor.prefs",
+            path = %path.display(),
+            bytes = content.len(),
+            stage,
+            stage_ms,
+            remaining_budget_ms = ?remaining_budget_ms,
+            write_ms = if stage == "scratch write" { stage_ms } else { written.duration_since(started).as_secs_f64() * 1000.0 },
+            sync_ms = if stage == "scratch sync" { stage_ms } else { synced.saturating_duration_since(written).as_secs_f64() * 1000.0 },
+            rename_ms = if stage == "rename" { stage_ms } else { renamed.saturating_duration_since(synced).as_secs_f64() * 1000.0 },
+            parent_sync_ms = if stage == "parent sync" { stage_ms } else { 0.0 },
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            success = result.is_ok(),
+            "Issue Monitor durable write timing"
+        );
+    }
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -7066,15 +7119,19 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    let started = std::time::Instant::now();
     let mut normalized = prefs.clone();
     crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
         .map_err(io::Error::other)?;
     let prefs = &normalized;
+    let normalized_at = std::time::Instant::now();
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
     validate_existing_issue_monitor_prefs_schema(path)?;
+    let validated_at = std::time::Instant::now();
     crate::machine_agent_settings::migration_before_project_save(path)?;
-    let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
-    if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
+    let migrated_at = std::time::Instant::now();
+    let content = if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
+        let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
         let fields = value.as_object_mut().expect("Monitor preferences object");
         // Older readers require this key. It is a fixed safe compatibility
         // mirror, never this project's or the machine's requested policy.
@@ -7091,10 +7148,32 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
                 }
             ),
         );
-    }
-    let content = serde_json::to_string_pretty(&value).map_err(io::Error::other)?;
+        serde_json::to_string_pretty(&value).map_err(io::Error::other)?
+    } else {
+        // Roster snapshots already have their canonical shape. Serialize them
+        // directly instead of allocating and walking a complete Value tree.
+        serde_json::to_string_pretty(prefs).map_err(io::Error::other)?
+    };
+    let serialized_at = std::time::Instant::now();
     crate::update_settings::migrate_before_project_save(path, false)?;
+    let prepared_at = std::time::Instant::now();
     let committed = durable_atomic_write(path, content.as_bytes());
+    let elapsed = started.elapsed();
+    if committed.is_err() || elapsed >= std::time::Duration::from_millis(100) {
+        tracing::info!(
+            target: "gwt.issue_monitor.prefs",
+            path = %path.display(),
+            normalize_ms = normalized_at.duration_since(started).as_secs_f64() * 1000.0,
+            validate_ms = validated_at.duration_since(normalized_at).as_secs_f64() * 1000.0,
+            machine_migration_ms = migrated_at.duration_since(validated_at).as_secs_f64() * 1000.0,
+            serialize_ms = serialized_at.duration_since(migrated_at).as_secs_f64() * 1000.0,
+            update_migration_ms = prepared_at.duration_since(serialized_at).as_secs_f64() * 1000.0,
+            write_ms = prepared_at.elapsed().as_secs_f64() * 1000.0,
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            success = committed.is_ok(),
+            "Issue Monitor prefs save timing"
+        );
+    }
     // Invalidate even if parent sync failed after the rename became visible.
     // Local writers cannot rely on metadata granularity to distinguish a save.
     issue_monitor_prefs_cache()
@@ -12197,6 +12276,9 @@ impl IssueMonitorState {
                 self.provider_quota_hold_releases.contains_key(provider)
                     && !self.provider_quota_holds.contains_key(provider)
             }) {
+                record.attempts = 0;
+                record.non_agent_attempts = 0;
+                record.last_failure_message = None;
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
@@ -12667,6 +12749,9 @@ impl IssueMonitorState {
                 .and_then(normalize_issue_monitor_provider)
                 .is_some_and(|held| held == provider);
             if held_by_provider {
+                record.attempts = 0;
+                record.non_agent_attempts = 0;
+                record.last_failure_message = None;
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
@@ -15229,6 +15314,12 @@ impl IssueMonitorState {
 
     fn completion_anomaly(&self, item: &IssueMonitorInboxItem) -> (bool, Option<String>) {
         if self.released_completed_reason(item.issue.number).is_some() {
+            return (false, None);
+        }
+        // A slice merge is not completion while its Session still owns the launch.
+        if self.active_launches.contains(&item.issue.number)
+            && self.process_held_issues.contains(&item.issue.number)
+        {
             return (false, None);
         }
         if item.issue.state != IssueMonitorIssueState::Open {
@@ -21560,7 +21651,8 @@ impl IssueMonitorState {
     /// the slot stays held and the row stays `launched`, so the claim-TTL
     /// expiry cannot relaunch the same Issue into the same worktree against
     /// the session that still holds its execution authority. Completion
-    /// evidence that does complete the Issue is applied regardless.
+    /// evidence that does complete the Issue is applied regardless of the
+    /// pane, but an active process-held Session retains its launch until exit.
     fn record_issue_completion_with_live_pane(
         &mut self,
         issue_number: u64,
@@ -21581,13 +21673,15 @@ impl IssueMonitorState {
             .as_ref()
             .map(Self::issue_completion_decision)
             .unwrap_or(IssueCompletionDecision::Unknown);
-        if decision != IssueCompletionDecision::Complete
-            && live_pane
-            && self.active_launches.contains(&issue_number)
+        // Both branch reconciliation and the Delivering worker enter here.
+        // Session evidence also vetoes release when the canvas is unavailable.
+        if self.active_launches.contains(&issue_number)
+            && (self.process_held_issues.contains(&issue_number)
+                || (decision != IssueCompletionDecision::Complete && live_pane))
         {
             tracing::info!(
                 issue_number,
-                "issue monitor kept a live launch through a partial merged delivery"
+                "issue monitor kept a live launch through a merged delivery"
             );
             return false;
         }
@@ -25875,9 +25969,13 @@ impl IssueMonitorState {
             self.record_launch_window_timeout(issue_number, message, now);
             return;
         }
-        // A remote-tracking ref race between concurrent fetches is neither an
-        // agent failure nor an attempt: retry behind a short backoff in every mode.
-        if gwt_agent::is_transient_launch_failure(&message) {
+        // Implementation capacity admission and fetch races are not failed attempts.
+        // Keep them queued behind the existing transient infrastructure backoff.
+        if gwt_agent::is_transient_launch_failure(&message)
+            || (state == MonitorInboxState::LaunchFailed
+                && message.starts_with("Issue Monitor max_active reached (")
+                && !self.review_failure_applies(issue_number, state, now))
+        {
             self.record_transient_launch_retry(issue_number, message, now);
             return;
         }
@@ -49430,7 +49528,8 @@ mod tests {
         );
         assert!(monitor.is_autonomous_in_flight(7));
 
-        monitor.record_launch_failed(7, "Independent review could not start");
+        let failure = "Issue Monitor max_active reached (8/8) before launching Issue #7";
+        monitor.record_launch_failed(7, failure);
 
         // Issue #4815 AC-1: the review's failure is the review ladder's, not
         // the implementation's. The record returns to Implementing (the PR
@@ -49463,10 +49562,15 @@ mod tests {
             Some(MonitorInboxState::Launched),
             "the implementation stays launched (not re-queued, not parked)"
         );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the implementation keeps its slot"
+        );
         assert!(monitor
             .inbox_item(7)
             .and_then(|item| item.error_message.clone())
-            .is_some_and(|error| error.contains("Independent review could not start")));
+            .is_some_and(|error| error.contains(failure)));
     }
 
     #[test]
@@ -51233,6 +51337,11 @@ mod tests {
         monitor.record_candidate(issue(42));
         monitor.complete_active_launch(42, "tab-1::agent-42");
         let evidence = quota_hold_evidence_fixture();
+        let record = monitor.autonomous_record_mut(42);
+        record.attempts = 3;
+        record.non_agent_attempts = 3;
+        record.last_failure_message = Some(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE.into());
+        monitor.record_attempt(43);
 
         assert_eq!(
             monitor.try_hold_provider_usage_limit(
@@ -51295,6 +51404,18 @@ mod tests {
                 .autonomous_record(42)
                 .and_then(|record| record.retry_not_before.clone()),
             None
+        );
+        let released = monitor.autonomous_record(42).unwrap();
+        assert_eq!(
+            released.attempts, 0,
+            "quota release grants a fresh retry budget"
+        );
+        assert_eq!(released.non_agent_attempts, 0);
+        assert_eq!(released.last_failure_message, None);
+        assert_eq!(
+            monitor.attempt_count(43),
+            1,
+            "unrelated history is preserved"
         );
         let prefs = monitor.prefs();
         assert!(prefs.provider_quota_holds.is_empty());
@@ -51510,6 +51631,7 @@ mod tests {
         daemon.set_gui_connected(true);
         daemon.record_candidate(issue(42));
         daemon.complete_active_launch(42, "tab-1::agent-42");
+        daemon.record_attempt(42);
         assert_eq!(
             daemon.try_hold_provider_usage_limit(
                 42,
@@ -51537,8 +51659,14 @@ mod tests {
             "a hold released on disk must not be re-stamped by a process that still holds it"
         );
         assert!(daemon.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"));
+        assert_eq!(
+            daemon.attempt_count(42),
+            0,
+            "the release survives prefs rebase"
+        );
 
         daemon.complete_active_launch(42, "tab-1::agent-43");
+        daemon.record_attempt(42);
         assert_eq!(
             daemon.try_hold_provider_usage_limit(
                 42,
@@ -51552,6 +51680,11 @@ mod tests {
             IssueMonitorProviderUsageLimitOutcome::Held
         );
         daemon.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            daemon.attempt_count(42),
+            1,
+            "a newer hold keeps its retry history"
+        );
         assert_eq!(
             daemon
                 .prefs()
@@ -51754,6 +51887,41 @@ mod tests {
         assert_eq!(item.state, MonitorInboxState::Queued);
         assert_eq!(item.error_message.as_deref(), Some(message.as_str()));
         assert!(!monitor.retry_ready(4153, now));
+    }
+
+    #[test]
+    fn max_active_refusal_requeues_even_with_an_exhausted_attempt_budget() {
+        let now = "2026-11-10T00:47:09Z";
+        let message = "Issue Monitor max_active reached (8/8) before launching Issue #5379";
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(5379, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        monitor.complete_active_launch(5379, "tab-1::preparing-5379");
+        monitor.set_autonomous_phase(5379, AutonomousPhase::Implementing);
+        let record = monitor.autonomous_record_mut(5379);
+        record.attempts = 3;
+        record.last_failure_message = Some(message.into());
+
+        monitor.record_launch_failed_at(5379, message, now);
+
+        assert_eq!(
+            monitor.inbox_item(5379).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.queue.contains(&5379));
+        assert_eq!(monitor.attempt_count(5379), 3, "capacity is not an attempt");
+        assert_eq!(
+            monitor.autonomous_record(5379).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(!monitor.failed_issues.contains_key(&5379));
+        assert!(
+            !monitor.retry_ready(5379, now),
+            "capacity retries are backed off"
+        );
     }
 
     #[test]
@@ -53870,6 +54038,92 @@ mod tests {
             0,
             "removing the finished pane frees its slot"
         );
+    }
+
+    #[test]
+    fn issue_6972_merge_retains_a_process_held_launch_until_session_exit() {
+        let now = "2026-06-26T01:00:00Z";
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.config.max_active = 1;
+        monitor.record_candidate(issue(43));
+        let branch = monitor.active_launched_branches()[0].1.clone();
+        let merged = BTreeSet::from([branch.clone()]);
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        monitor.record_merged_deliveries(&BTreeMap::from([(
+            branch,
+            merged_delivery(7, "delivered", "2026-06-26T00:30:00Z"),
+        )]));
+
+        // The Delivering worker calls this directly, without a canvas snapshot.
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert!(monitor.active_launches.contains(&42));
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::agent-42")
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(!monitor.queue.contains(&42));
+        assert!(monitor.next_launch_request(now).is_none());
+        let row = &monitor.agent_status_at(now).inbox[0];
+        assert!(!row.recoverable_merged);
+        assert_eq!(row.completion_reason, None);
+
+        // Ordinary branch reconciliation and repeated scans must retain it too.
+        assert!(monitor
+            .reconcile_merged_branches_at(&merged, now)
+            .is_empty());
+        monitor.record_merged(42);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        assert_eq!(monitor.reconcile_merged_branches_at(&merged, now), vec![42]);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.active_launches.contains(&42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.agent_status_at(now).inbox[0]
+                .completion_reason
+                .as_deref(),
+            Some("delivered_by_pr_7")
+        );
+    }
+
+    #[test]
+    fn issue_6972_completed_issue_waits_for_process_held_session_exit() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .unwrap()
+            .issue
+            .state = IssueMonitorIssueState::Closed;
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Merged
+        );
+        assert_eq!(monitor.active_count(), 0);
     }
 
     /// Issue #4852 AC-3 (negative half): with no pane on a fresh snapshot, or

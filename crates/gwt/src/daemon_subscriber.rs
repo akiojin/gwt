@@ -1109,7 +1109,7 @@ pub(crate) fn validate_project_owner_health(
     // Disconnecting here drops GUI presence and can shut down unrelated panes.
     // The owner fences the affected operation while its finalizer reconciles.
     if health.draining {
-        return Err("Project execution owner is draining or requires reconciliation".into());
+        return Err("Project execution owner is draining".into());
     }
     Ok(health.identity)
 }

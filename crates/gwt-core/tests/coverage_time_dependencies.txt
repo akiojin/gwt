@@ -321,7 +321,6 @@ crates/gwt/src/cli/daemon/server.rs|shutdown_rejects_pending_and_queued_control_
 crates/gwt/src/cli/daemon/server.rs|spawn_issue_monitor_effect|while!Path::new(&release).exists()&&Instant::now()<deadline|1
 crates/gwt/src/cli/daemon/server.rs|spawn_issue_monitor_scan|letdeadline=Instant::now()+ISSUE_MONITOR_SCAN_TIMEOUT|1
 crates/gwt/src/cli/daemon/server.rs|startup_marker_lock_timeout_remains_retryable_without_changing_authority|assert!(started.elapsed()<CONTENDED_BUDGET*8)|1
-crates/gwt/src/cli/daemon/server.rs|startup_retries_expired_attempt_with_free_lock_and_missing_fence|let_expired=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_secs(1),)|1
 crates/gwt/src/cli/daemon/server.rs|startup_retry_blocking_queue_wait_respects_total_budget|letqueued=tokio::time::timeout(HANG_GUARD,submitted.notified()).await|1
 crates/gwt/src/cli/daemon/server.rs|startup_retry_blocking_queue_wait_respects_total_budget|letstatus=tokio::time::timeout(HANG_GUARD,hub.wait_for_issue_monitor_status()).await|1
 crates/gwt/src/cli/daemon/server.rs|startup_retry_blocking_queue_wait_respects_total_budget|tokio::time::timeout(HANG_GUARD,worker).await.expect().expect()|1
@@ -491,9 +490,7 @@ crates/gwt/src/issue_cache.rs|resync_skips_issue_view_for_spec_entries_whose_cac
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|Some(result)=>result,None=>done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect(),|1
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|letcompleted_while_locked=done_rx.recv_timeout(std::time::Duration::from_millis(100)).ok()|1
 crates/gwt/src/issue_monitor.rs|authority_fence_clear_waits_for_the_stable_prefs_lock|started_rx.recv_timeout(std::time::Duration::from_secs(1)).expect()|1
-crates/gwt/src/issue_monitor_worker.rs|a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window|let_scan_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+scan_window,)|1
 crates/gwt/src/issue_monitor_worker.rs|github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline|assert!(started.elapsed()<std::time::Duration::from_millis(1_500),,started.elapsed())|1
-crates/gwt/src/issue_monitor_worker.rs|the_readback_fan_out_stops_while_the_launch_stage_still_has_budget|let_almost_spent=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+ISSUE_MONITOR_LAUNCH_RESERVE-std::time::Duration::from_millis(1),)|1
 crates/gwt/src/knowledge_bridge.rs|knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/src/knowledge_bridge.rs|knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip|started.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt/src/knowledge_bridge.rs|knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip|whileArc::strong_count(&flight)<3&&Instant::now()<deadline|1

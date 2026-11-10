@@ -2037,6 +2037,7 @@ fn sample_runtime_with_events(
         pending_launch_delivery_acks: HashMap::new(),
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
+        issue_monitor_launch_failure_causes: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
         issue_monitor_launch_attempts: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),

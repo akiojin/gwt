@@ -572,11 +572,18 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
   await settings.locator('[data-settings-tab="issues"]').click();
   await expect(left).toHaveAttribute("data-surface", "issues");
   await expect(right).toHaveAttribute("data-surface", "settings");
-  const labels = controls.getByLabel("Allowed labels", { exact: true });
-  await labels.fill("bug, draft");
+  const labels = controls.getByRole("group", { name: "Allowed labels", exact: true });
+  const bug = labels.getByRole("checkbox", { name: "bug", exact: true });
+  const draft = labels.getByRole("checkbox", { name: "draft", exact: true });
+  await bug.click();
+  await expect(bug).toBeEnabled();
+  await expect(bug).toBeChecked();
+  await draft.click();
+  await expect(draft).toBeEnabled();
   await confirm(page, [3, 4]);
-  await expect(labels).toHaveValue("bug, draft");
-  await expect(labels).toBeFocused();
+  await expect(bug).toBeChecked();
+  await expect(draft).toBeChecked();
+  await expect(draft).toBeFocused();
   await expect(search).toHaveValue("First");
   await expect(root.locator(".knowledge-detail-title")).toHaveText("First backlog issue");
   await settings.locator('[data-settings-tab="system"]').click();
@@ -595,7 +602,8 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
   await expect(settings).toBeVisible();
   await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
   await settings.locator('[data-settings-tab="issues"]').click();
-  await expect(controls.getByLabel("Allowed labels", { exact: true })).toHaveValue("bug, draft");
+  await expect(bug).toBeChecked();
+  await expect(draft).toBeChecked();
   const autonomous = controls.getByRole("checkbox", { name: "Autonomous", exact: true });
   await autonomous.scrollIntoViewIfNeeded();
   await expect(autonomous).toBeInViewport({ ratio: 1 });
@@ -969,7 +977,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
     await expect(row(page,number)).toHaveCSS("border-left-width","3px");
     expect(await row(page,number).locator(".knowledge-row-number").evaluate(node=>node.nextElementSibling?.className)).toBe("knowledge-row-title");
   }
-  await expect(row(page,3).locator(".issue-card-label")).toHaveText("spec");
+  await expect(row(page,3).locator(".issue-card-label")).toHaveText("gwt-spec");
   await expect(row(page,5).locator(".issue-card-updated + .issue-agent-status")).toHaveCount(1);
   const theme=info.project.name.includes("light")?"light":"dark";
   await page.setViewportSize({width:1600,height:1400});
@@ -1849,6 +1857,10 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             max_active_agents_override:message.max_active_agents,
             max_active_agents_mode:message.max_active_agents == null ? "auto" : "manual"});
           this.emit({kind:"issue_monitor_status",status});
+        }
+        else if(message.kind==="get_repository_labels") {
+          this.emit({kind:"repository_labels",project_root:"/fixture",loaded:true,error:null,
+            labels:[{name:"bug",color:"d73a4a"},{name:"draft",color:"0075ca"}]});
         }
         else if(message.kind==="set_issue_monitor_allowed_labels") {
           status.allowed_labels=message.allowed_labels;

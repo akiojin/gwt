@@ -2112,6 +2112,8 @@ pub struct AppRuntime {
     /// replay never creates a second agent window and can re-ACK after a
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
+    /// Last consecutive launch failure per project, independent of delivery identity.
+    pub(crate) issue_monitor_launch_failure_causes: HashMap<PathBuf, String>,
     pub(crate) issue_monitor_launch_preparations: HashSet<wizard::IssueMonitorLaunchPreparationKey>,
     pub(crate) issue_monitor_launch_attempts: HashMap<wizard::IssueMonitorLaunchPreparationKey, u8>,
     pub(crate) issue_monitor_launch_queue: Vec<wizard::PendingIssueMonitorLaunch>,
@@ -5199,6 +5201,7 @@ impl AppRuntime {
             pending_launch_delivery_acks: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
             issue_monitor_launch_attempts: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
@@ -11568,6 +11571,7 @@ impl AppRuntime {
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
             | FrontendEvent::SetIssueMonitorTier { .. }
             | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
+            | FrontendEvent::GetRepositoryLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
             | FrontendEvent::QuickRegisterIssue { .. } => {
@@ -12713,6 +12717,9 @@ impl AppRuntime {
                     allowed_labels,
                     request_id,
                 )
+            }
+            FrontendEvent::GetRepositoryLabels { refresh } => {
+                self.repository_labels_events(context, &client_id, refresh)
             }
             FrontendEvent::GetIssueMonitorProfiles => {
                 let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);

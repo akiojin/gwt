@@ -354,9 +354,13 @@ fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
         "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
+        settings_js.contains(r#"labels.setAttribute("role", "group")"#)
+            && settings_js.contains(r#"checkbox.type = "checkbox""#)
+            && settings_js.contains("settings-label-options")
+            && settings_js.contains("createRepositoryLabelChip")
+            && settings_js.contains("get_repository_labels")
             && settings_js.contains("settings-field")
-            && settings_js.contains("settings-input")
+            && !settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
             && !surface_js
                 .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#),
         "allowed labels must use existing Operator Settings controls instead of inline Issue details"
@@ -1669,7 +1673,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*let replayedReleaseNotesId = null;\s*let replayedRecoveryCenterId = null;\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*if \(pending\.message\.kind === "load_recovery_center"\) replayedRecoveryCenterId = pending\.message\.request_id;\s*\}\s*recoveryCenterController\?\.reconnect\(replayedRecoveryCenterId\);"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*let replayedReleaseNotesId = null;\s*let replayedRecoveryCenterId = null;\s*const replayedWorkAdvisoryIds = \[\];\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*if \(pending\.message\.kind === "load_recovery_center"\) replayedRecoveryCenterId = pending\.message\.request_id;\s*if \(pending\.message\.kind === "request_work_advisory"\) replayedWorkAdvisoryIds\.push\(pending\.message\.request_id\);\s*\}\s*resyncWorkAdvisory\(replayedWorkAdvisoryIds\);\s*recoveryCenterController\?\.reconnect\(replayedRecoveryCenterId\);"#,
     )
     .expect("valid regex");
 

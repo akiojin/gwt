@@ -2,14 +2,80 @@ use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
 #[test]
+fn repository_labels_read_runs_off_thread_for_the_requesting_project() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let active = temp.path().join("active");
+    let requested = temp.path().join("requested");
+    for root in [&active, &requested] {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+    }
+    let cache = gwt::issue_cache::issue_cache_root_for_repo_path(&requested).unwrap();
+    let (owner, repo) =
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(&requested).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(
+        cache.join("repository-labels.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "repository": format!("{owner}/{repo}"),
+            "labels": [{"name":"backend","color":"123abc"}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let tabs = vec![
+        sample_project_tab("active", "Active", active, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "requested",
+            "Requested",
+            requested.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("active"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.project_context("requested").unwrap();
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "get_repository_labels", "refresh": false,
+    }))
+    .expect("repository label request");
+    assert!(runtime
+        .handle_frontend_event_for_project(&context, "requesting-client".into(), event)
+        .is_empty());
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    assert!(recorded.lock().unwrap().is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let completion = recorded.lock().unwrap().pop().unwrap();
+    let UserEvent::Dispatch(events) = recorded_project_payload(&completion) else {
+        panic!("repository labels reply expected");
+    };
+    let reply = &events[0];
+    assert!(
+        matches!(&reply.target, DispatchTarget::Client(client_id) if client_id == "requesting-client")
+    );
+    let payload = serde_json::to_value(&reply.event).unwrap();
+    assert_eq!(payload["project_root"], requested.display().to_string());
+    assert_eq!(payload["loaded"], true);
+    assert_eq!(payload["labels"][0]["name"], "backend");
+    assert!(payload["error"].is_null());
+}
+
+#[test]
 fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notifications() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir(&repo).unwrap();
+    let other_repo = temp.path().join("other-repo");
+    fs::create_dir(&other_repo).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let other_tab = sample_project_tab("tab-2", "Other", other_repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab, other_tab], Some("tab-1"));
     let context = runtime.project_context("tab-1").unwrap();
+    let other_context = runtime.project_context("tab-2").unwrap();
     let request = super::super::DeferredIssueMonitorLaunch {
         project_root: repo,
         issue_number: 6934,
@@ -28,15 +94,32 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
             "publish ack timeout; exact cleanup remains pending",
             "owner endpoint unavailable",
         ] {
-            for _ in 0..601 {
+            for observation in 0..601 {
+                let mut request = request.clone();
+                request.delivery_id =
+                    (observation % 3 != 0).then(|| format!("failed-owner-delivery-{observation}"));
                 notifications.extend(runtime.schedule_issue_monitor_launch_failure(
                     context.clone(),
-                    request.clone(),
+                    request,
                     reason.into(),
                     None,
                 ));
             }
         }
+        let mut other_request = request.clone();
+        other_request.project_root = other_repo;
+        notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+            other_context,
+            other_request,
+            "owner endpoint unavailable".into(),
+            None,
+        ));
+        notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+            context,
+            request,
+            "owner endpoint unavailable".into(),
+            None,
+        ));
         notifications
     });
     let errors = captured
@@ -52,15 +135,15 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
         })
         .count();
     assert_eq!(
-        errors, 2,
-        "each new failure reason is logged once, including after a reason change"
+        errors, 3,
+        "each project logs a new cause once across changing or absent deliveries"
     );
     assert_eq!(
         notifications
             .iter()
             .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
             .count(),
-        1202,
+        1204,
         "notification aggregation retains its existing raw observation path"
     );
 }
@@ -5988,9 +6071,22 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     assert_eq!(before_ready["acknowledged"], false);
     assert_eq!(before_ready["id"], pane.id);
     assert_eq!(before_ready["incarnation"], pane.incarnation);
+    let other_project = temp.path().join("other-project");
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(repo.clone(), "owner endpoint unavailable".into());
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(other_project.clone(), "owner endpoint unavailable".into());
     // Accepted replay now observes readiness too. Consume its negative GUI
     // completion before asserting a separate ACK worker can be scheduled.
     runtime.finish_queued_delivery_acks(&launch_tasks);
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a negative ACK must retain the consecutive failure cause"
+    );
     assert!(!runtime
         .pending_launch_delivery_acks
         .contains_key(&window_id));
@@ -6200,6 +6296,18 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         *ack
     };
     runtime.handle_issue_monitor_launch_delivery_ack(take_ack());
+    assert!(
+        !runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a successful owner ACK starts a new failure episode for its project"
+    );
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&other_project),
+        "an ACK must preserve another project's consecutive failure cause"
+    );
     assert_eq!(
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
         disk_after_ready
@@ -6348,10 +6456,19 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         stale_owner_ack.is_err(),
         "the replaced owner incarnation cannot ACK"
     );
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(repo.clone(), "owner endpoint unavailable".into());
     stale_ack();
     assert!(runtime
         .handle_issue_monitor_launch_delivery_ack(take_ack())
         .is_empty());
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a stale ACK must retain the consecutive failure cause"
+    );
     assert_eq!(
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
         disk_before_stale_ack

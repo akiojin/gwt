@@ -749,6 +749,10 @@ export function createLaunchWizardSurface({
         renderWorkAdvisoryPanel();
         wizardAdvisoryTimer = setTimeout(() => {
           wizardAdvisoryTimer = 0;
+          if (!isStartWorkLaunch()) {
+            wizardAdvisoryLoading = false;
+            return;
+          }
           wizardAdvisoryRequestSeq += 1;
           wizardAdvisoryLatestRequestId = wizardAdvisoryRequestSeq;
           requestWorkAdvisory({
@@ -757,6 +761,12 @@ export function createLaunchWizardSurface({
             request_id: wizardAdvisoryRequestSeq,
           });
         }, 280);
+      }
+
+      function resyncWorkAdvisory(replayedRequestIds = []) {
+        if (!isStartWorkLaunch() || !wizardAdvisoryLoading || wizardAdvisoryTimer
+          || replayedRequestIds.includes(wizardAdvisoryLatestRequestId)) return;
+        scheduleWorkAdvisory();
       }
 
       // SPEC-2359 US-80 — apply a duplicate-work advisory result. Ignore stale
@@ -2328,6 +2338,7 @@ export function createLaunchWizardSurface({
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,

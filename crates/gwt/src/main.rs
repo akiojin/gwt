@@ -4889,6 +4889,7 @@ mod tests {
             pending_launch_delivery_acks: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_launch_attempts: std::collections::HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
