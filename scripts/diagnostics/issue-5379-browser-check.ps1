@@ -24,7 +24,7 @@ foreach ($file in @($binary, $gwtd)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'Build this checkout gwt/gwtd before browser-check.' }
 }
 if ($BaselineEvidence) { $BaselineEvidence = (Resolve-Path -LiteralPath $BaselineEvidence).Path }
-$node = (Get-Command node -CommandType Application).Source
+$node = (Get-Command node -CommandType Application | Select-Object -First 1).Source
 $artifactRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp'
 $checkHome = Join-Path $artifactRoot ("gwt-5379-$Arm-" + [guid]::NewGuid().ToString('N'))
 foreach ($relative in @('.gwt', '.codex', '.claude', 'workload', 'tmp')) {
@@ -124,6 +124,8 @@ function Invoke-IsolatedGwtd([string]$Operation, [hashtable]$Parameters, [string
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     $process = [Diagnostics.Process]::Start($start)
     try {
         $process.StandardInput.WriteLine((@{schema_version=1;operation=$Operation;params=$Parameters} | ConvertTo-Json -Depth 10 -Compress))
@@ -154,7 +156,7 @@ function Assert-ManagedBrowserPreflight($Doctor) {
     }
 }
 function Invoke-FixtureGit([string]$Project, [string[]]$Arguments) {
-    $start = New-IsolatedProcess (Get-Command git -CommandType Application).Source $Project
+    $start = New-IsolatedProcess (Get-Command git -CommandType Application | Select-Object -First 1).Source $Project
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
