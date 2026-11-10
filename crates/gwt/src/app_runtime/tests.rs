@@ -7756,9 +7756,10 @@ fn owner_monitor_fixture_with_prefs(
             std::process::id(),
         ),
     ) {
-        assert_eq!(
-            error.to_string(),
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+        assert!(
+            matches!(error,
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(message)
+                if message == gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR),
             "the actual initial source scan must be reserved or already running"
         );
     }

@@ -16812,7 +16812,7 @@ exit 0
                 .expect("bounded receipt")
                 .err()
                 .map(|error| error.message()),
-            Some("Issues control rejected: scan_already_in_flight")
+            Some(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR)
         );
         assert!(
             !probe.overlap_observed(),

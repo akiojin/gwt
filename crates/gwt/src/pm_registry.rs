@@ -113,7 +113,7 @@ pub const PM_STEERING_CLAUSE: &str =
 /// carry [`PM_STEERING_CLAUSE`] in full.
 pub const PM_STEERING_WAKE_CLAUSE: &str =
     "Steer stalled/off-scope/waiting launches via `board.post` or `pm.message.send` (never past \
-     Monitor); act/escalate on CI-RED/AUTO-MERGE-STALLED PRs, gone owners, and pending \
+     Issues); act/escalate on CI-RED/AUTO-MERGE-STALLED PRs, gone owners, and pending \
      gwt-feedback before judging no change.";
 
 /// Durable record of the one resident PM session for a project.
@@ -5321,7 +5321,7 @@ mod tests {
     #[test]
     fn steering_clauses_name_the_same_channels_and_monitor_boundary() {
         for clause in [PM_STEERING_CLAUSE, PM_STEERING_WAKE_CLAUSE] {
-            for phrase in ["`board.post`", "`pm.message.send`", "Monitor"] {
+            for phrase in ["`board.post`", "`pm.message.send`", "Issues"] {
                 assert!(
                     clause.contains(phrase),
                     "steering clause is missing {phrase}: {clause}"
