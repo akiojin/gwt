@@ -12197,6 +12197,9 @@ impl IssueMonitorState {
                 self.provider_quota_hold_releases.contains_key(provider)
                     && !self.provider_quota_holds.contains_key(provider)
             }) {
+                record.attempts = 0;
+                record.non_agent_attempts = 0;
+                record.last_failure_message = None;
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
@@ -12667,6 +12670,9 @@ impl IssueMonitorState {
                 .and_then(normalize_issue_monitor_provider)
                 .is_some_and(|held| held == provider);
             if held_by_provider {
+                record.attempts = 0;
+                record.non_agent_attempts = 0;
+                record.last_failure_message = None;
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
@@ -25875,9 +25881,12 @@ impl IssueMonitorState {
             self.record_launch_window_timeout(issue_number, message, now);
             return;
         }
-        // A remote-tracking ref race between concurrent fetches is neither an
-        // agent failure nor an attempt: retry behind a short backoff in every mode.
-        if gwt_agent::is_transient_launch_failure(&message) {
+        // Capacity admission and concurrent fetch races are not failed attempts.
+        // Keep them queued behind the existing transient infrastructure backoff.
+        if gwt_agent::is_transient_launch_failure(&message)
+            || (state == MonitorInboxState::LaunchFailed
+                && message.starts_with("Issue Monitor max_active reached ("))
+        {
             self.record_transient_launch_retry(issue_number, message, now);
             return;
         }
@@ -51233,6 +51242,11 @@ mod tests {
         monitor.record_candidate(issue(42));
         monitor.complete_active_launch(42, "tab-1::agent-42");
         let evidence = quota_hold_evidence_fixture();
+        let record = monitor.autonomous_record_mut(42);
+        record.attempts = 3;
+        record.non_agent_attempts = 3;
+        record.last_failure_message = Some(WINDOWLESS_LAUNCH_TIMEOUT_MESSAGE.into());
+        monitor.record_attempt(43);
 
         assert_eq!(
             monitor.try_hold_provider_usage_limit(
@@ -51295,6 +51309,18 @@ mod tests {
                 .autonomous_record(42)
                 .and_then(|record| record.retry_not_before.clone()),
             None
+        );
+        let released = monitor.autonomous_record(42).unwrap();
+        assert_eq!(
+            released.attempts, 0,
+            "quota release grants a fresh retry budget"
+        );
+        assert_eq!(released.non_agent_attempts, 0);
+        assert_eq!(released.last_failure_message, None);
+        assert_eq!(
+            monitor.attempt_count(43),
+            1,
+            "unrelated history is preserved"
         );
         let prefs = monitor.prefs();
         assert!(prefs.provider_quota_holds.is_empty());
@@ -51510,6 +51536,7 @@ mod tests {
         daemon.set_gui_connected(true);
         daemon.record_candidate(issue(42));
         daemon.complete_active_launch(42, "tab-1::agent-42");
+        daemon.record_attempt(42);
         assert_eq!(
             daemon.try_hold_provider_usage_limit(
                 42,
@@ -51537,8 +51564,14 @@ mod tests {
             "a hold released on disk must not be re-stamped by a process that still holds it"
         );
         assert!(daemon.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"));
+        assert_eq!(
+            daemon.attempt_count(42),
+            0,
+            "the release survives prefs rebase"
+        );
 
         daemon.complete_active_launch(42, "tab-1::agent-43");
+        daemon.record_attempt(42);
         assert_eq!(
             daemon.try_hold_provider_usage_limit(
                 42,
@@ -51552,6 +51585,11 @@ mod tests {
             IssueMonitorProviderUsageLimitOutcome::Held
         );
         daemon.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            daemon.attempt_count(42),
+            1,
+            "a newer hold keeps its retry history"
+        );
         assert_eq!(
             daemon
                 .prefs()
@@ -51754,6 +51792,41 @@ mod tests {
         assert_eq!(item.state, MonitorInboxState::Queued);
         assert_eq!(item.error_message.as_deref(), Some(message.as_str()));
         assert!(!monitor.retry_ready(4153, now));
+    }
+
+    #[test]
+    fn max_active_refusal_requeues_even_with_an_exhausted_attempt_budget() {
+        let now = "2026-11-10T00:47:09Z";
+        let message = "Issue Monitor max_active reached (8/8) before launching Issue #5379";
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(5379, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        monitor.complete_active_launch(5379, "tab-1::preparing-5379");
+        monitor.set_autonomous_phase(5379, AutonomousPhase::Implementing);
+        let record = monitor.autonomous_record_mut(5379);
+        record.attempts = 3;
+        record.last_failure_message = Some(message.into());
+
+        monitor.record_launch_failed_at(5379, message, now);
+
+        assert_eq!(
+            monitor.inbox_item(5379).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.queue.contains(&5379));
+        assert_eq!(monitor.attempt_count(5379), 3, "capacity is not an attempt");
+        assert_eq!(
+            monitor.autonomous_record(5379).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(!monitor.failed_issues.contains_key(&5379));
+        assert!(
+            !monitor.retry_ready(5379, now),
+            "capacity retries are backed off"
+        );
     }
 
     #[test]
