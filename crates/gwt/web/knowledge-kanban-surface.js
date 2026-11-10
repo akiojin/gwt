@@ -174,6 +174,7 @@ function reconcileKnowledgeList(host, entries, options) {
 
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
+  awaiting_measurement: Object.freeze({ label: "Awaiting measurement", tone: "idle" }),
   not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
   source_excluded: Object.freeze({ label: "Needs triage", tone: "needs-input" }),
   launching: Object.freeze({ label: "Launching", tone: "active" }),
@@ -308,7 +309,7 @@ const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_f
 // queue *without* starting an agent had no control at all and meant hand-editing
 // issue-monitor.json. Offered only where such a hold exists, so the button never
 // promises a change that cannot happen.
-const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed"]);
+const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed", "awaiting_measurement"]);
 const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
   closed: Object.freeze({ label: "Done", tone: "done" }),
   remote: Object.freeze({ label: "Remote", tone: "remote" }),
@@ -363,7 +364,7 @@ export function issueQueueColumn(entry, work = null, localLive = false) {
   if (issueStopReason(entry) !== null) return "backlog";
   // Reservations, window status and historical Work activity are not child
   // liveness evidence. Keep their existing action/authority rules separate.
-  if (["needs_human", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
+  if (["needs_human", "awaiting_measurement", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
   if (work?.status_category === "blocked") return "backlog";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
@@ -488,6 +489,8 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, surfaceWind
       return {
         order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
+    case "awaiting_measurement":
+      return { order: ["requeue-issue", "configure-issue", ...workActions] };
     case "launch_failed":
     case "agent_failed":
       return {
@@ -1026,6 +1029,7 @@ export function createKnowledgeKanbanSurface({
         if (primary.key === "monitor:source_excluded" && legacyReason) return legacyReason;
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
+          "monitor:awaiting_measurement": "Only measurement evidence remains after the merged work. Update the acceptance criteria when observations finish, or return the issue to the queue if implementation work remains.",
           "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
           "monitor:source_excluded": "This issue requires source trust triage before automatic launches.",
           "monitor:launching": "The monitor is starting an agent for this issue.",

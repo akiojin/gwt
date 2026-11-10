@@ -998,7 +998,12 @@ work ブランチが `develop` に merge されると、monitor は delivered �
 自分で決着させます（`Closes #N` は default branch でしか発火しません）。
 受け入れ基準がすべてチェック済みなら、PR 番号と merge
 SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
-`merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
+`merge 済み・未達 AC あり` コメントを残します。Autonomous が on の場合、実装残件は
+新しい session の queue に戻します。未達の基準がすべて `(measurement)` または
+`[measurement]` で明示されていれば、NeedsHuman に含めず Backlog の
+**Awaiting measurement** として実測を待ちます。測定後に受け入れ基準をチェックすると
+close を再評価でき、**Return to queue** で作業を再開することもできます。
+Autonomous が off の場合は従来どおり `NeedsHuman` にします。`gwt-spec` Issue は
 全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に
 委譲しても、未チェックの項目があれば close しません。auto-close は既定で
 `Autonomous` トグルに連動し、`issue.monitor.config.set` の

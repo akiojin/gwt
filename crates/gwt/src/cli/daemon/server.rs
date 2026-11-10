@@ -8592,7 +8592,16 @@ fn try_commit_issue_monitor_effect_result(
                         merge_sha.clone(),
                         outcome.unmet_acceptance.map_or_else(
                             || action.clone(),
-                            |unmet| crate::MergedIssueSettlementAction::UnmetAcceptance { unmet },
+                            |unmet| {
+                                if matches!(
+                                    action,
+                                    crate::MergedIssueSettlementAction::AwaitMeasurement { .. }
+                                ) {
+                                    crate::MergedIssueSettlementAction::ContinueWork { unmet }
+                                } else {
+                                    crate::MergedIssueSettlementAction::UnmetAcceptance { unmet }
+                                }
+                            },
                         ),
                         &completed.completed_at,
                     );

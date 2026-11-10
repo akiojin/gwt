@@ -87,6 +87,17 @@ test("Issue #4862 a deliberate stop stays Held despite stale window activity", a
   }
 });
 
+test("Issue #6994 measurement waits stay in Backlog and offer an explicit return to queue", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(6994, { monitor_state: "awaiting_measurement", queue_position: 1,
+    exclusion_reason: "Waiting for one day of production observations: AC-4" });
+  assert.equal(issueQueueColumn(entry), "backlog", "queue membership must not relaunch a measurement wait");
+  const model = issueRowStateModel({ entry });
+  assert.deepEqual(model.primary, { key: "monitor:awaiting_measurement", label: "Awaiting measurement", tone: "idle" });
+  assert.equal(model.secondary[0].label, entry.exclusion_reason);
+  assert.deepEqual(model.actions, ["requeue-issue", "configure-issue"]);
+});
+
 test("Issue #4862 launch diagnoses retain the cause and name the next operation", async () => {
   const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
   for (const [monitor_state, error_message, recovery] of [

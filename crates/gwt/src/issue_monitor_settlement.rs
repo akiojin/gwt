@@ -61,7 +61,7 @@ pub struct MergedIssueSettlementOutcome {
     pub closed: bool,
     /// The Issue was already closed when the attempt read it back.
     pub already_closed: bool,
-    /// A proposed close was downgraded after reading the current checklist.
+    /// A proposed close or measurement wait was downgraded by the live checklist.
     pub unmet_acceptance: Option<Vec<String>>,
 }
 
@@ -110,7 +110,7 @@ pub fn render_settlement_comment(
         }
         MergedIssueSettlementAction::UnmetAcceptance { unmet } => {
             body.push_str(&format!(
-                "merge 済み・未達 AC あり: PR #{pr_number}（merge commit `{sha}`）は merge されましたが、受け入れ基準が未達のため close しません。needs_human として人間の判断を待ちます。\n"
+                "merge 済み・未達 AC あり: PR #{pr_number}（merge commit `{sha}`）は merge されましたが、受け入れ基準が未達のため close しません。Autonomous が on なら残件を継続し、off なら needs_human として判断を待ちます。\n"
             ));
             if unmet.is_empty() {
                 body.push_str("\n受け入れ基準ブロック（`- [ ] AC-N:`）が見つかりません。\n");
@@ -120,6 +120,12 @@ pub fn render_settlement_comment(
             body.push_str(
                 "\n証跡を確認して Issue の受け入れ基準を更新するか、残りの作業の扱いを人間または PM が判断してください。委譲の記述だけでは close しません。\n",
             );
+        }
+        MergedIssueSettlementAction::ContinueWork { unmet } => {
+            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の slice を配信しました。Issue #{issue_number} は open のまま、残 AC を fresh launch の queue に戻します。\n\n未達 AC: {}\n", unmet.join(", ")));
+        }
+        MergedIssueSettlementAction::AwaitMeasurement { unmet } => {
+            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} は実測待ち（awaiting_measurement）です。測定後に AC を更新するか、明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
         }
     }
     body.push_str("\nManaged by gwt Issue Monitor.\n");
@@ -306,13 +312,22 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
         snapshot.body.clone()
     };
     let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(&source);
-    let unmet_acceptance = (wants_close && !criteria.all_checked()).then_some(criteria.unchecked);
-    let effective_action =
-        unmet_acceptance
-            .as_ref()
-            .map(|unmet| MergedIssueSettlementAction::UnmetAcceptance {
+    let invalid_measurement_wait =
+        matches!(action, MergedIssueSettlementAction::AwaitMeasurement { .. })
+            && !criteria.only_measurement_remaining();
+    let unmet_acceptance = ((wants_close && !criteria.all_checked()) || invalid_measurement_wait)
+        .then_some(criteria.unchecked);
+    let effective_action = unmet_acceptance.as_ref().map(|unmet| {
+        if invalid_measurement_wait {
+            MergedIssueSettlementAction::ContinueWork {
                 unmet: unmet.clone(),
-            });
+            }
+        } else {
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: unmet.clone(),
+            }
+        }
+    });
     let action = effective_action.as_ref().unwrap_or(action);
     let wants_close = matches!(action, MergedIssueSettlementAction::Close { .. });
     let marker = settlement_marker(pr_number, merge_sha);
@@ -529,6 +544,38 @@ mod tests {
         assert!(!outcome.commented, "marker present: no duplicate comment");
         assert!(outcome.closed);
         assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+    }
+
+    #[test]
+    fn issue_6994_measurement_wait_rechecks_the_live_criterion_text() {
+        let client = FakeIssueClient::new();
+        let repo = delivery_repo();
+        seed_open_issue(&client, 42, vec![]);
+        let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+        else {
+            panic!("snapshot")
+        };
+        snapshot.body = "## Acceptance Criteria\n- [ ] AC-1: implementation remains\n".into();
+        client.seed(snapshot);
+        let outcome = settle_merged_issue(
+            &client,
+            &repository(),
+            repo.path(),
+            42,
+            7,
+            Some("abc123"),
+            &MergedIssueSettlementAction::AwaitMeasurement {
+                unmet: vec!["AC-1".into()],
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(outcome.unmet_acceptance, Some(vec!["AC-1".to_string()]));
+        assert!(!outcome.closed);
+        assert!(client
+            .comments(IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("fresh launch")));
     }
 
     #[test]

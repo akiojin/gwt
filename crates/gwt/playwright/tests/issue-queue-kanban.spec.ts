@@ -46,6 +46,31 @@ const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-is
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
 
+test("Issue #6994 merged work awaits measurement in Backlog with an explicit requeue action", async ({ page }) => {
+  const reason = "Waiting for one day of production observations: AC-4";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 6994, title: "Merged work awaiting production observations",
+      state: "open", labels: [], related_work_refs: [] }]);
+    fixture.__queueConfirm([6994]);
+    fixture.__queueInbox([{ issue: { number: 6994 }, state: "awaiting_measurement", exclusion_reason: reason }]);
+  }, reason);
+  const waiting = column(page, "backlog").locator('[data-issue-number="6994"]');
+  await expect(waiting).toBeVisible();
+  const badge = waiting.locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Awaiting measurement");
+  await expect(badge).toHaveAttribute("data-issue-explanation", /Only measurement evidence remains/);
+  await expect(waiting).toContainText(reason);
+  await expect(waiting).not.toContainText(/Needs human|Agent failed/);
+  await expect(column(page, "queued").locator('[data-issue-number="6994"]')).toHaveCount(0);
+  await waiting.locator('[data-action="requeue-issue"]').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
+    { kind: "issue_monitor_requeue", issue_number: 6994 },
+  ]);
+});
+
 test("Issue #6880 artifact diagnostics recover to queued without a requeue request", async ({ page }, info) => {
   const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6880_PROJECTION;
   test.skip(!projectionPath, "Requires the projections emitted by the Issue #6880 Rust regression test");

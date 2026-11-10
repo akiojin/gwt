@@ -383,6 +383,10 @@ pub enum MergedIssueSettlementAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unmet: Vec<String>,
     },
+    /// Autonomous delivery ended one slice; implementation remains runnable.
+    ContinueWork { unmet: Vec<String> },
+    /// Only explicitly tagged production measurement criteria remain.
+    AwaitMeasurement { unmet: Vec<String> },
 }
 
 /// One merged pull request for an Issue's work branch, as the scan saw it.
@@ -2954,6 +2958,8 @@ pub enum MonitorInboxState {
     /// The source is untrusted and requires PM triage. Re-evaluated each scan.
     #[serde(alias = "hold_excluded")]
     SourceExcluded,
+    /// Delivered implementation awaits production measurements, not a decision.
+    AwaitingMeasurement,
     Launching,
     Launched,
     /// Current Issue generation is complete. The GitHub Issue may still be
@@ -2986,6 +2992,7 @@ impl MonitorInboxState {
                 | MonitorInboxState::LaunchFailed
                 | MonitorInboxState::AgentFailed
                 | MonitorInboxState::NeedsHuman
+                | MonitorInboxState::AwaitingMeasurement
         )
     }
 }
@@ -8569,6 +8576,7 @@ impl IssueMonitorState {
         state.enforce_provider_quota_account_bindings();
         state.enforce_provider_quota_hold_releases();
         state.enforce_open_pr_holds();
+        state.enforce_measurement_waits();
         state
     }
 
@@ -13460,6 +13468,7 @@ impl IssueMonitorState {
             self.remember_failed_launch_start(failed.issue_number, at);
         }
         self.reconcile_delivered_failures();
+        self.enforce_measurement_waits();
         self.reconcile_terminal_queue();
     }
 
@@ -16161,7 +16170,25 @@ impl IssueMonitorState {
                 settled.map(|settlement| &settlement.action),
                 Some(MergedIssueSettlementAction::AwaitClose { .. })
             );
-            if !(awaiting_only && self.auto_close_merged_issues_enabled()) {
+            let acceptance_progressed = self.inbox_item(issue_number).is_some_and(|item| {
+                let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                    item.issue.body.as_deref().unwrap_or(""),
+                );
+                match settled.map(|settlement| &settlement.action) {
+                    Some(MergedIssueSettlementAction::AwaitMeasurement { .. }) => {
+                        !criteria.only_measurement_remaining()
+                    }
+                    Some(MergedIssueSettlementAction::ContinueWork { unmet }) => {
+                        criteria.all_checked()
+                            || (criteria.only_measurement_remaining()
+                                && criteria.unchecked != *unmet)
+                    }
+                    _ => false,
+                }
+            });
+            if !((awaiting_only || acceptance_progressed)
+                && self.auto_close_merged_issues_enabled())
+            {
                 return false;
             }
         }
@@ -16213,6 +16240,7 @@ impl IssueMonitorState {
         if !self.merged_issue_settlement_applies(issue_number, delivery) {
             return false;
         }
+        let action = self.remaining_acceptance_action(issue_number, action);
         let epoch = self.effect_authority_epoch;
         let sha = delivery.merge_sha.as_deref().unwrap_or("unknown");
         self.prepare_effect(PendingIssueMonitorEffect::prepared(
@@ -16239,6 +16267,7 @@ impl IssueMonitorState {
         action: MergedIssueSettlementAction,
         settled_at: &str,
     ) {
+        let action = self.remaining_acceptance_action(issue_number, action);
         self.merged_issue_settlements.insert(
             issue_number,
             MergedIssueSettlement {
@@ -16273,7 +16302,81 @@ impl IssueMonitorState {
                     format!("PR #{pr_number} merged with unmet acceptance criteria: {detail}"),
                 );
             }
+            MergedIssueSettlementAction::ContinueWork { .. }
+            | MergedIssueSettlementAction::AwaitMeasurement { .. } => {
+                self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(
+                    issue_number,
+                    "merged slice; remaining acceptance",
+                    settled_at,
+                );
+                self.enforce_measurement_waits();
+            }
             MergedIssueSettlementAction::AwaitClose { .. } => {}
+        }
+    }
+
+    fn remaining_acceptance_action(
+        &self,
+        issue_number: u64,
+        action: MergedIssueSettlementAction,
+    ) -> MergedIssueSettlementAction {
+        let unmet = match action {
+            MergedIssueSettlementAction::UnmetAcceptance { unmet }
+            | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+            // The executor may have downgraded a planned measurement wait
+            // using a newer live checklist. Never restore it from stale inbox text.
+            MergedIssueSettlementAction::ContinueWork { unmet } if self.autonomous_mode => {
+                return MergedIssueSettlementAction::ContinueWork { unmet };
+            }
+            MergedIssueSettlementAction::ContinueWork { unmet } => unmet,
+            other => return other,
+        };
+        if !self.autonomous_mode {
+            return MergedIssueSettlementAction::UnmetAcceptance { unmet };
+        }
+        let measurement_only = self.inbox_item(issue_number).is_some_and(|item| {
+            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                item.issue.body.as_deref().unwrap_or(""),
+            );
+            // A stale close result may describe a newer live checklist. Unknown
+            // IDs must stay runnable rather than silently entering a wait.
+            criteria.unchecked == unmet && criteria.only_measurement_remaining()
+        });
+        if measurement_only {
+            MergedIssueSettlementAction::AwaitMeasurement { unmet }
+        } else {
+            MergedIssueSettlementAction::ContinueWork { unmet }
+        }
+    }
+
+    fn enforce_measurement_waits(&mut self) {
+        for item in &mut self.inbox {
+            if self.autonomous_mode
+                && item.issue.state == IssueMonitorIssueState::Open
+                && matches!(
+                    item.state,
+                    MonitorInboxState::Queued | MonitorInboxState::AwaitingMeasurement
+                )
+                && self
+                    .merged_issue_settlements
+                    .get(&item.issue.number)
+                    .is_some_and(|settlement| {
+                        matches!(
+                            settlement.action,
+                            MergedIssueSettlementAction::AwaitMeasurement { .. }
+                        )
+                    })
+                && crate::issue_monitor_gate::classify_acceptance_criteria(
+                    item.issue.body.as_deref().unwrap_or(""),
+                )
+                .only_measurement_remaining()
+            {
+                item.state = MonitorInboxState::AwaitingMeasurement;
+                item.error_message = None;
+                item.exclusion_reason = Some("Only measurement evidence remains; update acceptance after measurement or explicitly return to queue.".into());
+                self.queue.retain(|number| *number != item.issue.number);
+            }
         }
     }
 
@@ -18235,6 +18338,38 @@ impl IssueMonitorState {
             self.label_excluded_issues.remove(&issue_number);
         }
         let mut existing = self.inbox_item(issue_number).cloned();
+        // Upgrade only the old merged-acceptance park, never an actual user
+        // decision or an operator stop recorded after that settlement.
+        if self.autonomous_mode
+            && existing.as_ref().is_some_and(|item| {
+                item.state == MonitorInboxState::NeedsHuman
+                    && item.error_message.as_deref().is_some_and(|message| {
+                        message.starts_with("PR #")
+                            && message.contains("merged with unmet acceptance criteria:")
+                    })
+            })
+        {
+            if let Some(settlement) = self
+                .merged_issue_settlements
+                .get(&issue_number)
+                .cloned()
+                .filter(|settlement| {
+                    matches!(
+                        settlement.action,
+                        MergedIssueSettlementAction::UnmetAcceptance { .. }
+                    )
+                })
+            {
+                self.record_merged_issue_settlement(
+                    issue_number,
+                    settlement.pr_number,
+                    settlement.merge_sha,
+                    settlement.action,
+                    &format_rfc3339_utc(chrono::Utc::now()),
+                );
+                existing = self.inbox_item(issue_number).cloned();
+            }
+        }
         let exclusion = issue_monitor_candidate_exclusion(&issue, self.source_repository)
             .or_else(|| {
                 (!allowed).then(|| {
@@ -18371,6 +18506,7 @@ impl IssueMonitorState {
                 | Some(MonitorInboxState::Merged)
                 | Some(MonitorInboxState::NotReady)
                 | Some(MonitorInboxState::SourceExcluded)
+                | Some(MonitorInboxState::AwaitingMeasurement)
                 | Some(MonitorInboxState::Skipped)
                 | None => MonitorInboxState::Queued,
                 Some(other) => other,
@@ -18438,6 +18574,10 @@ impl IssueMonitorState {
             );
         }
         self.upsert_inbox(item);
+        self.enforce_measurement_waits();
+        let state = self
+            .inbox_item(issue_number)
+            .map_or(state, |item| item.state);
         if state != MonitorInboxState::Queued {
             self.queue.retain(|queued| *queued != issue_number);
         }
@@ -22967,6 +23107,44 @@ impl IssueMonitorState {
             return IssueMonitorRequeueOutcome::LaunchLive;
         }
         if !self.failed_issues.contains_key(&issue_number) {
+            if self
+                .merged_issue_settlements
+                .get(&issue_number)
+                .is_some_and(|settlement| {
+                    matches!(
+                        settlement.action,
+                        MergedIssueSettlementAction::AwaitMeasurement { .. }
+                    )
+                })
+            {
+                if let Some(settlement) = self.merged_issue_settlements.get_mut(&issue_number) {
+                    if let MergedIssueSettlementAction::AwaitMeasurement { unmet } =
+                        &settlement.action
+                    {
+                        settlement.action = MergedIssueSettlementAction::ContinueWork {
+                            unmet: unmet.clone(),
+                        };
+                        // A cold operator call can share the settlement's
+                        // second. Its decision must still win a stale rebase.
+                        settlement.settled_at = parse_rfc3339_utc(&settlement.settled_at)
+                            .zip(parse_rfc3339_utc(now))
+                            .map(|(previous, now)| {
+                                now.max(previous + chrono::Duration::nanoseconds(1))
+                                    .to_rfc3339()
+                            })
+                            .unwrap_or_else(|| now.to_string());
+                    }
+                }
+                let attempts = self.attempt_count(issue_number);
+                self.terminal_queue_push(&[issue_number], "operator", now);
+                self.requeue_issue_for_relaunch(issue_number, QueuePosition::Head);
+                self.fence_automatic_relaunch(issue_number, reason, now);
+                return IssueMonitorRequeueOutcome::Requeued {
+                    stale_window_id: None,
+                    attempts_before: attempts,
+                    attempts_after: attempts,
+                };
+            }
             return IssueMonitorRequeueOutcome::NotHeld;
         }
 
@@ -51096,6 +51274,158 @@ mod tests {
             vec![42],
             "AC-2: enabling auto-close acts on the delivery the annotation left open"
         );
+    }
+
+    #[test]
+    fn issue_6994_autonomous_unmet_merge_requeues_a_fresh_slice() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: finish implementation\n".into());
+        scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+        monitor.autonomous_record_mut(42).attempts = 2;
+        let stale = monitor.prefs();
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        monitor.rebase_daemon_driver_prefs(&stale);
+        monitor.record_candidate(candidate);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.agent_status().needs_human.contains(&42));
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert_eq!(
+            monitor.queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert!(!monitor.merged_issue_settlement_applies(
+            42,
+            &merged_delivery(7, "aaa", "2026-09-01T01:00:00Z"),
+        ));
+    }
+
+    #[test]
+    fn issue_6994_legacy_merge_park_recovers_but_operator_stop_stays_held() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let mut candidate = issue(42);
+        candidate.body =
+            Some("## Acceptance Criteria\n- [ ] AC-1: implementation remains\n".into());
+        scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        let mut stopped = monitor.clone();
+        stopped.adopt_stopped_terminal_state(42, "operator decision");
+        for state in [&mut monitor, &mut stopped] {
+            state.set_autonomous_mode(true);
+            state.record_candidate(candidate.clone());
+        }
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(
+            stopped.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+    }
+
+    #[test]
+    fn issue_6994_measurement_wait_survives_scan_and_allows_close_after_measurement() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [x] AC-1: implementation\n- [ ] AC-2: observe one day (measurement)\n".into());
+        scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+        assert!(
+            matches!(
+                monitor.remaining_acceptance_action(
+                    42,
+                    MergedIssueSettlementAction::ContinueWork {
+                        unmet: vec!["AC-2".into()]
+                    }
+                ),
+                MergedIssueSettlementAction::ContinueWork { .. }
+            ),
+            "live downgrade wins over stale tagged inbox text"
+        );
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-2".into()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.record_candidate(candidate.clone());
+        assert_eq!(
+            serde_json::to_value(restored.inbox_item(42).unwrap().state).unwrap(),
+            "awaiting_measurement"
+        );
+        assert!(!restored.agent_status().needs_human.contains(&42));
+        assert!(!restored.queue.contains(&42));
+        let delivery = merged_delivery(7, "aaa", "2026-09-01T01:00:00Z");
+        assert!(!restored.merged_issue_settlement_applies(42, &delivery));
+        candidate.body = candidate.body.map(|body| body.replace("[ ]", "[x]"));
+        restored.record_candidate(candidate);
+        assert!(restored.merged_issue_settlement_applies(42, &delivery));
+    }
+
+    #[test]
+    fn issue_6994_operator_requeue_releases_measurement_wait_without_reparking() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body =
+            Some("## Acceptance Criteria\n- [ ] AC-1: observe one day [measurement]\n".into());
+        scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        // The CLI reconstructs only durable prefs, without an inbox census.
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(cold.inbox_item(42).is_none());
+        assert!(matches!(
+            cold.requeue_failed_issue(42, "measurement ready", "2026-09-01T01:00:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        monitor.rebase_daemon_driver_prefs(&cold.prefs());
+        assert!(matches!(
+            monitor.merged_issue_settlement(42).unwrap().action,
+            MergedIssueSettlementAction::ContinueWork { .. }
+        ));
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), cold.prefs());
+        restored.record_candidate(candidate);
+        assert_eq!(
+            restored.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!restored.merged_issue_settlement_applies(
+            42,
+            &merged_delivery(7, "aaa", "2026-09-01T01:00:00Z"),
+        ));
     }
 
     #[test]

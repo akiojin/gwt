@@ -58,6 +58,20 @@ impl AcceptanceCriteria {
         self.machine_checkable && self.unchecked.is_empty()
     }
 
+    /// Only explicit tags may defer remaining work for production measurement.
+    /// Unknown or mixed implementation criteria must keep the work runnable.
+    pub fn only_measurement_remaining(&self) -> bool {
+        self.machine_checkable
+            && !self.unchecked.is_empty()
+            && self.unchecked.iter().all(|id| {
+                self.criterion_texts.iter().any(|(criterion_id, text)| {
+                    let text = text.to_ascii_lowercase();
+                    criterion_id == id
+                        && (text.contains("(measurement)") || text.contains("[measurement]"))
+                })
+            })
+    }
+
     /// Actionable rejection reason naming the missing element (Issue #3930
     /// AC-2), or `None` when the criteria are machine-checkable.
     pub fn rejection_reason(&self) -> Option<String> {
