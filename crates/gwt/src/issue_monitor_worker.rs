@@ -9041,6 +9041,9 @@ pub(crate) mod tests {
     /// exhausted one — the production fan-out failure this Issue is about.
     #[test]
     fn a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window() {
+        use gwt_core::operation_deadline::{now, ScopedOperationClock, ScopedOperationDeadline};
+        use std::time::{Duration, Instant};
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9048,47 +9051,50 @@ pub(crate) mod tests {
             "GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS",
             "50",
         );
-        let scan_window = std::time::Duration::from_secs(30);
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + scan_window,
-        );
+        let started = Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let scan_window = Duration::from_secs(30);
+        let _scan_deadline = ScopedOperationDeadline::enter(started + scan_window);
 
         let observed = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
             let remaining = gwt_core::operation_deadline::current()
                 .expect("the readback runs under a deadline")
-                .saturating_duration_since(std::time::Instant::now());
+                .saturating_duration_since(now());
             Ok::<_, String>(remaining)
         })
         .expect("the stage itself succeeds");
 
-        assert!(
-            observed <= std::time::Duration::from_millis(50),
-            "the call must see its own budget, got {observed:?}"
+        assert_eq!(
+            observed,
+            // test-hygiene: allow-short-duration Logical budget under the fixed operation clock; no real-time wait.
+            Duration::from_millis(50),
+            "the call must see its own budget"
         );
 
         // The scan window is intact afterwards, so the next candidate is not
         // paying for this one.
         let remaining = gwt_core::operation_deadline::current()
             .expect("the scan deadline is restored")
-            .saturating_duration_since(std::time::Instant::now());
-        assert!(
-            remaining > std::time::Duration::from_secs(20),
-            "the shared scan window must survive one readback, got {remaining:?}"
+            .saturating_duration_since(now());
+        assert_eq!(
+            remaining, scan_window,
+            "the shared scan window must survive one readback"
         );
     }
 
     /// Issue #3933: the fan-out yields before it eats the launch stage's budget.
     #[test]
     fn the_readback_fan_out_stops_while_the_launch_stage_still_has_budget() {
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
         assert!(
             readback_fan_out_has_budget(),
             "no ambient deadline imposes no fan-out limit"
         );
 
-        let _almost_spent = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + ISSUE_MONITOR_LAUNCH_RESERVE
-                - std::time::Duration::from_millis(1),
-        );
+        let started = std::time::Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let _almost_spent = ScopedOperationDeadline::enter(started + ISSUE_MONITOR_LAUNCH_RESERVE);
 
         assert!(
             !readback_fan_out_has_budget(),
