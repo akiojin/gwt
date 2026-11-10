@@ -1,12 +1,27 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { startWorksManagedSource } from "./_helpers/works-managed-source";
 
-const fileDropBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
-const fileDropAppUrl = fileDropBase ? new URL(new URL(APP_URL).pathname, fileDropBase).href : APP_URL;
+let fileDropBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+let fileDropAppUrl = fileDropBase ? new URL(new URL(APP_URL).pathname, fileDropBase).href : APP_URL;
 
 test.describe("Browser file drop attachments", () => {
   const browserErrors = new WeakMap<Page, string[]>();
+  let managedSource: Awaited<ReturnType<typeof startWorksManagedSource>> | undefined;
+  test.beforeAll(async ({ browser }, info) => {
+    if (process.env.GWT_PLAYWRIGHT_WORKS_SOURCE !== "1") return;
+    test.setTimeout(60_000);
+    managedSource = await startWorksManagedSource(browser, info);
+    fileDropBase = managedSource.url;
+    fileDropAppUrl = new URL(new URL(APP_URL).pathname, fileDropBase).href;
+  });
+  test.afterAll(async () => {
+    test.setTimeout(60_000);
+    await managedSource?.stop();
+    managedSource = undefined;
+  });
   test.beforeEach(async ({ page }, testInfo) => {
+    await managedSource?.audit("before");
     const errors: string[] = [];
     browserErrors.set(page, errors);
     page.on("pageerror", error => errors.push(error.message));
@@ -15,8 +30,15 @@ test.describe("Browser file drop attachments", () => {
     await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
   });
   test.afterEach(async ({ page }, testInfo) => {
-    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
-    expect(browserErrors.get(page), "console and page errors").toEqual([]);
+    const failures: unknown[] = [];
+    try {
+      await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+      expect(browserErrors.get(page), "console and page errors").toEqual([]);
+    } catch (error) { failures.push(error); }
+    try { await managedSource?.audit("post"); }
+    catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Attachment assertions and source post proof failed");
   });
   test.use({
     deviceScaleFactor: 1,
