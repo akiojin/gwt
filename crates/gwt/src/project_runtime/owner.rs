@@ -990,10 +990,23 @@ enum ProjectChoiceError {
     Unconfirmed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ReconciliationTarget {
+    Registry,
+    Retirement(String, u64),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReconciliationAttempt {
+    Scheduled(std::time::Instant),
+    Attempted,
+    NeedsHuman,
+}
+
 struct ReconciliationRecovery {
     timeout: std::time::Duration,
     retry_at: Option<std::time::Instant>,
-    attempted: bool,
+    attempts: HashMap<ReconciliationTarget, ReconciliationAttempt>,
     needs_human: bool,
 }
 
@@ -1002,11 +1015,63 @@ impl Default for ReconciliationRecovery {
         Self {
             timeout: std::time::Duration::from_secs(30),
             retry_at: None,
-            attempted: false,
+            attempts: HashMap::new(),
             needs_human: false,
         }
     }
 }
+
+impl ReconciliationRecovery {
+    fn advance(
+        &mut self,
+        now: std::time::Instant,
+        retained: &HashSet<ReconciliationTarget>,
+        failed: &HashSet<ReconciliationTarget>,
+    ) -> (Vec<ReconciliationTarget>, Vec<ReconciliationTarget>) {
+        // In-flight cleanup keeps its attempt history, but needs no scheduled timer.
+        self.attempts.retain(|target, attempt| {
+            retained.contains(target)
+                && (failed.contains(target)
+                    || !matches!(attempt, ReconciliationAttempt::Scheduled(_)))
+        });
+        let deadline = now
+            .checked_add(self.timeout)
+            .unwrap_or(now + std::time::Duration::from_secs(30));
+        let mut retry = Vec::new();
+        let mut exhausted = Vec::new();
+        for target in failed {
+            let attempt = self
+                .attempts
+                .entry(target.clone())
+                .or_insert(ReconciliationAttempt::Scheduled(deadline));
+            match *attempt {
+                ReconciliationAttempt::Scheduled(due) if now >= due => {
+                    *attempt = ReconciliationAttempt::Attempted;
+                    retry.push(target.clone());
+                }
+                ReconciliationAttempt::Attempted => {
+                    *attempt = ReconciliationAttempt::NeedsHuman;
+                    exhausted.push(target.clone());
+                }
+                _ => {}
+            }
+        }
+        self.retry_at = self
+            .attempts
+            .values()
+            .filter_map(|attempt| match attempt {
+                ReconciliationAttempt::Scheduled(due) => Some(*due),
+                _ => None,
+            })
+            .min();
+        self.needs_human = self
+            .attempts
+            .values()
+            .any(|attempt| matches!(attempt, ReconciliationAttempt::NeedsHuman));
+        (retry, exhausted)
+    }
+}
+
 impl From<String> for ProjectChoiceError {
     fn from(message: String) -> Self {
         Self::BeforeSave(message)
@@ -2134,73 +2199,67 @@ impl OwnerState {
 
     fn reconcile_failed_retirements(&mut self, now: std::time::Instant) {
         let registry_failed = self.agent_registry.is_err();
-        if self.retirements.is_empty() && !registry_failed {
-            self.reconciliation.retry_at = None;
-            self.reconciliation.attempted = false;
-            self.reconciliation.needs_human = false;
-            return;
-        }
-        let failed = self
+        let mut retained = self
+            .retirements
+            .keys()
+            .map(|(id, incarnation)| ReconciliationTarget::Retirement(id.clone(), *incarnation))
+            .chain(self.closing.iter().map(|(id, closing)| {
+                ReconciliationTarget::Retirement(id.clone(), closing.incarnation)
+            }))
+            .collect::<HashSet<_>>();
+        let mut failed = self
             .retirements
             .iter()
-            .filter_map(|(key, captured)| captured.is_some().then_some(key.clone()))
-            .collect::<Vec<_>>();
-        if failed.is_empty() && !registry_failed {
-            self.reconciliation.retry_at = None;
-            return;
-        }
-        if self.reconciliation.attempted {
-            if !self.reconciliation.needs_human {
-                self.reconciliation.needs_human = true;
-                use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
-                let message = "Project owner exact cleanup recovery needs_human; retained identities require reconciliation";
-                tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key,
-                    identities = ?failed, registry_failed, recovery = "needs_human", "{message}");
-                let mut record = ErrorRecord::new(
-                    ErrorKind::DaemonFault,
-                    message,
-                    ErrorTarget {
-                        project_root: Some(self.root.to_string_lossy().into_owned()),
-                        ..Default::default()
-                    },
-                )
-                .with_context(std::collections::BTreeMap::from([
-                    ("operation".into(), "project_owner_reconciliation".into()),
-                    ("recovery".into(), "needs_human".into()),
-                    ("identities".into(), format!("{failed:?}")),
-                ]));
-                record.id = format!(
-                    "project-owner-reconciliation-{}-{}",
-                    self.project_key, self.host_instance_id
-                );
-                if let Err(error) = gwt_core::error_ledger::record_once(record) {
-                    tracing::warn!(%error, "could not record project owner reconciliation recovery");
-                }
-            }
-            return;
-        }
-        let Some(retry_at) = self.reconciliation.retry_at else {
-            self.reconciliation.retry_at = Some(
-                now.checked_add(self.reconciliation.timeout)
-                    .unwrap_or(now + std::time::Duration::from_secs(30)),
-            );
-            tracing::warn!(target: "gwt.owner.recovery", project_key = %self.project_key,
-                identities = ?failed, registry_failed, timeout_secs = self.reconciliation.timeout.as_secs(),
-                "exact owner cleanup scheduled for automatic reconciliation");
-            return;
-        };
-        if now < retry_at {
-            return;
-        }
-        self.reconciliation.retry_at = None;
-        self.reconciliation.attempted = true;
-        tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
-            identities = ?failed, registry_failed, "retrying exact owner cleanup");
+            .filter(|(_, captured)| captured.is_some())
+            .map(|((id, incarnation), _)| {
+                ReconciliationTarget::Retirement(id.clone(), *incarnation)
+            })
+            .collect::<HashSet<_>>();
         if registry_failed {
-            self.agent_registry = super::agent_dispatch::load_owner_registry(&self.root);
-            self.refresh_registry_projection();
+            retained.insert(ReconciliationTarget::Registry);
+            failed.insert(ReconciliationTarget::Registry);
         }
-        for (id, incarnation) in failed {
+        let previous_retry_at = self.reconciliation.retry_at;
+        let (retry, exhausted) = self.reconciliation.advance(now, &retained, &failed);
+        if self.reconciliation.retry_at.is_some()
+            && self.reconciliation.retry_at != previous_retry_at
+        {
+            tracing::warn!(target: "gwt.owner.recovery", project_key = %self.project_key,
+                attempts = ?self.reconciliation.attempts, timeout_secs = self.reconciliation.timeout.as_secs(),
+                "exact owner cleanup scheduled for automatic reconciliation");
+        }
+        if !exhausted.is_empty() {
+            use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+            let message = "Project owner exact cleanup recovery needs_human; retained identities require reconciliation";
+            tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key,
+                identities = ?exhausted, recovery = "needs_human", "{message}");
+            let record = ErrorRecord::new(
+                ErrorKind::DaemonFault,
+                message,
+                ErrorTarget {
+                    project_root: Some(self.root.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            )
+            .with_context(std::collections::BTreeMap::from([
+                ("operation".into(), "project_owner_reconciliation".into()),
+                ("recovery".into(), "needs_human".into()),
+                ("identities".into(), format!("{exhausted:?}")),
+            ]));
+            if let Err(error) = gwt_core::error_ledger::record_once(record) {
+                tracing::warn!(%error, "could not record project owner reconciliation recovery");
+            }
+        }
+        if !retry.is_empty() {
+            tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
+                identities = ?retry, "retrying exact owner cleanup");
+        }
+        for target in retry {
+            let ReconciliationTarget::Retirement(id, incarnation) = target else {
+                self.agent_registry = super::agent_dispatch::load_owner_registry(&self.root);
+                self.refresh_registry_projection();
+                continue;
+            };
             let Some(captured) = self
                 .retirements
                 .get_mut(&(id.clone(), incarnation))
@@ -13829,6 +13888,124 @@ mod drop_tests {
     use std::time::Duration;
 
     #[test]
+    fn later_failed_cleanup_gets_its_own_recovery_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (mut state, _receiver, _handle) = owner_fixture(root.path());
+        let first = ReconciliationTarget::Retirement("first".into(), 1);
+        let later = ReconciliationTarget::Retirement("later".into(), 2);
+        state.retirements.insert(("first".into(), 1), None);
+        state
+            .reconciliation
+            .attempts
+            .insert(first.clone(), ReconciliationAttempt::Attempted);
+        let registry = state.agent_registry.as_ref().unwrap().clone();
+        let project_key = state.project_key.clone();
+        let capture = |id: &str| {
+            Some(Retirement::StoppedWindow(Box::new(
+                super::super::agent_dispatch::StoppedWindowRetirement {
+                    sessions_dir: root.path().into(),
+                    expected: None,
+                    cleanup: super::super::agent_dispatch::OwnedWindowRecordCleanup {
+                        registry: registry.clone(),
+                        registry_path: root.path().join("workspace.json"),
+                        root: root.path().into(),
+                        project_key: project_key.clone(),
+                        canonical_id: id.into(),
+                        expected_session_id: None,
+                    },
+                },
+            )))
+        };
+        state
+            .retirements
+            .insert(("later".into(), 2), capture("later"));
+        let now = std::time::Instant::now();
+        let tick = |seconds| {
+            // test-hygiene: allow-wall-clock-deadline Advances only the injected recovery clock; no real-time wait or latency assertion.
+            now + Duration::from_secs(seconds)
+        };
+
+        state.reconcile_failed_retirements(tick(31));
+
+        assert_eq!(state.reconciliation.retry_at, Some(tick(61)));
+        assert!(!state.reconciliation.needs_human);
+        state
+            .retirements
+            .insert(("first".into(), 1), capture("first"));
+        state.reconcile_failed_retirements(tick(32));
+        assert!(state.reconciliation.needs_human);
+        assert_eq!(state.reconciliation.retry_at, Some(tick(61)));
+
+        // Observe the real scheduling decision without starting another finalizer.
+        // The existing PTY regression covers dispatch and physical completion.
+        let retained = HashSet::from([first.clone(), later.clone()]);
+        assert_eq!(
+            state.reconciliation.advance(tick(60), &retained, &retained),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            state.reconciliation.advance(tick(61), &retained, &retained),
+            (vec![later.clone()], vec![]),
+            "the later identity gets its own retry while the first is exhausted"
+        );
+        state.reconcile_failed_retirements(tick(62));
+        state.reconcile_failed_retirements(tick(100));
+        let records = gwt_core::error_ledger::list_since(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                row.context.get("operation").map(String::as_str)
+                    == Some("project_owner_reconciliation")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records.len(),
+            2,
+            "each newly exhausted cohort is recorded once"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|row| row.context["identities"].clone())
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                format!("{:?}", std::slice::from_ref(&first)),
+                format!("{:?}", std::slice::from_ref(&later)),
+            ]),
+            "a diagnostic includes only identities whose own retry failed"
+        );
+
+        state.agent_registry = Err("registry temporarily unavailable".into());
+        state.reconcile_failed_retirements(tick(101));
+        assert_eq!(
+            state.reconciliation.retry_at,
+            Some(tick(131)),
+            "registry recovery is independent"
+        );
+        state.agent_registry = Ok(registry);
+        state.retirements.clear();
+        state.closing.insert(
+            "first".into(),
+            ClosingRuntime {
+                incarnation: 1,
+                pm_worktree: false,
+            },
+        );
+        state.reconcile_failed_retirements(tick(102));
+        assert_eq!(state.reconciliation.attempts.len(), 1);
+        assert!(matches!(
+            state.reconciliation.attempts.get(&first),
+            Some(ReconciliationAttempt::NeedsHuman)
+        ));
+        assert!(state.reconciliation.retry_at.is_none());
+        state.closing.get_mut("first").unwrap().incarnation = 2;
+        state.reconcile_failed_retirements(tick(103));
+        assert!(state.reconciliation.attempts.is_empty());
+        assert!(!state.reconciliation.needs_human);
+    }
+
+    #[test]
     fn inflight_retirement_clears_scheduled_reconciliation_deadline() {
         let root = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
@@ -13840,7 +14017,7 @@ mod drop_tests {
         state.reconcile_failed_retirements(now);
 
         assert!(state.reconciliation.retry_at.is_none());
-        assert!(!state.reconciliation.attempted);
+        assert!(state.reconciliation.attempts.is_empty());
     }
 
     struct TestPtyGuard(Arc<PtyHandle>);
