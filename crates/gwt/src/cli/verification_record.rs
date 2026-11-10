@@ -9520,7 +9520,8 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
-        let dir = tempfile::tempdir().unwrap();
+        let temporary = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tempfile::tempdir_in(temporary).unwrap();
         // Cargo metadata resolves the temporary-root symlink, unlike absolute overrides.
         let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let commands = ["cargo nextest run -p gwt --lib".to_string()];
@@ -9764,7 +9765,8 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::tempdir().unwrap();
+        let temporary = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tempfile::tempdir_in(temporary).unwrap();
         let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let candidate = dir

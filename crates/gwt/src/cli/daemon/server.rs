@@ -315,29 +315,61 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
 }
 
 #[cfg(test)]
+pub struct TestDaemonServer {
+    shutdown: Arc<DaemonShutdown>,
+    task: Option<tokio::task::JoinHandle<Result<i32, SpecOpsError>>>,
+    pub(crate) owner: crate::project_runtime::owner::OwnerHandle,
+}
+
+#[cfg(test)]
+impl TestDaemonServer {
+    pub async fn shutdown(mut self) {
+        self.shutdown.request();
+        let task = self.task.take().expect("test daemon server task");
+        task.await
+            .expect("test daemon server task failed")
+            .expect("test daemon shutdown failed");
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDaemonServer {
+    fn drop(&mut self) {
+        self.owner.stop();
+        self.shutdown.request();
+    }
+}
+
+#[cfg(test)]
 pub fn spawn_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,
     hub: BroadcastHub,
-) -> Result<tokio::task::JoinHandle<Result<i32, SpecOpsError>>, SpecOpsError> {
+) -> Result<TestDaemonServer, SpecOpsError> {
     // Bind synchronously so test clients never race a scheduled server task.
     // Pin only this synchronous fixture setup, on Unix and Windows alike.
     let _prefs_budget = pin_prefs_hang_guard();
     let authority_lease = acquire_daemon_startup_lease(&endpoint.scope)?;
     let bound = bind_daemon(&endpoint, &socket_path, &endpoint_path, authority_lease)?;
+    let owner = bound.project_transport.owner.clone();
     let shutdown = Arc::new(DaemonShutdown::new());
     spawn_signal_watcher(Arc::clone(&shutdown));
-    Ok(tokio::spawn(run_bound_server(
+    let task = tokio::spawn(run_bound_server(
         endpoint,
         endpoint_path,
         hub,
-        shutdown,
+        shutdown.clone(),
         crate::IssueMonitorConfig::default(),
         ISSUE_MONITOR_SCAN_TIMEOUT,
         bound,
         IssueMonitorWorkerTestHooks::default(),
-    )))
+    ));
+    Ok(TestDaemonServer {
+        shutdown,
+        task: Some(task),
+        owner,
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -29494,9 +29526,8 @@ exit 1
         drop(write_half);
         drop(reader);
 
-        // Cancel the server (simulating SIGINT) by aborting.
-        server_handle.abort();
-        let _ = server_handle.await;
+        // Use the same cooperative shutdown as SIGINT.
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]
