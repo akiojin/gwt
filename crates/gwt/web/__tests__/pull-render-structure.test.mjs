@@ -20,7 +20,8 @@ test('structure measurement separates lexical sites, surface construction and re
       function receive(event) { switch (event.kind) {
         case "pm_reports": applyPmWindowReceiveEvent(event); break;
         case "terminal_output": applyPmWindowReceiveEvent(event); break;
-        case "terminal_snapshot": applyPmWindowReceiveEvent(event); break; } }
+        case "terminal_snapshot": applyPmWindowReceiveEvent(event); break;
+        case 9007199254740993n: applyPmWindowReceiveEvent(event); break; } }
       function syncPmChat() { document.createElement('div'); }
       function mountWindowBody() { body.innerHTML = ''; if (surface === "terminal") {
         body.innerHTML = '<div>'; const node = document.createElement('div');
@@ -30,6 +31,12 @@ test('structure measurement separates lexical sites, surface construction and re
       // subscribe( fetch( are counted by the original lexical method too.`],
     ['crates/gwt/web/ui-content.js', `export function renderUiContent() {
       const node = document.createElement('div'); node.innerHTML = '<p>'; return node; }`],
+    ['crates/gwt/web/other.js', `import { createUiStateStore } from './ui-state-store.js';
+      const model = createUiStateStore({});
+      const applyOtherReceiveEvent = (event) => {
+        if (!event) return;
+        switch (event.kind) { case 'other_state': model.update(() => ({ value: event.value })); }
+      };`],
   ]);
   const result = measureModules(modules);
   assert.deepEqual(result.lexical_totals,
@@ -38,6 +45,22 @@ test('structure measurement separates lexical sites, surface construction and re
   assert.deepEqual(result.receiver_audit.findings, []);
   assert.equal(result.receiver_audit.bypass_probes.length, 3);
   assert.ok(result.receiver_audit.bypass_probes.every(probe => probe.detected));
+  assert.equal(result.all_receiver_audit.scanned_modules, modules.size);
+  assert.deepEqual(result.all_receiver_audit.findings, []);
+  const receive = result.all_receiver_audit.roots.find(root => root.root === 'receive');
+  assert.ok(receive, 'the root inventory must include function declarations');
+  assert.doesNotThrow(() => JSON.stringify(result));
+  assert.equal(receive.switch_labels.at(-1).value, '9007199254740993');
+  const other = result.all_receiver_audit.roots.find(root => root.file.endsWith('/other.js'));
+  assert.equal(other.root, 'applyOtherReceiveEvent');
+  assert.equal(other.if_statements, 1);
+  assert.deepEqual(other.switch_labels.map(label => label.value), ['other_state']);
+  modules.set('crates/gwt/web/other.js', modules.get('crates/gwt/web/other.js')
+    .replace('model.update(', 'document.body.textContent = event.value; model.update('));
+  const bypass = measureModules(modules);
+  assert.deepEqual(bypass.receiver_audit.findings, [], 'the initial pair audit cannot cover other surfaces');
+  assert.ok(bypass.all_receiver_audit.findings.some(finding => finding.file.endsWith('/other.js')
+    && finding.root === 'applyOtherReceiveEvent' && finding.kind === 'dom-write'));
   const terminal = result.dom_scopes.find(scope => scope.scope === 'mountWindowBody:terminal');
   assert.deepEqual(terminal.construction_sites.map(site => site.kind), ['innerHTML=', 'createElement']);
   assert.ok(terminal.dom_operation_sites.some(site => site.kind === 'appendChild'));

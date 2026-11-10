@@ -31,9 +31,12 @@ test("server intents deliver once by transition ID without runtime or reconnect 
   assert.equal(notifier.handleIntent({ ...stopped }), null);
   const error = intent({ transition_id: "runtime-one:2", category: "error", title: "Agent error", body: "Stop-block hit an error" });
   assert.deepEqual(notifier.handleIntent(error), error);
-  const human = intent({ transition_id: "runtime-one:3", category: "needs_human", window_id: null, title: "Needs human" });
+  const interrupted = intent({ transition_id: "runtime-one:3", category: "interrupted", title: "Agent interrupted", body: "Fixture agent was interrupted in Repo One." });
+  assert.deepEqual(notifier.handleIntent(interrupted), interrupted);
+  assert.equal(notifier.handleIntent({ ...interrupted }), null);
+  const human = intent({ transition_id: "runtime-one:4", category: "needs_human", window_id: null, title: "Needs human" });
   assert.deepEqual(notifier.handleIntent(human), human);
-  assert.deepEqual(desktop, [stopped, error, human]);
+  assert.deepEqual(desktop, [stopped, error, interrupted, human]);
 });
 
 test("desktop-only intents never prompt or publish an in-app toast when permission is not granted", () => {
@@ -106,11 +109,13 @@ test("unsupported OS constructor failures are logged safely once and remain dedu
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
 function collectAttentionToaster() {
   const toasts = [];
+  const dismissed = [];
   const toaster = createAgentAttentionToaster({
     showToast: (notice) => toasts.push(notice),
+    dismissToast: id => dismissed.push(id),
     now: () => 1000,
   });
-  return { toaster, toasts };
+  return { toaster, toasts, dismissed };
 }
 
 test("FR-040: needs_input (waiting) fires an in-app toast even while present", () => {
@@ -127,14 +132,15 @@ test("FR-040: needs_input (waiting) fires an in-app toast even while present", (
   assert.equal(toasts.length, 1);
 });
 
-test("FR-040: blocked/error and done states also toast", () => {
+test("AS-01: errors toast but stopped/exited/interrupted never claim completion", () => {
   const { toaster, toasts } = collectAttentionToaster();
   toaster.handleRuntimeState({ windowId: "w-err", runtimeState: "error", windowData: { title: "a" } });
   toaster.handleRuntimeState({ windowId: "w-done", runtimeState: "stopped", windowData: { title: "b" } });
   toaster.handleRuntimeState({ windowId: "w-exit", runtimeState: "exited", windowData: { title: "c" } });
+  toaster.handleRuntimeState({ windowId: "w-intr", runtimeState: "interrupted", windowData: { title: "d" } });
   assert.deepEqual(
     toasts.map((t) => t.flavor),
-    ["error", "done", "done"],
+    ["error"],
   );
 });
 
@@ -175,11 +181,12 @@ test("FR-040: leaving and re-entering an attention state toasts again", () => {
   assert.equal(toasts.length, 2, "re-entry into waiting after running must toast again");
 });
 
-test("FR-040: error -> done transition toasts each distinct flavor", () => {
-  const { toaster, toasts } = collectAttentionToaster();
+test("AS-01: error -> stopped clears error attention without a completion toast", () => {
+  const { toaster, toasts, dismissed } = collectAttentionToaster();
   toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "error", windowData: {} });
   toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "stopped", windowData: {} });
-  assert.deepEqual(toasts.map((t) => t.flavor), ["error", "done"]);
+  assert.deepEqual(toasts.map((t) => t.flavor), ["error"]);
+  assert.deepEqual(dismissed, ["attention-w-1"]);
 });
 
 test("FR-040: forgetWindow clears dedupe so a fresh window toasts", () => {
@@ -197,6 +204,89 @@ test("FR-040: missing windowId yields no toast", () => {
   assert.equal(toasts.length, 0);
 });
 
+test("Issue #6729: status projections cannot turn persisted errors or stale launch details into attention", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  const input = { windowId: "foreign", runtimeState: "error", windowData: { title: "agent" } };
+  toaster.handleRuntimeState({ ...input, source: "snapshot" });
+  toaster.handleRuntimeState({ ...input, source: "window_state", statusDetail: "Launching..." });
+  assert.deepEqual(toasts, []);
+  toaster.handleRuntimeState({ ...input, source: "terminal_status", statusDetail: "Process exited with status 1" });
+  assert.equal(toasts.length, 1, "a real local diagnostic must still notify, including after reconnect");
+  assert.match(toasts[0].body, /Process exited with status 1/);
+  assert.doesNotMatch(toasts[0].body, /Launching/);
+});
+
+test("Issue #6729: retryable failure and successful retry resolve sticky errors", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { windowId: "retry", runtimeState: "error", statusDetail: "Launch timed out" };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, retryable: true });
+  assert.deepEqual(dismissed, [shown[0].id]);
+  assert.equal(shown.length, 1);
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, runtimeState: "running" });
+  assert.deepEqual(dismissed, [shown[0].id, shown[1].id]);
+});
+
+test("Issue #6729: errors share one project/Issue key across windows and recover on the successor", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { projectKey: "project-a", windowId: "old", runtimeState: "error", windowData: { linked_issue_number: 6729 } };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  assert.equal(shown[0].id, shown[1].id);
+  assert.equal(shown[1].windowId, "new", "the toast must target the current failed window");
+  toaster.forgetWindow("old");
+  assert.deepEqual(dismissed, [], "removing an old window cannot dismiss the successor's error");
+  toaster.handleRuntimeState({ ...input, projectKey: "project-b", windowId: "other-project" });
+  toaster.handleRuntimeState({ ...input, windowId: "other-issue", windowData: { linked_issue_number: 6730 } });
+  assert.equal(new Set(shown.map(n => n.id)).size, 3);
+  toaster.handleRuntimeState({ ...input, windowId: "recovered", runtimeState: "starting" });
+  assert.deepEqual(dismissed, [shown[0].id]);
+});
+
+test("Issue #6729: superseded windows cannot clear current errors or replay recovered errors", () => {
+  const shown = [], dismissed = [];
+  const toaster = createAgentAttentionToaster({ showToast: n => shown.push(n), dismissToast: id => dismissed.push(id) });
+  const input = { projectKey: "project", windowId: "old", runtimeState: "error", windowData: { linked_issue_number: 6729 } };
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  toaster.handleRuntimeState({ ...input, runtimeState: "stopped" });
+  toaster.handleRuntimeState({ ...input, runtimeState: "running" });
+  assert.deepEqual(dismissed, [], "late old frames must leave the latest error unresolved");
+  toaster.handleRuntimeState({ ...input, windowId: "recovered", runtimeState: "starting" });
+  toaster.handleRuntimeState(input);
+  toaster.handleRuntimeState({ ...input, windowId: "new" });
+  assert.equal(shown.length, 2, "reconnect must not replay either superseded diagnostic");
+  assert.deepEqual(dismissed, [shown[1].id]);
+});
+
+test("Issue #6729: reload uses known local runtime start times without hiding unknown pre-spawn failures", () => {
+  for (const reverse of [false, true]) {
+    const { toaster, toasts, dismissed } = collectAttentionToaster();
+    const input = { projectKey: "project", windowId: "old", runtimeState: "error",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 1000 } };
+    const current = { ...input, windowId: "current", runtimeState: "running",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 2000 } };
+    const snapshot = [input, current];
+    if (reverse) snapshot.reverse();
+    for (const frame of snapshot) toaster.handleRuntimeState({ ...frame, source: "snapshot" });
+    toaster.handleRuntimeState(input);
+    assert.deepEqual(toasts, [], "older retained diagnostics must stay resolved after a full reload");
+    toaster.forgetWindow("current");
+    toaster.handleRuntimeState(input);
+    assert.deepEqual(toasts, [], "closing the successful successor must not revive retained diagnostics");
+    toaster.handleRuntimeState({ ...input, windowId: "pre-spawn", windowData: { linked_issue_number: 6729 } });
+    assert.equal(toasts.length, 1, "missing start time must not be treated as older than a known runtime");
+    toaster.handleRuntimeState({ ...input, windowId: "null-start",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: null } });
+    toaster.handleRuntimeState({ ...current, source: "snapshot",
+      windowData: { linked_issue_number: 6729, runtime_started_at_ms: 3000 } });
+    assert.deepEqual(dismissed, [], "a newer known start cannot order an unknown/null failure");
+  }
+});
+
 
 test("typed inputs retain source authority and never infer NeedsHuman from Waiting", () => {
   const {notificationForTransition} = notifications;
@@ -210,9 +300,11 @@ test("typed inputs retain source authority and never infer NeedsHuman from Waiti
   assert.doesNotMatch(notice.title, /complete|finish/i);
 });
 
-test("Stopped attention says stopped, without claiming work finished", () => {
-  const {toaster} = collectAttentionToaster();
-  const notice = toaster.handleRuntimeState({windowId: "one", runtimeState: "stopped"});
-  assert.equal(notice.title, "Agent stopped");
-  assert.doesNotMatch(notice.title, /finish|complete/i);
+test("Stopped and Interrupted desktop copy stays factual without claiming work finished", () => {
+  for (const state of ["stopped", "interrupted"]) {
+    const notice = notifications.notificationForTransition({source: "runtime", state});
+    assert.equal(notice.kind, `agent_${state}`);
+    assert.equal(notice.title, `Agent ${state}`);
+    assert.doesNotMatch(notice.title + notice.body, /finish|complete/i);
+  }
 });

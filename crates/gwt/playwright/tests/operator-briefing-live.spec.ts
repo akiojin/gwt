@@ -73,7 +73,7 @@ test("Monitor strip coalesces receiver bursts and updates without animation fram
     });
   }
   await page.locator("#op-strip-issue-monitor").click();
-  await expect(page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]')).toBeVisible();
+  await expect(page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root')).toBeVisible();
   await info.attach("monitor-strip", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
   if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
     await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/monitor-strip-${info.project.name}.png`, fullPage: true });

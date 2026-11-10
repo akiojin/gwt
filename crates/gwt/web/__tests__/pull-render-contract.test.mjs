@@ -338,6 +338,12 @@ test("Open Project result receiver commits shared state and rejects bypass rende
     { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyProjectOpenReceiveEvent');
   assert.deepEqual(delegated(source), []);
   assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const fromApp = controller => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-shell-surface.js', shell], [file, controller]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/project_opened');
+  assert.deepEqual(fromApp(source), []);
+  assert.ok(fromApp(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Clone Project receivers commit shared state and reject bypass rendering", () => {
@@ -658,30 +664,38 @@ test("reassigned factory handler aliases fail closed per lexical binding", () =>
     .some(finding => finding.kind === "unresolved-call" && finding.path === "receive"));
 });
 
-test("direct named imports follow exported function bodies for one module hop", () => {
+test("direct named imports follow exported function bodies for at most two module hops", () => {
   const entry = `import { selectValue as select } from "./data.js";
     function receive(event) { select(event); }`;
   const data = `export function selectValue(event) { return normalize(event.value); }
     function normalize(value) { return String(value).trim(); }`;
-  const inspect = (source = entry, module = data) => scanModule(source, "entry.js", {
-    modules: new Map([["data.js", module], ["second.js", "export function normalize(value) { return String(value); }"]]),
+  const second = "export function normalize(value) { return String(value); }";
+  const twoHops = 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }';
+  const inspect = (source = entry, module = data, dependency = second) => scanModule(source, "entry.js", {
+    modules: new Map([["data.js", module], ["second.js", dependency], ["third.js", second]]),
   });
   assert.deepEqual(inspect(), []);
   assert.deepEqual(inspect(entry, data + '\nfunction unrelated() { let normalize = () => {}; normalize = external; }'), []);
   const dirty = inspect(entry, data.replace("return String(value).trim();", "element.textContent = value;"));
   assert.ok(dirty.some(finding => finding.kind === "dom-write" && finding.file === "data.js"
     && finding.root === "receive" && finding.path.includes("selectValue>normalize")));
+  assert.deepEqual(inspect(entry, twoHops), []);
+  assert.ok(inspect(entry, twoHops, second.replace('return String(value);', 'element.textContent = value;'))
+    .some(finding => finding.kind === 'dom-write' && finding.file === 'second.js' && finding.root === 'receive'));
+  for (const dependency of [
+    'import { normalize as next } from "./third.js"; export function normalize(value) { return next(value); }',
+    'import { selectValue } from "./data.js"; export function normalize(value) { return selectValue(value); }',
+  ]) assert.ok(inspect(entry, twoHops, dependency).some(finding => finding.kind === 'unresolved-call'));
   for (const [source, module] of [
     [entry, data.replace("export function", "function")],
     [entry, "export function other() {}"],
     [entry.replace("receive(event)", "receive(event, select)"), data],
-    [entry, 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }'],
     [entry, data + "\nselectValue = external;"],
   ]) assert.ok(inspect(source, module).some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
 });
 
-test("Board receiver and Branch subscriber data imports reject DOM mutations in their helpers", () => {
+test("Board receipt and Branch subscriber data imports reject DOM mutations in their helpers", () => {
   for (const [sourceName, dependencyName, exportedName, marker, context] of [
     ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
     ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
@@ -691,7 +705,7 @@ test("Board receiver and Branch subscriber data imports reject DOM mutations in 
     const file = `crates/gwt/web/${dependencyName}.js`;
     const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
       modules: new Map([[file, module]]),
-      rootName: sourceName === 'app' ? 'renderBranchEntries' : undefined,
+      rootName: sourceName === 'app' ? 'renderBranchEntries' : 'applyBoardReceipt',
     }).filter(finding => finding.context === (sourceName === 'app' ? '' : context)
       && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
     assert.deepEqual(inspect(dependency), []);
@@ -837,7 +851,7 @@ test("Release notes receivers resolve only shared model updates", () => {
   assert.deepEqual(receivers(app), []);
   for (const name of ['handlePayload', 'handleError']) {
     assert.deepEqual(scanModule(surface, surfaceFile, { rootName: name }), []);
-    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message) {',
+    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message, id = null) {',
         `function ${name}(${name === 'handlePayload' ? 'payload' : 'message'}) { renderSidebar(model.read());`);
     assert.notEqual(bypass, surface);
     assert.ok(scanModule(bypass, surfaceFile, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
@@ -926,6 +940,65 @@ test("Profile receivers resolve only shared model updates", () => {
     .some(finding => finding.kind === 'dom-write'));
 });
 
+test("Profile reconnect preserves newer edits while a sent rename is unconfirmed", async t => {
+  const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
+    .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
+  const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body><div class="pane"><div class="window-body"></div></div></body></html>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const pane = document.querySelector('.pane'), sends = [];
+  const surface = createProfileWindowSurface({
+    send: event => sends.push(event), windowMap: new Map([['profile', pane]]),
+    createNode(tag, className, text = '') {
+      const node = document.createElement(tag);
+      node.className = className; node.textContent = text; return node;
+    },
+    focusWindowLocally() {}, sendWindowFocus() {},
+  });
+  t.after(() => surface.disposeProfileWindow('profile'));
+  const snapshot = name => ({ active_profile: name, selected_profile: name, os_env: [],
+    profiles: [{ name, description: 'saved', env_vars: [], disabled_env: [] }] });
+  surface.mountProfileWindow({ id: 'profile' }, pane.firstChild);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot: snapshot('review') });
+  const name = pane.querySelector('.profile-field input');
+  name.value = 'renamed'; name.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  assert.equal(sends.at(-1).name, 'renamed');
+  // The backend commits this rename, but its reply is lost. Undoing the name
+  // locally does not restore the server identity used by the next save.
+  name.value = 'review'; name.dispatchEvent(new window.Event('input'));
+  const description = pane.querySelector('.profile-textarea');
+  description.value = 'newer unsaved draft'; description.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  assert.equal(sends.at(-1).current_name, 'review');
+  surface.applyProfileReceiveEvent({ kind: 'profile_error', id: 'profile', message: 'profile not found: review' });
+  const currentInput = pane.querySelector('.profile-textarea');
+  const before = sends.length;
+
+  surface.resyncProfile(['profile']);
+
+  assert.equal(sends.length, before, 'a recovery read cannot resolve an unconfirmed rename');
+  assert.equal(pane.querySelector('.profile-textarea'), currentInput);
+  assert.equal(currentInput.value, 'newer unsaved draft');
+  assert.equal(pane.querySelector('.profile-status').textContent, 'profile not found: review');
+  // A confirmed rename releases the local uncertainty; ordinary reads resume.
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot: snapshot('renamed') });
+  surface.resyncProfile(['profile']);
+  assert.deepEqual(sends.at(-1), { kind: 'load_profile', id: 'profile' });
+  assert.equal(sends.length, before + 1);
+  const nextName = pane.querySelector('.profile-field input');
+  nextName.value = 'next-rename'; nextName.dispatchEvent(new window.Event('input'));
+  surface.flushProfileSave('profile');
+  const pending = sends.length;
+  surface.resyncProfile(['profile']);
+  assert.equal(sends.length, pending);
+  pane.querySelector('[data-action="refresh-profile"]').click();
+  assert.equal(sends.length, pending + 1, 'explicit refresh releases the lost rename loading owner');
+  assert.deepEqual(sends.at(-1), { kind: 'load_profile', id: 'profile' });
+});
+
 test("Profile disposal cancels pending saves and remounts without closed-window data", async t => {
   const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
     .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
@@ -979,16 +1052,6 @@ test("Profile disposal cancels pending saves and remounts without closed-window 
   assert.equal(remounted.querySelector('.profile-field input').value, 'default');
   assert.match(remounted.querySelector('.profile-status').textContent, /^Active /);
   surface.disposeProfileWindow('profile');
-});
-
-test("Window List receiver updates the catalog model and rejects direct rendering bypass", () => {
-  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const file = 'crates/gwt/web/app.js';
-  const modules = new Map([['crates/gwt/web/project-shell-surface.js', readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8')]]);
-  const migrated = findings => findings.filter(finding => finding.root === 'receive' && finding.context === '/window_list');
-  assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
-  const bypass = app.replace('case "window_list":', 'case "window_list": element.textContent = event.kind;');
-  assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
 test("workspace receivers cannot manually sync Agents or Split outside the catalog", () => {
@@ -1060,11 +1123,15 @@ test("checkout baseline satisfies the live and Git base contracts", () => {
 test("cleanup and branch error receivers commit shared data and reject direct rendering", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
+  const knowledgeFile = 'crates/gwt/web/knowledge-kanban-surface.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
-  const modules = new Map([[surfaceFile, surface]]);
+  const knowledge = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[surfaceFile, surface], [knowledgeFile, knowledge]]);
   const selected = findings => findings.filter(finding =>
-    /\/(branch_cleanup_(progress|result)|branch_error)$/.test(finding.context));
+    finding.context.split('/').at(-1).split('|').some(kind =>
+      /^(branch_cleanup_(progress|result)|branch_error)$/.test(kind)));
+  assert.deepEqual(selected(scanModule(knowledge, knowledgeFile)), []);
   assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
   assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
   const bypass = surface.replace('case "branch_cleanup_result": {',
@@ -1091,22 +1158,9 @@ test("Knowledge list completions retain shared rendering and reject receiver byp
   const local = text => lists(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
   const delegated = (text, surface = source) => lists(scanModule(text, appFile,
     { modules: new Map([[file, surface]]) }));
-  // Existing load/recovery, transport and preference calls remain data-only.
-  // renderKnowledgeBridge itself publishes the window to the shared models.
-  const dataCalls = [
-    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
-    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
-    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
-    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
-    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
-    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
-    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
-    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
-    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
-  ];
+  // The full list receipt crosses the immutable store before synchronous ingestion.
   for (const findings of [local(source), delegated(app)]) {
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'));
-    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+    assert.deepEqual(findings, []);
   }
   for (const bypass of ['document.body.textContent = event.kind;',
     'renderKnowledgeBoardView(event.id, windowMap.get(event.id), knowledgeBridgeStateMap.get(event.id));']) {
@@ -1174,32 +1228,30 @@ test("Knowledge phase completions commit shared state and reject direct renderin
   assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
 });
 
-test("Board entries commit shared data and reject direct mention rendering", () => {
+test("Board response receipts commit shared data and reject direct rendering", () => {
   const file = 'crates/gwt/web/board-logs-surface.js';
   const appFile = 'crates/gwt/web/app.js';
   const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const entries = findings => findings.filter(finding =>
-    finding.context.split('/').at(-1).split('|').includes('board_entries'));
-  const local = entries(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' }));
-  const delegated = entries(scanModule(app, appFile, { modules: new Map([[file, source]]) }));
-  // The guard deliberately leaves the existing imported pure mention selector
-  // unresolved. Every path other than that selector must cross the store.
-  for (const findings of [local, delegated]) {
-    assert.ok(findings.length > 0);
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
-      && finding.path.endsWith('>find:callback')));
+  for (const kind of ['board_entries', 'board_history_page', 'board_error']) {
+    const responses = findings => findings.filter(finding =>
+      finding.context.split('/').at(-1).split('|').includes(kind));
+    const local = text => responses(scanModule(text, file, { rootName: 'applyBoardLogsReceiveEvent' }));
+    const delegated = (text, surface = source) => responses(scanModule(text, appFile,
+      { modules: new Map([[file, surface]]) }));
+    assert.deepEqual(local(source), [], kind);
+    assert.deepEqual(delegated(app), [], kind);
+    const receiver = source.indexOf('function applyBoardLogsReceiveEvent(event)');
+    const bypass = source.slice(0, receiver) + source.slice(receiver).replace(`case "${kind}": {`,
+      `case "${kind}": { renderBoard(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(local(bypass).length > 0, kind);
+    assert.ok(delegated(app, bypass).length > 0, kind);
+    const appBypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')), kind);
   }
-  const bypass = source.replace('case "board_entries": {',
-    'case "board_entries": { showBoardMentionNotification(event.entries[0], event.id);');
-  assert.notEqual(bypass, source);
-  assert.ok(entries(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' })).length > local.length);
-  assert.ok(entries(scanModule(app, appFile, { modules: new Map([[file, bypass]]) })).length > delegated.length);
-  const appBypass = app.replace('case "board_entries":',
-    'case "board_entries": document.body.textContent = event.kind;');
-  assert.notEqual(appBypass, app);
-  assert.ok(entries(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
-    .some(finding => finding.kind.startsWith('dom-')));
 });
 
 test("Logs live receipts commit shared data and reject direct rendering", () => {
@@ -1313,6 +1365,13 @@ test("folder picker receiver commits shared state and rejects direct rendering",
     { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyPickerReceiveEvent');
   assert.deepEqual(delegated(source), []);
   assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const fromApp = controller => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-shell-surface.js', shell], [file, controller]]),
+  }).filter(finding => finding.root === 'receive'
+    && finding.context === '/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy');
+  assert.deepEqual(fromApp(source), []);
+  assert.ok(fromApp(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Knowledge detail completions commit shared state and reject direct rendering", () => {

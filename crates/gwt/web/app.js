@@ -1,3 +1,4 @@
+import { createProjectExecutionPolicyModel, createProjectViewReadiness } from "/project-execution-policy-model.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
 import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
@@ -11,6 +12,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         subscribeIssueMonitorStatus,
         applyProviderUsage,
         subscribeRuntimeHealth,
+        subscribeProjectOwnerHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
@@ -60,6 +62,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         createAgentCompletionNotifier,
         createAgentAttentionToaster,
         notificationForTransition,
+        monitorDiagnostic,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -110,7 +113,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
-        clearTerminalOutputBeforeSnapshot,
         createTerminalFitScheduler,
         createTerminalSnapshotWriteCoordinator,
         createTerminalViewportRefreshScheduler,
@@ -124,6 +126,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         runTerminalActivationSequence,
         runTerminalFitRequest,
         runTerminalRevealActivation,
+        scheduleTerminalInitialFit,
         takeTerminalActivationIntent,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -151,6 +154,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
+      import { bindControlExplanations, setControlExplanation } from "/control-explanations.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
       // SPEC-3015 — window runtime state normalization extracted from app.js;
       // backed by the generated protocol enum contract (/protocol-enums.js).
@@ -186,6 +190,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           palette: null,
         };
       }
+      const projectOwnerHealthModel = createUiStateStore(null);
+      subscribeProjectOwnerHealth(document, projectOwnerHealthModel);
       const runtimeHealthModel = createUiStateStore(null);
       subscribeRuntimeHealth(document, runtimeHealthModel, {
         focusWindow: (windowId) => requestWindowFrame(windowId),
@@ -201,13 +207,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
-
-      // SPEC-3064 Phase 3 (E7): the project-shell chrome element refs
-      // (project tabs strip, open-project button + split-button menu,
-      // picker/onboarding elements, recent project list, window list
-      // button/panel) moved to /project-shell-surface.js; app.js keeps the
-      // toolbar buttons whose click listeners stay wired here.
-      const addButton = document.getElementById("add-button");
+      const rail = document.getElementById("op-rail");
+      for (const control of rail.querySelectorAll("button[title]")) {
+        setControlExplanation(control, control.title);
+      }
+      const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-control-explanation", placement: "right", passThrough: true });
 
       // The rail owns PM navigation and launches a missing PM.
       for (const id of ["op-pm-entry"]) {
@@ -217,8 +221,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         });
       }
 
-      const modal = document.getElementById("preset-modal");
-      const closeModalButton = document.getElementById("close-modal");
       // SPEC-3064 Phase 3 (E5): the other wizard chrome element refs
       // (dialog/title/meta/summary/body/error/back/cancel/submit) moved to
       // /launch-wizard-surface.js; app.js keeps wizardModal for the modal
@@ -237,7 +239,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const appVersionLabel = document.getElementById("app-version");
 
       const decoderMap = new Map();
-      const pendingOutputMap = new Map();
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
@@ -248,6 +249,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
       const terminalOutputBatcher = createTerminalOutputBatcher({
+        // The queue retains encoded strings; limits count their decoded RAW
+        // bytes, including writes awaiting xterm's completion callback.
+        measureBytes: (chunk) => chunk.length / 4 * 3
+          - (chunk.endsWith("==") ? 2 : chunk.endsWith("=") ? 1 : 0),
+        projectForWindow: (id) => projectWindowContextById(id)?.tab.project_key ?? socketProjectKey,
         mergeChunks: (chunks, windowId) => {
           const decoder = decoderMap.get(windowId);
           if (!decoder) {
@@ -260,12 +266,39 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         write: (windowId, text, onWritten) => {
           const runtime = terminalMap.get(windowId);
           if (!runtime) {
+            onWritten();
             return;
           }
-          runtime.terminal.write(text, onWritten);
+          runtime.hasOutput = true;
+          runtime.outputWrites++;
+          try {
+            runtime.terminal.write(text, () => {
+              runtime.outputWrites--;
+              onWritten();
+            });
+          } catch (error) {
+            runtime.outputWrites--;
+            throw error;
+          }
         },
-        // Hidden Agents tabs still feed the shared buffer used by Issue previews.
-        canWrite: (windowId) => (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        onError: (error, windowId, projectKey) => {
+          if (!socketProjectKey || projectKey !== socketProjectKey
+            || socket?.readyState !== WebSocket.OPEN) return;
+          // The batch runs after receive() returns, so recover here rather than
+          // letting the dispatcher continue an already torn terminal stream.
+          connectSocket(true);
+          renderDegradationBanner.report({ source: "terminal:output", error });
+        },
+        // Reports hides the PM renderer, but its VT buffer must keep consuming
+        // output at the current grid. Replaying it only after reveal can apply
+        // old-width wraps and relative erases to an already resized terminal.
+        // Hidden Agents likewise feed the buffer used by Issue previews.
+        canWrite: (windowId) => {
+          const runtime = terminalMap.get(windowId);
+          return runtime?.isReady === true
+            && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true
+            && (pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId));
+        },
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -380,23 +413,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }),
         projectState: Object.freeze({
           owner: "project-workspace-shell",
-          // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries are
-          // backed by /project-shell-surface.js; the remaining state stays
-          // in app.js and is exposed to the surface through accessors.
           state: Object.freeze([
             "appState",
             "versionState",
             "projectError",
             "viewport",
-            "windowListOpen",
-            "windowListEntries",
           ]),
           mutatedBy: Object.freeze([
             "renderAppState",
             "renderWorkspace",
             "renderProjectPicker",
             "renderProjectOnboarding",
-            "renderWindowList",
           ]),
         }),
       });
@@ -425,8 +452,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      const projectExecutionPolicy = createProjectExecutionPolicyModel(routeProjectKey);
+      const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
-      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
+      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        onRename: request => {
+          if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
+            request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
+        },
+      });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
@@ -457,8 +492,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
-      // Window List visibility stays in the shell; its snapshot gate lives in
-      // the shared catalog model below.
       let appState = {
         app_version: "",
         tabs: [],
@@ -467,7 +500,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       };
       const windowCatalogModel = createUiStateStore({
         catalog: { appState, runtimeStates: {}, focusedId: null, version: 0 },
-        listEntries: [],
       });
       let reconcilingWindowCatalog = false;
 
@@ -496,18 +528,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             version: state.catalog.version + 1,
           } };
         });
-      }
-
-      // Existing shell callers request a catalog commit; they cannot repaint
-      // just the List while leaving another catalog subscriber stale.
-      function renderWindowList() {
-        publishWindowCatalog();
-      }
-
-      function catalogRuntimeStateForWindow(windowData) {
-        const states = windowCatalogModel.read().catalog.runtimeStates;
-        const sourceState = Object.hasOwn(states, windowData.id) ? states[windowData.id] : windowData.status;
-        return normalizeWindowRuntimeState(sourceState, windowData.preset);
       }
 
       function publishWindowCatalogRuntime(windowId, status) {
@@ -593,6 +613,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           appendRenderKeyPart(parts, windowData?.agent_id || "");
           appendRenderKeyPart(parts, "agent_name");
           appendRenderKeyPart(parts, windowData?.agent_name || "");
+          appendRenderKeyPart(parts, "display_title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
@@ -613,8 +635,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return parts.join("");
       }
 
-      // SPEC-3064 Phase 3 (E7): windowListRenderKey moved to
-      // /project-shell-surface.js with the Window List dropdown renderer.
       function windowRuntimeStatusRenderKey(windowId, runtimeState, effectiveDetail, windowData) {
         const parts = [];
         appendRenderKeyPart(parts, "id");
@@ -753,7 +773,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-3064 Phase 3 (E7): projectPickerRenderKey /
-      // projectOnboardingRenderKey / actionAvailabilityRenderKey and the
+      // projectOnboardingRenderKey and the
       // migration / clone-project modal state moved to
       // /project-shell-surface.js with their renderers.
       let versionState = { current: "", latest: "" };
@@ -882,7 +902,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
         }
         return null;
@@ -911,9 +931,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // A switch is valid only on this live Host connection. Never replay
-        // an unacknowledged request or cancellation after a Host restart.
-        if (message.kind === "agent_switch" && message.action.kind !== "read") {
+        // These explicit writes belong to this live connection.
+        // Never replay an unacknowledged write after reconnect.
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+            (message.kind === "agent_switch" && message.action.kind !== "read") ||
+            (message.kind === "agent_roster" && message.action.kind === "rename") ||
+            (message.kind === "get_hook_doctor" && message.repair === true)) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -998,8 +1021,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }
           },
         });
-        // SPEC-2356 Anshin Addendum (FR-042): STOP ALL is reachable from the
-        // palette as well as the rail.
+        // #4777: all-agent stop remains in the palette after its rail entry retires.
         window.__operatorShell.palette.register({
           id: "stop-all-agents",
           label: "Agents: Stop All Running Agents",
@@ -1128,6 +1150,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       updateRestartImpactModel.subscribe(impact => impact, impact => {
         if (impact) updateCtaController.handleUpdateRestartImpact(impact);
       });
+      const updateCheckResultModel = createUiStateStore(null);
+      updateCheckResultModel.subscribe(event => event, event => {
+        if (event) updateCtaController.handleUpdateCheckResult(event);
+      });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
       // WebSocket bridge is down — a tiny status-strip label alone reads as
@@ -1169,14 +1195,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         },
       });
 
-      function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); }
+      function setConnectionState(connected, recoverSnapshots = false) {
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
-          handleKnowledgeTransportChange(connected);
+          handleKnowledgeTransportChange(connected, recoverSnapshots);
         }
         // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
         // screen overlay above) is the home for connection state. The class
@@ -1264,6 +1290,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (socket?.readyState !== WebSocket.OPEN) return;
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
+        releaseNotesWindow.reconnect();
         resyncSocketSurfaces();
         if (socketProjectKey) requestVisiblePmReports(true);
       }
@@ -1293,8 +1320,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           onResync: (reason) => {
             if (ownGeneration !== socketReceiveDispatcherGeneration) return;
             // A native receive backlog precedes snapshots on the old socket.
-            // Replace the project transport on foreground recovery to discard it.
-            if ((reason === "visible" || reason === "overflow") && socketProjectKey) connectSocket(true);
+            // Replace the transport so a torn stream cannot precede recovery.
+            if ((reason === "visible" || reason === "overflow" || reason === "receive-error") && socketProjectKey) connectSocket(true);
             else requestSocketSnapshots();
           },
           // Issue #3365 — a receive() failure keeps the event stream alive but
@@ -1307,12 +1334,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           },
         });
         projectPageMetadata.resetConnection();
+        projectViewReadiness.connectionLost();
         // A restarted backend has its own restore gate, even when this page survives.
         startupAutoResumeReadySent = false;
-        setConnectionState(true);
+        setConnectionState(true, recoverSnapshots);
         send({ kind: "frontend_ready" });
+        closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
-        recoveryCenterController?.reconnect();
+        let replayedReleaseNotesId = null;
+        let replayedRecoveryCenterId = null;
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1320,12 +1350,29 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             continue;
           }
           pendingMessages.splice(index, 1);
+          if (recoverSnapshots === true && pending.message.kind === "load_knowledge_bridge") {
+            const state = knowledgeBridgeStateMap.get(pending.message.id);
+            if (state?.loadQueued && state.loadRequestId === pending.message.request_id
+              && (activeWorkspace()?.windows || []).some(entry => entry.id === pending.message.id)) continue;
+          }
           socket.send(JSON.stringify(pending.message));
+          if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
+          if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
         }
+        recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
+        else if (socketProjectKey) {
+          resyncSettings();
+          // frontend_ready omits these snapshots; release reads lost with the old client.
+          const ids = (activeWorkspace()?.windows || []).map(entry => entry.id);
+          resyncBoardLogs(ids);
+          resyncProfile(ids);
+          resyncProjectIndexSearch(ids);
+        }
+        releaseNotesWindow.reconnect(replayedReleaseNotesId);
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -1402,6 +1449,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function handleSocketClose(recoverSnapshots = false) {
         closeProjectController.connectionLost();
+        projectViewReadiness.connectionLost();
+        projectExecutionPolicy.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
@@ -1575,8 +1624,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-3064 Phase 3 (E7): sendOpenProjectDialog, the clone-project
-      // modal glue (open/close/render + state), and
-      // updateActionAvailability moved to /project-shell-surface.js.
+      // modal glue (open/close/render + state) moved to /project-shell-surface.js.
 
       function presetLabel(preset) {
         return preset
@@ -1715,7 +1763,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
-          const name = String(windowData?.agent_name || "").trim();
+          const member = windowData?.session_id && rosterModel.read().members.find(member => !member.is_pm
+            && member.assignment?.session_id === windowData.session_id);
+          const name = String(member?.name || windowData?.agent_name || "").trim();
           const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
           if (name) return purpose ? `${name} — ${purpose}` : name;
         }
@@ -1747,10 +1797,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
 
-      // SPEC-3064 Phase 3 (E7): escapeHtml moved to
-      // /project-shell-surface.js with the Window List renderer (its only
-      // remaining caller).
-
       function runtimeStateForWindow(windowData) {
         const sourceState = windowRuntimeStateMap.has(windowData.id)
           ? windowRuntimeStateMap.get(windowData.id)
@@ -1763,10 +1809,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           ? windowRuntimeStateMap.get(windowData.id)
           : windowData.status;
       }
-
-      // SPEC-3064 Phase 3 (E7): the Window List dropdown
-      // (requestWindowList / renderWindowList / toggleWindowList) lives in
-      // /project-shell-surface.js.
 
       // SPEC-3064 Phase 3 (E7): renderProjectTabs, the close-project-tab
       // confirm modal (state + render + requestCloseProjectTab), the project
@@ -1792,11 +1834,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function receiveHubState(hub) {
+        const execution = hub.projects?.find(project => project.project_key === routeProjectKey)?.execution;
+        if (execution) projectExecutionPolicy.applyStatus(execution);
         hubCatalog = hub;
         renderAppState({ ...appState, app_version: hub.app_version });
       }
 
-      function renderAppState(nextState) {
+      function renderAppState(nextState, incomingRuntimeStatus = false) {
         dismissOperatorBriefing();
         return traceMeasure(
           UI_TRACE_EVENT.renderAppState,
@@ -1809,159 +1853,62 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               active_tab_id: null,
               recent_projects: [],
             });
+            // Runtime snapshots observe unmounted windows too. Reconcile
+            // attention against the full catalog, never DOM membership.
+            const currentWindowIds = allProjectWindowIdSet();
+            for (const windowId of windowRuntimeStateMap.keys()) {
+              if (currentWindowIds.has(windowId)) continue;
+              agentAttentionToaster.forgetWindow(windowId);
+              alertsToasts.dismiss(`attention-${windowId}`);
+              windowRuntimeStateMap.delete(windowId);
+              windowRuntimeStateSinceMap.delete(windowId);
+              detailMap.delete(windowId);
+              renderedRuntimeStatusKeys.delete(windowId);
+            }
             // Rebind before rendering can emit requests for the new project.
-            connectSocket();
+            // A streamed prefix may precede an old catalog in the dispatcher.
+            // Reclaim unmounted orphans, then recover uncertain bytes through
+            // hydration rather than continuing across a silently dropped gap.
+            const discardedRaw = terminalOutputBatcher.prune(new Set([...currentWindowIds, ...windowMap.keys()]));
+            for (const id of discardedRaw) {
+              pendingSnapshotMap.delete(id);
+              renderedTerminalPackets.delete(id);
+              removePmWindowState(id);
+            }
+            connectSocket(discardedRaw.length > 0 && socket?.readyState === WebSocket.OPEN && socketProjectKey === activeProjectKey());
+            if (incomingRuntimeStatus) {
+              const wasReconciling = reconcilingWindowCatalog;
+              reconcilingWindowCatalog = true;
+              try {
+                for (const tab of nextState?.tabs || []) for (const window of tab.workspace?.windows || []) {
+                  applyStatus(window.id, window.status, detailMap.get(window.id));
+                }
+              } finally {
+                reconcilingWindowCatalog = wasReconciling;
+              }
+            }
             setVersionState(appState.app_version, versionState.latest);
             const tab = activeProjectTab();
             document.getElementById("split-view-button").disabled = !tab;
             renderProjectPicker(tab);
-            updateActionAvailability(tab);
             renderProjectOnboarding(tab);
             renderWorkspace(tab?.workspace || emptyWorkspace());
             syncCurrentProjectWorkspaceIds(
               deriveCurrentProjectWorkspaceIds(tab?.workspace || {}),
             );
-            renderWindowList();
+            publishWindowCatalog();
           },
         );
       }
 
-      let presetModalFocusReturn = null;
-      let presetModalFocusTrapRelease = null;
-      // SPEC-2356 "Surface Deck" — arrow-key roving across the 2-column
-      // preset grid. Buttons are walked in document order; ←→ step within a
-      // row, ↑↓ jump a full row (columns = 2). `.is-active` mirrors the
-      // currently-focused tile so the keyboard glow tracks the cursor.
-      // SPEC-2356 landscape weighted deck — roving is geometry direction-nearest
-      // (not a fixed column-count jump) so the 45/33/22 weighted columns and the
-      // uneven per-column row counts navigate intuitively. The handler reads real
-      // tile geometry; a too-diagonal candidate (>~63°) is rejected so pressing
-      // Down at the bottom of a short column clamps instead of leaping columns.
-      function findGeometryNeighbor(buttons, current, key) {
-        const src = buttons[current].getBoundingClientRect();
-        const sx = src.left + src.width / 2;
-        const sy = src.top + src.height / 2;
-        const AXIS_BIAS = 2.5;
-        let best = -1;
-        let bestScore = Infinity;
-        buttons.forEach((btn, i) => {
-          if (i === current) return;
-          const r = btn.getBoundingClientRect();
-          const dx = r.left + r.width / 2 - sx;
-          const dy = r.top + r.height / 2 - sy;
-          const inDirection =
-            (key === "ArrowRight" && dx > 1) ||
-            (key === "ArrowLeft" && dx < -1) ||
-            (key === "ArrowDown" && dy > 1) ||
-            (key === "ArrowUp" && dy < -1);
-          if (!inDirection) return;
-          const horizontal = key === "ArrowRight" || key === "ArrowLeft";
-          const primary = horizontal ? Math.abs(dx) : Math.abs(dy);
-          const secondary = horizontal ? Math.abs(dy) : Math.abs(dx);
-          if (secondary > primary * 2) return;
-          const score = primary + secondary * AXIS_BIAS;
-          if (score < bestScore) {
-            bestScore = score;
-            best = i;
-          }
-        });
-        return best;
-      }
-      function presetRovingButtons() {
-        return [...modal.querySelectorAll(".preset-button")];
-      }
-      function setActivePresetButton(buttons, index) {
-        if (!buttons.length) return;
-        const clamped = Math.max(0, Math.min(index, buttons.length - 1));
-        buttons.forEach((button, i) => {
-          button.classList.toggle("is-active", i === clamped);
-        });
-        const target = buttons[clamped];
-        if (target && typeof target.focus === "function") {
-          try { target.focus({ preventScroll: true }); }
-          catch { target.focus(); }
-        }
-      }
-      function handlePresetRovingKeydown(event) {
-        const key = event.key;
-        if (
-          key !== "ArrowRight" &&
-          key !== "ArrowLeft" &&
-          key !== "ArrowUp" &&
-          key !== "ArrowDown" &&
-          key !== "Enter"
-        ) {
-          return;
-        }
-        const buttons = presetRovingButtons();
-        if (!buttons.length) return;
-        let current = buttons.indexOf(document.activeElement);
-        if (current < 0) {
-          current = buttons.findIndex((button) =>
-            button.classList.contains("is-active"),
-          );
-          if (current < 0) current = 0;
-        }
-        if (key === "Enter") {
-          event.preventDefault();
-          buttons[current].click();
-          return;
-        }
-        event.preventDefault();
-        const next = findGeometryNeighbor(buttons, current, key);
-        if (next >= 0) setActivePresetButton(buttons, next);
-      }
-      function openModal() {
-        // SPEC-2356 — capture trigger BEFORE adding .open so we can
-        // restore focus on close. The preset modal is invoked via the
-        // "+" Add Window button; without restore, focus falls to body.
-        presetModalFocusReturn = document.activeElement;
-        modal.classList.add("open");
-        modal.removeAttribute("aria-hidden");
-        const presetShell = modal.querySelector(".modal-shell");
-        if (presetShell && typeof presetShell.focus === "function") {
-          try { presetShell.focus({ preventScroll: true }); }
-          catch { presetShell.focus(); }
-        }
-        // SPEC-2356 — trap Tab inside the modal so keyboard users can't
-        // escape into background content while the modal is open.
-        if (presetShell) {
-          presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
-        }
-        // SPEC-2356 "Surface Deck" — drop focus onto the first preset tile so
-        // arrow-key roving works immediately without a stray Tab.
-        const buttons = presetRovingButtons();
-        if (buttons.length) {
-          setActivePresetButton(buttons, 0);
-        }
-      }
-
-      function closeModal() {
-        const wasOpenPreset = modal.classList.contains("open");
-        modal.classList.remove("open");
-        modal.setAttribute("aria-hidden", "true");
-        if (wasOpenPreset) {
-          if (typeof presetModalFocusTrapRelease === "function") {
-            presetModalFocusTrapRelease();
-            presetModalFocusTrapRelease = null;
-          }
-          if (presetModalFocusReturn && typeof presetModalFocusReturn.focus === "function") {
-            try { presetModalFocusReturn.focus({ preventScroll: true }); }
-            catch { presetModalFocusReturn.focus(); }
-          }
-          presetModalFocusReturn = null;
-          // SPEC-2356 — clear the roving highlight so a re-open starts clean.
-          for (const button of presetRovingButtons()) {
-            button.classList.remove("is-active");
-          }
-        }
-      }
-
-
+      let initialSurfaceTabId = null;
+      let initialSurfaceSelected = false;
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
         windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (splitSurfaces?.show(surface)) {
+          // Late initial windows must not override an explicit surface choice.
+          initialSurfaceSelected = true;
           // A rail choice supersedes navigation still awaiting a window.
           pendingFrameWindowId = null;
           pendingPmFrame = false;
@@ -2065,7 +2012,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const closeProjectController = createCloseProjectController({
-        document, send,
+        document, send, projectKey: routeProjectKey,
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
@@ -2098,7 +2045,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return false;
         }
         if (
-          modal.classList.contains("open") ||
           wizardModal.classList.contains("open") ||
           cloneProjectModal?.classList.contains("open") ||
           document.querySelector(".modal-backdrop.open")
@@ -2123,10 +2069,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2008 Phase 26.A regression fix (Issue #2832): completeInitialFitHandshake
       // must verify the container has a real layout box before flipping
       // `isReady` true, otherwise fit resolves against a 0-sized parent
-      // and the deferredWrites flush into xterm's default 80×24 grid.
-      // 60 frames at the default 60Hz cap retries to ~1 s, after which we
-      // fall through so a permanently 0-size window can not pin Claude
-      // Code output forever.
+      // and queued output reaches xterm's default 80×24 grid.
+      // Bound retries even when only the 100ms readiness fallback advances.
+      // A later reveal can retry a window whose layout was unavailable.
       const HANDSHAKE_RETRY_LIMIT = 60;
 
       function terminalContainerHasLayoutBox(windowId) {
@@ -2145,12 +2090,21 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function retryInitialFitHandshake(windowId, runtime, reason) {
         runtime.handshakeAttempts = (runtime.handshakeAttempts || 0) + 1;
         if (runtime.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT) {
-          requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+          scheduleInitialFitHandshake(windowId);
           return;
         }
         console.warn(
           `[gwt] terminal ${windowId} initial-fit handshake gave up after ${HANDSHAKE_RETRY_LIMIT} attempts; ${reason}.`,
         );
+      }
+
+      function scheduleInitialFitHandshake(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.isReady || runtime.initialFitCancel) return;
+        runtime.initialFitCancel = scheduleTerminalInitialFit(() => {
+          runtime.initialFitCancel = null;
+          if (terminalMap.get(windowId) === runtime) completeInitialFitHandshake(windowId);
+        });
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -2368,6 +2322,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (!runtime) {
           return;
         }
+        scheduleInitialFitHandshake(windowId);
         runtime.pendingActivationIntent = mergeTerminalActivationIntent(
           runtime.pendingActivationIntent,
           { shouldPersistGeometry, reason },
@@ -2402,7 +2357,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           const shouldFocus = !shouldSkipTerminalFocusActivation({
             doc: document,
             modalElements: [
-              modal,
               wizardModal,
               cloneProjectModal,
               document.getElementById("open-project-path-modal"),
@@ -2476,7 +2430,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // (completeInitialFitHandshake bails when canRefreshTerminalViewport
           // is false). The hidden → visible transition is the first chance
           // to drain the pending buffers; complete the handshake here so
-          // subsequent writeOutput calls stop hitting deferredWrites.
+          // the bounded output queue can start draining.
           if (activeRuntime.isReady === false) {
             completeInitialFitHandshake(windowId);
           }
@@ -2494,8 +2448,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
-      // Live state uses the host census enriched by the window catalog;
-      // MISSION tracks completion across the project's agent panes.
+      // Live state uses the host census enriched by the window catalog.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
         appendRenderKeyPart(parts, "running");
@@ -2511,16 +2464,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         appendRenderKeyPart(parts, counts?.waiting ?? null);
         appendRenderKeyPart(parts, "error");
         appendRenderKeyPart(parts, counts?.error ?? null);
-        appendRenderKeyPart(parts, "done");
-        appendRenderKeyPart(parts, counts?.done ?? null);
-        appendRenderKeyPart(parts, "agents");
-        appendRenderKeyPart(parts, counts?.agents ?? null);
-        // SPEC-3038 (2026-06-20): include the window count so the rail Windows
-        // badge refreshes when only surface (non-agent) windows are added or
-        // removed. Agent-count fields alone do not change for surfaces, which
-        // otherwise short-circuits the badge update via the shared cache key.
-        appendRenderKeyPart(parts, "windows");
-        appendRenderKeyPart(parts, counts?.windows ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
@@ -2598,10 +2541,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function recomputeOperatorTelemetry() {
 
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
-        // open-window count across all project tabs, matching the cross-tab
-        // Windows popover. windowMap only holds windows mounted in visited
-        // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           running: 0,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
@@ -2613,9 +2552,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // now it drives the WAITING strip cell instead.
           waiting: 0,
           error: 0,
-          done: 0,
-          agents: 0,
-          windows: allProjectWindowIds().length,
         };
         // The same host census supplies Agents and Works membership. Catalog
         // state enriches that proof; a historical Work never creates an agent.
@@ -2623,12 +2559,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        // MISSION tracks completion of project panes after their children exit.
-        for (const data of windows) {
-          if (!presetSupportsWaitingStatus(data.preset)) continue;
-          counts.agents += 1;
-          if (mapAgentTelemetryState(catalog.runtimeStates[data.id] ?? data.status) === "done") counts.done += 1;
-        }
         let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
@@ -2731,7 +2661,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return item;
       }
 
-      function applyStatus(windowId, status, detail) {
+      function applyStatus(windowId, status, detail, source = "snapshot", retryable = false) {
         return traceMeasure(
           UI_TRACE_EVENT.applyStatus,
           { window_id: windowId, status },
@@ -2758,6 +2688,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
+              (source === "terminal_status" && runtimeState === "error") ||
               runtimeState === "running" ||
               runtimeState === "starting" ||
               runtimeState === "idle" ||
@@ -2774,6 +2705,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                 runtimeState,
                 windowData,
                 statusDetail: effectiveDetail,
+                projectKey: windowContext?.tab.project_key || windowContext?.tab.id,
+                source,
+                retryable,
               });
             }
             const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
@@ -3096,6 +3030,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         options = {},
       ) {
         const readOnly = options.readOnly === true;
+        terminalContainer.title =
+          "Scroll to review history. Hold Shift+drag to select text (Option+drag on macOS).";
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         const imagePasteCleanup = readOnly
           ? noopCleanup
@@ -3112,11 +3048,18 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
-          sendTerminalInput: (data) => {
+          isRuntimeStopped: () => {
+            const windowData = workspaceWindowById(windowId);
+            return isAgentWindowPreset(windowData?.preset)
+              && ["stopped", "interrupted"].includes(runtimeStateForWindow(windowData));
+          },
+          sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
-            terminal.focus();
+            if (focus) {
+              terminal.focus();
+            }
             send({ kind: "terminal_input", id: windowId, data });
           },
         });
@@ -3167,12 +3110,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           runtime.terminal,
           { readOnly },
         );
+        // Reparenting is a reveal even when Agents never selects this window.
+        scheduleInitialFitHandshake(windowId);
         requestAnimationFrame(() => {
-          // SPEC-3671: a runtime created inside a hidden host never completed its
-          // initial fit handshake, and nothing else retries it for a window that is
-          // never revealed in Agents. Reparenting into a laid-out container IS
-          // the reveal, so retry the handshake here; it is idempotent once ready.
-          completeInitialFitHandshake(windowId);
           scheduleTerminalFit(windowId, true);
         });
         return runtime;
@@ -3212,6 +3152,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          macOptionClickForcesSelection: true,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -3226,6 +3167,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
+          runtime.initialFitCancel?.();
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
           viewportRefreshCleanup();
         };
@@ -3267,22 +3209,43 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           cleanup,
           viewportRefreshPending: false,
           activationFrame: null,
+          initialFitCancel: null,
           pendingActivationIntent: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
           // `isReady` flips to `true` AFTER the first
-          // runTerminalActivationSequence has run inside the rAF below,
+          // runTerminalActivationSequence has resolved real dimensions,
           // i.e. after xterm has reached its real cols/rows. Until then,
-          // all writeOutput / replaceTerminalSnapshot calls are captured
-          // in deferredWrites / pendingSnapshotMap so the bytes are not
+          // live output stays in the bounded batcher and snapshots in
+          // pendingSnapshotMap so the bytes are not
           // written against xterm's default 80x24 grid. Without this,
           // the early Claude Code TUI bytes (which were generated for
           // the backend's spawn cols/rows) land at the wrong grid size
           // and stay layout-locked until the next manual resize,
           // producing the post-launch corruption symptom.
           isReady: false,
-          deferredWrites: [],
           snapshotWriteCoordinator: null,
           hasOutput: false,
+          outputWrites: 0,
+          fitBarrierPending: false,
+          prepareFit: () => {
+            // Initial fit establishes the grid before any output can drain.
+            if (runtime.isReady !== true) return true;
+            if (runtime.fitBarrierPending) return false;
+            if (terminalOutputBatcher.pendingCount(windowId) === 0
+              && runtime.outputWrites === 0
+              && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true) return true;
+            runtime.fitBarrierPending = true;
+            terminalOutputBatcher.flushNow(windowId);
+            terminal.write("", () => {
+              runtime.fitBarrierPending = false;
+              if (terminalMap.get(windowId) !== runtime) return;
+              scheduleTerminalFocusActivation(windowId, {
+                shouldPersistGeometry: true,
+                reason: "output_drained",
+              });
+            });
+            return false;
+          },
           // Issue #2937: bounds the focus-path reflow retry in
           // scheduleTerminalFocusActivation when the revealed container's
           // layout box has not settled yet (mirrors handshakeAttempts).
@@ -3314,44 +3277,32 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           installLiveDecoder: (decoder) => decoderMap.set(windowId, decoder),
           onSnapshotFailureSettled: () => {
             decoderMap.set(windowId, new TextDecoder());
-            flushDeferredTerminalWrites(windowId, runtime);
           },
           onLatestSnapshotWritten: () => {
             try {
+              terminalOutputBatcher.finishSnapshot(windowId);
               forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
             } finally {
-              flushDeferredTerminalWrites(windowId, runtime);
+              terminalOutputBatcher.schedulePending(windowId);
             }
           },
           onError: (error, stage) => {
             console.warn(`terminal snapshot ${stage} failed for ${windowId}`, error);
+            if (["take", "decode", "reset", "barrier-write", "snapshot-write"].includes(stage)) {
+              terminalOutputBatcher.invalidate(windowId, error);
+            }
           },
         });
         // SPEC-2008 Phase 26.A / FR-057: schedule the initial fit
         // handshake. The handshake only completes once the runtime's
         // element is actually visible — see completeInitialFitHandshake.
         // If the window was created in a hidden state (e.g. inactive
-        // tab group member), the rAF below runs but is a no-op; the
+        // tab group member), the attempt runs but is a no-op; the
         // handshake then completes on the next hidden → visible
         // transition via scheduleTerminalFocusActivation.
-        requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+        scheduleInitialFitHandshake(windowId);
 
         return runtime;
-      }
-
-      function flushDeferredTerminalWrites(windowId, runtime) {
-        if (
-          terminalMap.get(windowId) !== runtime ||
-          runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true ||
-          runtime.deferredWrites.length === 0
-        ) {
-          return;
-        }
-        const flush = runtime.deferredWrites;
-        runtime.deferredWrites = [];
-        for (const chunk of flush) {
-          writeOutput(windowId, chunk);
-        }
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
@@ -3382,7 +3333,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // state `fitAddon.fit()` resolves cell-grid dimensions against a
         // 0-sized container and silently leaves the terminal at the xterm
         // default 80×24 grid. The previous code then flipped
-        // `isReady = true` and flushed `deferredWrites` into that broken
+        // `isReady = true` and flushed pending output into that broken
         // grid, producing the post-launch corruption that resize/move
         // recovered from. Re-schedule via rAF until the container has a
         // non-zero box, with an attempt ceiling so a perma-hidden window
@@ -3405,24 +3356,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         runtime.handshakeAttempts = 0;
         runtime.isReady = true;
+        runtime.initialFitCancel?.();
+        runtime.initialFitCancel = null;
         startupMetrics.onTerminalReady(windowId, runtime);
 
         if (pendingSnapshotMap.has(windowId)) {
           runtime.snapshotWriteCoordinator.start();
         }
 
-        const pending = pendingOutputMap.get(windowId);
-        if (pending?.length) {
-          for (const chunk of pending) {
-            writeOutput(windowId, chunk);
-          }
-          pendingOutputMap.delete(windowId);
-        }
-
-        // Flush any terminal_output WebSocket bytes that arrived
-        // between createTerminalRuntime returning and this handshake
-        // firing.
-        flushDeferredTerminalWrites(windowId, runtime);
+        terminalOutputBatcher.schedulePending(windowId);
       }
 
       function writeOutput(windowId, base64) {
@@ -3431,27 +3373,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           { window_id: windowId, bytes_base64: base64 ? base64.length : 0 },
           () => {
             const runtime = terminalMap.get(windowId);
-            if (!runtime) {
-              const queue = pendingOutputMap.get(windowId) || [];
-              queue.push(base64);
-              pendingOutputMap.set(windowId, queue);
-              return;
-            }
-            if (base64) {
+            if (base64 && runtime) {
               runtime.hasOutput = true;
             }
-            // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
-            // completed its initial fit, hold the chunk in the runtime's
-            // deferred queue. The createTerminalRuntime rAF flushes this
-            // queue after the activation sequence so writes land at the
-            // real cols/rows instead of xterm's default 80×24 grid.
-            if (
-              runtime.isReady === false ||
-              runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true
-            ) {
-              runtime.deferredWrites.push(base64);
-              return;
-            }
+            // One bounded queue covers absent/unfit/hidden runtimes and
+            // snapshot barriers. canWrite keeps bytes behind the real grid.
             terminalOutputBatcher.enqueue(windowId, base64);
             if (!canRefreshTerminalViewport(windowId)) {
               markTerminalViewportRefreshPending(windowId);
@@ -3462,12 +3388,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
-        clearTerminalOutputBeforeSnapshot({
-          windowId,
-          runtime,
-          pendingOutputMap,
-          clearBatchedOutput: (id) => terminalOutputBatcher.clear(id),
-        });
+        terminalOutputBatcher.beginSnapshot(windowId);
         pendingSnapshotMap.set(windowId, base64);
         if (base64 && runtime) {
           runtime.hasOutput = true;
@@ -3656,6 +3577,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         issueMonitorModel,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
+        knowledgeBridgeStateMap,
         requestKnowledgeBridge,
         resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
@@ -3878,7 +3800,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
         const alert = {
-          id: `attention-${notice.windowId}`,
+          id: notice.id,
           level,
           title: notice.title || "Agent attention",
           message: notice.body || "",
@@ -3888,7 +3810,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
         // FR-011: recorded regardless of the toast; the history row keeps the
         // jump-to (Sc 7) and survives the window's toast being dismissed.
-        notificationCenter.record({ kind: "attention", ...alert });
+        if (flavor === "error") {
+          notificationCenter.recordSurfaceNotice({ key: notice.id, ...alert });
+        } else {
+          notificationCenter.record({ kind: "attention", ...alert });
+        }
         alertsToasts.push(alert);
       }
 
@@ -4046,7 +3972,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         installWizardChrome,
       } = createLaunchWizardSurface({
         createNode,
-        closeModal,
         sendWizardAction,
         requestWorkAdvisory,
       });
@@ -4067,6 +3992,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         document,
         send,
         confirm: (message) => window.confirm(message),
+        executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey,
       });
       pmSettingsPanel.bindEntryPoints({ document });
 
@@ -4148,9 +4074,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome surface
       // (project tabs + close-tab confirm modal + tab cues, Recent Projects,
       // Open Project split-button menu, picker/onboarding renderers, action
-      // availability, Window List dropdown + render key, open/clone project
-      // modal glue, migration modal glue,
-      // the window_list / clone_* / migration_* receive bodies, and the
+      // open/clone project and migration modal glue,
+      // clone_* / migration_* receive bodies, and the
       // project-shell chrome listeners) moved to /project-shell-surface.js.
       // app.js keeps renderAppState (the central render orchestrator), the
       // receive() case arms, the frontendUnits registry entries, and the
@@ -4158,9 +4083,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const {
         sendOpenProjectDialog,
         closeCloneProjectModal,
-        updateActionAvailability,
-        requestWindowList,
-        toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -4170,7 +4092,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         clearPickerPending,
         applyMigrationReceiveEvent,
         handleMigrationModalEscape,
-        handleWindowListEscape,
         installProjectShellChrome,
         dispose: disposeProjectShellSurface,
       } = createProjectShellSurface({
@@ -4179,30 +4100,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // appState / projectError are reassigned in app.js, so the surface
         // reads them through accessors.
         getAppState: () => appState,
-        windowCatalogModel,
         getProjectError: () => projectError,
         activeProjectTab,
-        activeWorkspace,
-        windowMap,
         appendRenderKeyPart,
-        runtimeStateForWindow: catalogRuntimeStateForWindow,
-        windowDisplayTitle,
-        windowTitleTooltip,
-        windowRoleBadgeLabel,
-        shouldShowRuntimeStatus,
-        presetSurface,
-        focusWindowRemotely,
-        // Window-list rows select the live view in its surface.
-        frameWindow,
-        scheduleTerminalFit,
-        addButton,
 
         cloneProjectModal,
         cloneProjectDialog,
         migrationModal,
         migrationDialog,
         isModalOpen: () =>
-          modal.classList.contains("open") ||
           wizardModal.classList.contains("open") ||
           branchCleanupModal?.classList.contains("open"),
       });
@@ -4228,7 +4134,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("issue", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -4534,9 +4440,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
         applyAgentBackendsReceiveEvent,
         systemSettingsInteractionGuard,
@@ -4548,6 +4456,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -4556,6 +4465,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
+        supportedAgentsModel,
+        customAgentsModel,
+        systemSettingsModel,
       } = createSettingsSurface({
         send,
         createNode,
@@ -4565,10 +4477,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderUsagePanel,
         getIndexStatus,
         pmSettingsPanel,
-        mountIssues: (data, host) => {
-          mountKnowledgeWindow(data, host);
-          send({ kind: "request_remote_start_work_branches", id: data.id });
-        },
+        rosterModel,
       });
 
       function ensureWindow(windowData) {
@@ -4673,7 +4582,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge" || surface === "settings") {
+        if (surface === "knowledge") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -4707,7 +4616,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         } else {
           delete element.dataset.agentColor;
         }
-        applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        const status = windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id) : windowData.status;
+        applyStatus(windowData.id, status, detailMap.get(windowData.id));
         renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (presetSurface(windowData.preset) === "terminal") {
           scheduleTerminalFit(windowData.id, true);
@@ -4772,10 +4683,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
-                    agentAttentionToaster.forgetWindow(windowId);
-                    // SPEC #3206: dismiss this window's attention toast from the shared
-                    // alerts stack so a sticky error toast never orphans a gone window.
-                    alertsToasts.dismiss(`attention-${windowId}`);
                     renderedWindowElementKeys.delete(windowId);
                     renderedRuntimeStatusKeys.delete(windowId);
                     renderedAgentKanbanBodyKeys.delete(windowId);
@@ -4786,7 +4693,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                       return next;
                     });
                     renderedIssueWindowHeaderKeys.delete(windowId);
-                    pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
                     terminalOutputBatcher.clear(windowId);
                     disposeProfileWindow(windowId);
@@ -4799,6 +4705,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     clearBranchCleanupForWindow(windowId);
 
                     pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
+                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -4855,10 +4762,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         activeWorkspace,
         workspaceWindowById,
         sendOpenProjectDialog,
-        requestWindowList,
-        renderWindowList,
         windowDisplayTitle,
-        toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -4915,10 +4819,19 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
-        applyStatus(state.id, state.status, state.detail);
+        applyStatus(state.id, state.status, state.detail, state.kind, state.retryable);
         if (state.kind === "terminal_status") {
           startupMetrics.onTerminalStatus(state.id, state.status, terminalMap.get(state.id));
         }
+      });
+
+      const windowCommandErrorModel = createUiStateStore(null);
+      windowCommandErrorModel.subscribe(event => event, event => {
+        if (!event) return;
+        const title = { input: "Input failed", resize: "Resize failed", stop: "Stop failed" }[event.operation] || "Window command failed";
+        const key = `window-command:${event.id}:${event.operation}`;
+        notificationCenter.recordError({ key, title, message: event.message });
+        alertsToasts.push({ id: key, level: "error", title, message: event.message, timeoutMs: 8000 });
       });
 
       const launchProgressModel = createUiStateStore(null);
@@ -4940,6 +4853,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
+        if (event.level === "error") {
+          const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
+          if (diagnostic) {
+            const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
+            const notice = { ...diagnostic, title: `${transition?.title || "Issue Monitor"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
+            else notificationCenter.recordError(notice);
+          }
+          return;
+        }
         // Repeated launch attempts update one Issue notice until it is dismissed.
         if (event.level === "info" && !event.notification_transition
           && event.message === "Issue Monitor launch requested"
@@ -4975,6 +4898,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
+        dismissToast: (id) => {
+          alertsToasts.dismiss(id);
+          notificationCenter.removeNotice(id);
+        },
       });
 
       const workspaceWindowManager = Object.freeze({
@@ -5119,15 +5046,23 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updatePmLauncher(activeWorkspace());
       });
 
+      const projectViewChallengeModel = createUiStateStore(null);
+      projectViewChallengeModel.subscribe(value => value, challenge => {
+        if (challenge?.project_key !== routeProjectKey) return;
+        projectExecutionPolicy.bindGeneration(challenge.generation);
+        projectViewReadiness.challenge(challenge);
+      });
+
       const workspaceStateModel = createUiStateStore(null);
       workspaceStateModel.subscribe(state => state, snapshot => {
         if (!snapshot) return;
         projectError = "";
-        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);
+        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);
         projectPageMetadata.setProjectName(activeProjectTab()?.title);
         // Keep launcher, pending navigation and startup ACKs in render order.
         updatePmLauncher(activeWorkspace());
         resolvePendingWindowFrames();
+        projectViewReadiness.rendered();
         sendStartupAutoResumeReady();
         startupMetrics.onWorkspaceRendered();
       });
@@ -5139,12 +5074,22 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         switch (event.kind) {
+          case "project_view_challenge":
+            projectViewChallengeModel.update(() => event);
+            break;
+          case "project_execution_status":
+            projectExecutionPolicy.applyStatus(event.status);
+            break;
           case "hub_state": {
             hubCatalogModel.update(() => event.hub);
             break;
           }
           case "project_not_found": {
             if (event.project_key === routeProjectKey) projectRouteNotFoundModel.update(() => true);
+            break;
+          }
+          case "project_owner_health": {
+            if (event.health?.project_key === routeProjectKey) projectOwnerHealthModel.update(() => event.health);
             break;
           }
           case "project_agent_aggregate": {
@@ -5182,7 +5127,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyReleaseNotesPayload(event);
             break;
           case "release_notes_error":
-            applyReleaseNotesError(event.message);
+            applyReleaseNotesError(event.message, event.id);
             break;
           case "active_work_projection":
           case "active_work_projection_patch":
@@ -5193,14 +5138,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyAgentActivitySnapshot(event.activity);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
-          case "window_list":
-            windowCatalogModel.update(state => ({ ...state, listEntries: event.windows || [] }));
-            break;
           case "agent_roster_error":
             applyAgentRosterError(event);
             break;
           case "agent_roster":
-            applyAgentRosterSnapshot(event.roster);
+            applyAgentRosterSnapshot(event.roster, event.request_id);
+            refreshProfilesAfterRoster(event.roster);
             break;
           case "agent_switch":
             applyAgentSwitchSnapshot(event.snapshot);
@@ -5270,7 +5213,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "terminal_status":
             terminalStatusModel.update(() => ({
               kind: event.kind, id: event.id, status: event.status, detail: event.detail,
+              retryable: event.retryable,
             }));
+            break;
+          case "window_command_error":
+            windowCommandErrorModel.update(() => ({ ...event }));
             break;
           case "attachment_progress":
             handleAttachmentProgress(event);
@@ -5421,9 +5368,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }));
             break;
           case "update_state":
-            if (event.state === "available") {
+            if (event.state === "available" || event.state === "up_to_date") {
               applyUpdateState(event);
             }
+            break;
+          case "update_check_result":
+            updateCheckResultModel.update(() => event);
             break;
           case "update_progress":
             applyUpdateProgress({
@@ -5492,6 +5442,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "update_settings":
             applyGlobalUpdateSettings(event);
             break;
+          case "hook_doctor":
+            applyHookDoctorEvent(event);
+            break;
           case "system_settings":
           case "system_settings_updated":
             applySystemSettingsEvent(event);
@@ -5529,6 +5482,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
         worksSurface?.dispose();
         agentsSurface?.dispose();
+        railExplanations.dispose();
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
         agentActivityModel.dispose();
@@ -5556,24 +5510,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       // SPEC-3064 Phase 3 (E7): the project-shell chrome listeners (Open
       // Project button + picker/onboarding entry points, the Open Project
-      // split-button menu wiring, the Windows dropdown trigger, and the
-      // dropdown outside-click close) moved into the project shell surface.
+      // split-button menu wiring) moved into the project shell surface.
       // Installed here so the menu Esc listener keeps registering before the
       // global Esc handler below.
       installProjectShellChrome();
-      addButton.addEventListener("click", () => {
-        if (addButton.disabled) {
-          return;
-        }
-        openModal();
-      });
-
-      closeModalButton.addEventListener("click", closeModal);
-      modal.addEventListener("click", (event) => {
-        if (event.target === modal) {
-          closeModal();
-        }
-      });
       // SPEC-3064 Phase 3 (E5): the wizard chrome listeners (footer
       // Cancel/Back/Submit + the wizardBody/wizardModal interaction-guard
       // wiring) moved into the launch wizard surface.
@@ -5685,6 +5625,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        systemSettingsModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,
@@ -5715,16 +5656,23 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           focusWindowLocally(id);
           terminalMap.get(id)?.terminal.focus();
         },
-        onLayout: () => requestAnimationFrame(() => {
-          if (!worksHost) return;
-          for (const id of terminalMap.keys()) {
-            if (worksSurface.isVisible(id)) {
-              terminalOutputBatcher.schedulePending(id);
-              completeInitialFitHandshake(id);
-              scheduleTerminalFit(id, true);
+        onLayout: () => {
+          if (worksHost) {
+            for (const id of terminalMap.keys()) {
+              if (worksSurface.isVisible(id)) scheduleInitialFitHandshake(id);
             }
           }
-        }),
+          scheduleTerminalInitialFit(() => {
+            if (!worksHost) return;
+            for (const id of terminalMap.keys()) {
+              if (worksSurface.isVisible(id)) {
+                terminalOutputBatcher.schedulePending(id);
+                completeInitialFitHandshake(id);
+                scheduleTerminalFit(id, true);
+              }
+            }
+          });
+        },
       });
       worksSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(worksSurface.element);
@@ -5743,6 +5691,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      let renderedRosterNames = null;
+      rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
+        [member.member_id, member.name, member.assignment?.session_id])), names => {
+        if (renderedRosterNames !== null) renderWorkspace(activeWorkspace());
+        renderedRosterNames = names;
+      });
       rosterModel.subscribe(state => state.revision, () => {
         if (rosterHost && !scheduleModel.read().pending) requestAgentSchedule();
       });
@@ -5771,7 +5725,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const targetHost = host || document.querySelector(".surface-area");
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
-        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); }
+        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch();
+          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -5780,8 +5735,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel,
-        onAddMember: () => requestAgentRoster({ kind: "add" }),
+      agentsSurface = createAgentsSurface({ document, executionModel: projectExecutionPolicy.model,
+        projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+        onRenameMember: editAgentMemberName,
+        onRetryName: retryAgentMemberName,
+        onAddMember: (agentId, name) => {
+          applyAgentRosterError({ project_key: routeProjectKey, message: null });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+        },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
@@ -5793,7 +5754,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
-      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync());
+      // Telemetry updates keep the current native terminal host.
+      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
         document,
 
@@ -5804,7 +5766,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         onAgentsHost: setRosterHost,
 
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "settings" : surface;
+          const preset = surface === "issues" ? "issue" : surface;
           send({ kind: "create_window", preset });
         },
         onChange: () => {
@@ -5813,7 +5775,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           refreshVisibleKnowledgeWindows();
         },
         onLayout: (ids) => {
-          for (const id of ids) activateTerminalOnReveal(id);
+          for (const id of ids) {
+            activateTerminalOnReveal(id);
+            windowMap.get(id)?.querySelector(".window-body")?.settingsExplanations?.refresh();
+          }
         },
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
@@ -5845,8 +5810,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       pmLauncherModel.subscribe(state => state, () => {
         if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
       });
-      let initialSurfaceTabId = null;
-      let initialSurfaceSelected = false;
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {
@@ -5897,14 +5860,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (handleWizardEscapeKeydown(event)) {
           return;
         }
-        if (modal.classList.contains("open")) {
-          // SPEC-2356 — preset (Add Window) modal also needs Esc-close.
-          // closeModal() handles both the .open class flip and the focus
-          // restore via the WeakMap-style closure variables.
-          closeModal();
-          event.preventDefault();
-          return;
-        }
         if (cloneProjectModal && cloneProjectModal.classList.contains("open")) {
           closeCloneProjectModal();
           event.preventDefault();
@@ -5926,18 +5881,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
-        // before the windowList dropdown because the Drawer is a
-        // modal surface and outranks the dropdown affordance.
+        // through the shared modal Escape path.
         const kanbanDrawer = document.getElementById("kanban-drawer");
         if (kanbanDrawer && kanbanDrawer.dataset.open === "true") {
           closeKanbanDrawer();
           event.preventDefault();
-          return;
-        }
-        // SPEC-3064 Phase 3 (E7): the Windows dropdown Esc path (close +
-        // focus restore to the trigger button) lives in the project shell
-        // surface. Returns true when it consumed the event.
-        if (handleWindowListEscape(event)) {
           return;
         }
       });
@@ -5952,9 +5900,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         terminalIds: () => terminalMap.keys(),
         canRefreshViewport: canRefreshTerminalViewport,
         fitTerminal: scheduleTerminalFit,
-        beforeFan: () => {
-          frontendUnits.projectWorkspaceShell.renderWindowList();
-        },
       });
       observeTerminalFontMetricsReady({
         fontsReady: document.fonts?.ready,
@@ -5974,28 +5919,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
           else if (socketProjectKey) connectSocket(true);
         }
+        projectViewReadiness.visible();
         requestVisiblePmReports(true);
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
       });
       window.addEventListener("pageshow", () => requestVisiblePmReports(true));
-      for (const button of modal.querySelectorAll("[data-preset]")) {
-        button.addEventListener("click", () => {
-          focusOrSpawnPreset(button.dataset.preset);
-          closeModal();
-        });
-      }
-
-      // SPEC-2356 "Surface Deck" — arrow-key roving + Enter-to-deploy. Esc is
-      // already handled by the global modal close handler, so the roving
-      // listener only needs the directional keys and Enter.
-      modal.addEventListener("keydown", handlePresetRovingKeydown);
-
       // SPEC-2356 — bridge Command Palette + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
-      // creates a new one through the same socket transport the preset
-      // buttons use, so they share the legacy invariants.
+      // creates a new one through the existing socket transport.
 
       function isSingletonSurfacePreset(preset) {
         const sessionPresets = new Set(["agent", "shell", "claude", "codex"]);
@@ -6023,10 +5956,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function focusOrSpawnPreset(preset, { surfaceOwner = null } = {}) {
         preset = normalizeSurfacePreset(preset);
-        if (preset === "issue") {
-          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-          return (activeWorkspace().windows || []).find(w => w.preset === "settings" && !w.surface_owner)?.id || null;
-        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
           ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset
@@ -6069,11 +5998,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "open-branches":
             focusOrSpawnPreset("work");
             return;
+          case "open-profile":
+            focusOrSpawnPreset("profile");
+            return;
           case "open-index":
             focusOrSpawnPreset("index");
             return;
           case "open-issue-monitor":
             focusOrSpawnPreset("issue");
+            send({ kind: "open_issue_monitor" });
             return;
           case "open-recovery-center":
             recoveryCenterController?.open();

@@ -1,5 +1,5 @@
 /** Issue #5596: real Monitor delivery completion + PTY handoff, offline providers. */
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
@@ -8,19 +8,21 @@ import { gotoLiveGwt, sendLiveGwtEvent } from './_helpers/live-gwt';
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || '';
 const HOME = process.env.GWT5596_HOME || '';
 const SEQUENTIAL = process.env.GWT5596_SEQUENTIAL === '1';
+const LAUNCH_COUNT = Number(process.env.GWT5596_LAUNCH_COUNT || '10');
 test.skip(!BASE || !HOME, 'requires scripts/verify-issue-5596.ps1');
 test.use({ headless: false });
-test(SEQUENTIAL ? 'Issue #6096: ten sequential admitted launches finish within 120 seconds each'
+test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launches finish within 120 seconds each`
   : 'Issue #5596: twelve admitted launches keep completion handlers within budget', async ({ page }, info) => {
   test.setTimeout(SEQUENTIAL ? 1_400_000 : 600_000);
   const fixture = JSON.parse(await readFile(join(HOME, 'fixture.json'), 'utf8'));
-  const count = fixture.sequential ? 10 : 12;
+  const count = fixture.sequential ? fixture.launch_count ?? 10 : 12;
   const theme = info.project.name.includes('light') ? 'light' : 'dark';
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   let passed = false;
   let measurement: any = {};
+  const cargoLoadPeriod: any = {};
   try {
     expect(fixture.issues).toHaveLength(count);
     expect(fixture.expected_deliveries).toHaveLength(count);
@@ -29,7 +31,11 @@ test(SEQUENTIAL ? 'Issue #6096: ten sequential admitted launches finish within 1
     await page.bringToFront();
     await gotoLiveGwt(page, BASE, { enableTestBridge: true, projectKey: fixture.project_key });
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    if (fixture.cargo_load) cargoLoadPeriod.activated = await setCargoLoad(fixture, true);
     if (fixture.sequential) await sequentialLaunches(page, fixture);
+    // Issue #6393 times window materialization under load. Provider/hook
+    // assertions still run below, after all three window intervals finish.
+    if (fixture.cargo_load) cargoLoadPeriod.windows_completed = await setCargoLoad(fixture, false);
     await expect.poll(async () => {
       const providers = await launches();
       // Startup admission can wait for a provider handshake before opening
@@ -91,15 +97,29 @@ test(SEQUENTIAL ? 'Issue #6096: ten sequential admitted launches finish within 1
     await info.attach(`launch-performance-${theme}`, { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
     passed = true;
   } finally {
+    // A second theme starts a fresh browser; its setup is outside launch timing.
+    if (fixture.cargo_load) cargoLoadPeriod.paused = await setCargoLoad(fixture, false);
     // Baseline also asserts thresholds and exits nonzero on failure. The phase
     // label changes evidence provenance only; it never converts a failure to PASS.
     measurement = await observe(fixture);
+    const terminalDiagnostics = await page.evaluate((ids: string[]) => ids.map(id => {
+      const messages = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) =>
+        entry.payload.kind === 'terminal_output' && entry.payload.id === id);
+      const output = messages.map((entry: any) => {
+        try { return atob(entry.payload.data_base64 || ''); } catch { return ''; }
+      }).join('');
+      return { id, metrics: (window as any).__gwtTerminalTestApi?.metrics(id),
+        cursor_query_seen: output.includes('\u001b[6n'), output_bytes: output.length,
+        missing_shell_image: /pwsh\.dll.*(?:not exist|not found)/i.test(output) };
+    }), measurement.durable_launch_ack_rows.filter((row: any) => row.window_id).map((row: any) => row.window_id));
     const evidence = {
-      issue: fixture.sequential ? 6096 : 5596, phase: fixture.phase, theme, passed, fixture, ...measurement,
+      issue: fixture.cargo_load ? 6393 : fixture.sequential ? 6096 : 5596, phase: fixture.phase, theme, passed, fixture, ...measurement,
+      cargo_load_period: fixture.cargo_load ? cargoLoadPeriod : undefined,
+      terminal_diagnostics: terminalDiagnostics,
       sequential_launches: fixture.sequential ? JSON.parse(await readFile(join(HOME, 'sequential-launches.json'), 'utf8').catch(() => '[]')) : undefined,
       launches: await launches(), browser_errors: errors,
       'User Verification Result': 'n/a (autonomous)', 'Agent Visual Check': passed ? 'pass' : 'fail',
-      limitations: 'Offline already-admitted delivery replay measures real GUI completion and PTY materialization. It excludes upstream claim/admission and model execution. Sequential mode measures ten individual enqueue-to-durable-ACK-and-live-window intervals, including hook handoff, with a strict 120-second limit. The default batch additionally checks handler budgets using conservative integer timing. Both themes inspect the same owned launch batch.',
+      limitations: 'Offline already-admitted delivery replay excludes upstream claim/admission and model execution. Sequential mode times provider/hook handoff within 120 seconds. Cargo-load mode instead times exact durable claim/delivery materialization, a session-bound running window and native terminal runtime presence within 120 seconds; hidden-terminal fit is recorded separately because it waits for reveal. All provider/hook assertions remain required after the three timed windows and load pause. The real build script records identical Cargo/build-script PIDs and increasing CPU/work counters across each loaded window interval. Both themes inspect the same owned launch batch.',
     };
     const json = JSON.stringify(evidence, null, 2) + '\n';
     await writeFile(join(fixture.evidence_directory, `launch-${theme}.json`), json);
@@ -110,7 +130,7 @@ test(SEQUENTIAL ? 'Issue #6096: ten sequential admitted launches finish within 1
 async function sequentialLaunches(page: any, fixture: any): Promise<void> {
   const receiptsPath = join(HOME, 'sequential-launches.json');
   const retained = await readFile(receiptsPath, 'utf8').catch(() => null);
-  // Dark and light inspect the same ten launches. A partial prior run remains
+  // Dark and light inspect the same launches. A partial prior run remains
   // failed evidence; the second theme cannot silently retry or replace it.
   const receipts: any[] = retained ? JSON.parse(retained) : [];
   if (!retained) {
@@ -122,8 +142,10 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
       }, error => error ? reject(error) : resolve());
     });
     for (const expected of fixture.expected_deliveries) {
+      const loadBefore = fixture.cargo_load ? await cargoLoadSample(fixture) : undefined;
       const enqueuedAt = new Date().toISOString();
-      const receipt: any = { ...expected, enqueued_at: enqueuedAt, complete: false };
+      const receipt: any = { ...expected, enqueued_at: enqueuedAt, complete: false, cargo_load_before: loadBefore,
+        timing_boundary: fixture.cargo_load ? 'durable-materialization-and-ready-native-window' : 'authenticated-provider-handoff' };
       receipts.push(receipt);
       await writeFile(receiptsPath, JSON.stringify(receipts, null, 2));
       try {
@@ -142,6 +164,29 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
         });
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await expect.poll(async () => {
+          if (fixture.cargo_load) {
+            // An already-started recorder must not hold the next launch's
+            // admission handshake while we measure windows independently.
+            await Promise.all((await launches()).map(provider => writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n')));
+            const measurement = await observe(fixture);
+            expect(measurement.failed_issue_rows, 'no failed Monitor deliveries under Cargo load').toEqual([]);
+            const ack = measurement.durable_launch_ack_rows.find((ack: any) => ack.issue_number === expected.issue_number);
+            if (!ack?.window_id || ack.confirmation_delivery_id !== expected.delivery_id
+              || ack.confirmation_claim_id !== expected.claim_id || ack.launched_claim_id !== expected.claim_id
+              || ack.launch_binding !== expected.issue_number || !ack.launched_issue_matches) return false;
+            await sendLiveGwtEvent(page, { kind: 'list_windows' });
+            const bound = await page.evaluate(({ id, cursor }: any) => {
+              const reply = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
+              const candidate = reply?.payload.windows?.find((entry: any) => entry.id === id && entry.session_id && ['running', 'idle'].includes(entry.status));
+              // SPEC-2008 FR-057 intentionally defers fit for hidden hosts.
+              const terminal = (window as any).__gwtTerminalTestApi?.metrics(id);
+              return candidate && terminal?.hasRuntime ? { candidate, terminal } : null;
+            }, { id: ack.window_id, cursor });
+            if (!bound) return false;
+            Object.assign(receipt, { window_id: ack.window_id, session_id: bound.candidate.session_id,
+              materialization: ack, terminal_metrics: bound.terminal });
+            return true;
+          }
           const providers = (await launches()).filter(provider => provider.argv.join(' ').includes(`#${expected.issue_number}`));
           if (providers.length !== 1) return false;
           const provider = providers[0];
@@ -164,6 +209,7 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
         receipt.completed_at = new Date().toISOString();
         receipt.elapsed_ms = Date.now() - Date.parse(enqueuedAt);
         expect(receipt.elapsed_ms, 'enqueue-to-bound-ACK must be strictly under 120 seconds').toBeLessThan(120_000);
+        if (fixture.cargo_load) receipt.cargo_load_after = await cargoLoadSample(fixture);
         receipt.complete = true;
       } catch (error) {
         receipt.failure = error instanceof Error ? error.message : String(error);
@@ -176,12 +222,60 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
       }
     }
   }
-  expect(receipts, 'exactly ten sequential launches measured').toHaveLength(10);
-  expect(receipts.filter(receipt => receipt.timed_out), 'zero timed out launches (0/10, below 5%)').toHaveLength(0);
+  expect(receipts, 'all configured sequential launches measured').toHaveLength(fixture.launch_count ?? 10);
+  expect(receipts.filter(receipt => receipt.timed_out), 'zero timed out launches').toHaveLength(0);
   for (const receipt of receipts) {
     expect(receipt.complete, `#${receipt.issue_number} completed`).toBe(true);
     expect(receipt.elapsed_ms).toBeLessThan(120_000);
+    if (fixture.cargo_load) {
+      expect(receipt.cargo_load_after.workload.work_units, 'concurrent Cargo build made CPU-work progress').toBeGreaterThan(receipt.cargo_load_before.workload.work_units);
+      const before = receipt.cargo_load_before.processes;
+      const after = receipt.cargo_load_after.processes;
+      for (const process of before) {
+        expect(after.find((entry: any) => entry.pid === process.pid)?.started_at, 'same live owned Cargo/build-script process spans launch').toBe(process.started_at);
+      }
+      expect(after.find((entry: any) => entry.pid === receipt.cargo_load_after.workload.pid)?.cpu_ms, 'actual build-script process consumed CPU during launch')
+        .toBeGreaterThan(before.find((entry: any) => entry.pid === receipt.cargo_load_before.workload.pid)?.cpu_ms);
+    }
   }
+}
+
+async function setCargoLoad(fixture: any, active: boolean): Promise<any> {
+  const controlPath = join(HOME, 'cargo-load/start');
+  if (active) await writeFile(controlPath, 'start\n');
+  else await rm(controlPath, { force: true });
+  let workload: any;
+  const observed = expect.poll(async () => {
+    workload = (await jsonRows(join(HOME, 'cargo-load'), /^progress\.jsonl$/)).at(-1);
+    expect(() => process.kill(fixture.cargo_load.cargo_pid, 0), 'same owned Cargo process remains alive').not.toThrow();
+    if (workload) expect(() => process.kill(workload.pid, 0), 'same owned build-script remains alive').not.toThrow();
+    return workload?.workers ?? -1;
+  }, { timeout: 30_000, message: active ? 'Cargo CPU workload active before agent launch' : 'Cargo CPU workload idle before next browser startup' });
+  if (active) await observed.toBeGreaterThan(0);
+  else await observed.toBe(0);
+  return { observed_at: new Date().toISOString(), workload };
+}
+
+async function cargoLoadSample(fixture: any): Promise<any> {
+  const workload = (await jsonRows(join(HOME, 'cargo-load'), /^progress\.jsonl$/)).at(-1);
+  expect(workload?.workers, 'Cargo build CPU workload is ready').toBeGreaterThan(0);
+  const pids = [fixture.cargo_load.cargo_pid, workload.pid];
+  for (const pid of pids) {
+    expect(Number.isSafeInteger(pid) && pid > 0, 'exact owned process PID').toBe(true);
+    expect(() => process.kill(pid, 0), 'owned Cargo/build-script process is alive').not.toThrow();
+  }
+  // OS CPU counters distinguish an active build from a sleeping Cargo parent.
+  // Sampling runs outside the measured enqueue-to-live-window interval.
+  const command = `Get-Process -Id ${pids.join(',')} -ErrorAction Stop | Select-Object @{n='pid';e={$_.Id}},@{n='cpu_ms';e={$_.TotalProcessorTime.TotalMilliseconds}},@{n='started_at';e={$_.StartTime.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -AsArray`;
+  const processes = await new Promise<any[]>((resolve, reject) => {
+    execFile('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      cwd: fixture.project, timeout: 30_000, windowsHide: true,
+    }, (error, stdout) => {
+      if (error) reject(error);
+      else { try { resolve(JSON.parse(stdout)); } catch (error) { reject(error); } }
+    });
+  });
+  return { observed_at: new Date().toISOString(), workload, processes };
 }
 
 async function launches(): Promise<any[]> {

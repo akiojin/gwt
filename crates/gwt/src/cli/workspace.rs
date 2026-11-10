@@ -79,6 +79,13 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Diagnose the shared host endpoint catalog without resolving stale roots.
+    ProjectScan,
+    /// Quarantine abandoned machine-local project stores; dry-run by default.
+    ProjectPrune {
+        dry_run: bool,
+        manifest_hash: Option<String>,
+    },
     /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
     /// fold project stores that a pre-#3466 build split apart back into the
     /// repository's canonical store.
@@ -1501,6 +1508,34 @@ pub(super) fn run<E: CliEnv>(
                 |_| false,
                 out,
             )
+        }
+        WorkspaceCommand::ProjectScan => {
+            let (roots, metrics) =
+                crate::project_runtime::installation::owner_host_project_catalog()
+                    .map_err(|error| core_error(error.into()))?;
+            let mut report = serde_json::to_value(metrics)
+                .map_err(|error| core_error(GwtError::Other(error.to_string())))?;
+            report["root_count"] = roots.len().into();
+            out.push_str(&report.to_string());
+            out.push('\n');
+            Ok(0)
+        }
+        WorkspaceCommand::ProjectPrune {
+            dry_run,
+            manifest_hash,
+        } => {
+            let report = crate::project_store_maintenance::run(
+                env.repo_path(),
+                dry_run,
+                manifest_hash.as_deref(),
+            )
+            .map_err(|error| core_error(error.into()))?;
+            out.push_str(
+                &serde_json::to_string(&report)
+                    .map_err(|error| core_error(GwtError::Other(error.to_string())))?,
+            );
+            out.push('\n');
+            Ok(0)
         }
         WorkspaceCommand::WorkPrune {
             dry_run,

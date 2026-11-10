@@ -446,12 +446,34 @@ test("Index result Open uses target numbers for Issue and SPEC hits", () => {
     .split("function openKnowledgeIndexResultTarget(preset, target)")[1]
     ?.split("// SPEC-3064 Phase 3 (E3)")[0];
   assert.ok(openKnowledgeTargetBlock, "expected the Knowledge target handoff helper");
-  assert.ok(
-    indexSurfaceSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
-      indexSurfaceSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
-      indexSurfaceSource.includes('pendingIndexOpenTargetsByPreset.set(knowledgeKind === "issue" ? "settings" : preset'),
-    "Issue/SPEC result Open should select the indexed target number, including newly created windows",
+  const numberAndOpen = indexSurfaceSource.slice(
+    indexSurfaceSource.indexOf("function indexResultTargetNumber(target)"),
+    indexSurfaceSource.indexOf("// SPEC-3064 Phase 3 (E3): the Index window mount moved here"),
   );
+  const kind = appSource.slice(appSource.indexOf("function knowledgeKindForPreset(preset)"), appSource.indexOf("function send(message)"));
+  const header = appSource.slice(appSource.indexOf("function runIssueWindowHeaderAction(action, windowData)"), appSource.indexOf("function syncIssueWindowHeader(windowData, element)"));
+  const pending = new Map(), selected = [], opened = [];
+  let host = null;
+  const routes = new Function("focusOrSpawnPreset", "requestKnowledgeDetail", "pendingIndexOpenTargetsByPreset",
+    `${kind}\n${numberAndOpen}\n${header}\nreturn { openKnowledgeIndexResultTarget, runIssueWindowHeaderAction, knowledgeKindForPreset };`)(
+    preset => { opened.push(preset); return host; }, (...args) => selected.push(args), pending,
+  );
+  for (const open of [
+    () => routes.openKnowledgeIndexResultTarget("issue", { number: 4777 }),
+    () => routes.openKnowledgeIndexResultTarget("spec", { spec_id: 4777 }),
+    () => routes.runIssueWindowHeaderAction("open-issue", { linked_issue_number: 4777 }),
+  ]) {
+    open();
+    assert.deepEqual([...pending], [["issue", { knowledgeKind: "issue", number: 4777 }]],
+      "a missing Issues host retains the selection under the preset mounted by the backend");
+    pending.clear();
+  }
+  assert.deepEqual(opened, ["issue", "spec", "issue"]);
+  assert.deepEqual(selected, [], "detail waits for the new host to mount");
+  host = "issue-existing";
+  routes.openKnowledgeIndexResultTarget("issue", { number: 4777 });
+  assert.deepEqual(selected, [[host, "issue", 4777]]);
+  assert.equal(routes.knowledgeKindForPreset("settings"), null, "Settings does not own Knowledge refresh state");
   assert.ok(
     indexSurfaceSource.includes('openKnowledgeIndexResultTarget("issue", target)') &&
       indexSurfaceSource.includes('openKnowledgeIndexResultTarget("spec", target)'),

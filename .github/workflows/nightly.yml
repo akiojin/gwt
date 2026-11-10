@@ -40,6 +40,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        id: auto_feedback_source
         with:
           ref: develop
       - uses: actions/setup-node@v7
@@ -65,6 +66,41 @@ jobs:
       - name: Build the checkout daemon for native hook tests
         run: cargo build -p gwt --bin gwtd
         timeout-minutes: 30
+      # Issue #6576: credentials reach only the read-only probe executable.
+      # A skipped/failed supplemental probe is not authenticated-read evidence.
+      - name: Build the Auto feedback authentication probe
+        id: auto_feedback_auth_probe_build
+        if: github.event_name == 'schedule' && github.repository == 'akiojin/gwt'
+        continue-on-error: true
+        run: cargo build -p gwt-github --example auto_feedback_auth_probe
+        timeout-minutes: 15
+      - name: Measure read-only Auto feedback authentication
+        id: auto_feedback_auth_probe
+        if: github.event_name == 'schedule' && github.repository == 'akiojin/gwt' && steps.auto_feedback_auth_probe_build.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $probeHome = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          try {
+            New-Item -ItemType Directory -Path $probeHome | Out-Null
+            $env:HOME = $probeHome
+            $env:USERPROFILE = $probeHome
+            $probeSha = '${{ steps.auto_feedback_source.outputs.commit }}'
+            if ($probeSha -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') { throw 'missing checkout SHA' }
+            Write-Host "auto_feedback_auth_probe_sha=$probeSha"
+            $result = & .\target\debug\examples\auto_feedback_auth_probe.exe 2>$null
+            $ok = $LASTEXITCODE -eq 0 -and @($result).Count -eq 1 -and $result -ceq 'true'
+            Write-Host ("auto_feedback_auth_probe=" + $ok.ToString().ToLowerInvariant())
+            if (-not $ok) { exit 1 }
+          } catch {
+            Write-Host 'auto_feedback_auth_probe=false'
+            exit 1
+          } finally {
+            Remove-Item -Recurse -Force $probeHome -ErrorAction SilentlyContinue
+          }
       # windows-latest gives 4 logical processors, and one pass over these
       # suites costs ~16 minutes for `--lib` and about as much again for
       # `--bin gwt` there, so three passes need a budget in the 100-minute

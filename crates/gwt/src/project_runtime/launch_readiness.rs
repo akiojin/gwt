@@ -220,3 +220,86 @@ fn readiness_handoff_detail(waited_secs: u64, observation: &str) -> String {
          window to cancel the launch."
     )
 }
+
+pub fn readiness_hook_config_diagnosis(
+    agent_id: &str,
+    worktree: &std::path::Path,
+) -> Option<String> {
+    let paths = if agent_id == gwt_agent::AgentId::Codex.command() {
+        gwt_skills::codex_hooks_paths_for_codex_discovery(
+            worktree,
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        )
+    } else if agent_id == gwt_agent::AgentId::ClaudeCode.command() {
+        vec![worktree.join(".claude").join("settings.local.json")]
+    } else {
+        return None;
+    };
+    let states = paths
+        .iter()
+        .map(|path| {
+            let state = if path.is_file() { "present" } else { "missing" };
+            format!("{} {state}", path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let cause = if paths.first().is_some_and(|path| !path.is_file()) {
+        "the agent may not have discovered its SessionStart hook"
+    } else {
+        "the hook config exists, so the hook ran late or could not reach gwt          (check hook health and project-state lock contention)"
+    };
+    Some(format!("SessionStart hook config: {states}. {cause}"))
+}
+
+pub fn record_readiness_handoff(
+    window_id: &str,
+    detail: &str,
+    session: Option<&crate::project_runtime::launch_payload::ActiveAgentSession>,
+    owner_root: Option<(
+        crate::cli::execution_state::ExecutionOwnerKey,
+        &std::path::Path,
+    )>,
+) -> String {
+    let diagnosis = session.and_then(|session| {
+        readiness_hook_config_diagnosis(&session.agent_id, &session.worktree_path)
+    });
+    let detail = match diagnosis {
+        Some(diagnosis) => format!("{detail} {diagnosis}"),
+        None => detail.to_string(),
+    };
+    // Observe the actual OS lock without waiting or trusting stale holder metadata.
+    let work_lock_contended = owner_root.is_some_and(|(_, project_root)| {
+        let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root)
+            .with_extension("lock");
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .ok()
+            .is_some_and(|file| {
+                fs2::FileExt::try_lock_exclusive(&file)
+                    .is_err_and(|error| gwt_core::operation_deadline::is_lock_contended(&error))
+            })
+    });
+    let work_diagnosis = if work_lock_contended {
+        "works.lock contention observed: yes; SessionStart may be waiting for Work intake"
+    } else {
+        "works.lock contention observed: no; other SessionStart delays remain undetermined"
+    };
+    let message = format!(
+        "{} {detail} {work_diagnosis}",
+        crate::issue_monitor::SESSION_START_READINESS_PENDING_PREFIX
+    );
+    let issue = owner_root.map(|(owner, _)| owner.number);
+    crate::error_report::report_error_and_publish(
+        gwt_core::error_ledger::ErrorKind::LaunchFailure,
+        message.clone(),
+        gwt_core::error_ledger::ErrorTarget {
+            window_id: Some(window_id.to_string()),
+            session_id: session.map(|session| session.session_id.clone()),
+            project_root: owner_root.map(|(_, root)| root.display().to_string()),
+            issue,
+        },
+    );
+    message
+}

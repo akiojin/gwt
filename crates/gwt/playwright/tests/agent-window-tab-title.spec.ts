@@ -7,11 +7,7 @@ const appUrl = liveBase
   ? new URL(liveBase).pathname === "/" ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : liveBase
   : APP_URL;
 const errors = new WeakMap<Page, string[]>();
-const rowFor = (page: Page, title: string) => page.locator(".window-list-row")
-  .filter({ has: page.locator(".window-list-title", { hasText: title }) });
-
-// #4777 T-3: grouped agents remain reachable through Windows after removing
-// the window tab strip. The existing titlebar/list retain title and telemetry.
+// #4777: grouped agents remain reachable through Works after the Windows list retires.
 test.describe("Agent window navigation without tabs", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
 
@@ -36,25 +32,23 @@ test.describe("Agent window navigation without tabs", () => {
     expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
-  test("full titles remain in the titlebar and Windows list without tab DOM", async ({ page }) => {
+  test("full titles remain in the titlebar without tab DOM", async ({ page }) => {
     await expect(page.locator(".window-tab-strip, .window-tab")).toHaveCount(0);
     await expect(page.locator(".workspace-window[data-id='agent-1'] .title-text"))
       .toHaveAttribute("title", "Codex · implementing complete maximize");
-    await page.locator("#window-list-button").click();
-    await expect(rowFor(page, "Aster").locator(".window-list-title"))
-      .toHaveAttribute("title", "Codex · implementing complete maximize");
-    await expect(rowFor(page, "Birch").locator(".window-list-title"))
-      .toHaveAttribute("title", "Birch");
+
   });
 
-  test("Windows focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
+  test("Works focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
     const active = page.locator(".works-terminal[data-window-id='agent-1']");
     const target = page.locator(".works-terminal[data-window-id='agent-2']");
     const source = page.locator(".workspace-window[data-id='agent-2']");
     await expect(target).toBeHidden();
-    await page.locator("#window-list-button").click();
-    await rowFor(page, "Birch").click();
+    await target.locator(".xterm").evaluate(node => { (window as any).__legacyGroupedTerminal = node; });
+    await page.locator('.works-full [data-action="back"]').click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
+    expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
     await expect(active).toBeHidden();
     await expect(page.locator(".works-full-name")).toHaveText("Birch");
     // Read-only list caches intentionally omit the startup performance beacon;
@@ -74,76 +68,10 @@ test.describe("Agent window navigation without tabs", () => {
     // Back changes presentation only; the native terminal remains owned by its session.
     await page.locator('.works-full [data-action="back"]').click();
     expect(await closedIds()).toEqual([]);
-    await page.locator("#window-list-button").click();
-    await rowFor(page, "Birch").click();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
-  });
-
-  test("Windows list batches inactive telemetry without delaying navigation", async ({ page }, info) => {
-    await page.locator("#window-list-button").click();
-    const trigger = page.locator("#window-list-button");
-    await trigger.focus();
-    await trigger.hover();
-    const panel = page.locator("#window-list-panel");
-    const chip = rowFor(page, "Birch").locator(".status-chip");
-    await expect(chip).toHaveClass(/running/);
-    await expect(chip.locator(".status-label")).toHaveText("Running");
-    const burst = await panel.evaluate(async panel => {
-      const before = panel.innerHTML;
-      const focused = document.activeElement;
-      let rebuilds = 0;
-      const observer = new MutationObserver(records => {
-        rebuilds += records.filter(record => record.type === "childList" && record.removedNodes.length > 0).length;
-      });
-      observer.observe(panel, { childList: true });
-      try {
-        for (let n = 1; n <= 50; n++) window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", n % 2 ? "running" : "idle", true);
-        const unchanged = panel.innerHTML === before;
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        return { unchanged, rebuilds, focusPreserved: document.activeElement === focused,
-          hoverPreserved: focused?.matches(":hover") };
-      } finally { observer.disconnect(); }
-    });
-    expect(burst).toEqual({ unchanged: true, rebuilds: 1, focusPreserved: true, hoverPreserved: true });
-    await expect(chip).toHaveClass(/idle/);
-    await expect(chip.locator(".status-label")).toHaveText("Idle");
-    await expect(page.locator(".works-full-name")).toHaveText("Aster");
-    const fallback = await panel.evaluate(async panel => {
-      const originalRaf = window.requestAnimationFrame;
-      window.requestAnimationFrame = () => 0;
-      const started = performance.now();
-      const before = panel.innerHTML;
-      try {
-        return await new Promise<{ unchanged: boolean; latency: number }>((resolve, reject) => {
-          const observer = new MutationObserver(() => {
-            if (!panel.textContent?.includes("Running")) return;
-            observer.disconnect(); clearTimeout(timeout);
-            resolve({ unchanged, latency: performance.now() - started });
-          });
-          const timeout = setTimeout(() => { observer.disconnect(); reject(new Error("Windows list fallback exceeded 1 second")); }, 1000);
-          observer.observe(panel, { childList: true });
-          window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "running", true);
-          const unchanged = panel.innerHTML === before;
-        });
-      } finally { window.requestAnimationFrame = originalRaf; }
-    });
-    expect(fallback.unchanged).toBe(true);
-    expect(fallback.latency).toBeLessThan(1000);
-    await expect(chip).toHaveClass(/running/);
-    await info.attach("windows-list-frame", { body: JSON.stringify({ burst, fallback }), contentType: "application/json" });
-    await page.screenshot({ path: info.outputPath("windows-list-frame.png") });
-    // A receipt waiting for paint must not retarget the row already displayed.
-    await rowFor(page, "Birch").evaluate(row => {
-      window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "idle", true);
-      (row as HTMLButtonElement).click();
-    });
-    await expect(panel).toBeHidden();
-    await expect(page.locator(".works-full-name")).toHaveText("Birch");
-    await trigger.click();
-    await expect(panel).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(panel).toBeHidden();
-    await expect(trigger).toBeFocused();
+    expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
   });
 
   test("provider runtime pushes update Works and fleet counts within one second", async ({ page }, info) => {

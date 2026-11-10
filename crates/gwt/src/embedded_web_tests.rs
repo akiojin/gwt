@@ -40,6 +40,24 @@ fn window_runtime_state_js() -> &'static str {
     root_js_module_source("/window-runtime-state.js")
 }
 
+#[test]
+fn embedded_web_status_strip_has_no_runtime_completion_indicator() {
+    for source in [
+        index_html(),
+        styles_components_css(),
+        root_js_module_source("/operator-shell.js"),
+    ] {
+        assert!(!source.contains("op-strip-mission"));
+        assert!(!source.contains("op-status-strip__cell--mission"));
+        assert!(!source.contains("op-status-strip__cell--complete"));
+    }
+    assert!(!app_js().contains("counts.done"));
+    assert!(!app_js().contains("counts?.done"));
+    assert!(index_html().contains("id=\"op-briefing\""));
+    assert!(index_html().contains("id=\"op-strip-branches\""));
+    assert!(static_asset_text("/styles/tokens.css").contains("--color-state-done"));
+}
+
 /// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
 /// app.js.
 fn project_index_search_surface_js() -> &'static str {
@@ -252,7 +270,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         !index_html().contains("data-preset=\"issue_monitor\""),
-        "Add Window must expose only the canonical Issue entrypoint"
+        "the retired issue_monitor preset must not be exposed"
     );
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     assert!(
@@ -285,15 +303,17 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
 }
 
 #[test]
-fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
+fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     let settings_js = settings_surface_js();
 
     assert!(
         surface_js.contains("settings:open")
             && surface_js.contains(r#"section: "issues""#)
-            && settings_js.contains("set_issue_monitor_max_active_agents"),
-        "Issues must delegate monitor concurrency controls to Settings Issues"
+            && settings_js.contains("set_issue_monitor_autonomous_mode")
+            && settings_js.contains("set_issue_monitor_enabled")
+            && !settings_js.contains("set_issue_monitor_max_active_agents"),
+        "Issues must delegate project controls to Settings without duplicate capacity editing"
     );
     assert!(
         surface_js.contains("issue_monitor_queue_move"),
@@ -599,7 +619,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         )
         .expect("valid regex");
     let streaming_write = regex::Regex::new(
-            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.terminal\.write\(text,\s*onWritten\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.outputWrites\+\+;\s*try\s*\{\s*runtime\.terminal\.write\(text,\s*\(\)\s*=>\s*\{\s*runtime\.outputWrites--;\s*onWritten\(\);\s*\}\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
         )
         .expect("valid regex");
     // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
@@ -608,7 +628,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // short-circuit on a background tab leaves xterm with stale cell
     // metrics and dead scrollback wheel until the next OS resize.
     let snapshot_write = regex::Regex::new(
-            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
+            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{\s*terminalOutputBatcher\.finishSnapshot\(windowId\);\s*forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\);",
         )
         .expect("valid regex");
     let snapshot_activation = regex::Regex::new(
@@ -671,9 +691,9 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         "expected document visibility restore to re-arm visible terminal refreshes",
     );
     assert!(
-        html.contains("clearTerminalOutputBeforeSnapshot({")
-            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id)"),
-        "expected snapshot receipt to clear every pre-boundary terminal output queue",
+        html.contains("terminalOutputBatcher.beginSnapshot(windowId);")
+            && html.contains("terminalOutputBatcher.finishSnapshot(windowId);"),
+        "expected snapshot receipt to discard old output and completion to resume its bounded suffix",
     );
     assert!(
         html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
@@ -715,19 +735,23 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // cols/rows) get written into xterm's default 80×24 grid and
     // stay layout-locked there until the next manual resize.
     let html = frontend_bundle_source();
-    // The rAF must dispatch to completeInitialFitHandshake — keeping
-    // the handshake idempotent and gated on real layout (see helper
+    // The initial-fit reservation must dispatch to completeInitialFitHandshake,
+    // including when rAF stalls, keeping the handshake gated on real layout (see helper
     // below). Works caches keep a layout box while hidden; ordinary hidden
     // windows still wait for reveal. Inlining replay before fit would
-    // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
+    // defeat the bounded output queue (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*return runtime;"#,
+        )
+        .expect("valid regex");
+    let scheduled_handshake = regex::Regex::new(
+            r#"(?s)function scheduleInitialFitHandshake\(windowId\) \{[\s\S]*?runtime\.initialFitCancel = scheduleTerminalInitialFit\(\(\) => \{\s*runtime\.initialFitCancel = null;\s*if \(terminalMap\.get\(windowId\) === runtime\) completeInitialFitHandshake\(windowId\);"#,
         )
         .expect("valid regex");
     // The helper must (a) bail on hidden windows outside the measurable
     // Works cache layout, and (b) mark ready only after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -738,7 +762,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     let write_gate = regex::Regex::new(
-            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(\s*runtime\.isReady === false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) === true\s*\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+            r#"(?s)canWrite: \(windowId\) => \{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true"#,
         )
         .expect("valid regex");
     let snapshot_gate = regex::Regex::new(
@@ -751,17 +775,25 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
             "expected createTerminalRuntime to dispatch its initial-fit handshake through completeInitialFitHandshake instead of inlining the replay (FR-057, CodeRabbit fix)",
         );
     assert!(
+            scheduled_handshake.is_match(html),
+            "expected the frame/timer reservation to dispatch the initial-fit handshake only for the current runtime (Issue #5016 CFIT)",
+        );
+    assert!(
             handshake_helper.is_match(html),
             "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Works caches, and only set isReady=true after activation succeeds (FR-057)",
         );
     assert!(
             reveal_completes_handshake.is_match(html),
-            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can still drain deferredWrites (FR-057, CodeRabbit fix)",
+            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can drain bounded output (FR-057, CodeRabbit fix)",
         );
     assert!(
             write_gate.is_match(html),
-            "expected writeOutput to push to runtime.deferredWrites when runtime.isReady === false (FR-057)",
+            "expected the bounded queue to write only after real initial fit and snapshot completion (FR-057)",
         );
+    assert!(
+        !html.contains("pendingOutputMap") && !html.contains("deferredWrites"),
+        "expected one bounded RAW queue across missing, unfit and hidden terminals",
+    );
     assert!(
             snapshot_gate.is_match(html),
             "expected replaceTerminalSnapshot to re-queue into pendingSnapshotMap when runtime.isReady === false (FR-057)",
@@ -1308,16 +1340,7 @@ fn embedded_web_window_state_visualization_uses_runtime_state_without_canvas_geo
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
-    // The Window List preserves runtime labels while ignoring saved canvas
-    // geometry, including legacy states loaded after a restart or update.
     let shell_js = project_shell_surface_js();
-    assert!(
-            !shell_js.contains("windowGeometryLabel")
-                && !shell_js.contains("window-list-geometry")
-                && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
-                && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
-            "expected fixed surface window list rendering to display runtime labels without canvas geometry",
-        );
     assert!(
         !js.contains("function windowStateLabel(windowData)")
             && !shell_js.contains("function windowStateLabel(windowData)"),
@@ -1348,10 +1371,9 @@ fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
         "expected embedded html to map serialized AgentColor values to the shared CSS variable",
     );
     assert!(
-            html.contains(".workspace-window[data-agent-color]::before")
-                && html.contains(".window-list-row[data-agent-color]::before"),
-            "expected embedded html to expose agent-color accent bars for workspace windows and the window list",
-        );
+        html.contains(".workspace-window[data-agent-color]::before"),
+        "expected embedded html to expose agent-color accent bars for workspace windows",
+    );
     assert!(
         html.contains(".agent-dot"),
         "expected embedded html to style the shared agent color dot surface",
@@ -1366,10 +1388,6 @@ fn embedded_web_agent_color_is_bound_for_windows_wizard_and_board() {
         html.contains("if (windowData.agent_color)")
             && html.contains("element.dataset.agentColor = windowData.agent_color"),
         "expected embedded bundle to bind workspace window colors from windowData.agent_color",
-    );
-    assert!(
-        html.contains("row.dataset.agentColor = entry.agent_color"),
-        "expected embedded bundle to bind window list rows from entry.agent_color",
     );
     assert!(
         html.contains("card.dataset.agentColor = entry.agent_color"),
@@ -1456,8 +1474,8 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
     let js = app_js();
 
     assert!(
-        html.contains(".window-role-badge") && html.contains(".window-list-role"),
-        "expected role badge styling for titlebars and the window list",
+        html.contains(".window-role-badge"),
+        "expected role badge styling for titlebars",
     );
     assert!(
         js.contains("function presetRoleLabel(preset)"),
@@ -1527,12 +1545,8 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
         "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        shell_js.contains("window-list-worktree"),
-        "window list rows must render worktree form"
-    );
-    assert!(
         styles.contains(".window-worktree-badge"),
-        "titlebar/list worktree badge styling must ship in embedded CSS"
+        "titlebar worktree badge styling must ship in embedded CSS"
     );
     let consumer_wiring = format!("{js}\n{shell_js}");
     for legacy in [
@@ -1559,10 +1573,10 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 }
 
 #[test]
-fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
+fn embedded_web_apply_status_keeps_catalog_and_badges_in_sync() {
     let js = app_js();
     let apply_status_source = js
-        .split("function applyStatus(windowId, status, detail)")
+        .split("function applyStatus(")
         .nth(1)
         .expect("applyStatus function")
         .split("\n      function ")
@@ -1580,30 +1594,9 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
         "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
-            apply_status.is_match(apply_status_source)
-                && !apply_status_source.contains("renderWindowList();"),
+            apply_status.is_match(apply_status_source),
             "expected applyStatus to publish shared catalog state before an unmounted return and update mounted badges",
         );
-}
-
-#[test]
-fn embedded_web_window_list_selection_navigates_to_window() {
-    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
-    // app.js to the project shell surface; the selection contract is pinned
-    // against the extracted module.
-    //
-    // The selected catalog entry is routed to the fixed surface layout.
-    let js = project_shell_surface_js();
-
-    assert!(
-        js.contains("frameWindow(entry.id);"),
-        "expected window list selection to navigate to the chosen window",
-    );
-    assert!(
-        !js.contains("send({ kind: \"restore_window\", id: entry.id });")
-            && !js.contains("focusWindowRemotely(entry.id, { center: true });"),
-        "expected window list selection to avoid the maximize/restore + center handshake",
-    );
 }
 
 #[test]
@@ -1676,7 +1669,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*let replayedReleaseNotesId = null;\s*let replayedRecoveryCenterId = null;\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*if \(pending\.message\.kind === "load_recovery_center"\) replayedRecoveryCenterId = pending\.message\.request_id;\s*\}\s*recoveryCenterController\?\.reconnect\(replayedRecoveryCenterId\);"#,
     )
     .expect("valid regex");
 
@@ -1718,7 +1711,7 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
     let mut remaining = subscription;
     for step in [
         "projectError = \"\";",
-        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);",
+        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);",
         "projectPageMetadata.setProjectName(activeProjectTab()?.title);",
         "updatePmLauncher(activeWorkspace());",
         "resolvePendingWindowFrames();",
@@ -1781,15 +1774,14 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
         "expected workspace rendering fallback helper in embedded html",
     );
     assert!(
-        html.contains("function renderAppState(nextState)"),
+        html.contains("function renderAppState(nextState, incomingRuntimeStatus = false)"),
         "expected app state rendering to live in a named helper",
     );
     assert!(
             html.contains("const tab = activeProjectTab();")
                 && html.contains("renderProjectOnboarding(tab);")
-                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());")
-                && html.contains("renderWindowList();"),
-            "expected app state rendering to drive onboarding, workspace, and window list updates from the active tab",
+                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());"),
+            "expected app state rendering to drive onboarding and workspace updates from the active tab",
         );
     assert!(
         html.contains("function renderWorkspace(workspace)"),
@@ -2116,9 +2108,9 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
     );
     assert!(
         html.contains(
-            "[\"settings\", \"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
+            "[\"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
         ) && html.contains("return \"issue\";"),
-        "expected Settings and legacy aliases to share Issue knowledge contracts",
+        "expected Issue and legacy aliases to share Issue knowledge contracts",
     );
 }
 
@@ -2171,8 +2163,8 @@ fn embedded_web_index_window_exposes_project_index_search_contract() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains("data-preset=\"index\""),
-        "expected Add Window modal to expose an Index preset",
+        html.contains("data-cmd=\"open-index\""),
+        "expected sidebar to expose the Index command",
     );
     assert!(
         html.contains("search_project_index"),
@@ -2762,29 +2754,26 @@ fn embedded_web_logs_surface_uses_cache_backed_contract() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        !html.contains(r#"data-preset="shell""#)
-            && !html.contains(r#"data-preset="claude""#)
-            && !html.contains(r#"data-preset="codex""#),
-        "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
-    );
-    assert!(
-            !html.contains(r#"data-preset="branches""#),
-            "expected Add window modal to not have a standalone Branches preset — branch browsing is part of the Work surface",
+fn embedded_web_sidebar_replaces_retired_window_navigation() {
+    let html = index_html();
+    for id in [
+        "preset-modal",
+        "add-button",
+        "window-list-button",
+        "window-list-panel",
+        "op-rail-window-count",
+    ] {
+        assert!(
+            !html.contains(&format!("id=\"{id}\"")),
+            "retired navigation {id} must be absent"
         );
-}
-
-#[test]
-fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        !html.contains(r#"data-preset="improvement""#),
-        "the retired Improvement Inbox preset must not appear in the Add window modal",
-    );
+    }
+    for command in ["open-logs", "open-index", "open-profile"] {
+        assert!(
+            html.contains(&format!("data-cmd=\"{command}\"")),
+            "sidebar must expose {command}"
+        );
+    }
 }
 
 #[test]
@@ -3141,7 +3130,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         workspace_event.is_match(html)
             && html.contains("const workspaceStateModel = createUiStateStore(null);")
             && html.contains(
-                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);"
+                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);"
             ),
         "expected workspace_state events to flow through the project workspace shell unit",
     );
@@ -3691,13 +3680,6 @@ fn embedded_web_host_window_resize_fans_out_terminal_fit() {
         "expected attachHostResizeReflow to route fit requests through the shared \
              terminal fit scheduler while preserving fitTerminal semantics; body: {body}",
     );
-    // SPEC-2008 camera-focus: maximize was removed, so the host-resize
-    // beforeFan no longer re-syncs maximized windows. It now refreshes the
-    // window list (rail/overview) so the new viewport size is reflected.
-    assert!(
-        body.contains("renderWindowList()"),
-        "expected attachHostResizeReflow.beforeFan to refresh the window list, body: {body}",
-    );
 }
 
 /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
@@ -4039,7 +4021,9 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
         "issue_monitor_profiles_set",
         "Add candidate",
         "prefer_for",
-        "next candidate when a provider rejects a launch due to a rate limit",
+        "agent_member_id",
+        "Only selected members using that tool are tried in order",
+        "tools never switch automatically",
     ] {
         assert!(
             surface.contains(contract),
@@ -4079,4 +4063,20 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );
+}
+
+#[test]
+fn embedded_web_pm_tasks_uses_the_shared_model_and_operator_tokens() {
+    let pm_chat = root_js_module_source("/pm-chat.js");
+    assert!(pm_chat.contains("requestTasks"));
+    assert!(pm_chat.contains("pm-chat__tasks"));
+    assert!(pm_chat.contains("showTasks"));
+    let styles = styles_components_css();
+    let tasks = styles.split(".pm-chat__tasks").nth(1).expect("Task styles");
+    let block = tasks.split('}').next().unwrap();
+    assert!(block.contains("var(--"));
+    assert!(!block.contains('#'));
+    assert!(!block.contains("rgb("));
+    assert!(!block.contains("rgba("));
+    assert!(!block.contains("position: fixed"));
 }

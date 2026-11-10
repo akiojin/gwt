@@ -60,6 +60,27 @@ pub trait CliEnv {
     fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
         super::feedback::spawn_worker(self.repo_path(), id)
     }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        use gwt_core::feedback::auto_report::AutoReason;
+        use gwt_github::client::{http::HttpIssueClient, ResolutionDeadline};
+        let deadline = ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(120),
+        );
+        // Never invoke gh/keyring: even a hidden auth token command can open
+        // an OS credential-store unlock dialog. Missing credentials fail closed.
+        let client = HttpIssueClient::from_noninteractive_env("akiojin", "gwt")
+            .map_err(|_| AutoReason::AuthUnavailable)?;
+        super::feedback::send_auto_to_upstream_with_deadline(
+            &client,
+            snapshot,
+            self.repo_path(),
+            &deadline,
+        )
+    }
     fn stdout(&mut self) -> &mut dyn io::Write;
     fn stderr(&mut self) -> &mut dyn io::Write;
     fn read_stdin(&mut self) -> io::Result<String>;
@@ -170,7 +191,32 @@ pub trait CliEnv {
     /// Issue #3515: re-run a failed run or job. Returns the outcome line.
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String>;
+    fn actions_diagnostic(
+        &mut self,
+        command: super::actions::DiagnosticCommand,
+    ) -> io::Result<serde_json::Value> {
+        super::actions::diagnostic::execute(self, command)
+    }
+    fn diagnostic_workflow_context(&mut self) -> io::Result<serde_json::Value> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_run_snapshot(&mut self, _run_id: u64) -> io::Result<serde_json::Value> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn diagnostic_artifact(&mut self, _run_id: u64, _artifact_id: u64) -> io::Result<Vec<u8>> {
+        Err(super::actions::diagnostic::unavailable())
+    }
+    fn dispatch_diagnostic_workflow(
+        &mut self,
+        _git_ref: &str,
+        _inputs: &serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<gwt_github::client::http::DiagnosticDispatchAck> {
+        Err(super::actions::diagnostic::unavailable())
+    }
     fn github_repository(&self) -> io::Result<(String, String)>;
+    fn release_policy_context(&mut self) -> io::Result<crate::cli::ReleasePolicyContext> {
+        super::actions::release_policy::context(self.repo_path())
+    }
     fn pm_settings_snapshot(
         &mut self,
         operation: &str,

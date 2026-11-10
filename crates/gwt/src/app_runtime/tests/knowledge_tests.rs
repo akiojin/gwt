@@ -1176,6 +1176,123 @@ fn frontend_user_action_logs_issue_monitor_global_profile_configure() {
 }
 
 #[test]
+fn app_runtime_open_issue_monitor_audits_navigation_without_mutation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let roots = [temp.path().join("first"), temp.path().join("other")];
+    for root in &roots {
+        fs::create_dir_all(root).expect("project root");
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&roots[0]);
+    let prefs = gwt::IssueMonitorPrefs {
+        priority_order: vec![3165, 3214],
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed stopped monitor");
+    let tabs = roots
+        .iter()
+        .zip(["first", "other"])
+        .map(|(root, id)| sample_project_tab(id, id, root.clone(), ProjectKind::NonRepo, &[]))
+        .collect();
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("other"));
+    let context = runtime
+        .project_context("first")
+        .expect("authenticated project");
+    let state = runtime.project_state(&context).expect("project state");
+    *state.issue_monitor_status_cache.borrow_mut() = Some(
+        test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone()).status_view(),
+    );
+    let before_status = serde_json::to_value(&*state.issue_monitor_status_cache.borrow()).unwrap();
+    let before_workspace =
+        serde_json::to_value(runtime.tab("first").unwrap().workspace.persisted()).unwrap();
+    let request: FrontendEvent = serde_json::from_str(r#"{"kind":"open_issue_monitor"}"#)
+        .expect("payload-free navigation audit request");
+    assert_eq!(
+        runtime.frontend_project_log_tab_id(Some(&context), &request),
+        Some("first"),
+        "the authenticated project owns the log even while another project is active"
+    );
+    let actions = capture_tracing_events(|| {
+        let replies = runtime.handle_frontend_event_in_scope(
+            "client-first".into(),
+            request,
+            &ClientScope::Project(context.project_key.clone()),
+        );
+        assert!(
+            replies.is_empty(),
+            "navigation audit has no backend response"
+        );
+    });
+    let actions: Vec<_> = actions
+        .iter()
+        .filter(|event| event.target == "gwt_ui_action")
+        .collect();
+    assert_eq!(actions.len(), 1, "one navigation produces one audit record");
+    let action = actions[0];
+    assert_eq!(action.level, Level::INFO);
+    assert_eq!(
+        action.fields.get("client_id").map(String::as_str),
+        Some("client-first")
+    );
+    assert_eq!(
+        action.fields.get("action").map(String::as_str),
+        Some("open_issue_monitor")
+    );
+    assert_eq!(
+        action.fields.get("surface").map(String::as_str),
+        Some("issue_monitor")
+    );
+    assert_eq!(action.fields.get("mode").map(String::as_str), Some(""));
+    assert_eq!(action.fields.get("ui_target").map(String::as_str), Some(""));
+    assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+    assert_eq!(
+        serde_json::to_value(runtime.tab("first").unwrap().workspace.persisted()).unwrap(),
+        before_workspace
+    );
+    assert_eq!(
+        serde_json::to_value(
+            &*runtime
+                .project_state(&context)
+                .unwrap()
+                .issue_monitor_status_cache
+                .borrow()
+        )
+        .unwrap(),
+        before_status
+    );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("other"));
+    assert!(runtime.window_details.is_empty());
+    assert!(runtime.issue_monitor_launch_queue.is_empty());
+    assert!(runtime.issue_monitor_launch_deliveries.is_empty());
+    assert!(runtime
+        .project_state(&context)
+        .unwrap()
+        .launch_wizard
+        .is_none());
+
+    let start = super::super::frontend_user_action_log(&FrontendEvent::SetIssueMonitorEnabled {
+        enabled: true,
+    })
+    .expect("existing Start audit");
+    let launch = super::super::frontend_user_action_log(&FrontendEvent::IssueMonitorLaunchNow {
+        issue_number: 3165,
+        linked_issue_kind: None,
+    })
+    .expect("existing Launch now audit");
+    assert_eq!(
+        (start.action, start.mode.as_str()),
+        ("set_issue_monitor_enabled", "on")
+    );
+    assert_eq!(
+        (launch.action, launch.ui_target.as_str()),
+        ("issue_monitor_launch_now", "3165")
+    );
+}
+
+#[test]
 fn app_runtime_load_logs_replies_with_current_log_snapshot() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

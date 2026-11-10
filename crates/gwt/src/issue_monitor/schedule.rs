@@ -210,8 +210,24 @@ fn reconcile(
         .get(host)
         .map(|queue| prefs.urgent_queue.projection(queue).entries)
         .unwrap_or_default();
+    let pool = prefs.launch_profile_pool();
+    let selected = pool
+        .first()
+        .filter(|profile| profile.agent_member_id.is_some())
+        .map(|primary| {
+            pool.iter()
+                .filter(|profile| {
+                    normalize_issue_monitor_provider(&profile.agent_id)
+                        == normalize_issue_monitor_provider(&primary.agent_id)
+                })
+                .filter_map(|profile| profile.agent_member_id.as_deref())
+                .collect::<BTreeSet<_>>()
+        });
     let eligible = |member: &&AgentMember| {
         member.enabled
+            && selected
+                .as_ref()
+                .is_none_or(|ids| ids.contains(member.agent_member_id.as_str()))
             && member.assignment.as_ref().is_none_or(|assignment| {
                 assignment.host_id.is_empty() || assignment.host_id == host
             })
@@ -237,6 +253,7 @@ fn reconcile(
                         .any(|queued| queued.number == entry.issue_number)
                     && !prefs.scheduled_issue_in_flight(entry.issue_number)
                     && (prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+                        || entry.reason == AgentScheduleReason::AssignedByYou
                         || prefs.agent_switch_intents.values().any(|intent| {
                             intent.has_admission_pin()
                                 && intent.request.target_issue_number == entry.issue_number
@@ -591,7 +608,17 @@ impl IssueMonitorState {
                 .iter()
                 .find(|member| member.agent_member_id == id)
         });
-        let available = member.is_some_and(|member| match &member.assignment {
+        let selected = self
+            .launch_profiles
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some());
+        let tool_matches = selected.is_none_or(|_| {
+            self.prefs()
+                .registered_launch_profiles_for_issue(number)
+                .iter()
+                .any(|profile| profile.agent_member_id.as_deref() == Some(id))
+        });
+        let available = tool_matches && member.is_some_and(|member| match &member.assignment {
             None => member.enabled,
             Some(assignment) => assignment.issue_number == Some(number)
                 && (assignment.host_id.is_empty() || assignment.host_id == host)
@@ -1051,6 +1078,233 @@ mod tests {
         );
         assert!(pin.runtime_exit_confirmed && pin.checkpoint.is_some());
     }
+    #[test]
+    fn issue_6413_deleted_session_assignment_recovers_on_the_next_schedule_scan() {
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let member = &roster.members[0].agent_member_id;
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "closed-window",
+            Some(41),
+            None,
+            None,
+            Some(member),
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(&root, "work/issue-41", gwt_agent::AgentId::Codex);
+        session.update_status(gwt_agent::AgentStatus::Idle);
+        session.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            member,
+            "closed-window",
+            &session.id,
+        )
+        .unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(monitor
+            .agent_schedule_launch_exclusion(41)
+            .unwrap()
+            .starts_with("agent_plan_missing"));
+        // A deleted window can leave its assignment behind while the GUI host lives.
+        fs::remove_file(sessions.join(format!("{}.toml", session.id))).unwrap();
+        let handshake = gwt_agent::active_launch_handshake_path(&sessions, &session.id);
+        fs::create_dir_all(handshake.parent().unwrap()).unwrap();
+        fs::write(&handshake, b"preparing or unreadable").unwrap();
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        fs::remove_file(handshake).unwrap();
+        let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        fs::write(&runtime, b"unreadable runtime still fences reuse").unwrap();
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        fs::remove_file(runtime).unwrap();
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(
+            monitor.agent_schedule_launch_exclusion(41).is_none(),
+            "a removed Session without runtime or launch evidence must not strand the queue head"
+        );
+        let snapshot =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        assert!(snapshot.members[0]
+            .issues
+            .iter()
+            .any(|entry| entry.issue_number == 41));
+        mutate_project_agent_schedule(
+            &root,
+            &sessions,
+            move_action(&snapshot, 41, member, &roster.members[1].agent_member_id),
+        )
+        .expect("schedule.reassign must provide a canonical recovery path after cleanup");
+    }
+
+    #[test]
+    fn issue_6749_idle_scheduled_member_uses_its_own_profile_after_reload_and_reassign() {
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            let members = &mut prefs.agent_roster.as_mut().unwrap().members;
+            members[0].agent_id = Some("codex".into());
+            members[1].agent_id = Some("claude".into());
+            let profiles = members
+                .iter()
+                .map(|member| {
+                    serde_json::from_value(serde_json::json!({
+                        "agent_id": member.agent_id,
+                        "agent_member_id": member.agent_member_id,
+                        "model": member.name,
+                        "skip_permissions": member.agent_id.as_deref() == Some("claude")
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        })
+        .unwrap();
+        let snapshot =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        mutate_project_agent_schedule(
+            &root,
+            &sessions,
+            move_action(
+                &snapshot,
+                41,
+                &roster.members[0].agent_member_id,
+                &roster.members[1].agent_member_id,
+            ),
+        )
+        .unwrap();
+
+        // A cold GUI/daemon restores the saved queue and explicit member choice.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        let member = &monitor.agent_roster.as_ref().unwrap().members[1];
+        assert!(member.enabled && member.assignment.is_none());
+        assert_eq!(monitor.agent_schedule_launch_exclusion(41), None);
+        let profiles = monitor.prefs().registered_launch_profiles_for_issue(41);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].agent_id, "claude");
+        assert_eq!(
+            profiles[0].model.as_deref(),
+            Some(roster.members[1].name.as_str())
+        );
+        let now = "2026-11-04T15:40:00Z";
+        assert!(
+            monitor
+                .permission_readiness_block_for_launch(41, now)
+                .is_none(),
+            "permission readiness must check the reserved profile rather than the primary"
+        );
+        assert_eq!(
+            select_launch_profile(&profiles, &BTreeMap::new(), &[], None, now).selected,
+            Some(0)
+        );
+        let mut prefs = monitor.prefs();
+        prefs.launch_auto = true;
+        let automatic = prefs
+            .select_auto_launch_profile(41, false, None, |pool| {
+                select_launch_profile(pool, &BTreeMap::new(), &[], None, now)
+            })
+            .expect("Auto tiers must use the explicitly selected member's tool");
+        assert_eq!(automatic.profile.agent_id, "claude");
+        assert_eq!(
+            automatic.profile.agent_member_id,
+            profiles[0].agent_member_id
+        );
+        prefs.launch_auto = false;
+        prefs
+            .provider_quota_holds
+            .insert("claude".into(), "2026-11-05T00:00:00Z".into());
+        let held = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        assert!(
+            !held.retry_ready_for_saved_profile(41, now),
+            "the reserved provider's hold still prevents claims"
+        );
+        prefs.provider_quota_holds.clear();
+        prefs
+            .agent_issue_schedule
+            .reservations
+            .iter_mut()
+            .find(|entry| entry.issue_number == 41)
+            .unwrap()
+            .reason = AgentScheduleReason::QueueOrder;
+        assert!(
+            prefs.registered_launch_profiles_for_issue(41).is_empty(),
+            "automatic reservations retain the primary tool restriction"
+        );
+        prefs.pending_launch_deliveries.push(serde_json::from_value(serde_json::json!({
+            "agent_member_id":profiles[0].agent_member_id, "delivery_id":"delivery-41", "issue_number":41,
+            "branch_name":"work/issue-41", "linked_issue_kind":crate::LinkedIssueKind::Issue,
+            "claim_id":"claim-41", "created_at":now
+        })).unwrap());
+        prefs.agent_issue_schedule.reservations.clear();
+        assert_eq!(
+            prefs.registered_launch_profiles_for_issue(41),
+            profiles,
+            "consuming the reservation must retain exact delivery replay"
+        );
+        prefs.agent_roster.as_mut().unwrap().members[1].agent_id = Some("codex".into());
+        assert!(
+            prefs.registered_launch_profiles_for_issue(41).is_empty(),
+            "a member's fixed tool must match its profile"
+        );
+        prefs.agent_roster.as_mut().unwrap().members[1].agent_id = Some("claude".into());
+        prefs.set_launch_profile_pool(vec![prefs.launch_profile_pool()[0].clone()]);
+        assert!(
+            prefs.registered_launch_profiles_for_issue(41).is_empty(),
+            "an unselected exact member must not fall back to the primary"
+        );
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(IssueMonitorIssue {
+            author_login: None,
+            number: 41,
+            title: "Queued work".into(),
+            labels: Vec::new(),
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: Some(now.into()),
+        });
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 41);
+
+        let snapshot =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        mutate_project_agent_schedule(
+            &root,
+            &sessions,
+            move_action(
+                &snapshot,
+                41,
+                &roster.members[1].agent_member_id,
+                &roster.members[0].agent_member_id,
+            ),
+        )
+        .unwrap();
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        assert_eq!(restored.agent_schedule_launch_exclusion(41), None);
+        assert_eq!(
+            restored.prefs().registered_launch_profiles_for_issue(41)[0].agent_id,
+            "codex"
+        );
+    }
+
     #[test]
     fn agent_schedule_reassignment_is_atomic_and_stale_observations_preserve_bytes() {
         let (_temp, _home, root, sessions, roster) = fixture();

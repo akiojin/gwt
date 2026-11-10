@@ -703,6 +703,30 @@ fn stage_graceful_update_apply_with_ops(
     ) {
         Ok(version) => Ok(version),
         Err(err) => {
+            // Permission/defer refusals return before this commit boundary.
+            // A helper failure is an actual failed attempt, never a ready retry.
+            let result = gwt_core::update::UpdateApplyResult {
+                outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+                from_version: marker.from_version.clone(),
+                to_version: marker.to_version.clone(),
+                observed_version: marker.from_version.clone(),
+                attempt: marker.attempt,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+                message: Some(err.clone()),
+            };
+            if let Err(error) = gwt_core::update::persist_update_apply_result(&result) {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", "record_apply_result"), ("reason", &error)],
+                );
+            }
+            if let Err(error) = gwt_core::update::discard_failed_pending_update(&marker.to_version)
+            {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", "discard_failed_pending"), ("reason", &error)],
+                );
+            }
             let _ = gwt_core::update::clear_update_resume_marker();
             Err(err)
         }
@@ -725,12 +749,13 @@ pub fn stage_graceful_update_apply(
     if !respect_defer {
         // Explicit Restart now authorizes the existing interactive installer.
         manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
-    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
-        && gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &current_exe)
-    {
-        return Err(
-            "Administrator privileges required; update stays staged for manual apply.".into(),
-        );
+    } else if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic {
+        if let Some(reason) = gwt_core::update::prepared_payload_automatic_apply_refusal(
+            &manifest.payload,
+            &current_exe,
+        ) {
+            return Err(format!("{reason}; update stays staged for manual apply."));
+        }
     }
     let mut ops = RealUpdateApplyOps::default();
     stage_graceful_update_apply_with_ops(
@@ -831,12 +856,16 @@ fn permits_pending_manifest_at_bootstrap(
     automatic_enabled: bool,
     requires_elevation: bool,
 ) -> bool {
-    let attempted = gwt_core::update::load_update_resume_marker()
+    if gwt_core::update::load_update_resume_marker()
         .is_some_and(|marker| marker.to_version == manifest.version)
-        || gwt_core::update::load_update_apply_result().is_some_and(|result| {
-            result.to_version == manifest.version
-                && result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
-        });
+    {
+        // Both manual and automatic attempts must settle before another apply.
+        return false;
+    }
+    let attempted = gwt_core::update::load_update_apply_result().is_some_and(|result| {
+        result.to_version == manifest.version
+            && result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
+    });
     manifest.permits_startup_apply(automatic_enabled && !attempted, requires_elevation)
 }
 
@@ -1385,6 +1414,12 @@ mod poll_state_tests {
             !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
             "an earlier helper attempt must reach startup settlement instead of being retried"
         );
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::ManualLater;
+        assert!(
+            !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
+            "a manual attempt must reach mismatch settlement before any bootstrap replay"
+        );
+        manifest.origin = gwt_core::update::PendingUpdateOrigin::Automatic;
         gwt_core::update::settle_update_resume_marker("9.30.0", chrono::Utc::now()).unwrap();
         assert!(
             !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
@@ -1629,9 +1664,16 @@ mod poll_state_tests {
             "a failed commit must not leave a marker that resumes nothing"
         );
         assert!(
-            gwt_core::update::load_pending_update_manifest().is_some(),
-            "the manifest stays so the user can retry"
+            gwt_core::update::load_pending_update_manifest().is_none(),
+            "a failed apply must not reappear as ready"
         );
+        let result = gwt_core::update::load_update_apply_result().expect("failure recorded");
+        assert_eq!(
+            result.outcome,
+            gwt_core::update::UpdateApplyOutcome::Failure
+        );
+        assert_eq!(result.to_version, "9.31.0");
+        assert_eq!(result.message.as_deref(), Some(err.as_str()));
     }
 
     // Issue #4038 (AC-1): the worker-thread `exit(0)` path is gone. Only the

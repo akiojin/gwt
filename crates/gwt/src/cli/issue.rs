@@ -154,6 +154,27 @@ pub(super) fn run<E: CliEnv>(
             guard_pm_owner_check(env.repo_path(), owner_check.as_ref())?;
             guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
+            let lineage_error = if super::pm::caller_is_registered_pm(env.repo_path()) {
+                owner_check
+                    .as_ref()
+                    .and_then(|check| check.owner_spec)
+                    .zip(super::pm::ambient_session_id())
+                    .and_then(|(parent, issuer)| {
+                        crate::project_execution_policy::record_derived_owner(
+                            env.repo_path(),
+                            snapshot.number.0,
+                            parent.get(),
+                            &issuer,
+                            &format!(
+                                "issue.create:{}:{}",
+                                snapshot.number.0, snapshot.updated_at.0
+                            ),
+                        )
+                        .err()
+                    })
+            } else {
+                None
+            };
             super::intake_outcome::auto_record_issue_operation(
                 env.repo_path(),
                 "issue.create",
@@ -162,6 +183,10 @@ pub(super) fn run<E: CliEnv>(
             );
             let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
             let code = finish_issue_create(&snapshot, renewal, out);
+            if let Some(error) = lineage_error {
+                out.push_str(&format!("warning: Issue #{} was created, but its continued-parent receipt could not be saved: {error}. Do not create this Issue again. Render this Project or capture a new normal human instruction for this existing child Issue to continue it. project.execution.status is diagnostic only; it does not repair the receipt.\n", snapshot.number.0));
+                return Ok(1);
+            }
             finish_urgent_issue_mutation(env, &snapshot, code, out)
         }
         IssueCommand::CacheRepair { number } => {
@@ -651,7 +676,7 @@ fn last_build_artifact_gc_record(
 /// read from the OS so the number is there even when the instance itself
 /// has stopped answering its pane WebSocket.
 fn attach_memory_pressure(status: &mut crate::IssueMonitorAgentStatus) {
-    status.memory_pressure = Some(crate::memory_pressure::probe());
+    status.memory_pressure = crate::memory_pressure::probe().ok();
 }
 
 /// Issue #4386 AC-1: the CPU Spotlight's indexing daemon is spending on this
@@ -930,6 +955,31 @@ fn run_monitor_status<E: CliEnv>(
     output["config_token"] = serde_json::json!(prefs.config_token());
     output["saved_config"] = prefs.config_observation();
     attach_monitor_admission_diagnostics(&mut output, &status, &prefs);
+    match monitor_launch_admission_hold(Some(&project_root), &prefs) {
+        Ok(Some(hold)) => {
+            if prefs.enabled {
+                output["stall_reason"] =
+                    serde_json::json!(crate::IssueMonitorStallReason::UpdateDrain);
+                for (index, row) in status.inbox.iter().enumerate() {
+                    if row.state == crate::MonitorInboxState::Queued {
+                        let prior = output["inbox"][index]["exclusion_reason"]
+                            .as_str()
+                            .unwrap_or_default();
+                        let detail = hold["detail"].as_str().unwrap_or("update_drain");
+                        output["inbox"][index]["exclusion_reason"] = if prior.is_empty() {
+                            detail.to_string()
+                        } else {
+                            format!("{prior}; {detail}")
+                        }
+                        .into();
+                    }
+                }
+            }
+            output["host_update_drain"] = hold;
+        }
+        Ok(None) => {}
+        Err(error) => output["host_update_drain_error"] = error.to_string().into(),
+    }
     // Keep released, unsettled launches observable without reading every queued
     // owner's ledger or changing Monitor/ECR state during a status read.
     let execution_generations = status
@@ -972,7 +1022,7 @@ fn run_monitor_status<E: CliEnv>(
         output["execution_generations"] = serde_json::to_value(execution_generations)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     }
-    if let Some(mut drain) = status.update_drain.clone() {
+    if let Some(mut drain) = prefs.effective_update_drain().cloned() {
         let wait = gwt_core::update::load_update_wait_observation(&project_root).filter(|wait| {
             wait.version == drain.version
                 && matches!((
@@ -1005,7 +1055,11 @@ fn run_monitor_status<E: CliEnv>(
                 format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
             } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
         });
-        output["update_drain"] = serde_json::to_value(drain).expect("update drain serializes");
+        let drain = serde_json::to_value(drain).expect("update drain serializes");
+        output["update_drain"] = drain.clone();
+        if let Some(gui) = output["gui_status"].as_object_mut() {
+            gui.insert("update_drain".into(), drain);
+        }
     }
     let mut effective_queue = prefs
         .terminal_queues
@@ -1891,6 +1945,7 @@ fn run_monitor_queue_push<E: CliEnv>(
     let mut accepted_numbers = Vec::new();
     let mut outcomes: Vec<QueuePushOutcome> = Vec::new();
     let mut urgent_observations = Vec::new();
+    let mut accepted_snapshots = Vec::new();
     let source_repository = monitor_client_source_repository(env, &root);
     let mut source_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
     source_monitor.set_source_repository(
@@ -2010,6 +2065,7 @@ fn run_monitor_queue_push<E: CliEnv>(
                 );
             }
             accepted_numbers.push(*number);
+            accepted_snapshots.push(snapshot);
             outcomes.push(QueuePushOutcome::accepted(*number));
         } else {
             accepted_numbers.push(*number);
@@ -2027,6 +2083,33 @@ fn run_monitor_queue_push<E: CliEnv>(
                 .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         if !accepted_numbers.is_empty() {
+            // The CLI starts with a cold inbox. Reuse the accepted live fetch
+            // so timeout recovery can validate the candidate before releasing
+            // its persisted failure; membership alone is not that evidence.
+            for snapshot in &accepted_snapshots {
+                if prefs.autonomous_mode
+                    && prefs.failed_issues.iter().any(|failed| {
+                        failed.issue_number == snapshot.number.0
+                            && crate::issue_monitor::MonitorFailureKind::classify(&failed.message)
+                                == crate::issue_monitor::MonitorFailureKind::LaunchWindowTimeout
+                    })
+                {
+                    monitor.record_candidate(crate::IssueMonitorIssue {
+                        author_login: snapshot.author_login.clone(),
+                        number: snapshot.number.0,
+                        title: snapshot.title.clone(),
+                        labels: snapshot.labels.clone(),
+                        state: match snapshot.state {
+                            IssueState::Open => crate::IssueMonitorIssueState::Open,
+                            IssueState::Closed => crate::IssueMonitorIssueState::Closed,
+                        },
+                        body: Some(snapshot.body.clone()),
+                        url: None,
+                        readiness: crate::IssueMonitorReadiness::NotApplicable,
+                        updated_at: Some(snapshot.updated_at.0.clone()),
+                    });
+                }
+            }
             monitor.terminal_queue_push(&accepted_numbers, "operation", &now);
         }
         for (snapshot, assignment) in &urgent_observations {
@@ -2460,10 +2543,11 @@ fn run_monitor_launch_now<E: CliEnv>(
     // Issue #5062 AC-4: an update drain holds every new launch, this one
     // included, so name it and its release instead of answering as if the
     // Issue will start.
-    let (admission_hold, admission_error) = match monitor_launch_admission_hold(&prefs) {
-        Ok(hold) => (hold, None),
-        Err(error) => (None, Some(error.to_string())),
-    };
+    let (admission_hold, admission_error) =
+        match monitor_launch_admission_hold(Some(&project_root), &prefs) {
+            Ok(hold) => (hold, None),
+            Err(error) => (None, Some(error.to_string())),
+        };
     let publication = monitor_status_publication(&project_root);
     let projection = publication.as_ref().and_then(|status| {
         serde_json::from_value::<crate::IssueMonitorAgentStatus>(status.clone()).ok()
@@ -2483,12 +2567,14 @@ fn run_monitor_launch_now<E: CliEnv>(
     {
         admission_exclusions.push("no_launch_profile".to_string());
     }
-    if admission_hold.is_some()
-        && !admission_exclusions
-            .iter()
-            .any(|reason| reason.contains("update_drain"))
-    {
-        admission_exclusions.push("update_drain".to_string());
+    if let Some(hold) = &admission_hold {
+        admission_exclusions.retain(|reason| reason != "update_drain");
+        admission_exclusions.push(
+            hold["detail"]
+                .as_str()
+                .unwrap_or("update_drain")
+                .to_string(),
+        );
     }
     if !github_backoff.is_empty() {
         admission_exclusions.push("github_refusal_window".to_string());
@@ -2571,6 +2657,7 @@ fn monitor_admission_exclusions(
     number: u64,
 ) -> Vec<String> {
     let row = status.inbox.iter().find(|row| row.issue_number == number);
+    let has_update_drain = prefs.effective_update_drain().is_some();
     let terminal_member = !status.label_excluded_issues.contains(&number)
         && prefs
             .terminal_queues
@@ -2581,9 +2668,10 @@ fn monitor_admission_exclusions(
         .into_iter()
         .flat_map(|reason| reason.split("; "))
         .filter(|reason| {
-            !terminal_member
-                || !(reason.starts_with("not_in_terminal_queue:")
-                    || *reason == "not selected in this terminal queue")
+            !reason.starts_with("update_drain")
+                && (!terminal_member
+                    || !(reason.starts_with("not_in_terminal_queue:")
+                        || *reason == "not selected in this terminal queue"))
         })
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -2628,7 +2716,7 @@ fn monitor_admission_exclusions(
     {
         add("max_active_saturated");
     }
-    if status.update_drain.is_some() {
+    if has_update_drain {
         add("update_drain");
     }
     if status.quota_hold.is_some() {
@@ -2651,6 +2739,43 @@ fn attach_monitor_admission_diagnostics(
     status: &crate::IssueMonitorAgentStatus,
     prefs: &crate::IssueMonitorPrefs,
 ) {
+    if let Some(drain) = prefs.effective_update_drain() {
+        let drain = serde_json::to_value(drain).expect("update drain serializes");
+        output["update_drain"] = drain.clone();
+        output["update_drain_release"] = crate::UPDATE_DRAIN_RELEASE_OPERATION.into();
+        if let Some(gui) = output["gui_status"].as_object_mut() {
+            gui.insert("update_drain".into(), drain);
+            gui.insert(
+                "update_drain_release".into(),
+                crate::UPDATE_DRAIN_RELEASE_OPERATION.into(),
+            );
+        }
+    } else {
+        if let Some(output) = output.as_object_mut() {
+            output.remove("update_drain");
+            output.remove("update_drain_release");
+            if let Some(gui) = output
+                .get_mut("gui_status")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                gui.remove("update_drain");
+                gui.remove("update_drain_release");
+                if gui.get("state").and_then(serde_json::Value::as_str) == Some("update_drain") {
+                    gui.insert(
+                        "state".into(),
+                        if prefs.enabled { "unknown" } else { "disabled" }.into(),
+                    );
+                }
+            }
+        }
+        if status.stall_reason == Some(crate::IssueMonitorStallReason::UpdateDrain) {
+            output["stall_reason"] = serde_json::json!(if prefs.enabled {
+                crate::IssueMonitorStallReason::Unknown
+            } else {
+                crate::IssueMonitorStallReason::Disabled
+            });
+        }
+    }
     // Also explain older daemon publications that predate row diagnostics.
     for (index, row) in status.inbox.iter().enumerate() {
         if row.state == crate::MonitorInboxState::Queued
@@ -2671,9 +2796,10 @@ fn attach_monitor_admission_diagnostics(
 /// GUI-only fallback has no durable host-wide authority projection; the GUI
 /// checks all its open projects before creating the actual window.
 fn monitor_launch_admission_hold(
+    project_root: Option<&std::path::Path>,
     prefs: &crate::IssueMonitorPrefs,
 ) -> Result<Option<serde_json::Value>, SpecOpsError> {
-    let mut drain = prefs.update_drain.clone();
+    let mut drain = prefs.effective_update_drain().cloned();
     let mut project_state_path = None;
     if drain.is_none() {
         let entries = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
@@ -2690,10 +2816,9 @@ fn monitor_launch_admission_hold(
                 continue;
             }
             let path = entry.path().join("project-state/issue-monitor.json");
-            let Some(candidate) = crate::load_issue_monitor_prefs(&path)
-                .map_err(io_as_api_error)?
-                .update_drain
-            else {
+            let candidate_prefs =
+                crate::load_issue_monitor_prefs(&path).map_err(io_as_api_error)?;
+            let Some(candidate) = candidate_prefs.effective_update_drain().cloned() else {
                 continue;
             };
             let crate::IssueMonitorAuthorityFenceState::Active(fence) =
@@ -2714,12 +2839,26 @@ fn monitor_launch_admission_hold(
             }
         }
     }
+    let holder = if let Some(path) = &project_state_path {
+        project_root.and_then(|root| {
+            crate::project_runtime::installation::owner_host_project_roots(root)
+                .ok()
+                .and_then(|roots| {
+                    roots
+                        .into_iter()
+                        .find(|root| crate::issue_monitor_prefs_path_for_repo_path(root) == *path)
+                })
+        })
+    } else {
+        project_root.map(std::path::Path::to_path_buf)
+    };
     Ok(drain.as_ref().map(|drain| {
-        serde_json::json!({
+        let mut hold = serde_json::json!({
             "reason": "update_drain",
             "drain_reason": drain.reason,
             "version": drain.version,
             "since": drain.since,
+            "project_root": holder,
             "project_state_path": project_state_path,
             "release_scope": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
                 "host"
@@ -2729,7 +2868,20 @@ fn monitor_launch_admission_hold(
             "release": if drain.reason == crate::IssueMonitorUpdateDrainReason::Auto {
                 format!("release.update.defer {}", serde_json::json!({"version": drain.version}))
             } else { crate::UPDATE_DRAIN_RELEASE_OPERATION.to_string() },
-        })
+        });
+        hold["detail"] = format!(
+            "update_drain: v{} in {} since {} (release: {})",
+            drain.version,
+            holder
+                .as_deref()
+                .or(project_state_path.as_deref())
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "current project".into()),
+            drain.since,
+            hold["release"].as_str().unwrap_or_default()
+        )
+        .into();
+        hold
     }))
 }
 
@@ -4504,12 +4656,6 @@ fn apply_monitor_config_set(
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
-    if max_active_auto && prefs.agent_roster.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Project Agent roster capacity is controlled by its enabled members",
-        ));
-    }
     validate_monitor_config_set(
         allowed_labels,
         enabled,
@@ -4673,6 +4819,42 @@ fn run_monitor_config_set<E: CliEnv>(
         caller_is_resident_pm,
     )
     .map_err(io_as_api_error)?;
+    // Bind the clear to the captured configuration, so a newly raised drain
+    // cannot be cleared while we defer the older captured version.
+    let clear_snapshot = if matches!(
+        update_drain,
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(false))
+    ) {
+        Some(
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                &project_root,
+            ))
+            .map_err(io_as_api_error)?,
+        )
+    } else {
+        None
+    };
+    let clear_guard = clear_snapshot
+        .as_ref()
+        .map(crate::IssueMonitorPrefs::config_token);
+    if let Some(snapshot) = &clear_snapshot {
+        crate::issue_monitor::check_expected_issue_monitor_config_token(
+            snapshot,
+            expected_config_token,
+        )
+        .map_err(io_as_api_error)?;
+    }
+    let expected_config_token = expected_config_token.or(clear_guard.as_deref());
+    let defer_version = clear_snapshot.as_ref().and_then(|prefs| {
+        prefs
+            .effective_update_drain()
+            .filter(|drain| {
+                prefs.enabled
+                    && drain.reason == crate::IssueMonitorUpdateDrainReason::Auto
+                    && drain.automatic.unwrap_or(prefs.autonomous_mode)
+            })
+            .map(|drain| drain.version.clone())
+    });
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
     // before publishing so the daemon never has to reject a control it
     // cannot explain back to the caller.
@@ -4689,6 +4871,40 @@ fn run_monitor_config_set<E: CliEnv>(
         }
     }
 
+    // Keep the captured raw hold available if the manifest cannot be saved.
+    // A later local CAS failure is a partial success: only this version's
+    // host-wide automatic holds have been released, and replacements stay intact.
+    let deferred_version = if let Some(version) = defer_version {
+        if let Some(pending) = gwt_core::update::load_pending_update_manifest().filter(|pending| {
+            pending.version == version
+                && !pending.auto_apply_deferred
+                && gwt_core::update::pending_version_is_newer(
+                    &pending.version,
+                    env!("CARGO_PKG_VERSION"),
+                )
+        }) {
+            gwt_core::update::defer_pending_update(&pending.version).map_err(|error| {
+                io_as_api_error(io::Error::other(format!(
+                    "Host update v{} could not be deferred; this request did not save Issue Monitor configuration: {error}",
+                    pending.version,
+                )))
+            })?;
+            Some(pending.version)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let local_save_error = |error: io::Error| {
+        io_as_api_error(if let Some(version) = &deferred_version {
+            io::Error::other(format!(
+                "Host update v{version} deferred; local configuration save result is unconfirmed. Re-read issue.monitor.status before retrying: {error}"
+            ))
+        } else {
+            error
+        })
+    };
     let mut config = serde_json::json!({
         "allowed_labels": allowed_labels,
         "enabled": enabled,
@@ -4717,7 +4933,7 @@ fn run_monitor_config_set<E: CliEnv>(
     let publication = publish_monitor_config_set(&project_root, payload);
     if let Err(error) = publication {
         if !error.allows_local_fallback() {
-            return Err(io_as_api_error(io::Error::other(error.to_string())));
+            return Err(local_save_error(io::Error::other(error.to_string())));
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         let control_id = uuid::Uuid::new_v4().to_string();
@@ -4737,7 +4953,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 caller_is_resident_pm,
             )?;
             let requested = candidate.max_active_last_change.as_ref()
-                .filter(|_| (max_active.is_some() || max_active_auto) && candidate.agent_roster.is_none());
+                .filter(|_| max_active.is_some() || max_active_auto);
             shared_write_started = requested.is_some();
             let policy = crate::machine_agent_settings::checked_update(
                 prefs, expected_config_token, requested, &control_id,
@@ -4748,18 +4964,18 @@ fn run_monitor_config_set<E: CliEnv>(
         })
         .map_err(|error| {
             if shared_write_started && error.to_string() != crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR {
-                io_as_api_error(io::Error::other(format!(
+                local_save_error(io::Error::other(format!(
                     "shared Max active save outcome is uncertain (control {control_id}); machine policy may be committed while project configuration is not. Re-read issue.monitor.status before retrying: {error}"
                 )))
             } else {
-                io_as_api_error(error)
+                local_save_error(error)
             }
         })?;
     }
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
     ))
-    .map_err(io_as_api_error)?;
+    .map_err(local_save_error)?;
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     monitor.refresh_agent_capacity(&project_root);
@@ -4771,8 +4987,8 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": monitor.effective_max_active_agents(),
-            "max_active_agents_override": monitor.max_active_agents_override(),
-            "max_active_mode": prefs.max_active_agents_mode,
+            "max_active_agents_override": monitor.max_active_agents_policy().0,
+            "max_active_mode": if monitor.max_active_agents_policy().0.is_some() { "manual" } else { "auto" },
             "agent_capacity": monitor.status_view().agent_capacity,
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
@@ -4900,6 +5116,18 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
             if let Some(object) = value.as_object_mut() {
                 object.insert("index".to_string(), serde_json::json!(candidate.index));
                 object.insert("summary".to_string(), serde_json::json!(candidate.summary));
+                let initial_prompt_supported = gwt_agent::resolve_agent_id(&profile.agent_id)
+                    .is_some_and(|agent| agent.supports_monitor_initial_prompt());
+                object.insert(
+                    "initial_prompt_supported".to_string(),
+                    serde_json::json!(initial_prompt_supported),
+                );
+                if !initial_prompt_supported {
+                    object.insert(
+                        "initial_prompt_recovery".to_string(),
+                        serde_json::json!("Use issue.monitor.profiles.set to select Claude Code, Codex, Grok Build, or Hermes for initial prompt delivery"),
+                    );
+                }
                 object.insert(
                     "prefer_for".to_string(),
                     serde_json::json!(candidate.prefer_for),
@@ -4985,7 +5213,8 @@ pub fn validate_monitor_profiles_set(
             }
             Some(agent_id) => agent_id.command().to_ascii_lowercase(),
         };
-        if !providers.insert(provider.clone()) {
+        let identity = crate::issue_monitor::launch_profile_identity(profile);
+        if !providers.insert(identity) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("duplicate launch candidate for provider {provider}"),
@@ -5011,6 +5240,7 @@ fn apply_monitor_profiles_set(
     usage_threshold_percent: Option<u8>,
 ) -> io::Result<()> {
     validate_monitor_profiles_set(profiles, usage_threshold_percent)?;
+    crate::agent_names::validate_registered_profiles(prefs, profiles).map_err(io::Error::other)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     // Same revocation the GUI save performs: proposals prepared against the
@@ -5183,30 +5413,119 @@ fn record_monitor_wait_in_prefs(
     now: &str,
 ) -> Result<(), String> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-        let position = prefs
-            .autonomous_records
-            .iter()
-            .position(|record| record.issue_number == number);
-        let index = match position {
-            Some(index) => index,
-            None => {
-                prefs
-                    .autonomous_records
-                    .push(crate::AutonomousIssueRecord::new(number));
-                prefs.autonomous_records.len() - 1
+    mutate_monitor_wait_with_subject(
+        project_root,
+        &prefs_path,
+        number,
+        !clear,
+        |prefs, subject| {
+            let position = prefs
+                .autonomous_records
+                .iter()
+                .position(|record| record.issue_number == number);
+            let index = match position {
+                Some(index) => index,
+                None => {
+                    prefs
+                        .autonomous_records
+                        .push(crate::AutonomousIssueRecord::new(number));
+                    prefs.autonomous_records.len() - 1
+                }
+            };
+            let record = &mut prefs.autonomous_records[index];
+            if clear {
+                crate::clear_wait_on_record(record, now);
+            } else {
+                if let Some(subject) = subject {
+                    if !crate::issue_monitor::apply_wait_subject_on_record(record, subject) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "wait provenance changed before fallback declaration",
+                        ));
+                    }
+                }
+                crate::declare_wait_on_record(record, reason, resume_condition, now);
             }
-        };
-        let record = &mut prefs.autonomous_records[index];
-        if clear {
-            crate::clear_wait_on_record(record, now);
-        } else {
-            crate::declare_wait_on_record(record, reason, resume_condition, now);
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .map(|_| ())
     .map_err(|error| error.to_string())
+}
+
+/// The fallback changes only the target record from the latest locked prefs.
+/// Preserve its original subject on clear/invalidation; a fresh declaration
+/// captures native authority before taking prefs, then checks it again leased.
+fn mutate_monitor_wait_with_subject<T>(
+    project_root: &std::path::Path,
+    prefs_path: &std::path::Path,
+    number: u64,
+    declare: bool,
+    mutation: impl FnOnce(
+        &mut crate::IssueMonitorPrefs,
+        Option<&crate::issue_monitor::IssueMonitorWaitSubject>,
+    ) -> io::Result<T>,
+) -> io::Result<(crate::IssueMonitorPrefs, T)> {
+    let snapshot = crate::load_issue_monitor_prefs(prefs_path)?;
+    let record = snapshot
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == number);
+    let original = record
+        .and_then(|record| record.wait_control.as_ref())
+        .map(|control| control.subject.clone());
+    let original_wait = (
+        record.and_then(|record| record.wait_control.as_ref()),
+        record.and_then(|record| record.wait.as_ref()),
+    );
+    let legacy_wait =
+        record.is_some_and(|record| record.wait.is_some() && record.wait_control.is_none());
+    let subject = if declare && !legacy_wait {
+        let current = super::execution_state::capture_current_wait_subject(project_root, number)?;
+        if original.is_some() && current.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "typed wait has no current native subject",
+            ));
+        }
+        current
+    } else {
+        original.clone()
+    };
+    let subjects = subject.iter().cloned().collect::<Vec<_>>();
+    super::execution_state::with_wait_subject_leases(project_root, &subjects, |live, _retired| {
+        if declare
+            && subject
+                .as_ref()
+                .is_some_and(|subject| !live.contains(subject))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "wait subject changed before fallback",
+            ));
+        }
+        crate::try_mutate_issue_monitor_prefs_without_authority_fence(prefs_path, |prefs| {
+            let record = prefs
+                .autonomous_records
+                .iter()
+                .find(|record| record.issue_number == number);
+            let control = record.and_then(|record| record.wait_control.as_ref());
+            let wait = record.and_then(|record| record.wait.as_ref());
+            if (control, wait) != original_wait
+                || (declare
+                    && control.is_some_and(|control| {
+                        control.ended && Some(&control.subject) == subject.as_ref()
+                    }))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "wait state changed before fallback commit",
+                ));
+            }
+            gwt_core::operation_deadline::ensure_remaining("wait fallback commit")?;
+            mutation(prefs, subject.as_ref())
+        })
+    })
 }
 
 /// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
@@ -5380,16 +5699,22 @@ fn record_monitor_wait_invalidation_in_prefs(
     now: &str,
 ) -> Result<(), String> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-        if let Some(record) = prefs
-            .autonomous_records
-            .iter_mut()
-            .find(|record| record.issue_number == number)
-        {
-            crate::invalidate_wait_on_record(record, by, reason, now);
-        }
-        Ok(())
-    })
+    mutate_monitor_wait_with_subject(
+        project_root,
+        &prefs_path,
+        number,
+        false,
+        |prefs, _subject| {
+            if let Some(record) = prefs
+                .autonomous_records
+                .iter_mut()
+                .find(|record| record.issue_number == number)
+            {
+                crate::invalidate_wait_on_record(record, by, reason, now);
+            }
+            Ok(())
+        },
+    )
     .map(|_| ())
     .map_err(|error| error.to_string())
 }
@@ -7022,18 +7347,6 @@ fn linked_prs_bulk_query_with_cursors(
     query
 }
 
-/// Linked PRs for every issue in `numbers` through the bulk query
-/// (SPEC #4093 FR-005), including every timeline page. First pages cost
-/// `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls instead of one per issue.
-/// An issue GitHub does not return (deleted, no access) is absent from the map.
-pub(crate) fn fetch_linked_prs_bulk_via_gh(
-    owner: &str,
-    repo: &str,
-    numbers: &[u64],
-) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
-    fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, |_, _| {})
-}
-
 /// Publish only completed Issues, so a later page failure does not erase their
 /// evidence. The return value retains the strict all-pages error contract.
 pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
@@ -7044,37 +7357,39 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     fetch_linked_prs_bulk_via_gh_with_observer(
         numbers,
-        |query| {
-            let hub = gwt_core::process_console::global();
-            let output = gwt_core::process_console::spawn_logged_blocking(
-                &hub,
-                gwt_core::process_console::ProcessKind::Gh,
-                "gh",
-                &[
-                    "api",
-                    "graphql",
-                    "-f",
-                    &format!("query={query}"),
-                    "-f",
-                    &format!("owner={owner}"),
-                    "-f",
-                    &format!("repo={repo}"),
-                ],
-                gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
-            )?;
-            if !output.success() {
-                return Err(io::Error::other(format!(
-                    "gh api graphql failed: {}",
-                    output.stderr.trim()
-                )));
-            }
-            Ok(output.stdout)
-        },
+        |query| run_linked_prs_bulk_query(owner, repo, query),
         observe,
     )
 }
 
-/// Injectable core of [`fetch_linked_prs_bulk_via_gh`]: `run` executes one
+fn run_linked_prs_bulk_query(owner: &str, repo: &str, query: &str) -> io::Result<String> {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("repo={repo}"),
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh api graphql failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+/// Injectable core of [`fetch_linked_prs_bulk_via_gh_observing`]: `run` executes one
 /// bulk query and answers its JSON body.
 #[cfg(test)]
 pub(crate) fn fetch_linked_prs_bulk_via_gh_with<F>(
@@ -7093,89 +7408,196 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
     mut observe: impl FnMut(u64, &[LinkedPrSummary]),
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     let mut linked = std::collections::BTreeMap::new();
-    for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
-        let mut pending = chunk.to_vec();
-        let mut cursors = std::collections::BTreeMap::new();
-        let mut seen_cursors = std::collections::BTreeSet::new();
-        let mut nodes_by_issue = std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new();
-        while !pending.is_empty() {
-            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-            let query = if cursors.is_empty() {
-                linked_prs_bulk_query(&pending)
-            } else {
-                linked_prs_bulk_query_with_cursors(&pending, &cursors)
-            };
-            let stdout = run(&query)?;
-            let value: serde_json::Value = serde_json::from_str(&stdout)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-            if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
-                gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
-                    &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
-                    &rate_limit,
-                    chrono::Utc::now(),
-                );
-            }
-            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
-            let repository = value.get("data").and_then(|v| v.get("repository"));
-            let mut next = Vec::new();
-            for number in &pending {
-                let invalid = || {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("issue #{number} linked PR timeline is incomplete"),
-                    )
-                };
-                let Some(issue) = repository
-                    .and_then(|v| v.get(format!("i{number}")))
-                    .filter(|v| !v.is_null())
-                else {
-                    if cursors.contains_key(number) {
-                        return Err(invalid());
-                    }
-                    continue;
-                };
-                let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
-                let nodes = timeline
-                    .get("nodes")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(invalid)?;
-                nodes_by_issue
-                    .entry(*number)
-                    .or_default()
-                    .extend(nodes.iter().cloned());
-                match timeline.get("pageInfo") {
-                    Some(info)
-                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
-                            == Some(true) =>
-                    {
-                        let cursor = info
-                            .get("endCursor")
-                            .and_then(serde_json::Value::as_str)
-                            .filter(|cursor| !cursor.trim().is_empty())
-                            .ok_or_else(invalid)?;
-                        if !seen_cursors.insert((*number, cursor.to_string())) {
-                            return Err(invalid());
-                        }
-                        cursors.insert(*number, cursor.to_string());
-                        next.push(*number);
-                        continue;
-                    }
-                    Some(info)
-                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
-                            == Some(false) => {}
-                    _ => return Err(invalid()),
-                }
-                let complete = serde_json::json!({"timelineItems": {
-                    "nodes": nodes_by_issue.remove(number).unwrap_or_default()
-                }});
-                let prs = parse_linked_pr_timeline(&complete, *number);
-                observe(*number, &prs);
-                linked.insert(*number, prs);
-            }
-            pending = next;
-        }
+    let mut read = LinkedPrBulkRead::default();
+    read.sync_numbers(numbers, LINKED_PR_BULK_CHUNK);
+    while !read.is_empty() {
+        read.read_next_with(&mut run, |number, prs| {
+            observe(number, prs);
+            linked.insert(number, prs.to_vec());
+        })?;
     }
     Ok(linked)
+}
+
+/// Resumable bulk timelines. Each turn issues at most one GraphQL request and
+/// publishes only complete histories. The caller owns freshness and supplies
+/// only cache misses when synchronizing the next turn's candidates.
+#[derive(Default)]
+pub(crate) struct LinkedPrBulkRead {
+    chunks: std::collections::VecDeque<LinkedPrReadChunk>,
+}
+
+#[derive(Clone, Default)]
+struct LinkedPrReadChunk {
+    numbers: Vec<u64>,
+    cursors: std::collections::BTreeMap<u64, String>,
+    seen_cursors: std::collections::BTreeSet<(u64, String)>,
+    prs_by_issue: std::collections::BTreeMap<u64, LinkedPrAccumulator>,
+}
+
+impl LinkedPrBulkRead {
+    pub(crate) fn sync_numbers(&mut self, numbers: &[u64], chunk_size: usize) {
+        let requested: std::collections::BTreeSet<_> = numbers.iter().copied().collect();
+        for chunk in &mut self.chunks {
+            chunk.numbers.retain(|number| requested.contains(number));
+            chunk.cursors.retain(|number, _| requested.contains(number));
+            chunk
+                .seen_cursors
+                .retain(|(number, _)| requested.contains(number));
+            chunk
+                .prs_by_issue
+                .retain(|number, _| requested.contains(number));
+        }
+        self.chunks.retain(|chunk| !chunk.numbers.is_empty());
+        let mut queued: std::collections::BTreeSet<_> = self
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.numbers.iter().copied())
+            .collect();
+        let missing: Vec<_> = numbers
+            .iter()
+            .copied()
+            .filter(|number| queued.insert(*number))
+            .collect();
+        for chunk in missing.chunks(chunk_size.clamp(1, LINKED_PR_BULK_CHUNK)) {
+            self.chunks.push_back(LinkedPrReadChunk {
+                numbers: chunk.to_vec(),
+                ..Default::default()
+            });
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub(crate) fn read_next(
+        &mut self,
+        owner: &str,
+        repo: &str,
+        observe: impl FnMut(u64, &[LinkedPrSummary]),
+    ) -> io::Result<()> {
+        self.read_next_with(
+            |query| run_linked_prs_bulk_query(owner, repo, query),
+            observe,
+        )
+    }
+
+    fn read_next_with(
+        &mut self,
+        mut run: impl FnMut(&str) -> io::Result<String>,
+        mut observe: impl FnMut(u64, &[LinkedPrSummary]),
+    ) -> io::Result<()> {
+        let Some(original) = self.chunks.pop_front() else {
+            return Ok(());
+        };
+        // A transport failure must retry with its original cursor and summaries.
+        let mut next = original.clone();
+        match next.read_page(&mut run, &mut observe) {
+            Ok(()) => {
+                // Other first pages run before this chunk's deep continuation.
+                if !next.numbers.is_empty() {
+                    self.chunks.push_back(next);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.chunks
+                    .push_back(if error.kind() == io::ErrorKind::InvalidData {
+                        // An invalid cursor or history cannot recover by replaying it.
+                        LinkedPrReadChunk {
+                            numbers: original.numbers,
+                            ..Default::default()
+                        }
+                    } else {
+                        original
+                    });
+                Err(error)
+            }
+        }
+    }
+}
+
+impl LinkedPrReadChunk {
+    fn read_page(
+        &mut self,
+        run: &mut impl FnMut(&str) -> io::Result<String>,
+        observe: &mut impl FnMut(u64, &[LinkedPrSummary]),
+    ) -> io::Result<()> {
+        gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+        let query = if self.cursors.is_empty() {
+            linked_prs_bulk_query(&self.numbers)
+        } else {
+            linked_prs_bulk_query_with_cursors(&self.numbers, &self.cursors)
+        };
+        let stdout = run(&query)?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
+            gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
+                &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
+                &rate_limit,
+                chrono::Utc::now(),
+            );
+        }
+        gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+        let repository = value.get("data").and_then(|v| v.get("repository"));
+        let mut next = Vec::new();
+        for number in &self.numbers {
+            let invalid = || {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("issue #{number} linked PR timeline is incomplete"),
+                )
+            };
+            let Some(issue) = repository
+                .and_then(|v| v.get(format!("i{number}")))
+                .filter(|v| !v.is_null())
+            else {
+                if self.cursors.contains_key(number) {
+                    return Err(invalid());
+                }
+                continue;
+            };
+            let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
+            let nodes = timeline
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(invalid)?;
+            self.prs_by_issue
+                .entry(*number)
+                .or_default()
+                .extend(nodes, *number);
+            match timeline.get("pageInfo") {
+                Some(info)
+                    if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                        == Some(true) =>
+                {
+                    let cursor = info
+                        .get("endCursor")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|cursor| !cursor.trim().is_empty())
+                        .ok_or_else(invalid)?;
+                    if !self.seen_cursors.insert((*number, cursor.to_string())) {
+                        return Err(invalid());
+                    }
+                    self.cursors.insert(*number, cursor.to_string());
+                    next.push(*number);
+                    continue;
+                }
+                Some(info)
+                    if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                        == Some(false) => {}
+                _ => return Err(invalid()),
+            }
+            let prs = self.prs_by_issue.remove(number).unwrap_or_default().prs;
+            observe(*number, &prs);
+            self.cursors.remove(number);
+            self.seen_cursors.retain(|(issue, _)| issue != number);
+        }
+        self.numbers = next;
+        Ok(())
+    }
 }
 
 /// Parse the issue-timeline GraphQL response into linked-PR summaries.
@@ -7201,81 +7623,93 @@ pub(crate) fn parse_linked_pr_timeline(
     issue: &serde_json::Value,
     issue_number: u64,
 ) -> Vec<LinkedPrSummary> {
-    let nodes = issue
+    let mut linked = LinkedPrAccumulator::default();
+    if let Some(nodes) = issue
         .get("timelineItems")
         .and_then(|v| v.get("nodes"))
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut index: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
-    let mut out: Vec<LinkedPrSummary> = Vec::new();
-    for node in nodes {
-        let typename = node
-            .get("__typename")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let (pr, mut will_close_target) = match typename {
-            "CrossReferencedEvent" => (
-                node.get("source"),
-                node.get("willCloseTarget")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            ),
-            "ConnectedEvent" => (node.get("subject"), true),
-            _ => (None, false),
-        };
-        let Some(pr) = pr else { continue };
-        // gwt merges fixes into develop (not the default branch), so GitHub
-        // reports willCloseTarget=false for every real fix PR (measured on
-        // #3222/#3213). The closing INTENT therefore also comes from closing
-        // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
-        // PR-body contract).
-        if !will_close_target {
-            if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
-                will_close_target = body_closes_issue(body, issue_number);
-            }
-        }
-        if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
-            continue;
-        }
-        let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let merged_at = pr
-            .get("mergedAt")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if let Some(existing) = index.get(&pr_number) {
-            out[*existing].will_close_target |= will_close_target;
-            if out[*existing].merged_at.is_none() {
-                out[*existing].merged_at = merged_at;
-            }
-            continue;
-        }
-        index.insert(pr_number, out.len());
-        out.push(LinkedPrSummary {
-            number: pr_number,
-            will_close_target,
-            merged_at,
-            title: pr
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: pr
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: pr
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
+    {
+        linked.extend(nodes, issue_number);
     }
-    out
+    linked.prs
+}
+
+/// Retain summaries, not raw timeline nodes and PR bodies, between pages.
+/// The single-page parser uses the same first-occurrence/OR merge contract.
+#[derive(Clone, Default)]
+struct LinkedPrAccumulator {
+    index: std::collections::BTreeMap<u64, usize>,
+    prs: Vec<LinkedPrSummary>,
+}
+
+impl LinkedPrAccumulator {
+    fn extend(&mut self, nodes: &[serde_json::Value], issue_number: u64) {
+        for node in nodes {
+            let typename = node
+                .get("__typename")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let (pr, mut will_close_target) = match typename {
+                "CrossReferencedEvent" => (
+                    node.get("source"),
+                    node.get("willCloseTarget")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                "ConnectedEvent" => (node.get("subject"), true),
+                _ => (None, false),
+            };
+            let Some(pr) = pr else { continue };
+            // gwt merges fixes into develop (not the default branch), so GitHub
+            // reports willCloseTarget=false for every real fix PR (measured on
+            // #3222/#3213). The closing INTENT therefore also comes from closing
+            // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
+            // PR-body contract).
+            if !will_close_target {
+                if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
+                    will_close_target = body_closes_issue(body, issue_number);
+                }
+            }
+            if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
+                continue;
+            }
+            let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let merged_at = pr
+                .get("mergedAt")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let Some(existing) = self.index.get(&pr_number) {
+                self.prs[*existing].will_close_target |= will_close_target;
+                if self.prs[*existing].merged_at.is_none() {
+                    self.prs[*existing].merged_at = merged_at;
+                }
+                continue;
+            }
+            self.index.insert(pr_number, self.prs.len());
+            self.prs.push(LinkedPrSummary {
+                number: pr_number,
+                will_close_target,
+                merged_at,
+                title: pr
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                state: pr
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                url: pr
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+    }
 }
 
 /// GitHub closing keywords (close/closes/closed, fix/fixes/fixed,
@@ -7348,6 +7782,7 @@ mod tests {
         launched_window_id: Option<&str>,
     ) -> crate::issue_monitor::IssueMonitorInboxSummary {
         crate::issue_monitor::IssueMonitorInboxSummary {
+            needs_human_reason: None,
             dependency: None,
             launch_tier: None,
             landing_tier: None,
@@ -10270,6 +10705,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("llmlb"));
+        assert_eq!(status["gui_status"]["update_drain"], status["update_drain"]);
         assert!(status["update_drain_evaluation"]["release"]
             .as_str()
             .unwrap()
@@ -10325,6 +10761,343 @@ mod tests {
         assert_eq!(
             result["admission_hold"]["release"],
             "release.update.defer {\"version\":\"9.110.0\"}"
+        );
+    }
+
+    fn issue_6899_stage_update(root: &std::path::Path) {
+        let payload = root.join("staged-gwt");
+        std::fs::write(&payload, b"staged payload").unwrap();
+        gwt_core::update::persist_pending_update_manifest(
+            &gwt_core::update::PendingUpdateManifest {
+                version: "99.0.0".into(),
+                asset_url: "https://example.invalid/update".into(),
+                payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+                downloaded_at: "2026-11-08T18:38:00Z".into(),
+                origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+                auto_apply_deferred: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_6899_disabled_automatic_update_drain_does_not_hold_host_launches() {
+        use crate::project_runtime::installation::prepare_host_update_drain_launch_hold;
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let repo = tmp.path().join("disabled");
+        std::fs::create_dir(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let (_, _lease) = crate::establish_issue_monitor_authority_fence(
+            &path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let mut prefs = crate::IssueMonitorPrefs {
+            enabled: false,
+            autonomous_mode: true,
+            update_drain: Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: "2026-11-08T18:38:00Z".into(),
+                reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(true),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            prepare_host_update_drain_launch_hold(std::slice::from_ref(&repo))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            monitor_launch_admission_hold(None, &crate::IssueMonitorPrefs::default())
+                .unwrap()
+                .is_none()
+        );
+        prefs.enabled = true;
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            prepare_host_update_drain_launch_hold(std::slice::from_ref(&repo))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            monitor_launch_admission_hold(None, &crate::IssueMonitorPrefs::default())
+                .unwrap()
+                .is_some()
+        );
+        prefs.enabled = false;
+        prefs.update_drain.as_mut().unwrap().automatic = Some(false);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            prepare_host_update_drain_launch_hold(&[repo])
+                .unwrap()
+                .is_some(),
+            "a manual Update click retains its hold"
+        );
+    }
+
+    #[test]
+    fn issue_6899_config_clear_releases_automatic_update_drain_across_projects() {
+        use crate::project_runtime::installation::prepare_host_update_drain_launch_hold;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let repo = tmp.path().join("current");
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let other_path = crate::issue_monitor_prefs_path_for_repo_path(&other);
+        let (_, _lease) = crate::establish_issue_monitor_authority_fence(
+            &other_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            update_drain: Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: "2026-11-08T18:38:00Z".into(),
+                reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(true),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        crate::save_issue_monitor_prefs(&other_path, &prefs).unwrap();
+        let other_before = std::fs::read(&other_path).unwrap();
+        let mut out = String::new();
+        let env = crate::cli::TestEnv::new(repo);
+        let clear = |out: &mut String| {
+            run_monitor_config_set(
+                &env,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                out,
+            )
+        };
+        let before = std::fs::read(&path).unwrap();
+        let token = prefs.config_token();
+        let manifest_lock =
+            gwt_core::update::pending_update_manifest_lock(&gwt_core::update::pending_update_dir())
+                .unwrap();
+        assert!(clear(&mut out).is_err());
+        assert!(out.is_empty());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a failed host defer must preserve the captured retry intent"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .config_token(),
+            token
+        );
+        drop(manifest_lock);
+        clear(&mut out).unwrap();
+        assert!(
+            gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
+        assert!(
+            prepare_host_update_drain_launch_hold(std::slice::from_ref(&other))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            monitor_launch_admission_hold(None, &crate::IssueMonitorPrefs::default())
+                .unwrap()
+                .is_none()
+        );
+        let other_prefs = crate::load_issue_monitor_prefs(&other_path).unwrap();
+        assert!(
+            crate::IssueMonitorState::with_prefs(Default::default(), other_prefs)
+                .update_drain()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(&other_path).unwrap(),
+            other_before,
+            "no foreign project write"
+        );
+        let mut manual = prefs.clone();
+        manual.update_drain.as_mut().unwrap().reason = crate::IssueMonitorUpdateDrainReason::Manual;
+        assert!(
+            monitor_launch_admission_hold(None, &manual)
+                .unwrap()
+                .is_some(),
+            "manual hold survives automatic defer"
+        );
+        crate::save_issue_monitor_prefs(&other_path, &manual).unwrap();
+        let manual_hold = prepare_host_update_drain_launch_hold(&[other])
+            .unwrap()
+            .unwrap();
+        assert!(manual_hold.contains(crate::UPDATE_DRAIN_RELEASE_OPERATION));
+        let mut newer = gwt_core::update::load_pending_update_manifest().unwrap();
+        newer.version = "100.0.0".into();
+        newer.auto_apply_deferred = false;
+        gwt_core::update::persist_pending_update_manifest(&newer).unwrap();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        out.clear();
+        clear(&mut out).unwrap();
+        assert!(
+            !gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred,
+            "clearing an older drain must not defer a newly staged version"
+        );
+        issue_6899_stage_update(tmp.path());
+        for release_kind in ["inactive", "absent", "manual"] {
+            gwt_core::update::resume_pending_update("99.0.0").unwrap();
+            let mut unrelated = prefs.clone();
+            match release_kind {
+                "inactive" => unrelated.enabled = false,
+                "absent" => unrelated.update_drain = None,
+                _ => unrelated.update_drain.as_mut().unwrap().automatic = Some(false),
+            }
+            crate::save_issue_monitor_prefs(&path, &unrelated).unwrap();
+            out.clear();
+            clear(&mut out).unwrap();
+            assert!(
+                !gwt_core::update::load_pending_update_manifest()
+                    .unwrap()
+                    .auto_apply_deferred,
+                "clearing an {release_kind} hold must not defer an unrelated host update"
+            );
+        }
+
+        gwt_core::update::resume_pending_update("99.0.0").unwrap();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let _fault = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &path,
+        );
+        std::fs::write(path.with_extension("parent-sync-fail-once"), "fail").unwrap();
+        out.clear();
+        let partial = clear(&mut out).unwrap_err().to_string();
+        assert!(
+            partial.contains("Host update v99.0.0 deferred"),
+            "{partial}"
+        );
+        assert!(partial.contains("local configuration save"), "{partial}");
+        assert!(
+            gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
+    }
+
+    #[test]
+    fn issue_6899_host_update_drain_status_names_holder_and_since() {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let repo = tmp.path().join("current");
+        let other = tmp.path().join("holder");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&other);
+        let (_, _lease) = crate::establish_issue_monitor_authority_fence(
+            &path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .unwrap();
+        let scope =
+            RuntimeScope::new("holder", "host", other.clone(), RuntimeTarget::Host).unwrap();
+        persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &DaemonEndpoint::new(
+                scope,
+                std::process::id(),
+                "test".into(),
+                "test".into(),
+                "test".into(),
+            ),
+        )
+        .unwrap();
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                update_drain: Some(crate::IssueMonitorUpdateDrain {
+                    version: "99.0.0".into(),
+                    since: "2026-11-08T18:38:00Z".into(),
+                    reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    automatic: Some(true),
+                    blocking: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let detail = crate::project_runtime::installation::prepare_host_update_drain_launch_hold(
+            std::slice::from_ref(&other),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(detail.contains("2026-11-08T18:38:00Z"), "{detail}");
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(status["stall_reason"], "update_drain");
+        assert_eq!(
+            status["host_update_drain"]["project_root"],
+            serde_json::json!(dunce::canonicalize(&other).unwrap())
+        );
+        assert_eq!(status["host_update_drain"]["version"], "99.0.0");
+        assert_eq!(status["host_update_drain"]["since"], "2026-11-08T18:38:00Z");
+        out.clear();
+        assert_eq!(
+            run_monitor_launch_now(&env, None, None, None, 5061, &mut out).unwrap(),
+            1
+        );
+        let launch: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let exclusion = launch["admission_exclusions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|reason| reason.contains("update_drain"))
+            .unwrap();
+        assert!(
+            exclusion.contains("holder")
+                && exclusion.contains("99.0.0")
+                && exclusion.contains("2026-11-08T18:38:00Z"),
+            "{exclusion}"
         );
     }
 
@@ -10389,6 +11162,66 @@ mod tests {
     }
 
     #[test]
+    fn issue_6899_deferred_update_drain_removes_stale_daemon_exclusions() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            Default::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        monitor.set_update_drain_with_origin(
+            crate::IssueMonitorUpdateDrainReason::Auto,
+            "99.0.0",
+            "2026-11-08T18:38:00Z",
+            Some(true),
+        );
+        let prefs = monitor.prefs();
+        let mut published = monitor.agent_status();
+        published.stall_reason = Some(crate::IssueMonitorStallReason::UpdateDrain);
+        published.gui_status.as_mut().unwrap().state = "update_drain".into();
+        published.inbox = vec![mismatch_row(42, crate::MonitorInboxState::Queued, None)];
+        published.inbox[0].exclusion_reason =
+            Some("update_drain: old version 99.0.0; independent_hold".into());
+        let mut replacement = prefs.clone();
+        replacement.update_drain.as_mut().unwrap().version = "100.0.0".into();
+        let mut replaced_output = serde_json::to_value(&published).unwrap();
+        attach_monitor_admission_diagnostics(&mut replaced_output, &published, &replacement);
+        assert_eq!(replaced_output["update_drain"]["version"], "100.0.0");
+        assert_eq!(
+            replaced_output["gui_status"]["update_drain"],
+            replaced_output["update_drain"]
+        );
+        assert!(!replaced_output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap()
+            .contains("99.0.0"));
+        gwt_core::update::defer_pending_update("99.0.0").unwrap();
+        let mut output = serde_json::to_value(&published).unwrap();
+        attach_monitor_admission_diagnostics(&mut output, &published, &prefs);
+        assert!(!output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("update_drain"));
+        assert!(output["inbox"][0]["exclusion_reason"]
+            .as_str()
+            .unwrap()
+            .contains("independent_hold"));
+        assert!(output["update_drain"].is_null());
+        assert!(output["gui_status"]["update_drain"].is_null());
+        assert!(output["gui_status"]["update_drain_release"].is_null());
+        assert_ne!(output["gui_status"]["state"], "update_drain");
+        assert_ne!(output["stall_reason"], "update_drain");
+        assert!(monitor_admission_exclusions(&published, &prefs, 42)
+            .iter()
+            .all(|reason| !reason.contains("update_drain")));
+    }
+
+    #[test]
     fn issue_5062_launch_now_uses_live_host_authority_and_manual_recovery() {
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -10409,12 +11242,21 @@ mod tests {
         );
         crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
         let prefs = crate::IssueMonitorPrefs::default();
-        let hold = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        let hold = monitor_launch_admission_hold(None, &prefs)
+            .unwrap()
+            .unwrap();
         assert_eq!(hold["version"], "9.110.0");
         assert_eq!(
             hold["release"],
             "release.update.defer {\"version\":\"9.110.0\"}"
         );
+        std::fs::write(gwt_core::paths::gwt_session_state_path(), "{").unwrap();
+        let known = monitor_launch_admission_hold(Some(&other_repo), &prefs)
+            .expect("optional holder-root lookup must not erase the known hold")
+            .unwrap();
+        assert_eq!(known["version"], "9.110.0");
+        assert_eq!(known["project_state_path"], serde_json::json!(path));
+        std::fs::remove_file(gwt_core::paths::gwt_session_state_path()).unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
@@ -10434,22 +11276,28 @@ mod tests {
             "9.110.0",
             "2026-10-05T17:00:24Z",
         );
-        let hold = monitor_launch_admission_hold(&monitor.prefs())
+        let hold = monitor_launch_admission_hold(None, &monitor.prefs())
             .unwrap()
             .unwrap();
         assert_eq!(hold["release"], crate::UPDATE_DRAIN_RELEASE_OPERATION);
         crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
-        let host_manual = monitor_launch_admission_hold(&prefs).unwrap().unwrap();
+        let host_manual = monitor_launch_admission_hold(None, &prefs)
+            .unwrap()
+            .unwrap();
         assert_eq!(host_manual["release_scope"], "drain_owner_project");
         assert_eq!(host_manual["project_state_path"], serde_json::json!(path));
         drop(lease);
         assert!(
-            monitor_launch_admission_hold(&prefs).unwrap().is_none(),
+            monitor_launch_admission_hold(None, &prefs)
+                .unwrap()
+                .is_none(),
             "a stale same-PID fence cannot hold admission"
         );
         let authority_path = path.with_extension("authority.lock");
         std::fs::remove_file(&authority_path).unwrap();
-        assert!(monitor_launch_admission_hold(&prefs).unwrap().is_none());
+        assert!(monitor_launch_admission_hold(None, &prefs)
+            .unwrap()
+            .is_none());
         assert!(
             !authority_path.exists(),
             "an admission probe must not create a daemon authority lock"
@@ -11250,10 +12098,47 @@ mod tests {
         assert_eq!(queued_numbers(&repo), vec![4812]);
     }
 
+    #[test]
+    fn issue_6689_queue_push_releases_a_cold_timeout_failure() {
+        let test_home = gwt_config::home::user_home().expect("isolated test home");
+        std::fs::create_dir_all(&test_home).expect("test home dir");
+        let tmp = TempDir::new_in(test_home).expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 6689, None);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                failed_issues: vec![crate::issue_monitor::IssueMonitorFailedIssue {
+                    issue_number: 6689,
+                    message: "Launch timed out: no window was created within 120s".to_string(),
+                    window_id: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .expect("seed historical failure");
+        let (code, _) = run_queue_push(&mut env, vec![6689], false);
+        assert_eq!(code, 0);
+        let prefs = crate::load_issue_monitor_prefs(&path).expect("saved prefs");
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "queue.push must release the old failure immediately"
+        );
+        assert_eq!(prefs.autonomous_records[0].attempts, 1);
+        assert_eq!(prefs.released_failures.len(), 1);
+    }
+
     /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.
     #[test]
     fn queue_push_claim_launches_on_the_next_scan_from_another_monitor_pid() {
-        let tmp = TempDir::new().expect("tempdir");
+        let test_home = gwt_config::home::user_home().expect("isolated test home");
+        std::fs::create_dir_all(&test_home).expect("test home dir");
+        let tmp = TempDir::new_in(test_home).expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -12220,6 +13105,7 @@ mod tests {
             needs_human: vec![2338],
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                needs_human_reason: None,
                 dependency: None,
                 launch_tier: None,
                 landing_tier: None,
@@ -12373,6 +13259,7 @@ mod tests {
                 needs_human: vec![2338],
                 released: Vec::new(),
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                    needs_human_reason: None,
                     dependency: None,
                     launch_tier: None,
                     landing_tier: None,
@@ -14135,16 +15022,32 @@ mod tests {
     fn issue_monitor_config_set_guard_rejects_stale_fallback_without_saving() {
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        issue_6899_stage_update(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
-        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let seed = crate::IssueMonitorPrefs {
+            max_active_agents: 3,
+            agent_roster: Some(
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1, "revision": 1,
+                    "members": [{
+                        "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                        "name": "Ada", "enabled": true, "agent_id": "codex",
+                        "created_at": "2026-10-22T00:00:00Z"
+                    }]
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &seed).unwrap();
         let before = std::fs::read(&path).unwrap();
         let super::super::CliCommand::Issue(command) =
             super::super::json_envelope::parse_operation(
                 "issue.monitor.config.set",
                 &serde_json::json!({
-                    "max_active": 3, "allowed_labels": ["backend"],
+                    "max_active": 3, "allowed_labels": ["backend"], "update_drain": false,
                     "expected_config_token": "unobserved-config"
                 }),
             )
@@ -14161,6 +15064,12 @@ mod tests {
         );
         assert!(out.is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !gwt_core::update::load_pending_update_manifest()
+                .unwrap()
+                .auto_apply_deferred
+        );
+        let machine_before = std::fs::read(crate::machine_agent_settings::path()).unwrap();
         let observed = crate::load_issue_monitor_prefs(&path)
             .unwrap()
             .config_token();
@@ -14180,6 +15089,18 @@ mod tests {
         let saved = crate::load_issue_monitor_prefs(&path).unwrap();
         let reply: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(saved.max_active_agents, 3);
+        assert_eq!(saved.agent_roster.as_ref().unwrap().enabled_count(), 3);
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(3)
+        );
+        assert_ne!(
+            std::fs::read(crate::machine_agent_settings::path()).unwrap(),
+            machine_before
+        );
         assert_eq!(saved.allowed_labels, ["backend"]);
         assert_eq!(reply["saved_config"], saved.config_observation());
         assert_eq!(reply["config_token"], saved.config_token());
@@ -14373,6 +15294,7 @@ mod tests {
 
     fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -14459,8 +15381,8 @@ mod tests {
                 .iter()
                 .map(|delivery| delivery.issue_number)
                 .collect::<Vec<_>>(),
-            vec![43, 44],
-            "cancel only the unowned unsupported Issue; keep the cold SPEC and owned delivery"
+            vec![42, 43, 44],
+            "skip the unsupported candidate and keep deliveries with a supported fallback"
         );
         assert_eq!(
             prefs
@@ -14468,12 +15390,9 @@ mod tests {
                 .iter()
                 .map(|launch| launch.issue_number)
                 .collect::<Vec<_>>(),
-            vec![43, 44]
+            vec![42, 43, 44]
         );
-        assert_eq!(prefs.pending_effects.len(), 1);
-        assert!(matches!(&prefs.pending_effects[0].payload,
-            crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
-                if claim_id == "claim-42" && owner == "host:1"));
+        assert!(prefs.pending_effects.is_empty());
         let mut restored = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
@@ -14508,8 +15427,8 @@ mod tests {
         assert!(prefs.launch_tiers.is_empty());
         assert_eq!(prefs.tier_overrides[&4774], 1);
 
-        // An Issue-only override can change the effective provider too.
-        // Reuse the same cold deliveries, keeping the SPEC on a supported tier.
+        // An Issue-only override skips an unsupported tier and keeps the
+        // delivery when a later tier provides a supported fallback.
         let mut override_prefs = initial_prefs.clone();
         override_prefs.launch_auto = true;
         override_prefs.launch_tiers = vec![
@@ -14526,14 +15445,10 @@ mod tests {
         assert_eq!(override_prefs.tier_overrides[&42], 1);
         assert_eq!(
             override_prefs.pending_launch_deliveries, prefs.pending_launch_deliveries,
-            "the Issue override must cancel only its unowned unsupported delivery"
+            "the Issue override must keep deliveries with a supported later tier"
         );
         assert_eq!(override_prefs.launching_issues, prefs.launching_issues);
-        assert_eq!(override_prefs.pending_effects.len(), 1);
-        assert_eq!(
-            override_prefs.pending_effects[0].payload,
-            prefs.pending_effects[0].payload
-        );
+        assert!(override_prefs.pending_effects.is_empty());
         let mut restored = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             override_prefs,
@@ -14597,15 +15512,18 @@ mod tests {
             }
             let saved = crate::load_issue_monitor_prefs(&path).unwrap();
             assert_eq!(
-                saved.pending_launch_deliveries, prefs.pending_launch_deliveries,
+                saved.pending_launch_deliveries,
+                initial_prefs.pending_launch_deliveries[1..].to_vec(),
                 "release only the unowned delivery with no eligible candidate"
             );
-            assert_eq!(saved.launching_issues, prefs.launching_issues);
-            assert_eq!(saved.pending_effects.len(), 1);
             assert_eq!(
-                saved.pending_effects[0].payload,
-                prefs.pending_effects[0].payload
+                saved.launching_issues,
+                initial_prefs.launching_issues[1..].to_vec()
             );
+            assert_eq!(saved.pending_effects.len(), 1);
+            assert!(matches!(&saved.pending_effects[0].payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                    if claim_id == "claim-42" && owner == "host:1"));
             assert_eq!(
                 saved.queued_launch_session_strategies[&42],
                 crate::issue_monitor::IssueMonitorLaunchSessionStrategy::FreshRequired
@@ -14710,6 +15628,13 @@ mod tests {
         assert_eq!(payload["launch_profiles"].as_array().map(Vec::len), Some(2));
         assert_eq!(payload["launch_profiles"][0]["index"], 0);
         assert_eq!(payload["launch_profiles"][0]["agent_id"], "codex");
+        assert_eq!(
+            payload["launch_profiles"][0]["initial_prompt_supported"],
+            true
+        );
+        assert!(payload["launch_profiles"][0]
+            .get("initial_prompt_recovery")
+            .is_none());
         assert_eq!(payload["launch_profiles"][0]["model"], "gpt-6-sol");
         assert_eq!(
             payload["launch_profiles"][0]["held_until"],
@@ -14745,15 +15670,24 @@ command = "my-agent-cli"
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         let env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
         run_monitor_profiles_set(
             &env,
             Some(&repo),
             None,
             vec![pool_patch("codex", &[]), pool_patch(" my-agent ", &[])],
             None,
-            &mut String::new(),
+            &mut out,
         )
         .expect("save registered custom candidate");
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("profiles json");
+        assert_eq!(
+            payload["launch_profiles"][1]["initial_prompt_supported"],
+            false
+        );
+        assert!(payload["launch_profiles"][1]["initial_prompt_recovery"]
+            .as_str()
+            .is_some_and(|recovery| recovery.contains("issue.monitor.profiles.set")));
         let prefs =
             crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
                 .expect("read saved candidates");
@@ -16321,6 +17255,179 @@ command = "my-agent-cli"
     /// without a publish transport produces) the declaration is still recorded
     /// in the durable prefs and `issue.monitor.status` shows the row waiting.
     #[test]
+    fn typed_monitor_wait_fallback_retains_intake_subject_and_clear_tombstone() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        record_monitor_wait_in_prefs(repo.path(), 3809, "CI", "checks finish", false, &now)
+            .unwrap();
+        let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        let subject = record.wait_control.as_ref().unwrap().subject.clone();
+        assert_eq!(subject.execution_identity.session_id, session.id);
+        record_monitor_wait_invalidation_in_prefs(repo.path(), 3809, "pm", "finished", &now)
+            .unwrap();
+        let invalidated = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = invalidated
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
+        assert!(record.wait.as_ref().unwrap().invalidated.is_some());
+        let since = record.wait.as_ref().unwrap().since.clone();
+        let heartbeat_at = (chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            + chrono::Duration::seconds(1))
+        .to_rfc3339();
+        let declaration_at = (chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            + chrono::Duration::seconds(2))
+        .to_rfc3339();
+        let heartbeat_path = path.clone();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                &heartbeat_path,
+                |prefs| {
+                    let record = prefs
+                        .autonomous_records
+                        .iter_mut()
+                        .find(|record| record.issue_number == 3809)
+                        .unwrap();
+                    crate::issue_monitor::record_heartbeat_on_record(record, &heartbeat_at);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        record_monitor_wait_in_prefs(
+            repo.path(),
+            3809,
+            "fresh wait",
+            "new checks finish",
+            false,
+            &declaration_at,
+        )
+        .expect("a fresh re-declaration permits an unrelated heartbeat after its snapshot");
+        let redeclared = crate::load_issue_monitor_prefs(&path).unwrap();
+        let wait = redeclared
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap()
+            .wait
+            .as_ref()
+            .unwrap();
+        assert!(wait.invalidated.is_none());
+        assert_eq!(wait.since, since);
+        record_monitor_wait_in_prefs(repo.path(), 3809, "", "", true, &now).unwrap();
+        let cleared = crate::load_issue_monitor_prefs(&path).unwrap();
+        let record = cleared
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 3809)
+            .unwrap();
+        assert!(record.wait.is_none());
+        assert_eq!(&record.wait_control.as_ref().unwrap().subject, &subject);
+        let before = std::fs::read(&path).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        std::fs::remove_file(runtime_path).unwrap();
+        assert!(record_monitor_wait_in_prefs(
+            repo.path(),
+            3809,
+            "CI",
+            "checks finish",
+            false,
+            &now
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "unknown canonical runtime cannot downgrade a typed wait to legacy"
+        );
+    }
+
+    #[test]
+    fn issue_5876_wait_fallback_rejects_same_subject_changes_after_snapshot() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (_, monitor, now) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(repo.path());
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        for clear in [false, true] {
+            record_monitor_wait_in_prefs(repo.path(), 3809, "CI", "checks finish", false, &now)
+                .unwrap();
+            let committed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let committed_in_hook = std::rc::Rc::clone(&committed);
+            let changed_path = path.clone();
+            let changed_at = now.clone();
+            // This owner lease is acquired after the fallback's prefs snapshot.
+            // Commit the intervening control before it observes the same native subject.
+            crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                    &changed_path,
+                    |prefs| {
+                        let record = prefs
+                            .autonomous_records
+                            .iter_mut()
+                            .find(|record| record.issue_number == 3809)
+                            .unwrap();
+                        let control = record.wait_control.clone();
+                        if clear {
+                            crate::clear_wait_on_record(record, &changed_at);
+                        } else {
+                            crate::invalidate_wait_on_record(record, "pm", "finished", &changed_at);
+                        }
+                        assert_eq!(record.wait_control, control, "the subject did not change");
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                *committed_in_hook.borrow_mut() = std::fs::read(&changed_path).unwrap();
+            });
+            assert!(
+                record_monitor_wait_in_prefs(
+                    repo.path(),
+                    3809,
+                    "stale declaration",
+                    "old checks finish",
+                    false,
+                    &now,
+                )
+                .is_err(),
+                "a same-subject {} after the snapshot must refuse the stale declaration",
+                if clear { "clear" } else { "PM invalidation" }
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), *committed.borrow());
+            record_monitor_wait_in_prefs(
+                repo.path(),
+                3809,
+                "fresh wait",
+                "new checks",
+                false,
+                &now,
+            )
+            .expect("a fresh snapshot can re-declare after either control");
+        }
+    }
+
+    #[test]
     fn monitor_wait_records_the_declaration_durably_without_a_publish_transport() {
         use gwt_core::test_support::ScopedEnvVar;
 
@@ -16762,6 +17869,7 @@ command = "my-agent-cli"
             needs_human: Vec::new(),
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                needs_human_reason: None,
                 dependency: None,
                 launch_tier: None,
                 landing_tier: None,
@@ -17683,6 +18791,116 @@ command = "my-agent-cli"
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
     }
 
+    #[test]
+    fn linked_pr_bulk_read_resumes_one_small_page_per_scan_and_keeps_retry_state() {
+        let numbers: Vec<u64> = (1..=80).collect();
+        let mut pending = LinkedPrBulkRead::default();
+        let mut linked = std::collections::BTreeMap::new();
+        let mut queries = Vec::new();
+        for turn in 0..19 {
+            let missing: Vec<_> = numbers
+                .iter()
+                .copied()
+                .filter(|number| !linked.contains_key(number))
+                .collect();
+            pending.sync_numbers(&missing, 5);
+            let before = queries.len();
+            let result = pending.read_next_with(
+                    |query| {
+                        queries.push(query.to_owned());
+                        if turn == 16 {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid cursor"));
+                        }
+                        let repository: serde_json::Map<_, _> = numbers
+                            .iter()
+                            .filter(|number| query.contains(&format!("i{number}: issue(")))
+                            .map(|number| {
+                                let continuation = query.contains("after:");
+                                let unfinished = *number == 1 && !continuation;
+                                let nodes = if *number == 1 {
+                                    vec![serde_json::json!({
+                                        "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                                        "source": {"__typename": "PullRequest",
+                                            "number": if continuation { 102 } else { 101 }, "state": "OPEN"}
+                                    })]
+                                } else {
+                                    vec![]
+                                };
+                                (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                    "nodes": nodes, "pageInfo": {
+                                        "hasNextPage": unfinished, "endCursor": "next"
+                                    }
+                                }}))
+                            })
+                            .collect();
+                        Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                    },
+                    |number, prs| {
+                        linked.insert(number, prs.to_vec());
+                    },
+                );
+            if turn == 16 {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(queries.len() - before, 1, "turn {turn} is one API call");
+            assert!(queries.last().unwrap().matches(": issue(").count() <= 5);
+            if turn < 18 {
+                assert!(!linked.contains_key(&1), "partial history stays unknown");
+            }
+        }
+        assert!(pending.is_empty());
+        assert_eq!(linked.len(), 80);
+        assert_eq!(
+            linked[&1].iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![101, 102]
+        );
+        assert!(queries[15].contains("i80: issue("));
+        assert!(queries[16].contains("after: \"next\""));
+        assert!(
+            !queries[17].contains("after:"),
+            "invalid cursor restarts its history"
+        );
+
+        pending.sync_numbers(&[81, 82], 5);
+        let failed_query = std::cell::RefCell::new(String::new());
+        assert!(pending
+            .read_next_with(
+                |query| {
+                    *failed_query.borrow_mut() = query.to_owned();
+                    Err(io::Error::other("offline"))
+                },
+                |_, _| panic!("failure cannot publish new evidence"),
+            )
+            .is_err());
+        assert_eq!(linked.len(), 80, "previous completed histories survive");
+        pending.sync_numbers(&[82], 5);
+        pending
+            .read_next_with(
+                |query| {
+                    assert!(
+                        !query.contains("i81: issue("),
+                        "removed candidates are dropped"
+                    );
+                    assert!(query.contains("i82: issue("));
+                    assert!(failed_query.borrow().contains("i82: issue("));
+                    Ok(
+                        serde_json::json!({"data": {"repository": {"i82": {"timelineItems": {
+                            "nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                        }}}}})
+                        .to_string(),
+                    )
+                },
+                |number, prs| {
+                    linked.insert(number, prs.to_vec());
+                },
+            )
+            .unwrap();
+        assert!(pending.is_empty());
+        assert!(linked.contains_key(&82));
+    }
+
     /// SPEC #4093 AC-7: the completion probe reads every candidate's linked
     /// PRs in `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls, never one per
     /// candidate, and each alias is parsed back to its own issue.
@@ -17726,6 +18944,134 @@ command = "my-agent-cli"
     }
 
     #[test]
+    fn linked_pr_bulk_reads_later_initial_chunks_before_failing_continuations() {
+        let numbers: Vec<u64> = (1..=26).collect();
+        let mut queries = Vec::new();
+        let mut completed = Vec::new();
+        let error = fetch_linked_prs_bulk_via_gh_with_observer(
+            &numbers,
+            |query| {
+                queries.push(query.to_string());
+                if query.contains("after:") {
+                    return Err(io::Error::other("continuation failed"));
+                }
+                let repository: serde_json::Map<_, _> = numbers
+                    .iter()
+                    .filter(|number| query.contains(&format!("i{number}: issue(")))
+                    .map(|number| {
+                        (
+                            format!("i{number}"),
+                            serde_json::json!({"timelineItems": {
+                                "nodes": [], "pageInfo": {
+                                    "hasNextPage": *number == 1, "endCursor": "next"
+                                }
+                            }}),
+                        )
+                    })
+                    .collect();
+                Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+            },
+            |number, _| completed.push(number),
+        )
+        .unwrap_err();
+        println!(
+            "{}",
+            serde_json::json!({
+                "completed_issue_ids": completed, "queries": queries.len(),
+                "continuation_failed": error.to_string() == "continuation failed"
+            })
+        );
+        assert_eq!(error.to_string(), "continuation failed");
+        assert!(
+            completed.contains(&26),
+            "later initial chunks must be observed"
+        );
+        assert!(!completed.contains(&1), "unfinished timelines stay unknown");
+        assert_eq!(completed.len(), 25);
+        assert_eq!(queries.len(), 3);
+        assert!(queries[1].contains("i26: issue(number: 26)"));
+    }
+
+    #[test]
+    fn linked_pr_bulk_retains_nodes_across_successful_chunk_interleaving() {
+        let numbers: Vec<u64> = (1..=26).collect();
+        let event = |number| {
+            serde_json::json!({
+                "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                "source": {"__typename": "PullRequest", "number": number, "state": "OPEN"}
+            })
+        };
+        let mut queries = Vec::new();
+        let mut observed = Vec::new();
+        let linked =
+            fetch_linked_prs_bulk_via_gh_with_observer(
+                &numbers,
+                |query| {
+                    queries.push(query.to_string());
+                    let repository = match queries.len() {
+                    1 => (1..=25)
+                        .map(|number| {
+                            (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                "nodes": if number == 1 { vec![event(101)] } else { vec![] },
+                                "pageInfo": {"hasNextPage": number == 1, "endCursor": "next"}
+                            }}))
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                        .into(),
+                    2 => serde_json::json!({"i26": {"timelineItems": {
+                        "nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }}}),
+                    3 => serde_json::json!({"i1": {"timelineItems": {
+                        "nodes": [event(102)],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }}}),
+                    _ => panic!("unexpected extra query"),
+                };
+                    Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                },
+                |number, prs| {
+                    observed.push((
+                        number,
+                        prs.iter()
+                            .map(|pr| (pr.number, pr.will_close_target))
+                            .collect::<Vec<_>>(),
+                    ));
+                },
+            )
+            .expect("all initial pages and the continuation succeed");
+
+        assert_eq!(queries.len(), 3);
+        assert!(queries[0].contains("i1: issue(number: 1)"));
+        assert!(queries[0].contains("i25: issue(number: 25)"));
+        assert!(!queries[0].contains("i26: issue("));
+        assert!(queries[1].contains("i26: issue(number: 26)"));
+        assert!(!queries[1].contains("i1: issue("));
+        assert!(!queries[1].contains("after:"));
+        assert!(queries[2].contains("i1: issue(number: 1)"));
+        assert!(queries[2].contains("after: \"next\""));
+        assert!(!queries[2].contains("i26: issue("));
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>(),
+            (2..=26).chain([1]).collect::<Vec<_>>()
+        );
+        assert_eq!(observed.last().unwrap().1, vec![(101, true), (102, true)]);
+        assert_eq!(linked.len(), 26);
+        for (number, prs) in &observed {
+            let returned: Vec<_> = linked[number]
+                .iter()
+                .map(|pr| (pr.number, pr.will_close_target))
+                .collect();
+            assert_eq!(&returned, prs);
+            if *number != 1 {
+                assert!(prs.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn issue_4157_linked_pr_bulk_read_follows_only_incomplete_timelines() {
         let event = |number, closing| {
             serde_json::json!({
@@ -17739,8 +19085,13 @@ command = "my-agent-cli"
             queries.push(query.to_string());
             assert!(query.contains("pageInfo { hasNextPage endCursor }"));
             let repository = if queries.len() == 1 {
+                let mut first = event(7, false);
+                first["source"]["title"] = serde_json::json!("first title");
+                first["source"]["url"] = serde_json::json!("first URL");
+                let mut empty_merge = event(8, true);
+                empty_merge["source"]["mergedAt"] = serde_json::json!("");
                 serde_json::json!({
-                    "i42": {"timelineItems": {"nodes": [event(7, false)],
+                    "i42": {"timelineItems": {"nodes": [first, empty_merge],
                         "pageInfo": {"hasNextPage": true, "endCursor": cursor}}},
                     "i43": {"timelineItems": {"nodes": [],
                         "pageInfo": {"hasNextPage": false, "endCursor": null}}}
@@ -17753,8 +19104,16 @@ command = "my-agent-cli"
                     "after: {}",
                     serde_json::to_string(cursor).unwrap()
                 )));
+                let mut later = event(7, false);
+                later["source"]["body"] = serde_json::json!("Fixes #42");
+                later["source"]["title"] = serde_json::json!("later title");
+                later["source"]["url"] = serde_json::json!("later URL");
+                later["source"]["state"] = serde_json::json!("MERGED");
+                later["source"]["mergedAt"] = serde_json::json!("2026-11-04T00:00:00Z");
+                let mut later_merge = event(8, true);
+                later_merge["source"]["mergedAt"] = serde_json::json!("2026-11-04T00:00:00Z");
                 serde_json::json!({"i42": {"timelineItems": {
-                    "nodes": [event(7, true), event(8, true)],
+                    "nodes": [later, later_merge],
                     "pageInfo": {"hasNextPage": false, "endCursor": null}
                 }}})
             };
@@ -17767,6 +19126,14 @@ command = "my-agent-cli"
             vec![7, 8]
         );
         assert!(linked[&42].iter().all(|pr| pr.will_close_target));
+        assert_eq!(linked[&42][0].title, "first title");
+        assert_eq!(linked[&42][0].url, "first URL");
+        assert_eq!(linked[&42][0].state, "OPEN");
+        assert_eq!(
+            linked[&42][0].merged_at.as_deref(),
+            Some("2026-11-04T00:00:00Z")
+        );
+        assert_eq!(linked[&42][1].merged_at.as_deref(), Some(""));
         assert!(linked[&43].is_empty());
 
         for cursor in [serde_json::Value::Null, serde_json::json!("unchanged")] {
@@ -18389,6 +19756,20 @@ command = "my-agent-cli"
         .unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registration-pm");
         let mut env = crate::cli::TestEnv::new(repo);
+        let continued_repo = env.repo_path().to_path_buf();
+        gwt_core::project_execution_policy::choose(
+            &continued_repo,
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "explicit-test-choice".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:3431".into()],
+            },
+        )
+        .unwrap();
         let error = run(
             &mut env,
             IssueCommand::CreateBody {
@@ -18430,6 +19811,29 @@ command = "my-agent-cli"
                 .filter(|call| call.starts_with("create_issue:"))
                 .count(),
             2
+        );
+        let created: Vec<u64> = env
+            .client
+            .call_log()
+            .iter()
+            .filter_map(|call| call.strip_prefix("create_issue:#")?.parse().ok())
+            .collect();
+        assert_eq!(created.len(), 2);
+        assert!(
+            crate::project_execution_policy::admission(
+                &continued_repo,
+                &[format!("issue:{}", created[0])]
+            )
+            .is_err(),
+            "an unrelated Issue is not a continued child"
+        );
+        assert!(
+            crate::project_execution_policy::admission(
+                &continued_repo,
+                &[format!("issue:{}", created[1])]
+            )
+            .is_ok(),
+            "typed PM child of the admitted parent remains runnable"
         );
     }
 
@@ -18570,6 +19974,7 @@ command = "my-agent-cli"
             &crate::IssueMonitorPrefs {
                 enabled: true,
                 launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                    agent_member_id: None,
                     agent_id: "codex".to_string(),
                     model: Some("gpt-5.5".to_string()),
                     reasoning: Some("high".to_string()),

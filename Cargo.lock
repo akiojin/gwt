@@ -859,15 +859,6 @@ dependencies = [
 
 [[package]]
 name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "fsevent-sys"
 version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e90520699e70a2008360ae6259fa3474a8c14fcf2e6b067c71b58eb6b1f53625"
@@ -1271,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1312,11 +1303,13 @@ dependencies = [
  "regex",
  "reqwest",
  "rfd",
+ "ring",
  "semver",
  "serde",
  "serde_json",
  "serde_norway",
  "sha2 0.10.9",
+ "subtle",
  "sysinfo",
  "tao",
  "tempfile",
@@ -1335,11 +1328,12 @@ dependencies = [
  "windows-registry 0.100.0",
  "windows-result 0.100.0",
  "winresource",
+ "zip",
 ]
 
 [[package]]
 name = "gwt-agent"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1368,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1378,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1386,9 +1380,10 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "dirs 7.0.0",
+ "fs2",
  "libc",
  "serde",
  "tempfile",
@@ -1402,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1411,7 +1406,7 @@ dependencies = [
  "dunce",
  "flate2",
  "fs2",
- "fsevent-sys 5.2.0",
+ "fsevent-sys",
  "gwt-config",
  "gwt-core",
  "hex",
@@ -1444,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1458,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1474,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1492,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1512,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1528,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.144.0"
+version = "9.157.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -1835,9 +1830,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
+checksum = "484be5657551d7868d67587df967fb4fcbe9d266a761cc855aaa148fda0b3cc7"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -2376,20 +2371,21 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "8.2.0"
+version = "8.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3"
+checksum = "82f812702fbc75d35416d3f884e04925be7e9498f4eceea2e24ba34559284674"
 dependencies = [
  "bitflags 2.11.1",
- "fsevent-sys 4.1.0",
  "inotify",
  "kqueue",
  "libc",
  "log",
  "mio",
  "notify-types",
+ "objc2-core-foundation",
+ "objc2-core-services",
  "walkdir",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2555,6 +2551,16 @@ checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
 dependencies = [
  "objc2",
  "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-core-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -2986,9 +2992,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.11.1",
  "getopts",
@@ -3722,9 +3728,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.39.6"
+version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+checksum = "0e8a3edbe0394ce115f3917a00349dd242be09eb5a091ed509eaf67b55cfb8a8"
 dependencies = [
  "libc",
  "memchr",
@@ -3749,9 +3755,9 @@ dependencies = [
 
 [[package]]
 name = "tao"
-version = "0.37.1"
+version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f37f381f4e048e6cdf038b5705f8cf14ad108279d46eb968140a7b291aba9400"
+checksum = "d5777b06fe6435126ae8d816eba269e050e1e10d302cf5461e9c49eccabc3548"
 dependencies = [
  "bitflags 2.11.1",
  "block2",
@@ -3822,7 +3828,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",
@@ -4377,12 +4383,13 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.28.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -5387,9 +5394,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.1.0"
+version = "9.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2886b00003a72c4ccee3f42cfc34908d33b2508a74d827dc2a4244706475c704"
+checksum = "ec2e3161de27091f18a831d9494e9c53378a34833af5c1dda35ad85849da18d6"
 dependencies = [
  "aes",
  "bzip2",

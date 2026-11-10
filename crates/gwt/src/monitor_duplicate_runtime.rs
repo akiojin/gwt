@@ -10,7 +10,7 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -141,43 +141,62 @@ pub fn capture_stop_request(
 
 /// The host owns the handles; this worker only retains exact captured references.
 /// No client connection, canvas snapshot or GUI event dispatch is needed.
+pub struct MonitorRuntimeReconciler {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for MonitorRuntimeReconciler {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::error!(target: "gwt.monitor.runtime", "Monitor runtime reconciliation worker failed during owner drain");
+            }
+        }
+    }
+}
+
 pub fn spawn(
-    open_projects: Arc<RwLock<BTreeMap<PathBuf, PathBuf>>>,
+    project_root: PathBuf,
+    sessions_dir: PathBuf,
     snapshot: impl Fn() -> Option<Vec<RegisteredMonitorRuntime>> + Send + 'static,
-) {
-    let result = std::thread::Builder::new()
+) -> io::Result<MonitorRuntimeReconciler> {
+    let (stop, stopped) = std::sync::mpsc::channel();
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    let home = gwt_core::test_support::gwt_home_override();
+    let worker = std::thread::Builder::new()
         .name("gwt-monitor-runtime".into())
         .spawn(move || {
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            let _home = home
+                .as_ref()
+                .map(gwt_core::test_support::ScopedGwtHome::set);
             let mut retained = BTreeMap::new();
-            let mut projects = BTreeMap::<PathBuf, PathBuf>::new();
+            let projects = BTreeMap::from([(project_root, sessions_dir)]);
             loop {
-                std::thread::sleep(Duration::from_secs(5));
-                // Remember projects independently of PTYs. In particular, a new
-                // host must purge old occupancy before it can admit its first PTY.
-                if let Ok(open) = open_projects.read() {
-                    projects.extend(
-                        open.iter()
-                            .map(|(root, sessions)| (root.clone(), sessions.clone())),
-                    );
+                let draining = match stopped.recv_timeout(Duration::from_secs(5)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                };
+                if let Some(current) = snapshot() {
+                    for entry in current {
+                        let registration = &entry.registration;
+                        retained.insert(
+                            (registration.window_id.clone(), registration.incarnation),
+                            entry,
+                        );
+                    }
+                    reconcile_retained_projects(&projects, &mut retained);
                 }
-                let Some(current) = snapshot() else { continue };
-                for entry in current {
-                    let registration = &entry.registration;
-                    projects.insert(
-                        registration.project_root.clone(),
-                        registration.sessions_dir.clone(),
-                    );
-                    retained.insert(
-                        (registration.window_id.clone(), registration.incarnation),
-                        entry,
-                    );
+                if draining {
+                    break;
                 }
-                reconcile_retained_projects(&projects, &mut retained);
             }
-        });
-    if let Err(error) = result {
-        tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start Monitor runtime reconciliation");
-    }
+        })?;
+    Ok(MonitorRuntimeReconciler {
+        stop,
+        worker: Some(worker),
+    })
 }
 
 fn reconcile_retained_projects(
@@ -223,11 +242,23 @@ fn reconcile_projects(projects: &BTreeMap<PathBuf, PathBuf>, entries: &[Register
             })
             .cloned()
             .collect::<Vec<_>>();
-        let inventory = censuses
-            .entry(sessions)
-            .or_insert_with(|| crate::session_inventory::ProjectSessionCensus::capture(sessions))
-            .observe(project);
-        if let Err(error) = reconcile_project(project, sessions, &entries, &inventory) {
+        let result = if entries.is_empty() {
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                std::time::Instant::now() + Duration::from_secs(5),
+            );
+            // Empty hosts still release dead-host accounting, but have no
+            // captured runtime that could consume a machine-wide census.
+            publish_counts(project, &entries).map(|_| ())
+        } else {
+            let inventory = censuses
+                .entry(sessions)
+                .or_insert_with(|| {
+                    crate::session_inventory::ProjectSessionCensus::capture(sessions)
+                })
+                .observe(project);
+            reconcile_project(project, sessions, &entries, &inventory)
+        };
+        if let Err(error) = result {
             tracing::warn!(target: "gwt.monitor.runtime", project = %project.display(), %error, "runtime reconciliation failed; retaining unknown authority");
         }
     }
@@ -629,10 +660,72 @@ mod prefs_io_tests {
     use super::*;
 
     #[test]
+    fn projects_without_monitor_runtimes_skip_census_and_release_dead_host_slots() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let project = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(project.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_monitor_runtime_counts(
+            u32::MAX,
+            1,
+            BTreeMap::from([(6743, 1)]),
+            "2026-01-01T00:00:00Z",
+        );
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let projects = BTreeMap::from([(
+            project.path().to_path_buf(),
+            gwt_core::paths::gwt_sessions_dir(),
+        )]);
+        let before = crate::session_inventory::ProjectSessionCensus::captures_for_test();
+        for _ in 0..2 {
+            reconcile_projects(&projects, &[]);
+        }
+        assert!(crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .monitor_runtime_counts
+            .values()
+            .all(|host| host.counts.is_empty() && host.windows.is_empty()));
+        assert_eq!(
+            crate::session_inventory::ProjectSessionCensus::captures_for_test() - before,
+            0,
+            "an idle project must release dead-host slots without a machine-wide Session census"
+        );
+    }
+
+    #[test]
     fn prefs_cache_five_second_io_counts() {
         let _env = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        const CHILD: &str = "GWT_TEST_MONITOR_PREFS_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Other tests may legitimately evict entries from the bounded
+            // process-wide cache. Measure this cadence in its own process.
+            let output = gwt_core::process::hidden_command(
+                std::env::current_exe().expect("test binary"),
+            )
+            .args([
+                "--exact",
+                "monitor_duplicate_runtime::prefs_io_tests::prefs_cache_five_second_io_counts",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("preferences I/O fixture");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
@@ -986,7 +1079,7 @@ mod stop_tests {
         }
         #[cfg(unix)]
         {
-            let mut system = sysinfo::System::new();
+            let mut system = sysinfo::System::new().expect("initialize test process observation");
             let pid = sysinfo::Pid::from_u32(pid);
             system.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::Some(&[pid]),

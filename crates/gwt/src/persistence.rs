@@ -402,7 +402,7 @@ fn normalize_loaded_workspace_state(state: &mut PersistedWindowRegistry) {
         let canonical = window.preset.canonical_surface_preset();
         if window.preset != canonical {
             // Keep the window identity: IssuePreview placements reference it,
-            // and distinct Settings views remain valid for split panes.
+            // and distinct Issues views remain valid for split panes.
             window.preset = canonical;
             window.title = canonical.title().to_string();
         }
@@ -415,6 +415,37 @@ fn normalize_loaded_workspace_state(state: &mut PersistedWindowRegistry) {
         .unwrap_or(0)
         + 1;
     state.next_z_index = state.next_z_index.max(next_z_index);
+
+    // Old Settings windows also hosted the Kanban. Keep the settings window
+    // intact, but move its preview links to an independent Issues host.
+    let settings_ids: Vec<_> = state
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Settings)
+        .map(|window| window.id.clone())
+        .collect();
+    if state.windows.iter().any(|window| {
+        matches!(&window.placement, WindowPlacement::IssuePreview { issue_window_id, .. }
+            if settings_ids.contains(issue_window_id))
+    }) {
+        let mut registry = crate::window_registry::WindowRegistry::from_persisted(state.clone());
+        let issue_host = registry.issue_preview_host_window_id().unwrap_or_else(|| {
+            let host = registry.add_window(WindowPreset::Issue);
+            state.next_z_index = registry.persisted().next_z_index;
+            state.windows.push(host.clone());
+            host.id
+        });
+        for window in &mut state.windows {
+            if let WindowPlacement::IssuePreview {
+                issue_window_id, ..
+            } = &mut window.placement
+            {
+                if settings_ids.contains(issue_window_id) {
+                    *issue_window_id = issue_host.clone();
+                }
+            }
+        }
+    }
 }
 
 fn default_persist_window() -> bool {
@@ -1288,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn load_workspace_state_migrates_issue_hosts_to_settings_preserving_preview_links() {
+    fn load_workspace_state_migrates_issue_hosts_preserving_preview_links() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
         let template = default_workspace_state().windows.remove(0);
@@ -1307,7 +1338,7 @@ mod tests {
             host.preset = preset;
             state.windows.push(host);
         }
-        let mut agent = template;
+        let mut agent = template.clone();
         agent.id = "agent-1".to_string();
         agent.preset = WindowPreset::Agent;
         agent.placement = WindowPlacement::IssuePreview {
@@ -1315,13 +1346,21 @@ mod tests {
             issue_number: 5321,
         };
         state.windows.push(agent);
+        let mut settings_preview = template;
+        settings_preview.id = "agent-2".to_string();
+        settings_preview.preset = WindowPreset::Agent;
+        settings_preview.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "settings".to_string(),
+            issue_number: 4777,
+        };
+        state.windows.push(settings_preview);
         save_workspace_state(&path, &state).expect("save legacy workspace");
 
         let loaded = load_workspace_state(&path).expect("restore legacy workspace");
         assert_eq!(
             loaded.windows.len(),
-            7,
-            "distinct Settings views are preserved"
+            8,
+            "distinct Issue and Settings views are preserved"
         );
         for (index, id) in [
             "settings",
@@ -1335,10 +1374,60 @@ mod tests {
         .enumerate()
         {
             assert_eq!(loaded.windows[index].id, id);
-            assert_eq!(loaded.windows[index].preset, WindowPreset::Settings);
-            assert_eq!(loaded.windows[index].title, "Settings");
+            let preset = if id == "settings" {
+                WindowPreset::Settings
+            } else {
+                WindowPreset::Issue
+            };
+            assert_eq!(loaded.windows[index].preset, preset);
+            assert_eq!(loaded.windows[index].title, preset.title());
         }
         assert_eq!(loaded.windows[6].placement, state.windows[6].placement);
+        assert_eq!(
+            loaded.windows[7].placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue".to_string(),
+                issue_number: 4777,
+            }
+        );
+        save_workspace_state(&path, &loaded).expect("save migrated workspace");
+        assert_eq!(load_workspace_state(&path).expect("reload"), loaded);
+    }
+
+    #[test]
+    fn load_workspace_state_moves_settings_previews_to_a_new_issue_host() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let mut state = empty_workspace_state();
+        let mut settings = default_workspace_state().windows.remove(0);
+        // The previous migration retained Issue IDs while changing their preset.
+        settings.id = "issue-1".to_string();
+        settings.title = "A custom settings title".to_string();
+        settings.preset = WindowPreset::Settings;
+        let mut agent = settings.clone();
+        agent.id = "agent-1".to_string();
+        agent.preset = WindowPreset::Agent;
+        agent.placement = WindowPlacement::IssuePreview {
+            issue_window_id: settings.id.clone(),
+            issue_number: 4777,
+        };
+        state.windows = vec![settings.clone(), agent];
+        save_workspace_state(&path, &state).expect("save");
+
+        let loaded = load_workspace_state(&path).expect("load");
+        assert_eq!(loaded.windows.len(), 3);
+        assert_eq!(loaded.windows[0], settings);
+        assert_eq!(loaded.windows[2].preset, WindowPreset::Issue);
+        assert_ne!(loaded.windows[2].id, settings.id);
+        assert_eq!(
+            loaded.windows[1].placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: loaded.windows[2].id.clone(),
+                issue_number: 4777,
+            }
+        );
+        save_workspace_state(&path, &loaded).expect("save migrated workspace");
+        assert_eq!(load_workspace_state(&path).expect("reload"), loaded);
     }
 
     #[test]

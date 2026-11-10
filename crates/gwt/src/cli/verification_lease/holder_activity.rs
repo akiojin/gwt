@@ -384,7 +384,8 @@ fn descendants(owner_pid: u32, samples: &[ProcessSample]) -> Option<BTreeSet<u32
 /// Exact roots whose descendants advanced during one shared sample window.
 /// Root CPU is not child progress, and a recycled or missing root is never
 /// credited. Start identities use `host_process_start_time`'s opaque token.
-pub(crate) fn progressing_descendants(roots: &[(u32, u64)]) -> BTreeSet<(u32, u64)> {
+/// An unavailable process observation returns `None`, never proven no-progress.
+pub(crate) fn progressing_descendants(roots: &[(u32, u64)]) -> Option<BTreeSet<(u32, u64)>> {
     let mut roots: BTreeSet<_> = roots
         .iter()
         .copied()
@@ -394,23 +395,23 @@ pub(crate) fn progressing_descendants(roots: &[(u32, u64)]) -> BTreeSet<(u32, u6
         crate::process::host_process_start_time(*pid) == Some(*started_at)
     });
     if roots.is_empty() {
-        return roots;
+        return Some(roots);
     }
 
-    let first = read_processes();
+    let first = read_processes()?;
     roots.retain(|(pid, _)| first.iter().any(|sample| sample.pid == *pid));
     if roots.is_empty() {
-        return roots;
+        return Some(roots);
     }
     let taken_at = Instant::now();
     std::thread::sleep(PROGRESS_WINDOW);
-    let second = read_processes();
+    let second = read_processes()?;
     let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     roots.retain(|(pid, started_at)| {
         crate::process::host_process_start_time(*pid) == Some(*started_at)
             && descendants_advancing(*pid, &first, &second, window_ms)
     });
-    roots
+    Some(roots)
 }
 
 fn descendants_advancing(
@@ -464,13 +465,13 @@ impl HolderProbe {
         let (first, taken_at) = match self.previous.take() {
             Some(previous) => previous,
             None => {
-                let first = read_processes();
+                let first = read_processes()?;
                 let at = Instant::now();
                 std::thread::sleep(PROGRESS_WINDOW);
                 (first, at)
             }
         };
-        let (second, second_at, host_cpu_percent) = read_processes_and_host_cpu();
+        let (second, second_at, host_cpu_percent) = read_processes_and_host_cpu()?;
         let window_ms =
             u64::try_from(second_at.duration_since(taken_at).as_millis()).unwrap_or(u64::MAX);
         self.previous = Some((second.clone(), second_at));
@@ -516,24 +517,24 @@ pub(crate) fn workload_for(
     }
 }
 
-fn read_processes() -> Vec<ProcessSample> {
+fn read_processes() -> Option<Vec<ProcessSample>> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_cpu(),
     );
-    collect(&system)
+    Some(collect(&system))
 }
 
 /// Host CPU needs two readings of its own, so it is sampled alongside the
 /// process table rather than in a pass of its own.
-fn read_processes_and_host_cpu() -> (Vec<ProcessSample>, Instant, Option<f64>) {
+fn read_processes_and_host_cpu() -> Option<(Vec<ProcessSample>, Instant, Option<f64>)> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     system.refresh_cpu_usage();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -545,11 +546,11 @@ fn read_processes_and_host_cpu() -> (Vec<ProcessSample>, Instant, Option<f64>) {
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     let host = f64::from(system.global_cpu_usage());
-    (
+    Some((
         samples,
         read_at,
         (host.is_finite() && host > 0.0).then_some(host),
-    )
+    ))
 }
 
 fn collect(system: &sysinfo::System) -> Vec<ProcessSample> {
@@ -1092,7 +1093,57 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn issue_3809_owned_windows_child_reports_silent_cpu_progress() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::windows::io::AsRawHandle;
         use std::process::{Child, Stdio};
+        use windows::Win32::{
+            Foundation::{FILETIME, HANDLE},
+            System::Threading::GetProcessTimes,
+        };
+
+        fn log_child(phase: &str, child: &mut Child, samples: Option<&[ProcessSample]>) {
+            let (mut birth, mut exit, mut kernel, mut user) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
+            let ticks = |time: FILETIME| {
+                (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+            };
+            // This adjacent native observation cannot recover sysinfo's discarded
+            // GetProcessTimes result. Keep its own error distinct from CPU zero.
+            // SAFETY: Child retains the live process handle and all buffers are writable.
+            let native_times = unsafe {
+                GetProcessTimes(
+                    HANDLE(child.as_raw_handle()),
+                    &mut birth,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                )
+            }
+            .map(|()| {
+                format!(
+                    "birth_100ns={} kernel_100ns={} user_100ns={}",
+                    ticks(birth),
+                    ticks(kernel),
+                    ticks(user)
+                )
+            });
+            let sampled_child =
+                samples.and_then(|samples| samples.iter().find(|sample| sample.pid == child.id()));
+            // Bypass libtest capture so passing Windows CI keeps the observations too.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "owned_child_observation phase={phase} pid={} table_available={} \
+                 sampled_child={sampled_child:?} independent_native_times={native_times:?} \
+                 child_state={:?}",
+                child.id(),
+                samples.is_some(),
+                child.try_wait()
+            );
+        }
 
         struct OwnedChild(Child);
         impl Drop for OwnedChild {
@@ -1104,29 +1155,46 @@ mod tests {
 
         let root = std::process::id();
         let started_at = crate::process::host_process_start_time(root).unwrap();
-        assert!(progressing_descendants(&[]).is_empty());
-        assert!(progressing_descendants(&[(0, 0), (root, started_at + 1)]).is_empty());
-        let child = OwnedChild(
+        assert!(progressing_descendants(&[]).unwrap().is_empty());
+        assert!(progressing_descendants(&[(0, 0), (root, started_at + 1)])
+            .unwrap()
+            .is_empty());
+        let mut child = OwnedChild(
             gwt_core::process::hidden_command("powershell.exe")
                 .args([
                     "-NoLogo",
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+                    "$value = 0; $value = ($value + 1) % 1000000; [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); while ($true) { $value = ($value + 1) % 1000000 }",
                 ])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn an owned silent CPU child"),
         );
         let child_pid = child.0.id();
+        let mut ready = String::new();
+        BufReader::new(child.0.stdout.take().expect("owned child stdout"))
+            .read_line(&mut ready)
+            .expect("read owned child ready receipt");
+        assert_eq!(ready.trim_end(), "ready");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "owned_child_ready pid={child_pid} receipt={:?}",
+            ready.trim_end()
+        );
         let first = read_processes();
         let taken_at = Instant::now();
-        let progressing = progressing_descendants(&[(root, started_at)]);
+        log_child("first", &mut child.0, first.as_deref());
+        let first = first.expect("first process observation");
+        let progressing =
+            progressing_descendants(&[(root, started_at)]).expect("observe owned descendants");
         let second = read_processes();
         let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap();
+        log_child("second", &mut child.0, second.as_deref());
+        let second = second.expect("second process observation");
         let child_cpu = |samples: &[ProcessSample]| {
             samples
                 .iter()

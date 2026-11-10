@@ -32,9 +32,10 @@ test("surface navigation and launches carry no world coordinates or canvas visib
 
 
 test("initial navigation honors pending choices and containment owners", () => {
-  const start = app.indexOf("      let initialSurfaceTabId = null;");
+  const flags = app.match(/      let initialSurfaceTabId = null;\n      let initialSurfaceSelected = false;\n/)?.[0];
+  const start = app.indexOf("      windowCatalogModel.subscribe(model => model.catalog, catalog => {");
   const end = app.indexOf("      // SPEC-2356 — keyboard equivalent", start);
-  assert.ok(start >= 0 && end > start, "expected the initial catalog subscription");
+  assert.ok(flags && start >= 0 && end > start, "expected the initial catalog subscription and flags");
   const model = createUiStateStore({
     catalog: { appState: { active_tab_id: null, tabs: [] }, focusedId: null, version: 0 },
     pendingSurface: null,
@@ -49,7 +50,7 @@ test("initial navigation honors pending choices and containment owners", () => {
   const activeWindows = catalog => catalog.appState.tabs
     .find(tab => tab.id === catalog.appState.active_tab_id)?.workspace.windows || [];
   new Function("windowCatalogModel", "catalogActiveWindows", "windowMap", "requestWindowFrame", "frameWindow",
-    app.slice(start, end))(model, activeWindows,
+    flags + app.slice(start, end))(model, activeWindows,
     new Map([["requested-log", {}], ["restored-pm", {}], ["issues-2", {}], ["preview-2", {}]]), frame, frame);
 
   model.update(state => ({ ...state,

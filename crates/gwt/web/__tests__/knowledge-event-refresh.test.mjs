@@ -9,7 +9,7 @@ async function surfaceModule() {
       'from "data:text/javascript,export function createFocusTrap(){return()=>{}}"')
     .replace('from "./launch-pending-controller.js"',
       `from "${new URL("../launch-pending-controller.js", import.meta.url).href}"`)
-    .replace('from "./agent-kanban-surface.js"',
+    .replace('from "./agent-completion-notifications.js"', `from "${new URL("../agent-completion-notifications.js", import.meta.url).href}"`).replace('from "./agent-kanban-surface.js"',
       `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`)
     .replace('from "./control-explanations.js"',
       `from "${new URL("../control-explanations.js", import.meta.url).href}"`)
@@ -73,14 +73,14 @@ async function harness(count = 1) {
     loads: () => sent.filter(message => message.kind === "load_knowledge_bridge") };
 }
 
-test("Issue #5395: status-only projection updates related Work from the snapshot without a load", async t => {
-  const timer = clock(t);
+test("Issues #5016/#5395: hidden related Work updates immediately from the snapshot without a load", async t => {
+  clock(t); // Local rendering must not wait for the remote reload debounce.
   const h = await harness();
+  h.visible.clear();
   const state = h.surface.knowledgeBridgeStateMap.get("issue-0");
   state.detail = { number: 1, related_works: [{ id: "work-1", branch: "work/one", title: "Before" }] };
   h.setProjection({ active_works: [{ ...h.projection.active_works[0], title: "After", status_category: "idle" }] });
   h.surface.scheduleKnowledgeRelatedWorkRefresh();
-  timer.advance(2000);
   assert.equal(h.loads().length, 0);
   assert.equal(state.detail.related_works[0].title, "After");
   assert.equal(state.detail.related_works[0].status_category, "idle");

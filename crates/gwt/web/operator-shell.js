@@ -184,21 +184,6 @@ export function applyTelemetryCounts(doc, counts = {}) {
   };
   if ("error" in counts) toggleAlert("error", counts.error);
   if ("waiting" in counts) toggleAlert("waiting", counts.waiting);
-  // FR-047 (anshin): MISSION convergence indicator. Shows done/total agents so
-  // the operator can see the fleet trending toward completion at a glance, and
-  // flips a positive "complete" state (not an alert pulse) when every agent has
-  // converged (done === agents > 0).
-  const agents = Number(counts.agents ?? 0);
-  const done = Number(counts.done ?? 0);
-  setText("op-strip-mission", agents > 0 ? `${done}/${agents}` : "—");
-  const missionCell = doc.querySelector(".op-status-strip__cell--mission");
-  if (missionCell) {
-    if (agents > 0 && done === agents) {
-      missionCell.classList.add("op-status-strip__cell--complete");
-    } else {
-      missionCell.classList.remove("op-status-strip__cell--complete");
-    }
-  }
   // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
@@ -225,15 +210,6 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
-  // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
-  if ("windows" in counts) {
-    const badge = doc.getElementById("op-rail-window-count");
-    if (badge) {
-      const value = Number(counts.windows) || 0;
-      badge.textContent = String(value);
-      badge.hidden = value <= 0;
-    }
-  }
 }
 
 export function subscribeIssueMonitorStatus(doc, model) {
@@ -347,6 +323,10 @@ function usageProviderLabel(provider) {
 
 function usageSummaryPercent(account) {
   const percentages = (account.windows || [])
+    .filter(
+      (window) => account.provider !== "claude_code" ||
+        window.kind === "five_hour" || window.kind === "weekly",
+    )
     .map((window) => window.used_percent)
     .filter(
       (percent) =>
@@ -1402,4 +1382,22 @@ function matchReduced(doc) {
 
 function pad2(n) {
   return String(n).padStart(2, "0");
+}
+
+// The project execution owner is independent of the browser's GUI connection.
+export function subscribeProjectOwnerHealth(doc, model) {
+  return model.subscribeFrame(state => state, health => {
+    if (health) applyProjectOwnerHealth(doc, health);
+  });
+}
+
+function applyProjectOwnerHealth(doc, health = {}) {
+  const cell = doc.querySelector("[data-project-owner-health]");
+  if (!cell) return;
+  const state = ["healthy", "degraded"].includes(health.state) ? health.state : "connecting";
+  cell.dataset.state = state;
+  cell.hidden = false;
+  cell.title = health.detail || "";
+  const value = cell.querySelector("[data-project-owner-health-value]");
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "degraded" ? "Unavailable" : "Connecting";
 }

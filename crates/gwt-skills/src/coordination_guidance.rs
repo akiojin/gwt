@@ -311,15 +311,21 @@ for a Board proposal or PM registration. The destination is always
 `akiojin/gwt`, separate from the current project's Issue intake.
 
 Collect the affected operation, complete refusal verbatim, reproduction steps
-(or `unconfirmed`), and workaround. gwtd adds environment/source context and
-saves a durable receipt. The actual gwt repository sends synchronously without
-consent and returns the Issue number and URL. Other or unknown repos return
-immediately and use a detached worker for the user's native **Send feedback**
-action. Continue project work while approval is pending; it must not hold
-project completion. No JSON flag, setting, or environment override grants
-consent. Cancellation or no desktop retains the report.
-Keep the request id and use `feedback.status` when needed. Retry only declined
-or failed receipts through `feedback.retry`; never automatically resend an
+(or `unconfirmed`), and workaround. With canonical Autonomous ON, gwtd discards
+free text before persistence/logging and sends a closed safe structured snapshot
+in a detached hidden worker. No consent, authentication or failure dialog,
+browser or console opens. Revoked/unreadable policy withholds the safe job.
+Missing/false preferences retain Manual; an I/O/decode failure is safe-only
+withheld intake with no worker or send authority. Auto uses existing GH_TOKEN/GITHUB_TOKEN
+only; a GitHub CLI login alone leaves feedback unsent.
+No extra opt-in is required; Auto capacity is unrelated. Manual mode (missing/false preferences)
+keeps native **Send feedback** consent for external projects and the actual
+gwt repository's synchronous exemption. Raw Manual receipts never become Auto
+reports. JSON/env/repository flags cannot grant Auto authority. Continue project
+work independently of feedback; cancellation/no desktop retains Manual reports.
+Keep the request id and use `feedback.status` when needed. Retry declined/failed
+Manual receipts or failed/withheld Auto snapshots through `feedback.retry`;
+never automatically resend an
 uncertain outcome. Use the Board separately for local blockers/coordination.
 
 ## Work (current state)
@@ -814,15 +820,19 @@ PM の起票を待たないでください。宛先は常に `akiojin/gwt` で�
 プロジェクトの通常 Issue intake とは別です。
 
 対象 operation、拒否文の原文全体、再現手順（不明なら `unconfirmed`）、
-回避策を集めます。gwtd が環境・報告元の文脈を追加し、ローカル receipt へ
-保存します。実際の gwt リポジトリは無承認で同期送信し、Issue 番号と URL を
-返します。他・不明の repo は即座に返り、独立 worker の native dialog で
-**Send feedback** をユーザーが明示的に選ぶ必要があります。承認待ちでも
-本作業を続け、feedback のために本作業の完了を止めないでください。
-JSON flag、設定、環境変数で承認を免除できません。
+回避策を集めます。canonical Autonomous ON では自由文を保存・log の前に破棄し、
+固定型の安全な構造だけを独立 hidden worker で送ります。同意・認証・失敗
+dialog/browser/console は開かず、設定失効・読取不能は safe job を withheld にします。
+欠落/正常 false は Manual を維持し、I/O/decode 失敗は worker/送信権限のない安全な保留だけにします。
+Auto は既存 GH_TOKEN/GITHUB_TOKEN だけを使い、GitHub CLI ログインだけでは未送信になります。
+追加 opt-in は不要で、容量 Auto とは別です。設定欠落/false の Manual では外部 project の
+native **Send feedback** 同意と実 gwt の同期送信免除を維持します。原文 receipt を
+Auto へ昇格しません。JSON/env/repository flag は Auto 権限になりません。
+feedback の受付・送信とは独立して本作業を続けてください。
 取消や desktop 不在でも報告は保全されます。request id を保持し、必要時に
-`feedback.status` で確認します。declined / failed だけ `feedback.retry` で
-再試行し、uncertain は自動再送しません。ローカルの blocker や連携には
+`feedback.status` で確認します。Manual の declined/failed または Auto の
+failed/withheld だけ `feedback.retry` で再試行し、uncertain は自動再送しません。
+ローカルの blocker や連携には
 別途 Board を使ってください。
 
 ## Work (current state)

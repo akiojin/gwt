@@ -130,7 +130,7 @@ fn daemon_subscription_stays_observer_until_startup_canvas_is_ready() {
         std::process::id(),
         socket.to_string_lossy().to_string(),
         "canvas-readiness-test".to_string(),
-        "test-daemon".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     persist_endpoint(
         &scope.endpoint_path(&gwt_core::paths::gwt_home()),
@@ -200,6 +200,10 @@ fn daemon_subscription_stays_observer_until_startup_canvas_is_ready() {
         )],
         Some("tab-a"),
     );
+    // This server exercises subscription framing, not private owner admission.
+    // Capture ensure intent so it cannot retire the wire-only endpoint's PID.
+    let (spawner, ensures) = crate::app_runtime::BlockingTaskSpawner::queued();
+    app.blocking_tasks = spawner;
     app.deferred_issue_monitor_launches = Some(Vec::new());
     app.startup_generation_reaper_pending = true;
     let mut subscribers = super::BoardDaemonSubscriberRegistry::default();
@@ -244,6 +248,7 @@ fn daemon_subscription_stays_observer_until_startup_canvas_is_ready() {
         "the completed canvas drain must enable agent-window materialization"
     );
     subscribers.sync(&app, app.proxy.clone());
+    assert_eq!(ensures.lock().unwrap().len(), 1);
     assert_eq!(subscribers.subscribers.len(), 1);
     assert_eq!(
         disconnected_rx.recv_timeout(Duration::from_millis(100)),

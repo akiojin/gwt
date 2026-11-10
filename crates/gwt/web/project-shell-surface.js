@@ -1,64 +1,8 @@
-// SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
-// extracted from app.js. Owns the project tab strip (close-tab confirm
-// modal + running-agent cues), the Recent Projects list (picker overlay +
-// Open Project split-button menu), the project picker / onboarding
-// renderers, the toolbar action availability, the Windows dropdown
-// (window list state + render key + renderer), the Open/Clone project modal
-// glue, the migration modal
-// glue, the window_list / clone_* / migration_* receive() bodies, and the
-// project-shell chrome listeners. Pure movement from app.js: behavior,
-// DOM output, and WS protocol are unchanged; the moved code keeps its
-// original app.js indentation. Textual changes are limited to:
-// - `appState` reads go through the `getAppState()` accessor (a local
-//   `const appState = getAppState();` prologue), because app.js reassigns
-//   `appState` on every workspace_state,
-// - `projectError` reads go through `getProjectError()` the same way,
-// - in-module references that previously went through
-//   `frontendUnits.projectWorkspaceShell.*` became direct local calls
-//   (sendOpenProjectDialog, toggleWindowList, renderWindowList),
-// - the global-Esc branches for the migration modal and the Windows
-//   dropdown moved behind handleMigrationModalEscape /
-//   handleWindowListEscape (same delegate pattern as the launch wizard
-//   surface's handleWizardEscapeKeydown),
-// - the receive() bodies for window_list / clone_* / migration_* moved
-//   behind applyWindowListEvent / applyCloneProjectReceiveEvent /
-//   applyMigrationReceiveEvent; the case arms stay in app.js as thin
-//   delegates.
-//
-// deps:
-// - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode(tag, className, textContent): shared DOM helper owned by
-//   app.js (also used by Board / settings / wizard surfaces).
-// - getAppState() / getProjectError(): accessors for app.js-owned mutable
-//   shell state.
-// - activeProjectTab() / activeWorkspace(): app.js workspace selectors.
-// - windowMap: workspace window element map owned by app.js.
-// - appendRenderKeyPart(parts, value): shared render-key primitive (also
-//   used by the render keys that stayed in app.js).
-// - runtimeStateForWindow / windowDisplayTitle / windowTitleTooltip /
-//   windowRoleBadgeLabel / shouldShowRuntimeStatus /
-//   presetSurface: window presentation helper owned
-//   by app.js (still used by the core window renderers there).
-// - focusWindowRemotely(windowId, opts): focus path owned by app.js.
-// - frameWindow(windowId, opts): select a window in its fixed rail host.
-// - scheduleTerminalFit(windowId, persist): terminal core scheduler.
-
-// - addButton: toolbar button owned by app.js
-//   (their click listeners stay there).
-// - cloneProjectModal / cloneProjectDialog / migrationModal /
-//   migrationDialog: modal elements owned by app.js because the focus
-//   shortcut guard and clone-modal-focus-guard wiring also read them.
+// Project picker/onboarding, Open/Clone project dialogs and migration chrome.
+// Shared catalog navigation lives in app.js and the Agents/Works surfaces.
 import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
 import { renderProjectCloneModal as renderProjectCloneModalView, createFolderPickerController, createOpenProjectPathForm, createOpenProjectPathDialog } from "/project-clone-modal.js";
-import { windowRuntimeLabel } from "/window-runtime-state.js";
-import { groupProjectWindowList } from "/window-list-model.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import {
-  applyWindowWorktreeData,
-  shouldShowWindowWorktreeBadge,
-  windowWorktreeBadgeView,
-  windowWorktreeForm,
-} from "/window-worktree-form.js";
 
 function shouldTriggerOpenFolderHotkey(event, { modalOpen = false } = {}) {
   const target = event?.target;
@@ -72,23 +16,9 @@ export function createProjectShellSurface({
   send,
   createNode,
   getAppState,
-  windowCatalogModel,
   getProjectError,
   activeProjectTab,
-  activeWorkspace,
-  windowMap,
   appendRenderKeyPart,
-  runtimeStateForWindow,
-  windowDisplayTitle,
-  windowTitleTooltip,
-  windowRoleBadgeLabel,
-  shouldShowRuntimeStatus,
-  presetSurface,
-  focusWindowRemotely,
-  // Window-list rows select the window in its fixed rail host.
-  frameWindow,
-  scheduleTerminalFit,
-  addButton,
 
 
   cloneProjectModal,
@@ -113,15 +43,10 @@ export function createProjectShellSurface({
       const onboardingOpenProjectButton = document.getElementById(
         "onboarding-open-project",
       );
-      const windowListButton = document.getElementById("window-list-button");
-      const windowListPanel = document.getElementById("window-list-panel");
 
-      let windowListOpen = false;
       let renderedRecentProjectsKey = "";
-      let renderedWindowListKey = "";
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
-      let renderedActionAvailabilityKey = "";
 
 
       function recentProjectsRenderKey(state) {
@@ -132,71 +57,6 @@ export function createProjectShellSurface({
             path: project?.path || "",
           })),
         );
-      }
-
-      function windowListRenderKey() {
-        const { catalog: { appState }, listEntries: windowListEntries } = windowCatalogModel.read();
-        // SPEC-3038 (2026-06-20): the popover is a cross-tab list; the render
-        // key must change when any project tab's windows change, not only the
-        // active tab's.
-        const model = groupProjectWindowList(appState, windowListEntries);
-        const appendEntryKey = (parts, entry) => {
-          const runtimeState = runtimeStateForWindow(entry);
-          appendRenderKeyPart(parts, "id");
-          appendRenderKeyPart(parts, entry?.id || "");
-          appendRenderKeyPart(parts, "preset");
-          appendRenderKeyPart(parts, entry?.preset || "");
-          appendRenderKeyPart(parts, "title");
-          appendRenderKeyPart(parts, entry?.title || "");
-          appendRenderKeyPart(parts, "dynamic_title");
-          appendRenderKeyPart(parts, entry?.dynamic_title || "");
-          appendRenderKeyPart(parts, "dynamic_title_detail");
-          appendRenderKeyPart(parts, entry?.dynamic_title_detail || "");
-          appendRenderKeyPart(parts, "purpose_title");
-          appendRenderKeyPart(parts, entry?.purpose_title || "");
-          appendRenderKeyPart(parts, "agent_id");
-          appendRenderKeyPart(parts, entry?.agent_id || "");
-          appendRenderKeyPart(parts, "agent_name");
-          appendRenderKeyPart(parts, entry?.agent_name || "");
-          appendRenderKeyPart(parts, "agent_color");
-          appendRenderKeyPart(parts, entry?.agent_color || "");
-          appendRenderKeyPart(parts, "worktree_form");
-          appendRenderKeyPart(parts, windowWorktreeForm(entry));
-          appendRenderKeyPart(parts, "status");
-          appendRenderKeyPart(parts, entry?.status || "");
-          appendRenderKeyPart(parts, "runtime_state");
-          appendRenderKeyPart(parts, runtimeState);
-          appendRenderKeyPart(parts, "runtime_label");
-          appendRenderKeyPart(parts, windowRuntimeLabel(runtimeState));
-          appendRenderKeyPart(parts, "role_badge");
-          appendRenderKeyPart(parts, windowRoleBadgeLabel(entry) || "");
-          appendRenderKeyPart(parts, "display_title");
-          appendRenderKeyPart(parts, windowDisplayTitle(entry));
-          appendRenderKeyPart(parts, "title_tooltip");
-          appendRenderKeyPart(parts, windowTitleTooltip(entry));
-        };
-        const parts = [];
-        appendRenderKeyPart(parts, "open");
-        appendRenderKeyPart(parts, Boolean(windowListOpen));
-        appendRenderKeyPart(parts, "active_tab_id");
-        appendRenderKeyPart(parts, appState?.active_tab_id || null);
-        appendRenderKeyPart(parts, "window_list_entries");
-        appendRenderKeyPart(parts, windowListEntries.length);
-        appendRenderKeyPart(parts, "multi_project");
-        appendRenderKeyPart(parts, Boolean(model.multiProject));
-        appendRenderKeyPart(parts, "rows");
-        appendRenderKeyPart(parts, model.count);
-        for (const group of model.groups) {
-          appendRenderKeyPart(parts, "group");
-          appendRenderKeyPart(parts, group.tabId);
-          appendRenderKeyPart(parts, group.tabTitle);
-          appendRenderKeyPart(parts, Boolean(group.isActiveTab));
-          appendRenderKeyPart(parts, group.entries.length);
-          for (const entry of group.entries) {
-            appendEntryKey(parts, entry);
-          }
-        }
-        return parts.join("");
       }
 
       function projectPickerRenderKey(activeTab = activeProjectTab()) {
@@ -228,9 +88,6 @@ export function createProjectShellSurface({
         return parts.join("");
       }
 
-      function actionAvailabilityRenderKey(activeTab = activeProjectTab()) {
-        return activeTab ? "active" : "empty";
-      }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
       // multi-project frontend never mixes events from different repos.
@@ -378,147 +235,6 @@ export function createProjectShellSurface({
           },
         });
         renderedCloneSnapshot = modal;
-      }
-
-      function updateActionAvailability(activeTab = activeProjectTab()) {
-        const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);
-        if (renderedActionAvailabilityKey === nextActionAvailabilityKey) {
-          return;
-        }
-        renderedActionAvailabilityKey = nextActionAvailabilityKey;
-        const hasActiveTab = nextActionAvailabilityKey === "active";
-        addButton.disabled = !hasActiveTab;
-        windowListButton.disabled = !hasActiveTab;
-        if (!hasActiveTab) {
-          windowListOpen = false;
-          windowCatalogModel.update(state => ({ ...state, listEntries: [] }));
-          renderWindowList();
-        }
-      }
-
-      function escapeHtml(value) {
-        return String(value || "")
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      }
-
-      function requestWindowList() {
-        if (!activeProjectTab()) {
-          return;
-        }
-        send({ kind: "list_windows" });
-      }
-
-      function renderWindowList() {
-        const { catalog, listEntries: windowListEntries } = windowCatalogModel.read();
-        windowListPanel.dataset.catalogVersion = String(catalog.version);
-        windowListPanel.hidden = !windowListOpen;
-        windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
-        if (!windowListOpen) {
-          renderedWindowListKey = "__closed__";
-          return;
-        }
-        const nextWindowListKey = windowListRenderKey();
-        if (renderedWindowListKey === nextWindowListKey) {
-          return;
-        }
-        renderedWindowListKey = nextWindowListKey;
-        // SPEC-3038 (2026-06-20): list windows from every project tab so the
-        // popover matches the cross-tab open-window badge. Multi-project
-        // shells get per-project group headers; single-project shells stay
-        // flat. The window set and order come from groupProjectWindowList.
-        const model = groupProjectWindowList(catalog.appState, windowListEntries);
-        windowListPanel.innerHTML = "";
-        if (model.count === 0) {
-          const empty = document.createElement("div");
-          empty.className = "window-list-empty";
-          empty.textContent = "No windows";
-          windowListPanel.appendChild(empty);
-          return;
-        }
-        for (const group of model.groups) {
-          if (model.multiProject) {
-            const header = document.createElement("div");
-            header.className = "window-list-group";
-            header.textContent = group.tabTitle || "Project";
-            windowListPanel.appendChild(header);
-          }
-          for (const entry of group.entries) {
-            windowListPanel.appendChild(createWindowListRow(entry));
-          }
-        }
-      }
-
-      function createWindowListRow(entry) {
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "window-list-row";
-        if (entry.agent_color) {
-          row.dataset.agentColor = entry.agent_color;
-        }
-        applyWindowWorktreeData(row, entry);
-        const runtimeState = runtimeStateForWindow(entry);
-        const runtimeLabel = windowRuntimeLabel(runtimeState);
-        const runtimeChip = shouldShowRuntimeStatus(entry)
-          ? `<span class="status-chip ${runtimeState}">
-              <span class="status-dot"></span>
-              <span class="status-label">${runtimeLabel}</span>
-            </span>`
-          : "";
-        const roleBadgeLabel = windowRoleBadgeLabel(entry);
-        const roleBadge = roleBadgeLabel
-          ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
-          : "";
-        const worktreeBadgeView = windowWorktreeBadgeView(entry);
-        const worktreeBadge = shouldShowWindowWorktreeBadge(entry)
-          ? `<span class="window-worktree-badge window-list-worktree" role="img" data-worktree-form="${escapeHtml(worktreeBadgeView.form)}" data-worktree-label="${escapeHtml(worktreeBadgeView.label)}" data-worktree-symbol="${escapeHtml(worktreeBadgeView.symbol)}" aria-label="${escapeHtml(worktreeBadgeView.ariaLabel)}" title="${escapeHtml(worktreeBadgeView.title)}">${escapeHtml(worktreeBadgeView.shortLabel)}</span>`
-          : "";
-        // FR-045 (anshin): surface the agent's live activity detail
-        // (dynamic_title_detail) as a glanceable line when it differs from the
-        // display title, so the operator can read what each pane is doing now
-        // without focusing it.
-        const displayTitle = windowDisplayTitle(entry);
-        const activityDetail = String(entry?.dynamic_title_detail || "").trim();
-        const activityLine =
-          activityDetail && activityDetail !== displayTitle
-            ? `<div class="window-list-activity">${escapeHtml(activityDetail)}</div>`
-            : "";
-        row.innerHTML = `
-          <div class="window-list-copy">
-            <div class="window-list-title">${escapeHtml(displayTitle)}</div>
-            ${activityLine}
-            <div class="window-list-meta">
-              ${worktreeBadge}
-              ${roleBadge}
-            </div>
-          </div>
-          ${runtimeChip}
-        `;
-        const windowListTitle = row.querySelector(".window-list-title");
-        if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
-        // Select the live view in its fixed host and notify backend focus.
-        row.addEventListener("click", () => {
-          windowListOpen = false;
-          renderWindowList();
-          frameWindow(entry.id);
-        });
-        return row;
-      }
-
-      function toggleWindowList() {
-        if (windowListButton.disabled) {
-          return;
-        }
-        windowListOpen = !windowListOpen;
-        windowCatalogModel.update(state => ({ ...state, listEntries: [] }));
-        renderedWindowListKey = "";
-        renderWindowList();
-        if (windowListOpen) {
-          requestWindowList();
-        }
       }
 
       function renderRecentProjects({ force = false } = {}) {
@@ -740,34 +456,13 @@ export function createProjectShellSurface({
         return false;
       }
 
-      // SPEC-3064 Phase 3 (E7): the Windows dropdown branch of the app.js
-      // global Esc handler. Returns true when the open dropdown consumed
-      // the event.
-      function handleWindowListEscape(event) {
-        if (windowListOpen) {
-          // Close the Windows dropdown and return focus to its trigger
-          // button (matches the modal pattern of restoring focus to the
-          // element that opened the dropdown).
-          windowListOpen = false;
-          renderWindowList();
-          if (windowListButton && typeof windowListButton.focus === "function") {
-            try { windowListButton.focus({ preventScroll: true }); }
-            catch { windowListButton.focus(); }
-          }
-          event.preventDefault();
-          return true;
-        }
-        return false;
-      }
-
       function projectShellModalOrDropdownOpen() {
         return (
           Boolean(isModalOpen?.()) ||
           document.getElementById("close-project-modal")?.classList.contains("open") ||
           openPathDialog.modal.classList.contains("open") ||
           cloneProjectModal?.classList.contains("open") ||
-          migrationModal?.classList.contains("open") ||
-          windowListOpen
+          migrationModal?.classList.contains("open")
         );
       }
 
@@ -787,11 +482,7 @@ export function createProjectShellSurface({
         return true;
       }
 
-      // SPEC-3064 Phase 3 (E7): project-shell chrome listeners (picker /
-      // onboarding entry points, the Windows dropdown trigger, and the dropdown
-      // outside-click close) moved out of the app.js bootstrap. References
-      // that previously went through frontendUnits.projectWorkspaceShell.*
-      // are direct local calls here.
+      // Project picker and onboarding entry points share the existing dialogs.
       //
       // SPEC-2013 Phase 8: the standalone Open Project split-button was retired.
       // Open Folder / Clone now live inside the consolidated `Projects ▾`
@@ -806,8 +497,6 @@ export function createProjectShellSurface({
         pickerCloneProjectButton.addEventListener("click", openCloneProjectModal);
         onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
 
-        windowListButton.addEventListener("click", toggleWindowList);
-
         window.addEventListener(
           "keydown",
           (event) => {
@@ -816,23 +505,8 @@ export function createProjectShellSurface({
           true,
         );
 
-        window.addEventListener("pointerdown", (event) => {
-          if (!windowListOpen) {
-            return;
-          }
-          if (
-            windowListPanel.contains(event.target) ||
-            windowListButton.contains(event.target)
-          ) {
-            return;
-          }
-          windowListOpen = false;
-          renderWindowList();
-        });
       }
 
-      const unsubscribeCatalog = windowCatalogModel.subscribeFrame(state => state.catalog, () => renderWindowList());
-      const unsubscribeList = windowCatalogModel.subscribeFrame(state => state.listEntries, () => renderWindowList());
       // Keep open/close, actions and stage transitions synchronous. During a
       // run, progress changes share one frame and pull the latest snapshot.
       const unsubscribeMigration = migrationModel.subscribe(
@@ -860,13 +534,9 @@ export function createProjectShellSurface({
       });
 
       return {
-        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); unsubscribeCloneFrame(); folderPicker.dispose(); openPathDialog.dispose(); },
+        dispose() { unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); unsubscribeCloneFrame(); folderPicker.dispose(); openPathDialog.dispose(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
-        updateActionAvailability,
-        requestWindowList,
-        renderWindowList,
-        toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -876,7 +546,6 @@ export function createProjectShellSurface({
         clearPickerPending,
         applyMigrationReceiveEvent,
         handleMigrationModalEscape,
-        handleWindowListEscape,
         installProjectShellChrome,
       };
 }

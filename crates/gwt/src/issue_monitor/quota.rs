@@ -50,6 +50,7 @@ mod tests {
 
     fn profile(agent_id: &str) -> IssueMonitorLaunchProfile {
         IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,

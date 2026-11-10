@@ -211,6 +211,7 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
         [("codex", codex), ("claude", claude)]
             .into_iter()
             .map(|(agent_id, model)| IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: agent_id.to_string(),
                 model: Some(model.to_string()),
                 reasoning: Some(effort.to_string()),
@@ -279,13 +280,48 @@ impl IssueMonitorPrefs {
     }
 
     pub fn effective_launch_tiers(&self) -> Vec<Vec<IssueMonitorLaunchProfile>> {
+        self.launch_tiers_for_pool(&self.launch_profile_pool())
+    }
+
+    fn launch_tiers_for_pool(
+        &self,
+        selected: &[IssueMonitorLaunchProfile],
+    ) -> Vec<Vec<IssueMonitorLaunchProfile>> {
         if !self.launch_auto {
-            vec![self.launch_profile_pool()]
-        } else if self.launch_tiers.is_empty() {
+            return vec![selected.to_vec()];
+        }
+        let tiers = if self.launch_tiers.is_empty() {
             default_launch_tiers()
         } else {
             self.launch_tiers.clone()
-        }
+        };
+        let Some(primary) = selected
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        else {
+            return tiers;
+        };
+        let tool = normalize_issue_monitor_provider(&primary.agent_id);
+        tiers
+            .into_iter()
+            .map(|tier| {
+                tier.into_iter()
+                    .filter(|profile| normalize_issue_monitor_provider(&profile.agent_id) == tool)
+                    .flat_map(|profile| {
+                        selected
+                            .iter()
+                            .filter(|member| {
+                                normalize_issue_monitor_provider(&member.agent_id) == tool
+                            })
+                            .map(move |member| {
+                                let mut candidate = profile.clone();
+                                candidate.agent_member_id = member.agent_member_id.clone();
+                                candidate
+                            })
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Wrap the existing candidate selector without changing its policy.
@@ -297,7 +333,12 @@ impl IssueMonitorPrefs {
         available: Option<&[String]>,
         select: impl Fn(&[IssueMonitorLaunchProfile]) -> LaunchProfileSelection,
     ) -> Option<IssueMonitorTierSelection> {
-        let tiers = self.effective_launch_tiers();
+        let selected = self.registered_launch_profiles_for_issue(issue_number);
+        let tiers = self.launch_tiers_for_pool(&selected);
+        let bound = self
+            .launch_profile_pool()
+            .first()
+            .is_some_and(|profile| profile.agent_member_id.is_some());
         let tier_input = self
             .autonomous_records
             .iter()
@@ -314,7 +355,12 @@ impl IssueMonitorPrefs {
             let pool: Vec<_> = pool
                 .into_iter()
                 .filter(|profile| {
-                    available.is_none_or(|agents| agents.iter().any(|id| id == &profile.agent_id))
+                    (!bound
+                        || selected
+                            .iter()
+                            .any(|selected| selected.agent_member_id == profile.agent_member_id))
+                        && available
+                            .is_none_or(|agents| agents.iter().any(|id| id == &profile.agent_id))
                 })
                 .collect();
             let selection = select(&pool);

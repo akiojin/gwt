@@ -25,10 +25,13 @@ test.describe.serial("Recovery Center live backend", () => {
     page.on("console", (message) => {
       if (message.type() === "error") throw new Error(message.text());
     });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
     releaseLiveBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     await installRecoveryCenterWireCapture(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await openLiveGwtProject(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   });
 
   test.afterEach(async () => {
@@ -145,7 +148,42 @@ test.describe.serial("Recovery Center live backend", () => {
     });
   });
 
-  test("invalid action receives an explicit handle rejection from the live backend", async ({ page }) => {
+  test("invalid action receives an explicit handle rejection from the live backend", async ({ page }, testInfo) => {
+    // Pause the reconnect timer, close the native socket, then open while offline.
+    await page.clock.install();
+    await page.clock.pauseAt(new Date(Date.now() + 1000));
+    await page.locator("#op-palette-button").click();
+    await page.locator("#op-palette-input").fill("Open Recovery Center");
+    await page.evaluate(() => {
+      const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+        socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+      if (!socket) throw new Error("owning project socket is missing");
+      (window as any).__recoveryCenterClosedSocket = socket;
+      socket.close();
+    });
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__recoveryCenterClosedSocket.readyState)).toBe(3);
+    await page.keyboard.press("Enter");
+    const modal = page.locator("#recovery-center-modal");
+    await expect(modal).toHaveClass(/\bopen\b/);
+    await expect(modal.locator(".recovery-center-status")).toContainText("Loading");
+    expect(await page.evaluate(() => (window as any).__recoveryCenterReads)).toEqual([]);
+    await page.clock.resume();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__recoveryCenterWireEvents.length)).toBe(1);
+    const evidence = await page.evaluate(() => ({
+      reads: (window as any).__recoveryCenterReads,
+      replies: (window as any).__recoveryCenterWireEvents,
+    }));
+    expect(evidence.reads).toHaveLength(1);
+    expect(evidence.replies[0].request_id).toBe(evidence.reads[0].request_id);
+    expect(evidence.replies[0].status).not.toBe("error");
+    await expect(modal.locator(".recovery-center-status")).not.toContainText("Loading");
+    await testInfo.attach("Recovery Center queued read recovery", {
+      body: JSON.stringify(evidence), contentType: "application/json",
+    });
+    await page.screenshot({ path: testInfo.outputPath("recovery-center-reconnected.png") });
+
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_send", {
       detail: { kind: "open_recovery_center_board_entry", request_id: "invalid-recovery-action",
         generation: 1, action_handle: "rc-invalid-client-handle" },
@@ -175,9 +213,17 @@ async function runPaletteCommand(page: any, query: string): Promise<void> {
 async function installRecoveryCenterWireCapture(page: any): Promise<void> {
   await page.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
+    (window as any).__recoveryCenterReads = [];
     (window as any).__recoveryCenterWireEvents = [];
     (window as any).__recoveryCenterActionReplies = [];
     window.WebSocket = class RecoveryCenterCaptureSocket extends NativeWebSocket {
+      send(data) {
+        const request = typeof data === "string" ? JSON.parse(data) : null;
+        if (request?.kind === "load_recovery_center") {
+          (window as any).__recoveryCenterReads.push(request);
+        }
+        return super.send(data);
+      }
       constructor(url, protocols) {
         super(url, protocols);
         this.addEventListener("message", (event) => {

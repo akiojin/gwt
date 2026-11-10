@@ -38,7 +38,7 @@ fn repo_root() -> PathBuf {
 
 #[test]
 fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
-    let path = repo_root().join("crates/gwt/src/app_runtime/launch.rs");
+    let path = repo_root().join("crates/gwt/src/project_runtime/launch.rs");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let policy = function_source(&source, "codex_hook_discovery_mode_for_launch_config");
@@ -56,7 +56,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
     assert!(policy.contains("health_report"));
     assert!(policy.contains("version_output"));
 
-    let launch = function_source(&source, "spawn_agent_window_async_with_claim");
+    let launch = function_source(&source, "prepare_agent_launch");
     assert_eq!(
         launch
             .matches("resolve_host_runner_health_checked(")
@@ -278,17 +278,26 @@ fn unmerged_codex_app_server_bridge_stays_absent() {
 #[test]
 fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
     let root = repo_root();
-    for relative in [
-        "crates/gwt/src/app_runtime/board.rs",
-        "crates/gwt/src/app_runtime/continuation.rs",
-        "crates/gwt/src/app_runtime/startup.rs",
-        "crates/gwt/src/app_runtime/wizard.rs",
+    for (relative, adapter) in [
+        ("crates/gwt/src/app_runtime/board.rs", "spawn_agent_window"),
+        (
+            "crates/gwt/src/app_runtime/continuation.rs",
+            "queue_project_owner_continue(",
+        ),
+        (
+            "crates/gwt/src/app_runtime/startup.rs",
+            "queue_project_owner_restore(",
+        ),
+        (
+            "crates/gwt/src/app_runtime/wizard.rs",
+            "spawn_agent_window_with_monitor_intent(",
+        ),
     ] {
         let path = root.join(relative);
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         assert!(
-            source.contains("spawn_agent_window") || source.contains("spawn_continue_work_window"),
+            source.contains(adapter),
             "reachable route owner must enter an AppRuntime launch wrapper: {relative}"
         );
         for bypass in [
@@ -310,10 +319,9 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
     for wrapper in [
         "spawn_agent_window",
         "spawn_agent_window_with_feedback",
-        "spawn_agent_window_with_prepared_monitor_admission",
+        "spawn_agent_window_with_monitor_intent",
         "spawn_agent_window_in_agent_kanban",
         "spawn_agent_window_with_identity",
-        "spawn_continue_work_window",
     ] {
         assert!(
             function_source(&launch, wrapper).contains("spawn_agent_window_with_options("),
@@ -321,25 +329,46 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
         );
     }
     let transaction = function_source(&launch, "spawn_agent_window_with_options");
-    let claim = transaction
+    assert!(transaction.contains("spawn_agent_window_with_options_inner("));
+    let adapter = function_source(&launch, "spawn_agent_window_with_options_inner");
+    assert!(adapter.contains("queue_project_owner_launch("));
+    let owner = fs::read_to_string(root.join("crates/gwt/src/project_runtime/owner.rs")).unwrap();
+    let asynchronous = function_source(&owner, "launch_agent_inner");
+    let admission = asynchronous
+        .find("prepare_owner_agent_admission(")
+        .expect("the fixed owner admits the request");
+    let preparation = asynchronous
+        .find("super::launch::prepare_agent_launch(")
+        .expect("the owner enters shared preparation");
+    let installation = asynchronous
+        .find("super::installation::install_agent_launch(")
+        .expect("the owner installs the physical launch");
+    assert!(admission < preparation && preparation < installation);
+    let installation_source =
+        fs::read_to_string(root.join("crates/gwt/src/project_runtime/installation.rs")).unwrap();
+    let admission = function_source(&installation_source, "prepare_owner_agent_admission");
+    let claim = admission
         .find("claim_prepared_manual_successor_launch(")
-        .expect("prepared manual successor is claimed before pane creation");
-    let pane = transaction
-        .find(".add_window_with_title(")
-        .expect("shared launch transaction creates the pane");
+        .expect("admission claims the exact manual successor");
     assert!(
-        claim < pane,
-        "durable successor claim must precede pane creation"
+        claim < admission.find("Ok(PreparedOwnerAgentAdmission {").unwrap(),
+        "the durable claim must precede admission and physical pane creation"
     );
-    assert!(transaction.contains("Self::spawn_agent_window_async_with_claim("));
-    let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
+    assert!(
+        function_source(&installation_source, "install_agent_launch")
+            .contains("spawn_bound_pane_with_attempt_observer(")
+    );
+    let worker_path = root.join("crates/gwt/src/project_runtime/launch.rs");
+    let worker_source = fs::read_to_string(&worker_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", worker_path.display()));
+    let worker = function_source(&worker_source, "prepare_agent_launch");
     for boundary in [
         "resolve_host_runner_health_checked(&mut config)",
         "apply_windows_host_shell_wrapper(&mut config)",
     ] {
         assert!(
-            asynchronous.contains(boundary),
-            "shared asynchronous launch transaction must own {boundary}"
+            worker.contains(boundary),
+            "shared launch preparation must own {boundary}"
         );
     }
 }

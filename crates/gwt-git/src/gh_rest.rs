@@ -20,7 +20,50 @@ use serde_json::Value;
 
 /// Bound unchanged Monitor inventories to one live read per four 30s scans.
 /// Queue-labelled Issue pages and authoritative per-resource reads bypass it.
-const LIST_CACHE_TTL_SECS: i64 = 120;
+pub(crate) const LIST_CACHE_TTL_SECS: i64 = 120;
+
+// Shared pages also serve the 600s Monitor and 900s Issue-cache readers.
+// A shorter reader's freshness limit must not evict pages those readers can use.
+const LIST_CACHE_RETENTION_SECS: i64 = 15 * 60;
+
+thread_local! {
+    static MONITOR_READ_MAX_AGE_SECS: std::cell::Cell<Option<i64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Issue #6877 AC-2: the freshness a timer-driven Issue Monitor scan accepts
+/// for its GitHub reads. While a scope is entered on the scanning thread,
+/// Monitor list pages and the in-process timeline / PR lifecycle caches serve
+/// entries up to this age instead of spawning `gh` again. Control-driven scans
+/// (ScanNow, agent completion, GUI actions) never enter one and stay fresh.
+pub struct ScopedMonitorReadMaxAge {
+    previous: Option<i64>,
+}
+
+impl ScopedMonitorReadMaxAge {
+    pub fn enter(max_age: std::time::Duration) -> Self {
+        let secs = i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
+        let previous = MONITOR_READ_MAX_AGE_SECS.with(|cell| cell.replace(Some(secs)));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedMonitorReadMaxAge {
+    fn drop(&mut self) {
+        MONITOR_READ_MAX_AGE_SECS.with(|cell| cell.set(self.previous));
+    }
+}
+
+/// The periodic-scan read max age entered on this thread, if any.
+pub fn monitor_read_max_age_secs() -> Option<i64> {
+    MONITOR_READ_MAX_AGE_SECS.with(std::cell::Cell::get)
+}
+
+/// Monitor list pages are never served older than the entered max age allows,
+/// and never fresher than the ordinary [`LIST_CACHE_TTL_SECS`] bound.
+pub(crate) fn monitor_list_cache_ttl_secs() -> i64 {
+    monitor_read_max_age_secs().map_or(LIST_CACHE_TTL_SECS, |age| age.max(LIST_CACHE_TTL_SECS))
+}
 
 #[derive(Serialize, Deserialize)]
 struct CachedListResponse {
@@ -35,7 +78,7 @@ pub(crate) fn cached_list_response_with(
     now: DateTime<Utc>,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
-    cached_list_response_at_with(cache_dir, key, now, LIST_CACHE_TTL_SECS, fetch)
+    cached_list_response_at_with(cache_dir, key, now, monitor_list_cache_ttl_secs(), fetch)
         .map(|(_, stdout)| stdout)
 }
 
@@ -51,7 +94,7 @@ pub fn cached_list_response_at_with(
     // A short common lock prevents cleanup from deleting a concurrently
     // refreshed page. Never hold it across the live fetch.
     if let Some(_lock) = list_cache_lock(cache_dir) {
-        reclaim_expired_list_pages(cache_dir, now, ttl_secs);
+        reclaim_expired_list_pages(cache_dir, now);
     }
     let path = cache_dir.join(list_cache_file_name(key));
     if let Some(cached) = std::fs::read(&path)
@@ -116,7 +159,7 @@ fn list_cache_lock(cache_dir: &Path) -> Option<ListCacheLock> {
 
 /// Called only under the same lock as publication. Unrecognized files and
 /// unreadable entries stay untouched; cleanup failures never affect reads.
-fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>, ttl_secs: i64) {
+fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>) {
     // Readers tolerate extra fields for compatibility; reclamation must not
     // assume that a future format has the same expiry contract.
     #[derive(Deserialize)]
@@ -142,7 +185,8 @@ fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>, ttl_secs: i6
             continue;
         };
         if entry.file_name() == std::ffi::OsStr::new(&list_cache_file_name(&cached.key))
-            && now.signed_duration_since(cached.fetched_at).num_seconds() >= ttl_secs
+            && now.signed_duration_since(cached.fetched_at).num_seconds()
+                >= LIST_CACHE_RETENTION_SECS
             && valid_list_response(&cached.stdout)
         {
             let _ = std::fs::remove_file(path);
@@ -407,12 +451,37 @@ mod tests {
     }
 
     #[test]
+    fn shorter_reader_preserves_periodic_pages_for_their_freshness_window() {
+        let cache = tempfile::tempdir().unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-11-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut monitor_calls = 0;
+        let mut ordinary_calls = 0;
+        for tick in 0..20 {
+            let now = start + chrono::Duration::seconds(tick * 30);
+            cached_list_response_at_with(cache.path(), "ordinary", now, 120, || {
+                ordinary_calls += 1;
+                Ok("[]".into())
+            })
+            .unwrap();
+            cached_list_response_at_with(cache.path(), "monitor", now, 600, || {
+                monitor_calls += 1;
+                Ok("[]".into())
+            })
+            .unwrap();
+        }
+        println!("Issue #6877 mixed-TTL replay: 20 scans/600 seconds; monitor fetches={monitor_calls}, ordinary fetches={ordinary_calls}");
+        assert_eq!((monitor_calls, ordinary_calls), (1, 5));
+    }
+
+    #[test]
     fn issue_5738_reclaims_only_expired_known_cache_pages_on_a_cache_hit() {
         let cache = tempfile::tempdir().unwrap();
         let now = DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let expired_at = now - chrono::Duration::seconds(LIST_CACHE_TTL_SECS);
+        let expired_at = now - chrono::Duration::seconds(LIST_CACHE_RETENTION_SECS);
         let expired = write_cached_page(cache.path(), "issues?since=old-cursor", expired_at);
         let fresh = write_cached_page(cache.path(), "issues?since=current-cursor", now);
         let future = write_cached_page(cache.path(), "future", now + chrono::Duration::seconds(1));
@@ -448,7 +517,7 @@ mod tests {
         assert!(response.ends_with("[]"));
         assert!(
             !expired.exists(),
-            "old cursor at the TTL boundary must be reclaimed"
+            "old cursor at the shared retention boundary must be reclaimed"
         );
         for path in [
             fresh,
@@ -477,7 +546,7 @@ mod tests {
         let expired = write_cached_page(
             cache.path(),
             "old-cursor",
-            now - chrono::Duration::seconds(LIST_CACHE_TTL_SECS),
+            now - chrono::Duration::seconds(LIST_CACHE_RETENTION_SECS),
         );
         let new_page = write_cached_page(cache.path(), "new-cursor", now);
         std::fs::remove_file(&new_page).unwrap();
@@ -820,5 +889,27 @@ mod tests {
         );
         assert!(parsed[1].body.is_none());
         assert!(parsed[1].author_login.is_none());
+    }
+}
+
+#[cfg(test)]
+mod monitor_read_max_age_tests {
+    use super::*;
+
+    /// Issue #6877 AC-2: a periodic scan widens the Monitor list TTL to its
+    /// read max age; outside the scope (and for a shorter max age) the
+    /// ordinary bound applies.
+    #[test]
+    fn monitor_list_cache_ttl_follows_the_scoped_periodic_max_age() {
+        assert_eq!(monitor_list_cache_ttl_secs(), LIST_CACHE_TTL_SECS);
+        {
+            let _scope = ScopedMonitorReadMaxAge::enter(std::time::Duration::from_secs(600));
+            assert_eq!(monitor_list_cache_ttl_secs(), 600);
+            assert_eq!(monitor_read_max_age_secs(), Some(600));
+        }
+        assert_eq!(monitor_list_cache_ttl_secs(), LIST_CACHE_TTL_SECS);
+        assert_eq!(monitor_read_max_age_secs(), None);
+        let _short = ScopedMonitorReadMaxAge::enter(std::time::Duration::from_secs(1));
+        assert_eq!(monitor_list_cache_ttl_secs(), LIST_CACHE_TTL_SECS);
     }
 }

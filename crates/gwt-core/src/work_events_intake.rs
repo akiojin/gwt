@@ -15,7 +15,7 @@
 //! - malformed lines are skipped leniently (warn, keep going);
 //! - terminal (Done / Discarded) items never apply events stamped at or
 //!   before their close time (no re-open, no `updated_at` rollback);
-//! - only works.json is written — sessions / current.json / journal.jsonl
+//! - only works.json and its close-projection proof are written — sessions / current.json / journal.jsonl
 //!   are untouched (SC-261).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
-    resolve_workspace_work_event_container, save_workspace_work_items_projection_to_path,
-    workspace_execution_container_same, DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance,
-    WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem, WorkItemsIntakeSnapshot,
-    WorkItemsProjection, WorkspaceExecutionContainerRef,
+    resolve_workspace_work_event_container, workspace_execution_container_same,
+    DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
+    WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
+    WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -354,14 +354,11 @@ fn publish_work_event_containers_repair(
     }
     let prepared = if changed && !dry_run {
         previous.work_items[target_index] = repaired;
-        Some(
-            serde_json::to_vec_pretty(&previous)
-                .map_err(|error| refuse(&format!("projection json: {error}")))?,
-        )
+        Some(snapshot.prepare_container_repair(previous)?)
     } else {
         None
     };
-    snapshot.commit_container_repair(prepared.as_deref(), dry_run)?;
+    snapshot.commit_container_repair(prepared.as_ref(), dry_run)?;
     Ok(WorkEventContainersRepairReport {
         work_id: work_id.to_string(),
         changed,
@@ -471,7 +468,7 @@ pub fn ingest_work_event_sources_with_local_path(
     let prepared = projection
         .map(|projection| snapshot.prepare(projection))
         .transpose()?;
-    snapshot.commit(prepared.as_deref())?;
+    snapshot.commit(prepared.as_ref())?;
     Ok((report, local_fingerprint))
 }
 
@@ -484,6 +481,11 @@ fn prepare_ingested_work_events(
     let previous = snapshot
         .projection()?
         .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now()));
+    if snapshot.close_projection_needs_rebuild(&previous, local_content)? {
+        return Err(GwtError::Other(
+            "incremental Work event intake requires a canonical complete Work event rebuild to restore close projection proof".into(),
+        ));
+    }
     let seen_event_ids: HashSet<String> = previous
         .work_items
         .iter()
@@ -758,7 +760,7 @@ pub fn rebuild_work_events_contents<'a>(
         .into_iter()
         .map(|content| SharedWorkEventsSource::new(content, None))
         .collect::<Vec<_>>();
-    publish_rebuilt_work_events(&snapshot, shared_sources, close_content)
+    publish_rebuilt_work_events(&snapshot, shared_sources, close_content, true)
 }
 
 /// Rebuild using the machine-local lifecycle log at `close_path`. The file is
@@ -781,6 +783,7 @@ pub fn rebuild_work_events_paths<'a>(
             ))
         },
         close_path,
+        true,
     )
     .map(|(report, _, _)| report)
 }
@@ -789,10 +792,13 @@ pub fn rebuild_work_events_paths<'a>(
 /// the loader and heavy preparation without the Work lock. Byte comparison at
 /// publication rejects concurrent writers; callers must not advance fingerprints
 /// on that error and should retry discovery on their next poll.
+/// Proof recovery must be admitted against the caller's complete source inventory;
+/// otherwise proof loss discovered after the earlier decision is refused.
 pub fn rebuild_work_events_with_shared_loader<F, T>(
     work_items_path: &Path,
     load_shared_contents: F,
     close_path: Option<&Path>,
+    allow_close_proof_recovery: bool,
 ) -> Result<(WorkEventsIntakeReport, T, Option<String>)>
 where
     F: FnOnce() -> Result<(Vec<SharedWorkEventsSource>, T)>,
@@ -801,7 +807,12 @@ where
     let (shared_contents, loaded_metadata) = load_shared_contents()?;
     let close_content = snapshot.local_content()?;
     let close_fingerprint = close_content.map(content_fingerprint);
-    let report = publish_rebuilt_work_events(&snapshot, shared_contents, close_content)?;
+    let report = publish_rebuilt_work_events(
+        &snapshot,
+        shared_contents,
+        close_content,
+        allow_close_proof_recovery,
+    )?;
     Ok((report, loaded_metadata, close_fingerprint))
 }
 
@@ -809,14 +820,29 @@ fn publish_rebuilt_work_events(
     snapshot: &WorkItemsIntakeSnapshot,
     shared_sources: Vec<SharedWorkEventsSource>,
     close_content: Option<&str>,
+    allow_close_proof_recovery: bool,
 ) -> Result<WorkEventsIntakeReport> {
-    let (report, projection, corrupt_state) = prepare_rebuilt_work_events(
-        snapshot.projection(),
-        shared_sources,
-        close_content,
-        Vec::new(),
-    )?;
-    let prepared = snapshot.prepare(projection)?;
+    let previous = snapshot.projection();
+    let proof_recovery = match &previous {
+        Ok(Some(projection)) => {
+            snapshot.close_projection_needs_rebuild(projection, close_content)?
+        }
+        _ => false,
+    };
+    if proof_recovery && !allow_close_proof_recovery {
+        return Err(GwtError::Other(
+            "close projection proof recovery was not admitted against complete event sources; retry the next poll".into(),
+        ));
+    }
+    let (report, projection, corrupt_state) =
+        prepare_rebuilt_work_events(previous, shared_sources, close_content, Vec::new())?;
+    if proof_recovery && (report.skipped_invalid > 0 || report.skipped_opaque > 0) {
+        return Err(GwtError::Other(
+            "close projection proof recovery refused: complete readable event history is required"
+                .into(),
+        ));
+    }
+    let prepared = snapshot.prepare_rebuilt(projection)?;
     snapshot.commit(Some(&prepared))?;
     if let Some(error) = corrupt_state {
         tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
@@ -870,14 +896,12 @@ fn rebuild_work_event_sources_locked_with_legacy(
         work_items_path,
         &mut projection,
     )?;
+    crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
+        work_items_path,
+        &projection,
+    )?;
     if let Some(error) = corrupt_state {
-        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
-            work_items_path,
-            &projection,
-        )?;
         tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
-    } else {
-        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
     Ok(report)
 }
@@ -1770,6 +1794,9 @@ impl WorkEventsIntakeStore {
             }
             report.groups_written += 1;
             report.bytes_written += body.len() as u64;
+            // Persisted sources can be reloaded; do not retain every saved
+            // group while later groups and the index are serialized.
+            self.loaded.remove(&group);
         }
 
         self.index.format = INTAKE_STORE_FORMAT;
@@ -1825,6 +1852,7 @@ pub fn content_fingerprint(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_projection::save_workspace_work_items_projection_to_path;
     use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
     use std::sync::Arc;
@@ -2528,7 +2556,7 @@ mod tests {
             let tmp = tempfile::tempdir().expect("tempdir");
             let works = tmp.path().join("works.json");
             let sources = sources_from_refs(&content, refs);
-            rebuild_work_events_with_shared_loader(&works, || Ok((sources, ())), None)
+            rebuild_work_events_with_shared_loader(&works, || Ok((sources, ())), None, true)
                 .expect("rebuild");
             let mut projection = load_workspace_work_items_from_path(&works)
                 .expect("load projection")
@@ -3152,6 +3180,57 @@ mod tests {
             assert!(rebuild_work_events_contents(&works, [source.as_str()], None).is_err());
             assert_eq!(std::fs::read(&works).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn close_proof_recovery_refuses_incomplete_shared_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let works = temp.path().join("works.json");
+        let closes = temp.path().join("work-events-closed.jsonl");
+        let now = Utc.with_ymd_and_hms(2026, 11, 8, 7, 0, 0).unwrap();
+        let done = WorkEvent::new(WorkEventKind::Done, "proof-recovery", now);
+        let mut full = WorkItemsProjection::empty(now);
+        full.apply_event(done.clone());
+        for index in 1..=99 {
+            full.apply_event(WorkEvent::new(
+                WorkEventKind::Update,
+                "proof-recovery",
+                now + chrono::Duration::seconds(index),
+            ));
+        }
+        save_workspace_work_items_projection_to_path(&works, &full).unwrap();
+        std::fs::write(&closes, serde_json::to_vec(&done).unwrap()).unwrap();
+        let proof = works.with_extension("close-proofs.json");
+        std::fs::remove_file(&proof).unwrap();
+        let before = std::fs::read(&works).unwrap();
+        let close_before = std::fs::read(&closes).unwrap();
+        let incremental = ingest_work_events_with_local_path(&works, [], Some(&closes))
+            .expect_err("incremental intake must defer lost proof to complete recovery");
+        assert!(incremental
+            .to_string()
+            .contains("complete Work event rebuild"));
+        assert_eq!(std::fs::read(&works).unwrap(), before);
+        assert_eq!(std::fs::read(&closes).unwrap(), close_before);
+        assert!(!proof.exists());
+        let denied = rebuild_work_events_with_shared_loader(
+            &works,
+            || Ok((Vec::new(), ())),
+            Some(&closes),
+            false,
+        )
+        .expect_err("late proof loss must not bypass complete-source admission");
+        assert!(denied.to_string().contains("not admitted"));
+        assert_eq!(std::fs::read(&works).unwrap(), before);
+        assert_eq!(std::fs::read(&closes).unwrap(), close_before);
+        assert!(!proof.exists());
+        let error = rebuild_work_events_paths(&works, ["{"], Some(&closes))
+            .expect_err("lost proof cannot be recovered from incomplete shared history");
+        assert!(error
+            .to_string()
+            .contains("complete readable event history"));
+        assert_eq!(std::fs::read(&works).unwrap(), before);
+        assert_eq!(std::fs::read(&closes).unwrap(), close_before);
+        assert!(!proof.exists());
     }
 
     #[test]
@@ -3988,7 +4067,10 @@ mod tests {
         );
         assert!(store.loaded.contains_key(group));
         store.save().unwrap();
-        assert!(store.evict_clean_group_sources(group));
+        assert!(
+            store.loaded.is_empty(),
+            "successfully persisted groups must release their source maps"
+        );
         assert!(!store.loaded.contains_key(group));
         assert_eq!(store.group_sources(group).unwrap().len(), 4);
         assert_eq!(store.to_state().unwrap(), expected);

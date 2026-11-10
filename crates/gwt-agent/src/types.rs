@@ -113,6 +113,15 @@ impl AgentId {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }
 
+    /// Whether gwt has a verified initial-task argv adapter for Monitor launches.
+    /// Unknown/custom CLIs stay out of unattended rotation until one is supplied.
+    pub fn supports_monitor_initial_prompt(&self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCode | Self::Codex | Self::GrokBuild | Self::Hermes
+        )
+    }
+
     /// Whether this agent supports selecting an upstream provider at launch
     /// (Hermes `--provider`). SPEC-3152.
     pub fn supports_provider_selection(&self) -> bool {

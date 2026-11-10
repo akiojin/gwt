@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-26T20:50:56.988208+00:00",
+  "owner": 5390,
+  "scope": "additional Completed identity read only; command-path microprobe, not whole GUI",
+  "baseline_head": "22a7d618836148d19a9ca08dabbd3d613dcf5066",
+  "source_path": "crates/gwt/src/app_runtime/terminal_convergence.rs",
+  "before_source_git_blob": "063e25654f2eb078acab764a9c7f915135b3bd62",
+  "after_source_git_blob": "3f6126112f14e3e5b68ac79aeb34beb9ff135986",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "build_profile": "debug, existing checkout library; identical binary for both variants",
+  "probe_source_sha256": "465ea55db614f2a3a25d50629b9dd676a97cc0e3f6583f7d7e30f965518a231a",
+  "probe_source": "use std::{path::Path, time::Instant};\nuse gwt::cli::execution_state::{self as execution, ExecutionControlStatus, ExecutionOwnerKey};\n\nfn observe(path: &Path, completed: bool, session_id: &str, owner_number: u64, guarded: bool) -> (u128, usize) {\n    let started = Instant::now();\n    let mut reads = 0;\n    for _ in 0..12 {\n        let matches = (!guarded || completed) && {\n            reads += 1;\n            execution::load(path).unwrap().is_some_and(|record| {\n                execution::integrity_ok(&record)\n                    && record.primary_session_id == session_id\n                    && record.owner_number == owner_number\n                    && record.status == ExecutionControlStatus::Completed\n            })\n        };\n        assert!(!matches);\n        std::hint::black_box(matches);\n    }\n    (started.elapsed().as_nanos(), reads)\n}\n\nfn main() {\n    let arg = std::env::args().nth(1).unwrap();\n    let path = Path::new(&arg);\n    let record = execution::load(path).unwrap().unwrap();\n    assert!(execution::integrity_ok(&record));\n    let completed = record.status == ExecutionControlStatus::Completed;\n    assert!(!completed, \"requires a non-Completed authority input\");\n    let owner = ExecutionOwnerKey { kind: record.owner_kind, number: record.owner_number };\n    let ledger = execution::load_generation_ledger(path, owner).unwrap().unwrap();\n    println!(\"{{\\\"kind\\\":\\\"input\\\",\\\"record_hash\\\":\\\"{}\\\",\\\"ledger_hash\\\":\\\"{}\\\",\\\"generations\\\":{},\\\"checks_per_sample\\\":12,\\\"paired_rounds\\\":20}}\", record.content_hash, ledger.content_hash, ledger.generations.len());\n    let sample = |guarded| observe(path, completed, &record.primary_session_id, record.owner_number, guarded);\n    sample(false);\n    sample(true);\n    for round in 0..20 {\n        let (old, new) = if round % 2 == 0 {\n            (sample(false), sample(true))\n        } else {\n            let new = sample(true);\n            (sample(false), new)\n        };\n        println!(\"{{\\\"kind\\\":\\\"pair\\\",\\\"round\\\":{round},\\\"old_ns\\\":{},\\\"old_reads\\\":{},\\\"new_ns\\\":{},\\\"new_reads\\\":{}}}\",old.0,old.1,new.0,new.1);\n    }\n    let after = execution::load(path).unwrap().unwrap();\n    let after_ledger = execution::load_generation_ledger(path, owner).unwrap().unwrap();\n    assert_eq!(record.content_hash, after.content_hash, \"input changed\");\n    assert_eq!(ledger.content_hash, after_ledger.content_hash, \"ledger changed\");\n    println!(\"{{\\\"kind\\\":\\\"validated\\\",\\\"input_unchanged\\\":true}}\");\n}\n",
+  "method": "One warmup each; 20 alternating old/new paired rounds; 12 identity checks per sample. Both variants call the actual execution_state::load with the same valid non-Completed authority input. Candidate branches on the captured diagnosis status before that load. Validate unchanged record/ledger hashes after all samples. Production caller is covered independently by the no-read regression and existing Completed/restore tests.",
+  "fixture": {
+    "kind": "input",
+    "record_hash": "a14f697ac6433fa1926ff4c50aa53fb372ab9a99473d7a7595e75ea31268bcff",
+    "ledger_hash": "bc30251eb59abb2774bc1f3a4513cdd49494493dad4a776775c203f55d4ab045",
+    "generations": 3,
+    "checks_per_sample": 12,
+    "paired_rounds": 20
+  },
+  "input_unchanged": true,
+  "additional_reads_per_window": {
+    "before": 1,
+    "after": 0
+  },
+  "elapsed_ms_per_12_checks": {
+    "before": {
+      "samples": [
+        153.8074,
+        160.1365,
+        154.0139,
+        149.8556,
+        151.1351,
+        152.8704,
+        154.3267,
+        169.3204,
+        155.8157,
+        159.2905,
+        161.5591,
+        160.7048,
+        160.4231,
+        159.0101,
+        158.8582,
+        157.0171,
+        150.3785,
+        150.3751,
+        119.6945,
+        119.0839
+      ],
+      "median": 155.07119999999998
+    },
+    "after": {
+      "samples": [
+        0.0003,
+        0.0002,
+        0.0003,
+        0.0002,
+        0.0003,
+        0.0001,
+        0.0002,
+        0.0003,
+        0.0003,
+        0.0002,
+        0.0002,
+        0.0003,
+        0.0003,
+        0.0002,
+        0.0003,
+        0.0003,
+        0.0003,
+        0.0002,
+        0.0001,
+        0.0001
+      ],
+      "median": 0.00025
+    }
+  },
+  "raw_pairs_ns": [
+    {
+      "kind": "pair",
+      "round": 0,
+      "old_ns": 153807400,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 1,
+      "old_ns": 160136500,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 2,
+      "old_ns": 154013900,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 3,
+      "old_ns": 149855600,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 4,
+      "old_ns": 151135100,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 5,
+      "old_ns": 152870400,
+      "old_reads": 12,
+      "new_ns": 100,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 6,
+      "old_ns": 154326700,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 7,
+      "old_ns": 169320400,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 8,
+      "old_ns": 155815700,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 9,
+      "old_ns": 159290500,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 10,
+      "old_ns": 161559100,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 11,
+      "old_ns": 160704800,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 12,
+      "old_ns": 160423100,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 13,
+      "old_ns": 159010100,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 14,
+      "old_ns": 158858200,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 15,
+      "old_ns": 157017100,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 16,
+      "old_ns": 150378500,
+      "old_reads": 12,
+      "new_ns": 300,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 17,
+      "old_ns": 150375100,
+      "old_reads": 12,
+      "new_ns": 200,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 18,
+      "old_ns": 119694500,
+      "old_reads": 12,
+      "new_ns": 100,
+      "new_reads": 0
+    },
+    {
+      "kind": "pair",
+      "round": 19,
+      "old_ns": 119083900,
+      "old_reads": 12,
+      "new_ns": 100,
+      "new_reads": 0
+    }
+  ],
+  "deployed_observation_separate_from_probe": {
+    "pid": 33132,
+    "start_time": "2026-10-26T01:37:09.7582637Z",
+    "binary_sha256": "BC04B97D65070C187EF2F617278B9015C21B8B7BAC179EB11D8FA9A638F52CCB",
+    "timestamp_utc": "2026-10-26T20:38:49.0366840Z",
+    "elapsed_seconds": 30.9839357,
+    "cpu_seconds": 63.125,
+    "average_cores": 2.037346081892366,
+    "working_set_bytes": 4395114496
+  },
+  "limitations": [
+    "The deployed process sample is an observation of the installed binary, not the checkout candidate or a causal before/after measurement.",
+    "The shared-host debug command-path timing excludes diagnosis, Monitor/session reads and all other GUI work. The three-generation fixture is not a large-fleet workload.",
+    "Zero record reads does not mean zero overall observer I/O: every original diagnosis still runs fresh. Completed identity still incurs the original additional load.",
+    "Parent real-agent eight-window sixty-minute CPU/RSS/timeout and PM-prompt acceptance are unproven and remain unchecked."
+  ]
+}

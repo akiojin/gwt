@@ -23,6 +23,9 @@ pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
 mod feedback;
+mod feedback_owner_bootstrap;
+#[cfg(any(windows, test))]
+mod feedback_supervisor;
 mod fleet;
 mod fleet_disposition;
 mod github_budget;
@@ -48,6 +51,7 @@ mod plan;
 mod pm;
 pub mod pm_authorization;
 mod pr;
+mod project_execution_policy;
 mod provider_reset;
 pub(crate) mod register;
 mod release;
@@ -71,7 +75,26 @@ pub(crate) mod worktree_gc;
 
 use std::{io, path::PathBuf};
 
-pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
+/// Private fixed-binary feedback roles run before normal CLI initialization.
+/// Invalid frames and unsupported platforms fail without diagnostics or hooks.
+pub fn run_feedback_private_role(argv: &[String]) -> Option<i32> {
+    match argv.get(1).map(String::as_str)? {
+        "--gwt-feedback-supervisor" | "--gwt-feedback-sender" => {
+            #[cfg(windows)]
+            {
+                feedback_owner_bootstrap::clear_git_selectors_for_private_role();
+                Some(feedback_supervisor::run(argv))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(1)
+            }
+        }
+        _ => None,
+    }
+}
+
+pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget, ReleasePolicyContext};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use completion_pr::CompletionPrCandidate;
@@ -154,7 +177,9 @@ pub enum CliCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonCommand {
     /// `daemon.start` — bootstrap and serve the runtime daemon.
-    Start,
+    Start {
+        startup_intent: gwt_core::daemon::DaemonStartIntent,
+    },
     /// `daemon.status` — print whether a daemon is registered for cwd scope.
     Status,
     /// `daemon.subscribe` — connect to the running daemon,
@@ -187,6 +212,7 @@ pub enum HookCommand {
     },
     /// `hook.doctor` — managed hook health projection with optional repair.
     Doctor {
+        purpose: Option<hook::health::HookDoctorPurpose>,
         runtime_state_path: Option<PathBuf>,
         profile_path: Option<PathBuf>,
         expected_hook_bin: Option<String>,
@@ -561,7 +587,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     inner: env,
                     stdout: &mut hook_stdout,
                 };
-                hook::run_hook(&mut capture, &name, &rest)?
+                hook::collect_daemon_hook(&mut capture, &name, &rest)?
             };
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
@@ -573,7 +599,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                     inner: env,
                     stdout: &mut hook_stdout,
                 };
-                hook::run_daemon_hook(&mut capture, &name, &rest)?
+                hook::collect_daemon_hook(&mut capture, &name, &rest)?
             };
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
@@ -599,25 +625,18 @@ pub(crate) fn run_collect<E: CliEnv>(
             0
         }
         CliCommand::Hook(HookCommand::Doctor {
+            purpose,
             runtime_state_path,
             profile_path,
             expected_hook_bin,
             repair,
         }) => {
-            // Browser-check must use the same default as launch/self-heal;
-            // choosing a separate bare name invalidates shared-root trust.
-            let managed_hook_bin =
-                crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
-            let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
-            let repair = if repair {
-                Some(
-                    hook::health::repair_managed_hook_configs(env.repo_path())
-                        .map_err(io_as_api_error)?,
-                )
+            let worktree = if purpose == Some(hook::health::HookDoctorPurpose::ManagedBrowser) {
+                gwt_core::paths::resolve_current_worktree_root(env.repo_path())
             } else {
-                None
+                env.repo_path().to_path_buf()
             };
-            let mut input = hook::health::ManagedHookHealthInput::new(env.repo_path());
+            let mut input = hook::health::ManagedHookHealthInput::new(&worktree);
             if let Some(path) = runtime_state_path {
                 input = input.with_runtime_state_path(path);
             }
@@ -627,18 +646,8 @@ pub(crate) fn run_collect<E: CliEnv>(
             if let Some(bin) = expected_hook_bin {
                 input = input.with_expected_hook_bin(bin);
             }
-            let mut health = hook::health::read_managed_hook_health(&input);
-            hook::append_codex_trust_health_for_doctor(&input, &mut health);
-            let payload = serde_json::json!({
-                "managed_hook_bin": managed_hook_bin,
-                "repair_writer": repair.as_ref().map(|_| serde_json::json!({
-                    "pid": std::process::id(),
-                    "executable": std::env::current_exe().ok(),
-                })),
-                "repair": repair,
-                "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
-                "health": health,
-            });
+            let payload =
+                hook::health::read_hook_doctor(&input, repair, purpose).map_err(io_as_api_error)?;
             out.push_str(&serde_json::to_string_pretty(&payload).map_err(serde_as_api_error)?);
             out.push('\n');
             0
@@ -675,6 +684,16 @@ pub(crate) fn run_collect<E: CliEnv>(
 }
 
 pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
+    let cmd = match cmd {
+        CliCommand::Hook(
+            HookCommand::Run { name, rest } | HookCommand::InternalDaemon { name, rest },
+        ) => {
+            // Completion means delivery to the actual protocol sink, not to
+            // run_collect's intermediate buffer.
+            return hook::run_daemon_hook(env, &name, &rest);
+        }
+        other => other,
+    };
     let (code, out) = run_collect(env, cmd)?;
     env.stdout()
         .write_all(out.as_bytes())

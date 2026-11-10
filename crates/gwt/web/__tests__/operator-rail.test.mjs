@@ -113,28 +113,23 @@ test("rail commands: Intake is absent and an existing [data-cmd] item still disp
     const stopAll = fixture.document.querySelector(
       '.op-rail__item[data-cmd="stop-all-windows"]',
     );
-    assert.ok(stopAll, "expected Stop all agents rail item");
-    stopAll.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
-    assert.deepEqual(received, ["stop-all-windows"]);
+    assert.equal(Boolean(stopAll), false, "Stop all agents must be absent from the rail");
+    const logs = fixture.document.querySelector('.op-rail__item[data-cmd="open-logs"]');
+    assert.ok(logs, "Logs stays directly reachable from the rail");
+    logs.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    assert.deepEqual(received, ["open-logs"]);
   } finally {
     fixture.dispose();
   }
 });
 
-test("rail window badge: applyTelemetryCounts が windows 数を badge に反映する", async () => {
-  // SPEC-3038 AS-1.4: the Windows rail item carries an open-window count
-  // badge; zero windows hides the badge entirely.
+test("rail: retired window list and Add window controls are absent", async () => {
   const { applyTelemetryCounts } = await importOperatorShell();
   const { document } = parseHTML(html);
-  const badge = document.getElementById("op-rail-window-count");
-  assert.ok(badge, "expected #op-rail-window-count badge in the rail");
-
   applyTelemetryCounts(document, { windows: 3 });
-  assert.equal(badge.textContent, "3");
-  assert.equal(badge.hidden, false);
-
-  applyTelemetryCounts(document, { windows: 0 });
-  assert.equal(badge.hidden, true);
+  for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
+    assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
+  }
 });
 
 test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反映しアラート点滅する", async () => {

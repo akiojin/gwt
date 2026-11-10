@@ -18,6 +18,10 @@ docker-compose.yaml text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# Fixed diagnostic hashes compare checkout bytes with canonical Git blob bytes.
+.github/workflows/windows-diagnostic.yml text eol=lf
+.github/diagnostics/windows/4777-restore-f351-v1/* text eol=lf
+
 # Binary files
 *.png binary
 *.jpg binary

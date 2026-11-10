@@ -13,7 +13,7 @@ pub enum WindowPreset {
     /// Legacy-only value retained to deserialize old workspace files.
     /// Hidden from [`Self::ALL`] and dropped during workspace load.
     FileTree,
-    /// Legacy Issue-family alias restored into Settings Issues.
+    /// Legacy Issue-family alias restored into Issues.
     Branches,
     Settings,
     /// Legacy-only value accepted so old workspace files containing
@@ -22,13 +22,12 @@ pub enum WindowPreset {
     Memo,
     Profile,
     Logs,
-    /// Legacy-only value accepted so persisted Issue windows restore into
-    /// Settings Issues. It is not exposed in [`Self::ALL`].
+    /// Independent Issues and Kanban surface.
     Issue,
     /// Legacy-only value accepted so persisted Issue Monitor windows restore
-    /// into Settings Issues. It is not exposed in [`Self::ALL`].
+    /// into Issues. It is not exposed in [`Self::ALL`].
     IssueMonitor,
-    /// Legacy Issue-family alias restored into Settings Issues.
+    /// Legacy Issue-family alias restored into Issues.
     Spec,
     /// Legacy Issue-family alias, including the old `workspace` spelling.
     #[serde(alias = "workspace")]
@@ -79,11 +78,12 @@ impl WindowSurface {
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 9] = [
+    pub const ALL: [WindowPreset; 10] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
         WindowPreset::AgentKanban,
+        WindowPreset::Issue,
         WindowPreset::Settings,
         WindowPreset::Profile,
         WindowPreset::Logs,
@@ -106,7 +106,7 @@ impl WindowPreset {
             Self::Logs => "Logs",
             // SPEC-3671 FR-014: the three Knowledge-surface faces must be
             // tellable apart from an open window's title.
-            Self::Issue => "Issue",
+            Self::Issue => "Issues",
             Self::IssueMonitor => "Issue Monitor",
             Self::Spec => "SPEC",
             // SPEC-3671 FR-015: the surface lists Works (launches).
@@ -187,20 +187,20 @@ impl WindowPreset {
         matches!(self.surface(), WindowSurface::Terminal)
     }
 
-    /// Retired Issue-family entrypoints share the Settings Issues surface.
+    /// Retired Issue-family entrypoints share the independent Issues surface.
     pub fn canonical_surface_preset(self) -> Self {
         match self {
             Self::Issue | Self::IssueMonitor | Self::Spec | Self::Work | Self::Branches => {
-                Self::Settings
+                Self::Issue
             }
             preset => preset,
         }
     }
 
-    /// Settings Issues mirrors auto-launched agents in its preview pane.
-    /// Legacy Issue hosts remain readable until workspace load migrates them.
+    /// Issues mirrors auto-launched agents in its preview pane.
+    /// Legacy Issue Monitor hosts remain readable until workspace load migrates them.
     pub fn hosts_issue_preview(self) -> bool {
-        matches!(self, Self::Settings | Self::Issue | Self::IssueMonitor)
+        matches!(self, Self::Issue | Self::IssueMonitor)
     }
 
     pub fn is_agent_terminal(self) -> bool {
@@ -487,14 +487,27 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 9);
+        assert_eq!(WindowPreset::ALL.len(), 10);
         assert!(!WindowPreset::ALL.contains(&WindowPreset::Spec));
         assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
         assert!(!WindowPreset::ALL.contains(&WindowPreset::Branches));
-        assert!(!WindowPreset::ALL.contains(&WindowPreset::Issue));
+        assert!(WindowPreset::ALL.contains(&WindowPreset::Issue));
         assert!(!WindowPreset::ALL.contains(&WindowPreset::IssueMonitor));
         // SPEC-3671 FR-014 / FR-015: each face is identifiable from its title.
-        assert_eq!(WindowPreset::Issue.title(), "Issue");
+        assert_eq!(WindowPreset::Issue.title(), "Issues");
+        for preset in [
+            WindowPreset::Issue,
+            WindowPreset::IssueMonitor,
+            WindowPreset::Spec,
+            WindowPreset::Work,
+            WindowPreset::Branches,
+        ] {
+            assert_eq!(preset.canonical_surface_preset(), WindowPreset::Issue);
+        }
+        assert_eq!(
+            WindowPreset::Settings.canonical_surface_preset(),
+            WindowPreset::Settings
+        );
         assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
@@ -558,7 +571,7 @@ mod tests {
         assert_eq!(
             error,
             PresetResolveError::NotLaunchable {
-                preset: "Issue".to_string()
+                preset: "Issues".to_string()
             }
         );
 

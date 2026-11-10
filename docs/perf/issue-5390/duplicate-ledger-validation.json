@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-26T22:02:59.788813+00:00",
+  "owner": 5390,
+  "scope": "strict ledger load plus duplicate validation; command-path microprobe, not whole diagnosis or GUI",
+  "baseline_head": "d169185ede894d43f160ceb4a9c3a0d7d8ca7587",
+  "source_path": "crates/gwt/src/cli/execution_state.rs",
+  "before_source_git_blob": "38e2143797c797f98ae016108117f47460eab017",
+  "after_source_git_blob": "24210a6a42fb67d41d981952c9a0e370d80b6f35",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "build_profile": "debug, existing checkout library; identical binary for both variants",
+  "probe_binary_sha256": "1c3b05276bdc1d708fc44a6a7a7a27e6f3b1709a602a27fd29430d02c8b475a9",
+  "probe_source_sha256": "5519af0da996deece06e569c6ce93213e77248f492b5743fe4db71369940f9a2",
+  "probe_source": "use std::{path::Path, time::Instant};\nuse gwt::cli::execution_state::{self as execution, ExecutionOwnerKey};\n\nfn observe(path: &Path, owner: ExecutionOwnerKey, duplicate: bool) -> (u128, usize) {\n    let started = Instant::now();\n    let mut additional_validations = 0;\n    for _ in 0..12 {\n        let ledger = execution::load_generation_ledger(path, owner).unwrap().unwrap();\n        if duplicate {\n            additional_validations += 1;\n            assert!(execution::generation_ledger_integrity_ok(&ledger));\n        }\n        std::hint::black_box(ledger);\n    }\n    (started.elapsed().as_nanos(), additional_validations)\n}\n\nfn main() {\n    let arg = std::env::args().nth(1).unwrap();\n    let path = Path::new(&arg);\n    let record = execution::load(path).unwrap().unwrap();\n    assert!(execution::integrity_ok(&record));\n    let owner = ExecutionOwnerKey { kind: record.owner_kind, number: record.owner_number };\n    let ledger = execution::load_generation_ledger(path, owner).unwrap().unwrap();\n    println!(\"{{\\\"kind\\\":\\\"input\\\",\\\"record_hash\\\":\\\"{}\\\",\\\"ledger_hash\\\":\\\"{}\\\",\\\"generations\\\":{},\\\"strict_loads_per_sample\\\":12,\\\"paired_rounds\\\":20}}\", record.content_hash, ledger.content_hash, ledger.generations.len());\n    observe(path, owner, true);\n    observe(path, owner, false);\n    for round in 0..20 {\n        let (old, new) = if round % 2 == 0 {\n            (observe(path, owner, true), observe(path, owner, false))\n        } else {\n            let new = observe(path, owner, false);\n            (observe(path, owner, true), new)\n        };\n        println!(\"{{\\\"kind\\\":\\\"pair\\\",\\\"round\\\":{round},\\\"old_ns\\\":{},\\\"old_additional_validations\\\":{},\\\"new_ns\\\":{},\\\"new_additional_validations\\\":{}}}\",old.0,old.1,new.0,new.1);\n    }\n    let after = execution::load(path).unwrap().unwrap();\n    let after_ledger = execution::load_generation_ledger(path, owner).unwrap().unwrap();\n    assert_eq!(record.content_hash, after.content_hash, \"input changed\");\n    assert_eq!(ledger.content_hash, after_ledger.content_hash, \"ledger changed\");\n    assert_eq!(ledger, after_ledger, \"loaded ledger changed\");\n    println!(\"{{\\\"kind\\\":\\\"validated\\\",\\\"input_unchanged\\\":true}}\");\n}\n",
+  "method": "One warmup each; 20 alternating paired rounds; 12 actual strict ledger loads per sample in both variants. Before repeats generation_ledger_integrity_ok on every returned immutable ledger; after consumes the validated result directly. Verify the initial and final entire loaded ledger and record/ledger hashes are identical. The production diagnosis is independently covered by its existing actual-reader projection regression with a thread-local full-validation counter.",
+  "fixture": {
+    "kind": "input",
+    "record_hash": "c60dafbecc060e082b1717a835ccc78d70b3fb000f27efac81f7cb3e016afcad",
+    "ledger_hash": "8c4d1dd1750d669140c73c842fcd52fb0f9c96d6f2132a97f03078d532072e50",
+    "generations": 4,
+    "strict_loads_per_sample": 12,
+    "paired_rounds": 20
+  },
+  "input_unchanged": true,
+  "strict_loads_per_sample": {
+    "before": 12,
+    "after": 12
+  },
+  "additional_validations_per_load": {
+    "before": 1,
+    "after": 0
+  },
+  "blocked_diagnosis_validation_count": {
+    "before": 3,
+    "after": 2
+  },
+  "elapsed_ms_per_12_loads": {
+    "before": {
+      "samples": [
+        151.6916,
+        140.6292,
+        196.601,
+        184.8529,
+        149.5139,
+        191.1345,
+        137.99,
+        134.9656,
+        137.4266,
+        137.3502,
+        170.5702,
+        104.134,
+        125.9745,
+        106.2605,
+        102.4072,
+        116.272,
+        105.8479,
+        138.8825,
+        104.2155,
+        163.5114
+      ],
+      "median": 137.7083
+    },
+    "after": {
+      "samples": [
+        126.0518,
+        97.6528,
+        95.7782,
+        93.9514,
+        95.4643,
+        95.8008,
+        116.9389,
+        118.789,
+        132.7606,
+        95.7256,
+        91.7624,
+        79.1852,
+        109.9622,
+        81.7204,
+        80.693,
+        104.6276,
+        67.6613,
+        76.9626,
+        75.5472,
+        131.2941
+      ],
+      "median": 95.7519
+    }
+  },
+  "raw_pairs_ns": [
+    {
+      "kind": "pair",
+      "round": 0,
+      "old_ns": 151691600,
+      "old_additional_validations": 12,
+      "new_ns": 126051800,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 1,
+      "old_ns": 140629200,
+      "old_additional_validations": 12,
+      "new_ns": 97652800,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 2,
+      "old_ns": 196601000,
+      "old_additional_validations": 12,
+      "new_ns": 95778200,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 3,
+      "old_ns": 184852900,
+      "old_additional_validations": 12,
+      "new_ns": 93951400,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 4,
+      "old_ns": 149513900,
+      "old_additional_validations": 12,
+      "new_ns": 95464300,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 5,
+      "old_ns": 191134500,
+      "old_additional_validations": 12,
+      "new_ns": 95800800,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 6,
+      "old_ns": 137990000,
+      "old_additional_validations": 12,
+      "new_ns": 116938900,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 7,
+      "old_ns": 134965600,
+      "old_additional_validations": 12,
+      "new_ns": 118789000,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 8,
+      "old_ns": 137426600,
+      "old_additional_validations": 12,
+      "new_ns": 132760600,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 9,
+      "old_ns": 137350200,
+      "old_additional_validations": 12,
+      "new_ns": 95725600,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 10,
+      "old_ns": 170570200,
+      "old_additional_validations": 12,
+      "new_ns": 91762400,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 11,
+      "old_ns": 104134000,
+      "old_additional_validations": 12,
+      "new_ns": 79185200,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 12,
+      "old_ns": 125974500,
+      "old_additional_validations": 12,
+      "new_ns": 109962200,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 13,
+      "old_ns": 106260500,
+      "old_additional_validations": 12,
+      "new_ns": 81720400,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 14,
+      "old_ns": 102407200,
+      "old_additional_validations": 12,
+      "new_ns": 80693000,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 15,
+      "old_ns": 116272000,
+      "old_additional_validations": 12,
+      "new_ns": 104627600,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 16,
+      "old_ns": 105847900,
+      "old_additional_validations": 12,
+      "new_ns": 67661300,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 17,
+      "old_ns": 138882500,
+      "old_additional_validations": 12,
+      "new_ns": 76962600,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 18,
+      "old_ns": 104215500,
+      "old_additional_validations": 12,
+      "new_ns": 75547200,
+      "new_additional_validations": 0
+    },
+    {
+      "kind": "pair",
+      "round": 19,
+      "old_ns": 163511400,
+      "old_additional_validations": 12,
+      "new_ns": 131294100,
+      "new_additional_validations": 0
+    }
+  ],
+  "limitations": [
+    "Shared-host debug command-path timings are observations without a timing assertion, not shipping release CPU, whole-diagnosis or GUI measurements.",
+    "Both variants run the same strict loader and preserve its filesystem and authority validation. Only the immediate duplicate validation of that heap value differs.",
+    "The four-generation fixture does not establish large-ledger scaling or real eight-agent sixty-minute CPU/RSS/timeout and PM-prompt acceptance.",
+    "Parent AC-1/2/3 and other owners long-duration memory acceptance remain unproven and unchecked."
+  ]
+}

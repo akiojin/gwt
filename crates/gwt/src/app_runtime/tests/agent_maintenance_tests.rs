@@ -279,7 +279,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
             "live {status:?} PM agent"
         );
     }
-    runtime.stop_window_runtime(&id);
+    close_test_owner_runtime(&mut runtime, &id);
     runtime
         .inflight_launches
         .insert("pending".into(), ("next-agent".into(), Instant::now()));
@@ -584,6 +584,12 @@ fn startup_surface_ready_preserves_pm_queue_until_maintenance_finishes() {
             workspace_resume_context: None,
         },
     );
+    assert!(runtime.startup_auto_resume_ready_events().is_empty());
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "bootstrap and accepted-view drains must also wait for maintenance"
+    );
     let immediate =
         runtime.handle_frontend_event("canvas".into(), FrontendEvent::StartupAutoResumeReady {});
     assert!(immediate.is_empty());
@@ -603,13 +609,15 @@ fn startup_surface_ready_preserves_pm_queue_until_maintenance_finishes() {
         "the paused restore placeholder must survive maintenance"
     );
     assert!(runtime.agent_maintenance.deferred_startup_ready);
-    runtime.handle_supported_agent_maintenance_complete(
-        super::super::agent_maintenance::AgentMaintenanceCompletion {
-            results: Vec::new(),
-            cache: None,
-            catalog: None,
-        },
-    );
+    with_inline_startup_admission(&mut runtime, |runtime| {
+        runtime.handle_supported_agent_maintenance_complete(
+            super::super::agent_maintenance::AgentMaintenanceCompletion {
+                results: Vec::new(),
+                cache: None,
+                catalog: None,
+            },
+        )
+    });
     assert!(runtime.issue_monitor_materializer_ready());
     assert!(runtime.pending_startup_pm_tabs.is_empty());
     assert!(

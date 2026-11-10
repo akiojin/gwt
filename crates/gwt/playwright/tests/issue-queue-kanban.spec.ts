@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 // #4499: real Chromium and checkout assets, deterministic protocol projections.
 // This suite proves the queue UI contract, not a real agent launch.
@@ -21,7 +22,7 @@ test.beforeEach(async ({ page }, info) => {
   if ((info.title.includes("Issue catalog bursts") || info.title.includes("Monitor list bursts"))) {
     await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
   }
-  const narrowSettings = info.title.includes("Settings integrates");
+  const narrowSettings = info.title.startsWith("T24 ");
   if (narrowSettings) await page.setViewportSize({ width: 1280, height: 1000 });
   if (!liveUrl) await installEmbeddedRoutes(page);
   await installBackend(page, {
@@ -44,6 +45,83 @@ const column = (page: Page, phase: string) => page.locator(`[data-queue-column="
 const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-issue-number="${number}"]`);
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
+
+test("Issue #6880 artifact diagnostics recover to queued without a requeue request", async ({ page }, info) => {
+  const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6880_PROJECTION;
+  test.skip(!projectionPath, "Requires the projections emitted by the Issue #6880 Rust regression test");
+  const body = readFileSync(projectionPath!, "utf8");
+  const snapshots = JSON.parse(body);
+  await info.attach("artifact-readiness-projections", { body, contentType: "application/json" });
+  expect(snapshots).toHaveLength(3);
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 42, state: "open", labels: ["gwt-spec"], related_work_refs: [],
+      title: "Reposted multipart SPEC artifacts" }]);
+  });
+  const reasons: string[] = [];
+  for (const [index, snapshot] of snapshots.entries()) {
+    const item = snapshot.inbox[0];
+    expect(item.issue.number).toBe(42);
+    expect(item.state).toBe(index < 2 ? "not_ready" : "queued");
+    const reason = item.exclusion_reason;
+    await page.evaluate(snapshot => {
+      const fixture = window as any;
+      fixture.__queueConfirm(snapshot.status.queue, snapshot.status.gui_status || {});
+      fixture.__queueInbox(snapshot.inbox);
+    }, snapshot);
+    const card = row(page, 42);
+    await expect(card).toBeVisible();
+    await expect(card.locator(".knowledge-row-badge")).toHaveText(index < 2 ? "Not ready" : "Queued");
+    if (index < 2) {
+      expect(reason).toBeTruthy();
+      await expect(card).toContainText(reason);
+      reasons.push(reason);
+    } else {
+      await expect(column(page, "queued").locator('[data-issue-number="42"]')).toBeVisible();
+      for (const previous of reasons) await expect(card).not.toContainText(previous);
+    }
+  }
+  expect(await messages(page)).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([]);
+});
+
+test("Issue #6690 delivered open parent waits without an Agent failed badge", async ({ page }, info) => {
+  const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6690_PROJECTION;
+  test.skip(!projectionPath, "Requires the normalized projection emitted by the Issue #6690 Rust regression test");
+  const body = readFileSync(projectionPath!, "utf8");
+  const projection = JSON.parse(body);
+  await info.attach("normalized-rust-monitor-projection", { body, contentType: "application/json" });
+  // The Rust regression proves normalization. This browser check consumes its
+  // actual output and proves only the existing UI's rendering of that output.
+  const delivered = projection.inbox.find((item: any) => item.issue_number === 42);
+  const failed = projection.inbox.find((item: any) => item.issue_number === 43);
+  expect(delivered).toMatchObject({ state: "queued", recoverable_merged: true });
+  expect(delivered.completion_reason).toMatch(/^delivered_by_pr_/);
+  expect(delivered.error_message ?? null).toBeNull();
+  expect(failed).toMatchObject({ state: "agent_failed", recoverable_merged: false });
+  expect(projection.queue).toContain(42);
+  await page.evaluate(projection => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries(projection.inbox.map((item: any) => ({
+      number: item.issue_number, state: "open", labels: [], related_work_refs: [],
+      title: item.issue_number === 42 ? "Open parent with a delivered slice" : "Undelivered failure",
+    })));
+    fixture.__queueConfirm(projection.queue, projection.gui_status || {});
+    fixture.__queueInbox(projection.inbox.map((item: any) => ({ ...item, issue: { number: item.issue_number } })));
+  }, projection);
+  const parent = column(page, "queued").locator('[data-issue-number="42"]');
+  await expect(parent).toBeVisible();
+  await expect(parent.locator(".knowledge-row-badge")).toHaveText("Queued");
+  await expect(parent).not.toContainText(/Agent failed|Agent error|Needs human/);
+  await expect(column(page, "done").locator('[data-issue-number="42"]')).toHaveCount(0);
+  await parent.locator(".knowledge-row-select").click();
+  await page.locator('.knowledge-detail-pane [data-issue-detail-view="output"]').click();
+  await expect(page.locator(".knowledge-detail-pane .issue-preview-empty")).toHaveText("Waiting in queue. No agent has started.");
+  await expect(column(page, "backlog").locator('[data-issue-number="43"] .knowledge-row-badge')).toHaveText("Agent failed");
+});
 
 test("AC34 local agent census separates five live agents from eighteen recorded Works", async ({ page }) => {
   await page.evaluate(() => {
@@ -359,7 +437,7 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
     await expect(statusPill).toHaveAttribute("data-tone", tone);
   }
   await root.locator('[data-action="monitor-diagnostics"]').click();
-  await expect(page.locator('[data-error-key="issue-monitor:last_error"]')).toContainText("Fixture current failure");
+  await expect(page.locator('.notification-center__item[data-error-key^="issue-monitor:"]').filter({ hasText: "Fixture current failure" })).toContainText("Fixture current failure");
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await page.evaluate(() => (window as any).__queueStatus({ state: "idle", last_error: null, active_count: 0, queue_len: 0 }));
   await expect(statusPill).toHaveText("Waiting · Empty");
@@ -434,117 +512,103 @@ test("Issue #5396 lazy preview retains DOM across unchanged list and detail repl
   await expect(detail.locator(".knowledge-detail-title")).toHaveText("Refreshed issue");
 });
 
-test("Issue #5321 Settings integrates Issues at 1280px without duplicate surfaces", async ({ page }, info) => {
-  test.skip(process.env.GWT_ISSUE_5321_PHASE === "before", "AC-M covers the approved Settings integration");
-  const settings = page.locator('.workspace-window[data-preset="settings"]');
-  await expect(settings).toBeInViewport({ ratio: 1 });
-  const issues = settings.locator('[data-settings-panel="issues"]');
+test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280px and 400px", async ({ page }, info) => {
+  const issues = page.locator('.workspace-window[data-preset="issue"]');
   const root = issues.locator(".issue-bridge-root");
-  const options = issues.locator(".settings-issues-options");
-  const controls = options.locator("[data-settings-issues-controls]");
-  const candidates = options.locator("[data-settings-candidates]");
-  const capture = async (name: string) => {
-    const path = process.env.GWT_ISSUE_5321_EVIDENCE
-      ? join(process.env.GWT_ISSUE_5321_EVIDENCE, `settings-1280-${info.project.name}-${name}.png`)
-      : info.outputPath(`settings-1280-${name}.png`);
-    await page.screenshot({ path });
-    await info.attach(`settings-1280-${name}`, { path, contentType: "image/png" });
-  };
-  const assertSingleSurface = async () => {
-    await expect(settings).toHaveCount(1);
-    await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
-    await expect(page.locator(".issue-bridge-root")).toHaveCount(1);
-  };
-  await assertSingleSurface();
   const issuesRail = page.locator('.op-rail [data-surface="issues"]');
+  const settingsRail = page.locator('.op-rail [data-surface="settings"]');
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  const controls = settings.locator("[data-settings-issues-controls]");
+  const candidates = settings.locator("[data-settings-candidates]");
+  const capture = async (name: string) => {
+    const path = info.outputPath(`independent-issues-settings-${name}.png`);
+    await page.screenshot({ path });
+    await info.attach(`independent-issues-settings-${name}`, { path, contentType: "image/png" });
+  };
+  await expect(issues).toBeInViewport({ ratio: 1 });
   await expect(issuesRail).toHaveAttribute("aria-pressed", "true");
-  await settings.locator('[data-settings-tab="system"]').click();
-  await expect(page.locator('.op-rail [data-surface="settings"]')).toHaveAttribute("aria-pressed", "true");
-  await settings.locator('[data-settings-tab="issues"]').click();
-  await expect(issuesRail).toHaveAttribute("aria-pressed", "true");
-  const navigation = settings.getByRole("tablist", { name: "Settings sections" });
-  await expect(navigation).toBeVisible();
-  await expect(navigation).toHaveAttribute("aria-orientation", "vertical");
-  await expect(settings.locator(".settings-tabs")).toContainText("Application settings");
-  await expect(settings.locator(".settings-tabs")).toContainText("Project settings");
-  await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-  await expect(settings.locator('[data-settings-tab="agents"]')).toHaveCount(0);
-  const navBox = (await settings.locator(".settings-tabs").boundingBox())!;
-  const issueBox = (await issues.boundingBox())!;
-  expect(navBox.width, "grouped navigation retains usable width").toBeGreaterThan(100);
-  expect(navBox.x + navBox.width, "grouped navigation sits beside Issues").toBeLessThanOrEqual(issueBox.x + 1);
-  await expect(options).not.toHaveAttribute("open", "");
-  await expect(controls).toBeHidden();
-  await expect(candidates).toBeHidden();
-  for (const action of ["monitor-autonomous", "monitor-toggle"]) {
-    await expect(root.locator(`[data-action="${action}"]`)).toBeVisible();
-    await expect(options.locator(`[data-action="${action}"]`)).toHaveCount(0);
-  }
+  await expect(issues.locator(".settings-root, .settings-tabs, .settings-heading")).toHaveCount(0);
+  await expect(issues.locator(".title-text")).toHaveText("Issues");
   await expect(root.locator(".knowledge-search")).toBeVisible();
   await expect(root.locator('[data-action="issue-new"]')).toBeVisible();
   await expect(root.locator('[data-action="refresh-knowledge"]')).toBeVisible();
   await expect(root.locator("[data-queue-column]")).toHaveCount(4);
   await expect(root.locator(".knowledge-detail-pane")).toBeHidden();
-  await capture("default");
+  await capture("issues");
+  await root.locator(".knowledge-search").fill("First");
   await row(page, 1).locator(".knowledge-row-select").click();
-  await expect(root.locator(".knowledge-detail-pane")).toBeVisible();
   await expect(root.locator(".knowledge-detail-title")).toHaveText("First backlog issue");
-  await capture("preview");
-  await root.locator('[data-action="close-issue-preview"]').click();
-  await expect(root).toHaveAttribute("data-preview-hidden", "true");
-  await expect(root.locator(".knowledge-detail-pane")).toBeHidden();
+  const search = root.locator(".knowledge-search");
   await root.locator('[data-action="monitor-settings"]').click();
-  await expect(options).toHaveAttribute("open", "");
+  await expect(settings).toBeVisible();
+  await expect(settingsRail).toHaveAttribute("aria-pressed", "true");
+  await expect(settings.locator(".issue-bridge-root, .issue-queue-board, .knowledge-detail-pane")).toHaveCount(0);
+  await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
+  await expect(settings.locator('[data-settings-tab="issues"]')).toContainText("Issues execution settings");
   await expect(controls).toBeVisible();
   await expect(candidates).toBeVisible();
-  const mode = controls.getByLabel("Max active mode", { exact: true });
-  const max = controls.getByLabel("Max active", { exact: true });
-  await expect(mode).toHaveValue("auto");
-  await expect(max).toBeDisabled();
-  await mode.selectOption("manual");
-  await expect(max).toBeEnabled();
-  await max.fill("3");
-  await max.press("Tab");
-  await controls.getByRole("button", { name: "Apply Max active", exact: true }).click();
-  await expect(max).toHaveValue("3");
-  // The fixture records a queued reply before dispatching it. Wait for the
-  // rendered allocation to prove the app consumed Manual before requesting Auto.
-  await expect(controls.getByRole("status").filter({hasText:"This project allocation:"}))
-    .toContainText("This project allocation: 3");
-  await mode.selectOption("auto");
-  await expect(max).toBeDisabled();
-  await expect(settings.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
+  await expect(page.locator(".issue-bridge-root")).toHaveCount(1);
+  await expect(settings.getByRole("tablist", { name: "Settings sections" })).toHaveAttribute("aria-orientation", "vertical");
+  await expect(settings.locator(".settings-tabs")).toContainText("Application settings");
+  await expect(settings.locator(".settings-tabs")).toContainText("Project settings");
+  for (const name of ["Max active", "Max active mode", "Apply Max active"]) {
+    await expect(controls.getByLabel(name, { exact: true })).toHaveCount(0);
+  }
+  await expect(controls.getByLabel("Autonomous", { exact: true })).toBeVisible();
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toBeVisible();
   await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
   await expect(settings.locator('[data-settings-panel="issues"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
-  await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-  await expect(candidates).toBeVisible();
   await expect(candidates).toBeFocused();
-  await assertSingleSurface();
-  await capture("options");
-  await root.locator('[data-action="monitor-settings"]').click();
-  await expect(options).not.toHaveAttribute("open", "");
-  await expect(root.locator(".issue-queue-board")).toBeVisible();
-  await page.locator('.op-rail [data-surface="agents"]').click();
-  await expect(page.locator('.op-rail [data-surface="agents"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".issue-bridge-root")).toHaveCount(1);
   await issuesRail.click();
-  await expect(root.locator(".issue-queue-board")).toBeVisible();
-  await expect(issuesRail).toHaveAttribute("aria-pressed", "true");
-  await settings.locator(".titlebar").click();
-  await expect(issuesRail).toHaveAttribute("aria-pressed", "true");
-  await assertSingleSurface();
+  await expect(root.locator(".knowledge-detail-title")).toHaveText("First backlog issue");
+  await expect(search).toHaveValue("First");
+  await expect(settings).toBeHidden();
   await page.getByRole("button", { name: "Split view", exact: true }).click();
   const left = page.getByRole("region", { name: "Left pane", exact: true });
-  await left.locator('[data-settings-tab="system"]').click();
-  await expect(left.locator('[data-settings-panel="issues"]')).toBeHidden();
+  const right = page.getByRole("region", { name: "Right pane", exact: true });
+  await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("settings");
+  await settings.locator('[data-settings-tab="issues"]').click();
+  await expect(left).toHaveAttribute("data-surface", "issues");
+  await expect(right).toHaveAttribute("data-surface", "settings");
+  const labels = controls.getByLabel("Allowed labels", { exact: true });
+  await labels.fill("bug, draft");
   await confirm(page, [3, 4]);
-  await expect(left.locator('[data-settings-tab="system"]')).toHaveAttribute("aria-selected", "true");
-  await issuesRail.click();
-  await expect(left.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-  await expect(left.locator(".issue-queue-board")).toBeVisible();
+  await expect(labels).toHaveValue("bug, draft");
+  await expect(labels).toBeFocused();
+  await expect(search).toHaveValue("First");
+  await expect(root.locator(".knowledge-detail-title")).toHaveText("First backlog issue");
+  await settings.locator('[data-settings-tab="system"]').click();
+  await expect(left).toHaveAttribute("data-surface", "issues");
+  await expect(root.locator(".issue-queue-board")).toBeVisible();
+  await expect(settings.locator('[data-settings-tab="system"]')).toHaveAttribute("aria-selected", "true");
+  await capture("split");
   await page.getByRole("button", { name: "Close split", exact: true }).click();
+  await page.setViewportSize({ width: 400, height: 900 });
+  await issuesRail.click();
+  await expect(issues).toBeVisible();
+  await expect(search).toHaveValue("First");
+  await expect(issues.locator(".settings-tabs")).toHaveCount(0);
+  await capture("issues-400");
+  await settingsRail.click();
+  await expect(settings).toBeVisible();
+  await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
+  await settings.locator('[data-settings-tab="issues"]').click();
+  await expect(controls.getByLabel("Allowed labels", { exact: true })).toHaveValue("bug, draft");
+  const autonomous = controls.getByRole("checkbox", { name: "Autonomous", exact: true });
+  await autonomous.scrollIntoViewIfNeeded();
+  await expect(autonomous).toBeInViewport({ ratio: 1 });
+  const settingsWidth = await settings.locator(".settings-body").evaluate(element => ({
+    visible: element.clientWidth, content: element.scrollWidth,
+  }));
+  expect(settingsWidth.content, "400px settings controls fit without horizontal scrolling").toBeLessThanOrEqual(settingsWidth.visible + 1);
+  await capture("settings-400");
+  await issuesRail.click();
+  await root.locator('[data-action="close-issue-preview"]').click();
+  await expect(root).toHaveAttribute("data-preview-hidden", "true");
+  await expect(root.locator(".knowledge-detail-pane")).toBeHidden();
 });
-
 test("Issue #5321 preview keyboard focus opens and returns with Escape", async ({ page }) => {
   const select = row(page, 1).locator(".knowledge-row-select");
   const detail = page.locator(".knowledge-detail-pane");
@@ -820,6 +884,14 @@ test("Issue #4862 failed launches with no window show their reason outside Activ
   await expect(row(page, 43).locator('[data-key="reason"]')).toContainText("autonomous launch attempts exhausted (3/3)");
   await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
   await expect(column(page, "active").locator('[data-issue-number="43"]')).toHaveCount(0);
+  // Issue #6689: a recovered timeout is queued even while its backoff reason
+  // remains observable; the previous Agent failed badge must disappear.
+  await confirm(page, [43]);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "queued",
+    error_message: "Launch timed out: no window was created within 120s" }]));
+  await expect(column(page, "queued").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(row(page, 43).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await expect(row(page, 43)).not.toContainText("Agent failed");
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "needs_human",
     error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-43-next is duplicated; use workspace.close" }]));
   await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
@@ -1506,7 +1578,8 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   const before=(await messages(page)).length;
   for(const phase of ["active","done"]) {
     await drag(page,2,column(page,phase).locator("h3"));
-    await expect(page.locator(".issue-queue-feedback")).toContainText("controlled by the monitor");
+    await expect(column(page,phase).locator(".issue-queue-column-notice"))
+      .toContainText(phase==="active" ? "The system controls issues" : "Landed issues cannot be moved");
   }
   expect((await messages(page)).length).toBe(before);
   await drag(page,2,column(page,"queued").locator("h3"));
@@ -1516,6 +1589,32 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: queue is unavailable");
   await confirm(page,[3,4,1]);
   await expect(page.locator(".issue-queue-feedback")).toContainText("queue is unavailable");
+});
+
+test("Issue #4499 drag response: accepting columns light up, Active/Done refuse with a column-top reason that clears", async ({ page }, info) => {
+  const card = row(page, 1);
+  await card.scrollIntoViewIfNeeded();
+  const start = await card.boundingBox();
+  await page.mouse.move(start!.x + 20, start!.y + 10);
+  await page.mouse.down();
+  for (const phase of ["queued", "active"]) {
+    const heading = await column(page, phase).locator("h3").boundingBox();
+    await page.mouse.move(heading!.x + 20, heading!.y + 5, { steps: 8 });
+    await expect(column(page, phase)).toHaveAttribute("data-drop-state", phase === "queued" ? "accept" : "reject");
+  }
+  await expect(column(page, "queued")).not.toHaveAttribute("data-drop-state", /.+/);
+  const refusing = await column(page, "active").evaluate(element => getComputedStyle(element).borderTopColor);
+  const idle = await column(page, "done").evaluate(element => getComputedStyle(element).borderTopColor);
+  expect(refusing, "the refusing column is drawn in a distinct color").not.toBe(idle);
+  await page.mouse.up();
+  const notice = column(page, "active").locator(".issue-queue-column-notice");
+  await expect(notice).toHaveText("The system controls issues while an implementation agent runs. To stop one, use Stop agent on its card.");
+  const refusalShot = info.outputPath(`drag-refusal-${info.project.name}.png`);
+  await page.screenshot({ path: refusalShot });
+  await info.attach(`drag-refusal-${info.project.name}`, { path: refusalShot, contentType: "image/png" });
+  await expect(column(page, "active")).not.toHaveAttribute("data-drop-state", /.+/);
+  await expect(notice).toHaveCount(0, { timeout: 7000 });
+  expect(await messages(page)).toEqual([]);
 });
 
 test("Issue #4499 hold labels preserve queue controls while source exclusions explain triage", async ({ page }) => {
@@ -1584,8 +1683,8 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(toggle).toContainText("On");
   await page.getByRole("button", {name:"Issues settings",exact:true}).click();
   const issues = page.locator('[data-settings-panel="issues"]');
-  await expect(issues.locator(".settings-issues-options")).toHaveAttribute("open", "");
-  await expect(issues.locator('[data-action="monitor-settings"]')).toBeFocused();
+  await expect(issues).toBeVisible();
+  await expect(issues.locator(".issue-bridge-root")).toHaveCount(0);
   await expect(issues.getByRole("checkbox",{name:"Auto-refill",exact:true})).toBeChecked();
   await issues.getByLabel("Refill limit",{exact:true}).fill("5");
   await issues.getByLabel("Refill limit",{exact:true}).press("Tab");
@@ -1732,7 +1831,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         const message=JSON.parse(raw);fixture.__queueMessages.push(message);
         if(message.kind==="frontend_ready") { fixture.__queueWorkspace={app_version:"playwright",tabs:[{
           id:"tab-queue",title:"Queue fixture",project_root:"/fixture",project_key:projectKey,kind:"git",
-          workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Settings",preset:"settings",
+          workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Issues",preset:"issue",
             geometry:{x:40,y:40,width:narrowSettings ? 1160 : 1470,height:narrowSettings ? 880 : 950},z_index:1,status:"running",persist:true,minimized:false,maximized:false},
             ...(includeAgent ? [{id:"tab-queue::agent-5",session_id:"agent-5-session",title:"Issue 5 agent",preset:"agent",agent_id:"codex",
               geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
@@ -1751,9 +1850,18 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             max_active_agents_mode:message.max_active_agents == null ? "auto" : "manual"});
           this.emit({kind:"issue_monitor_status",status});
         }
+        else if(message.kind==="set_issue_monitor_allowed_labels") {
+          status.allowed_labels=message.allowed_labels;
+          this.emit({kind:"issue_monitor_status",status});
+        }
+        else if(message.kind==="agent_roster") {
+          this.emit({kind:"agent_roster",roster:{project_key:projectKey,revision:1,capacity:1,members:[
+            {agent_member_id:"queue-member",name:"Aster",agent_id:"codex",provider:"codex",enabled:true,assignment:null}
+          ],past_contributors:[],by_session:{}}});
+        }
         else if(message.kind==="get_issue_monitor_profiles") {
           this.emit({kind:"issue_monitor_profiles",request_id:message.request_id,project_root:"/fixture",
-            profiles:[{agent_id:"codex",model:"gpt-6-sol",prefer_for:[]}],usage_threshold_percent:80});
+            profiles:[{agent_member_id:"queue-member",agent_id:"codex",model:"gpt-6-sol",prefer_for:[]}],usage_threshold_percent:80});
         }
         else if(message.kind==="list_issue_monitor") {
           this.emit({kind:"issue_monitor_status",status});

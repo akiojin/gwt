@@ -14,6 +14,61 @@ pub struct WindowRegistry {
 }
 
 impl WindowRegistry {
+    /// Merge presentation changes without admitting, replacing, or deleting a
+    /// process identity. Only owner lifecycle commands change those rows.
+    pub fn merge_owner_layout(&mut self, proposal: &PersistedWindowRegistry) -> bool {
+        let before = self.persisted.clone();
+        let process = |window: &PersistedWindowState| {
+            window.preset.requires_process()
+                || window.agent_id.is_some()
+                || window.session_id.is_some()
+        };
+        // Missing process/husk rows are stale presentation, never close intent.
+        // Ordinary UI-only rows still follow the GUI's latest surface layout.
+        self.persisted.windows.retain(|window| {
+            process(window)
+                || proposal
+                    .windows
+                    .iter()
+                    .any(|proposed| proposed.id == window.id && !process(proposed))
+        });
+        let mut seen = std::collections::HashSet::new();
+        for proposed in &proposal.windows {
+            if !seen.insert(proposed.id.as_str()) {
+                continue;
+            }
+            match self
+                .persisted
+                .windows
+                .iter_mut()
+                .find(|window| window.id == proposed.id)
+            {
+                Some(current) if process(current) => {
+                    current.placement = proposed.placement.clone();
+                    current.surface_owner = proposed.surface_owner;
+                    current.z_index = proposed.z_index;
+                }
+                Some(current) if !process(proposed) => {
+                    *current = proposed.clone();
+                }
+                Some(_) => {}
+                None if !process(proposed) => {
+                    self.persisted.windows.push(proposed.clone());
+                }
+                None => {}
+            }
+        }
+        self.persisted.next_z_index = self
+            .persisted
+            .windows
+            .iter()
+            .map(|window| window.z_index)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.persisted != before
+    }
+
     pub fn from_persisted(persisted: PersistedWindowRegistry) -> Self {
         Self { persisted }
     }
@@ -459,7 +514,6 @@ impl WindowRegistry {
             .persisted
             .windows
             .iter()
-            .filter(|window| window.preset == preset)
             .filter_map(|window| {
                 window
                     .id
@@ -755,7 +809,7 @@ mod tests {
     #[test]
     fn placing_agent_window_in_issue_preview_sets_containment_placement() {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Settings);
+        let issue = workspace.add_window(WindowPreset::Issue);
         let agent = workspace.add_window(WindowPreset::Agent);
 
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
@@ -776,11 +830,13 @@ mod tests {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
         let issue = workspace.add_window(WindowPreset::Issue);
         let board = workspace.add_window(WindowPreset::Board);
+        let settings = workspace.add_window(WindowPreset::Settings);
         let shell = workspace.add_window(WindowPreset::Shell);
         let agent = workspace.add_window(WindowPreset::Agent);
 
         assert!(!workspace.place_agent_window_in_issue_preview(&shell.id, &issue.id, 3671));
         assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, &board.id, 3671));
+        assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, &settings.id, 3671));
         assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, "missing-window", 3671));
         assert_eq!(
             workspace.window(&agent.id).expect("agent").placement,
@@ -830,7 +886,7 @@ mod tests {
     #[test]
     fn docking_agent_window_back_to_issue_returns_it_to_the_preview() {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Settings);
+        let issue = workspace.add_window(WindowPreset::Issue);
         let agent = workspace.add_window(WindowPreset::Agent);
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3885));
         assert!(workspace.undock_agent_window(&agent.id));
@@ -900,8 +956,8 @@ mod tests {
     #[test]
     fn closing_issue_window_releases_its_previews_to_a_surface() {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Settings);
-        let other_issue = workspace.add_window(WindowPreset::Settings);
+        let issue = workspace.add_window(WindowPreset::Issue);
+        let other_issue = workspace.add_window(WindowPreset::Issue);
         let agent = workspace.add_window(WindowPreset::Agent);
         let kept = workspace.add_window(WindowPreset::Agent);
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));

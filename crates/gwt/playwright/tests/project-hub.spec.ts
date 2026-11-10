@@ -259,7 +259,7 @@ test.describe("Project Hub and routes", () => {
     await page.goto(new URL(`/p/${projectA.project_key}`, base || ORIGIN_URL).href);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await expect(page.locator("#close-project-button")).toBeVisible();
-    const control = page.locator("#window-list-button");
+    const control = page.locator("#op-palette-button");
     await control.focus();
     await control.evaluate(element => { (window as any).__hubCatalogControl = element; });
     const emit = (hub: Record<string, unknown>) => page.evaluate(hub => {

@@ -2,7 +2,93 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+
+test("ordinary reconnect recovers Board and Logs reads without losing drafts or filters", async ({ page }, info) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires an isolated checkout server");
+  expect(await realpath(process.env.GWT_PLAYWRIGHT_CHECK_HOME!)).not.toBe(await realpath(homedir()));
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  await gotoLiveGwt(page, base!, { enableTestBridge: true });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  for (const preset of ["board", "logs"]) {
+    await sendLiveGwtEvent(page, { kind: "create_window", preset,
+      bounds: { x: 30, y: 30, width: 1200, height: 800 } });
+    await expect(page.locator(`.workspace-window[data-preset="${preset}"]`).last().locator(`.${preset}-status`)).not.toContainText("Loading");
+  }
+  const board = page.locator('.workspace-window[data-preset="board"]').last();
+  const logs = page.locator('.workspace-window[data-preset="logs"]').last();
+  const boardId = (await board.getAttribute("data-id"))!;
+  const logsId = (await logs.getAttribute("data-id"))!;
+  await page.evaluate(({ boardId, logsId }) => {
+    const board = document.querySelector(`.workspace-window[data-id="${boardId}"]`)!;
+    const logs = document.querySelector(`.workspace-window[data-id="${logsId}"]`)!;
+    const input = board.querySelector(".board-textarea") as HTMLTextAreaElement;
+    const filter = logs.querySelector(".logs-search-input") as HTMLInputElement;
+    input.value = "Unsent reconnect draft";
+    input.dispatchEvent(new Event("input"));
+    input.setSelectionRange(2, 7);
+    filter.value = "retained reconnect filter";
+    filter.dispatchEvent(new Event("input"));
+    const old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
+      socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
+    if (!old) throw new Error("missing owning project socket");
+    const send = WebSocket.prototype.send;
+    const state = { old, board, logs, input, filter, held: [] as any[], recovered: [] as any[],
+      sequence: (window as any).__gwtPlaywrightMessageSequence,
+      restore() { WebSocket.prototype.send = send; } };
+    WebSocket.prototype.send = function (data) {
+      const request = typeof data === "string" ? JSON.parse(data) : null;
+      if (request && [boardId, logsId].includes(request.id)) {
+        if (this === old && ["load_board", "load_logs"].includes(request.kind)) {
+          state.held.push(request); return;
+        }
+        if (this !== old) state.recovered.push(request);
+      }
+      return send.call(this, data);
+    };
+    (window as any).__boardLogsReconnect = state;
+    (board.querySelector('[data-action="refresh-board"]') as HTMLButtonElement).click();
+    (logs.querySelector('[data-action="refresh-logs"]') as HTMLButtonElement).click();
+  }, { boardId, logsId });
+  try {
+    await expect.poll(() => page.evaluate(() => (window as any).__boardLogsReconnect.held.map((row: any) => row.kind)))
+      .toEqual(["load_board", "load_logs"]);
+    await expect(board.locator(".board-status")).toContainText("Loading");
+    await expect(logs.locator(".logs-status")).toContainText("Loading");
+    await page.evaluate(() => (window as any).__boardLogsReconnect.old.close());
+    await expect.poll(() => page.evaluate(() => (window as any).__boardLogsReconnect.recovered))
+      .toEqual([{ kind: "load_board", id: boardId, all: false },
+        { kind: "load_logs", id: logsId, scope: "project" }]);
+    await expect.poll(() => page.evaluate(({ boardId, logsId }) => {
+      const state = (window as any).__boardLogsReconnect;
+      const messages = (window as any).__gwtPlaywrightMessages.filter((row: any) => row.sequence > state.sequence);
+      return ["board_entries", "log_entries"].map((kind, index) => messages.some((row: any) =>
+        row.payload.kind === kind && row.payload.id === [boardId, logsId][index]));
+    }, { boardId, logsId })).toEqual([true, true]);
+    await expect(board.locator(".board-status")).not.toContainText("Loading");
+    await expect(logs.locator(".logs-status")).not.toContainText("Loading");
+    const controls = await page.evaluate(({ boardId, logsId }) => {
+      const state = (window as any).__boardLogsReconnect;
+      return { sameBoard: state.board === document.querySelector(`.workspace-window[data-id="${boardId}"]`),
+        sameLogs: state.logs === document.querySelector(`.workspace-window[data-id="${logsId}"]`),
+        sameInput: state.input === state.board.querySelector(".board-textarea"),
+        sameFilter: state.filter === state.logs.querySelector(".logs-search-input"),
+        draft: state.input.value, selection: [state.input.selectionStart, state.input.selectionEnd],
+        query: state.filter.value, scope: state.logs.querySelector(".logs-scope-select").value };
+    }, { boardId, logsId });
+    expect(controls).toEqual({ sameBoard: true, sameLogs: true, sameInput: true, sameFilter: true,
+      draft: "Unsent reconnect draft", selection: [2, 7], query: "retained reconnect filter", scope: "project" });
+    await info.attach(`board-logs-reconnect-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    expect(errors, "zero console/page errors").toEqual([]);
+  } finally {
+    await page.evaluate(() => (window as any).__boardLogsReconnect?.restore());
+  }
+});
 
 test("Board destination updates and runtime hook refresh preserve controls and fence unrelated events", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
@@ -12,6 +98,24 @@ test("Board destination updates and runtime hook refresh preserve controls and f
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   const theme = info.project.name.includes("light") ? "light" : "dark";
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  await page.route("**/ui-state-store.js", async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const anchor = "export function createUiStateStore(";
+    expect(source).toContain(anchor);
+    const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+      export function createUiStateStore(...args) {
+        const store = originalCreateUiStateStore(...args);
+        const update = store.update;
+        store.update = reduce => {
+          update(reduce);
+          const receipt = store.read()?.receipt;
+          if (receipt?.kind?.startsWith("board_")) window.__boardReceipt = receipt;
+        };
+        return store;
+      }`;
+    await route.fulfill({ response, contentType: "text/javascript", body });
+  });
   await gotoLiveGwt(page, base!);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("op:command", { detail: { id: "open-board" } })));
@@ -32,7 +136,7 @@ test("Board destination updates and runtime hook refresh preserve controls and f
     };
     const inject = (detail: any) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
     const receive = () => inject({ kind: "board_entries", id,
-      entries: [{ id: "hook-post", author: "Fixture", body: "Retained entry", created_at: "2026-10-20T00:00:00Z" }], has_more_before: false });
+      entries: [{ id: "hook-post", author: "Fixture", body: "Retained entry", audience: [], created_at: "2026-10-20T00:00:00Z" }], has_more_before: false });
     receive();
     const card = root.querySelector('[data-board-entry-id="hook-post"]');
     const input = root.querySelector(".board-textarea") as HTMLTextAreaElement;
@@ -71,8 +175,23 @@ test("Board destination updates and runtime hook refresh preserve controls and f
       hook({ kind: "coordination_event" });
       const whileLoading = sent.length;
       receive(); hook({ kind: "coordination_event" }); receive();
-      return { destination, batch, ignored, loading, whileLoading, loads: sent.map(event => event.id),
-        sameCard: !!card && card === root.querySelector('[data-board-entry-id="hook-post"]'),
+      const sameCard = !!card && card === root.querySelector('[data-board-entry-id="hook-post"]');
+      const receipt = (window as any).__boardReceipt;
+      const frozen = !!receipt && Object.isFrozen(receipt) && Object.isFrozen(receipt.entries)
+        && Object.isFrozen(receipt.entries[0]) && Object.isFrozen(receipt.entries[0].audience);
+      inject({ kind: "board_history_page", id, entries: [], has_more_before: false });
+      const history = (window as any).__boardReceipt;
+      const historyFrozen = history?.kind === "board_history_page" && Object.isFrozen(history)
+        && Object.isFrozen(history.entries);
+      inject({ kind: "board_error", id, message: "Board receipt recovery" });
+      const error = (window as any).__boardReceipt;
+      const errorShown = root.querySelector(".board-status")!.textContent!.includes("Board receipt recovery")
+        && error?.kind === "board_error" && Object.isFrozen(error);
+      receive();
+      const recovered = !root.querySelector(".board-status")!.textContent!.includes("Board receipt recovery")
+        && root.querySelector('[data-board-entry-id="hook-post"]')?.textContent?.includes("Retained entry");
+      return { frozen, historyFrozen, errorShown, recovered, destination, batch, ignored, loading, whileLoading, loads: sent.map(event => event.id),
+        sameCard,
         sameInput: input === root.querySelector(".board-textarea"), focused: document.activeElement === input,
         draft: input.value, selection: [input.selectionStart, input.selectionEnd] };
     } finally {
@@ -82,7 +201,7 @@ test("Board destination updates and runtime hook refresh preserve controls and f
       chip.replaceChildren = originalReplace;
     }
   }, { id, projectRoot: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! });
-  expect(result).toEqual({ destination: "Slack #shared-49 ⚠", batch: { before: 0, sameBefore: true, frames: 1, after: 1 },
+  expect(result).toEqual({ frozen: true, historyFrozen: true, errorShown: true, recovered: true, destination: "Slack #shared-49 ⚠", batch: { before: 0, sameBefore: true, frames: 1, after: 1 },
     ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
     loads: [id, id], sameCard: true, sameInput: true, focused: true,
     draft: "Unsent draft", selection: [2, 5] });

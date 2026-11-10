@@ -357,14 +357,17 @@ fn terminate_orphan_process_tree(row: &Value, target: &FleetTarget) -> Result<Va
     let start = target
         .started_at
         .ok_or("orphan target requires started_at")?;
-    if pid == std::process::id() || crate::process::is_descendant_of(std::process::id(), pid) {
+    if pid == std::process::id()
+        || crate::process::is_descendant_of(std::process::id(), pid)
+            .map_err(|error| format!("PM process ancestry unavailable: {error}"))?
+    {
         return Err("the calling PM process tree is protected".into());
     }
     let expected_cwd = row["process"]["cwd"]
         .as_str()
         .ok_or("orphan cwd unavailable")?;
     let root = BoundOrphanProcess::capture(pid, start)?;
-    let mut system = System::new();
+    let mut system = System::new().map_err(|error| error.to_string())?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -408,7 +411,7 @@ fn terminate_orphan_process_tree(row: &Value, target: &FleetTarget) -> Result<Va
             let snapshot = system.process(sysinfo::Pid::from_u32(child))?;
             if crate::process::host_process_start_epoch_secs(child) != Some(snapshot.start_time())
                 || crate::process::host_process_start_time(pid) != Some(start)
-                || !crate::process::is_descendant_of(child, pid)
+                || !crate::process::is_descendant_of(child, pid).unwrap_or(false)
             {
                 return None;
             }
@@ -423,7 +426,7 @@ fn terminate_orphan_process_tree(row: &Value, target: &FleetTarget) -> Result<Va
         }
         if *child != pid
             && (crate::process::host_process_start_time(pid) != Some(start)
-                || !crate::process::is_descendant_of(*child, pid))
+                || !crate::process::is_descendant_of(*child, pid).unwrap_or(false))
         {
             failures.push(*child);
             continue;
@@ -535,19 +538,37 @@ mod tests {
         session.id = "orphan-session".into();
         session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
         let executable = worktree.join("codex");
-        std::fs::copy("/bin/cat", &executable).unwrap();
-        #[cfg(target_os = "macos")]
-        {
-            // Relocated system binaries retain a platform signature that can
-            // make macOS kill the fixture before the cleanup under test.
-            let signed = resolved_command(ProcessPlanRequest::new("/usr/bin/codesign"))
-                .unwrap()
-                .args(["--force", "--sign", "-"])
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(signed.status.success(), "{signed:?}");
-        }
+        // Renamed system tools can dispatch by their kernel executable path.
+        // Compile the required handshake instead of depending on that behavior.
+        let source = worktree.join("orphan_fixture.rs");
+        std::fs::write(
+            &source,
+            r#"use std::io::{self, Read, Write};
+fn main() {
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    let mut ready = [0; 6];
+    input.read_exact(&mut ready).unwrap();
+    output.write_all(&ready).unwrap();
+    output.flush().unwrap();
+    io::copy(&mut input, &mut io::sink()).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        let compiled = resolved_command(ProcessPlanRequest::new("rustc"))
+            .unwrap()
+            .current_dir(worktree)
+            .arg("--edition=2021")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "compile orphan fixture: {compiled:?}"
+        );
         let mut child = OwnedChild(
             resolved_command(ProcessPlanRequest::new(&executable))
                 .unwrap()

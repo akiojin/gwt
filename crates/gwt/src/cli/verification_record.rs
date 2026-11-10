@@ -1256,6 +1256,35 @@ pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &st
             .is_ok_and(|(commits, _)| commits.is_empty())
 }
 
+/// A merged owner PR's receipt is inherited by a later verified HEAD when the
+/// PR head reaches that HEAD and every product commit between them is already
+/// contained in the configured base (`origin/<base>`): other owners' delivered
+/// work on a fresh startup HEAD is not undelivered source (#6893). Product
+/// commits that only the work branch holds still refuse the inheritance.
+pub(crate) fn inherits_delivered_receipt(
+    worktree: &Path,
+    merged_head: &str,
+    verified: &str,
+    base_ref_name: &str,
+) -> bool {
+    if base_ref_name.trim().is_empty() {
+        return false;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", merged_head, verified])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && super::pr::head_check::product_changes_since(
+            &worktree,
+            merged_head,
+            verified,
+            &format!("origin/{}", base_ref_name.trim()),
+        )
+        .is_ok_and(|(commits, _)| commits.is_empty())
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],
@@ -2912,6 +2941,7 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
+            "--ignored=traditional",
             "--",
             WORK_EVENT_LOG_RELATIVE,
             WORK_EVENT_STORE_RELATIVE,
@@ -2930,6 +2960,19 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             return Err(());
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
+        if index == b'!' && worktree_state == b'!' {
+            let path = &bytes[3..];
+            if classify_path(path) == DeliveryPath::WorkEventShard
+                && !is_certified_pr_delivery_event(worktree, path)
+            {
+                dirty.push(WorkEventDirtyPath {
+                    path: line[3..].to_string(),
+                    state: WorkEventPathState::Untracked,
+                    basis: WorkEventDirtyBasis::GwtIgnoredShard,
+                });
+            }
+            continue;
+        }
         let mut push = |state| {
             dirty.push(WorkEventDirtyPath {
                 path: line[3..].to_string(),
@@ -2954,37 +2997,6 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             push(WorkEventPathState::Unstaged);
         }
     }
-    let ignored = gwt_core::process::hidden_command("git")
-        .args([
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--",
-            WORK_EVENT_STORE_RELATIVE,
-        ])
-        .current_dir(worktree)
-        .output()
-        .map_err(|_| ())?;
-    if !ignored.status.success() {
-        return Err(());
-    }
-    dirty.extend(
-        ignored
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .filter(|path| {
-                classify_path(path) == DeliveryPath::WorkEventShard
-                    && !is_certified_pr_delivery_event(worktree, path)
-            })
-            .map(|path| WorkEventDirtyPath {
-                path: String::from_utf8_lossy(path).into_owned(),
-                state: WorkEventPathState::Untracked,
-                basis: WorkEventDirtyBasis::GwtIgnoredShard,
-            }),
-    );
     Ok(dirty)
 }
 
@@ -3414,26 +3426,51 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// Cargo's test-only self dependency can overwrite the operational gwtd with
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
-fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
+fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Result<Vec<String>, String> {
     // The verification driver is pinned outside Cargo's artifacts on Windows,
     // so restoring the operational executable is safe there too (Issue #5480).
-    if !commands.iter().any(|command| {
-        split_command_line(command)
+    if !is_gwt_checkout(worktree) {
+        return Ok(Vec::new());
+    }
+    let mut restorations = Vec::new();
+    for command in commands {
+        let tests = split_command_line(command)
             .and_then(take_env_assignments)
             .is_ok_and(|(_, args)| {
                 args.first().map(String::as_str) == Some("cargo")
                     && (args.get(1).map(String::as_str) == Some("test")
                         || (args.get(1).map(String::as_str) == Some("nextest")
                             && args.get(2).map(String::as_str) == Some("run")))
-            })
-    }) {
-        return None;
+            });
+        if tests {
+            if let Some(restoration) = gwtd_artifact_restore_command(worktree, command)? {
+                if !restorations.contains(&restoration) {
+                    restorations.push(restoration);
+                }
+            }
+        }
     }
-    gwtd_artifact_restore_command(worktree)
+    Ok(restorations)
 }
 
-fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
-    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd --target-dir target")
+fn gwtd_artifact_restore_command(worktree: &Path, command: &str) -> Result<Option<String>, String> {
+    if !is_gwt_checkout(worktree) {
+        return Ok(None);
+    }
+    let Some(target) =
+        crate::cli::verification_lease::effective_cargo_target(worktree, command, false)?
+    else {
+        return Ok(None);
+    };
+    let target = target
+        .to_str()
+        .ok_or("gwtd artifact restoration target is not UTF-8")?;
+    // Pin the resolved target even when recovery scrubs CARGO_TARGET_DIR.
+    // The runner's splitter supports quoted fragments, not backslash escapes.
+    Ok(Some(format!(
+        "cargo build -p gwt --bin gwtd --target-dir '{}'",
+        target.replace('\'', "'\"'\"'")
+    )))
 }
 
 /// Identify this repository without comparing another project's HEAD to gwt's.
@@ -3484,23 +3521,30 @@ pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
 #[cfg(all(test, not(windows)))]
 fn restore_gwtd_after_deferral(
     worktree: &Path,
+    command: &str,
     host: &VerificationHost,
     artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
 ) -> String {
-    restore_gwtd_after_deferral_cancellable(worktree, host, artifacts, None)
+    restore_gwtd_after_deferral_cancellable(worktree, command, host, artifacts, None)
 }
 
 fn restore_gwtd_after_deferral_cancellable(
     worktree: &Path,
+    command: &str,
     host: &VerificationHost,
     artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
     check: Option<&CancellationCheck<'_>>,
 ) -> String {
-    let Some(command) = gwtd_artifact_restore_command(worktree) else {
-        return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
+    let command = match gwtd_artifact_restore_command(worktree, command) {
+        Ok(Some(command)) => command,
+        Ok(None) => {
+            return "gwtd artifact restoration: skipped (no eligible gwt artifact target)"
+                .to_string();
+        }
+        Err(error) => return format!("gwtd artifact restoration: failed: {error}"),
     };
     match execute_command_with_artifact_guard_cancellable(
-        worktree, command, true, None, host, None, artifacts, check,
+        worktree, &command, true, None, host, None, artifacts, check,
     ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
@@ -4607,14 +4651,19 @@ where
             .to_string()
             .into());
     }
-    // Keep the operational artifact restore as the final matrix occurrence.
+    // Keep operational artifact restoration at the end of the matrix.
     let mut effective_commands = commands.to_vec();
-    let restoration = gwtd_artifact_restoration(worktree, commands);
-    if let Some(restoration) = restoration {
-        effective_commands.push(restoration.to_string());
+    let restoration_start = effective_commands.len();
+    let mut restoration_by_command = Vec::new();
+    for command in commands {
+        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
+            if !effective_commands[restoration_start..].contains(&restoration) {
+                effective_commands.push(restoration.clone());
+            }
+            restoration_by_command.push((command.clone(), restoration));
+        }
     }
     let commands = effective_commands.as_slice();
-    let restoration_index = restoration.map(|_| commands.len() - 1);
     let request = authority.map(|authority| {
         continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
     });
@@ -4744,7 +4793,7 @@ where
         );
     }
     let mut continuation = request;
-    let mut results = Vec::new();
+    let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
     if let Some(previous) = &predecessor {
         let context = continuation.as_mut().expect("resumption has exact inputs");
@@ -4931,7 +4980,12 @@ where
             attempt.ensure_active().map_err(|error| error.to_string())?;
         }
         let command = &commands[index];
-        if failed_raw.is_some() && Some(index) != restoration_index {
+        if failed_raw.is_some()
+            && (index < restoration_start
+                || !restoration_by_command.iter().any(|(source, restoration)| {
+                    restoration == command && results.iter().any(|result| &result.command == source)
+                }))
+        {
             skipped_after_failure.push(command.clone());
             continue;
         }
@@ -5166,7 +5220,7 @@ where
             });
         if exit_code != 0
             && failed_raw.is_none()
-            && Some(index) != restoration_index
+            && index < restoration_start
             && !quarantine_candidate
         {
             failed_raw = Some(command.clone());
@@ -6132,6 +6186,18 @@ pub(crate) fn caller_has_verification_authority(worktree: &Path, session_id: &st
     snapshot_verification_caller_authority(worktree, session_id).is_ok()
 }
 
+/// Doctor needs positive bound evidence; the native verification gate also
+/// accepts legacy unbound callers. Reuse its validation without changing it.
+pub(crate) fn caller_has_current_bound_verification_authority(
+    worktree: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+) -> bool {
+    snapshot_verification_caller_authority(worktree, &expected.session_id).is_ok_and(|authority| {
+        authority.execution_binding.is_some()
+            && authority.session_binding.as_ref() == Some(expected)
+    })
+}
+
 fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
@@ -6282,6 +6348,7 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
     if requests.is_empty() {
         return Ok(());
     }
+    let recovery_source = crate::process::windows_recovery::capture_source();
     gwt_agent::validate_session_id_path_component(session_id).map_err(|_| denied())?;
     let path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
         .map(PathBuf::from)
@@ -6318,15 +6385,23 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
         || runtime.host_started_at != crate::process::host_process_start_time(host_pid)
         || runtime.child_started_at.is_none()
         || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
-        || (child_pid != std::process::id()
-            && !crate::process::is_descendant_of(std::process::id(), child_pid))
+        || !crate::process::checked_runtime_descendant_of(
+            std::process::id(),
+            child_pid,
+            recovery_source,
+        )
+        .unwrap_or(false)
         || requests.iter().any(|request| {
             // A writable sidecar cannot revive the stopped OS process or
             // its callers. The child can outlive its original GUI host.
             crate::process::host_process_start_time(request.child_pid)
                 == Some(request.child_started_at)
-                && (request.child_pid == std::process::id()
-                    || crate::process::is_descendant_of(std::process::id(), request.child_pid))
+                && crate::process::checked_runtime_descendant_of(
+                    std::process::id(),
+                    request.child_pid,
+                    recovery_source,
+                )
+                .unwrap_or(true)
         })
     {
         return Err(denied());
@@ -7300,6 +7375,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                             let check = || attempt.cancelled().map_err(|error| error.to_string());
                             restore_gwtd_after_deferral_cancellable(
                                 &worktree,
+                                command,
                                 host,
                                 artifacts,
                                 Some(&check),
@@ -7618,7 +7694,8 @@ pub(crate) mod tests {
                         &[],
                     )
                     .unwrap();
-                let target = worktree.path().join("target");
+                let target = worktree.path().join("isolated target");
+                let _target = ScopedEnvVar::set("CARGO_TARGET_DIR", &target);
                 let independent = worktree.path().join("independent-target");
                 let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
                 let recovery = |artifacts: Option<&lease::BuildArtifactGuard>| {
@@ -7647,6 +7724,7 @@ pub(crate) mod tests {
                     let other = lease::lock_build_artifacts(&independent).unwrap();
                     let restored = restore_gwtd_after_deferral(
                         worktree.path(),
+                        "cargo test --workspace",
                         &VerificationHost::Inherit,
                         artifacts,
                     );
@@ -7659,13 +7737,14 @@ pub(crate) mod tests {
                 let error = lease::admission::admit(
                     &mut env,
                     worktree.path(),
-                    Some("cargo test --workspace --target-dir target"),
+                    Some("cargo test --workspace"),
                     Duration::ZERO,
                     recovery,
                 )
                 .unwrap_err();
                 assert!(error.to_string().contains("deferred"), "{error}");
                 assert!(target.join("debug/gwtd").is_file());
+                assert!(!worktree.path().join("target").exists());
                 assert!(lease::try_lock_build_artifacts(&target).unwrap().is_some());
             },
         );
@@ -9426,14 +9505,22 @@ mod tests {
 
     #[test]
     fn nextest_restores_gwtd_only_in_the_gwt_workspace() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().unwrap();
+        // Cargo metadata resolves the temporary-root symlink, unlike absolute overrides.
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let commands = ["cargo nextest run -p gwt --lib".to_string()];
         fs::write(
             dir.path().join("Cargo.toml"),
             "[package]\nname = \"unrelated\"\nversion = \"0.0.0\"\n",
         )
         .unwrap();
-        assert_eq!(gwtd_artifact_restoration(dir.path(), &commands), None);
+        assert!(gwtd_artifact_restoration(dir.path(), &commands)
+            .unwrap()
+            .is_empty());
 
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(&package).unwrap();
@@ -9449,30 +9536,52 @@ mod tests {
              [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
         )
         .unwrap();
-        assert_eq!(
-            gwtd_artifact_restoration(dir.path(), &commands),
-            Some("cargo build -p gwt --bin gwtd --target-dir target")
-        );
-        assert_eq!(
-            gwtd_artifact_restoration(
-                dir.path(),
-                &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
-            ),
-            Some("cargo build -p gwt --bin gwtd --target-dir target")
-        );
-        assert_eq!(
-            gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
-            None
-        );
+        let targets = |commands: &[String]| {
+            gwtd_artifact_restoration(dir.path(), commands)
+                .unwrap()
+                .iter()
+                .map(|restore| {
+                    crate::cli::verification_lease::effective_cargo_target(
+                        dir.path(),
+                        restore,
+                        true,
+                    )
+                    .unwrap()
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&commands), vec![expected_root.join("target")]);
+        let ambient = dir.path().join("ambient target");
+        let _ambient = ScopedEnvVar::set("CARGO_TARGET_DIR", &ambient);
+        assert_eq!(targets(&[
+            commands[0].clone(),
+            r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string(),
+            r#"CARGO_TARGET_DIR=ignored cargo test -p gwt --lib --target-dir "explicit target's""#.to_string(),
+            "CARGO_TARGET_DIR='inline target' cargo test -p gwt --lib".to_string(),
+        ]), vec![ambient, expected_root.join("explicit target's"), expected_root.join("inline target")]);
+        assert!(targets(&["cargo nextest list".to_string()]).is_empty());
+        assert!(gwtd_artifact_restoration(
+            dir.path(),
+            &["cargo test --manifest-path missing/Cargo.toml".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
-    fn default_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
+    fn isolated_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
-        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", dir.path().join("ambient-target"));
+        let target = dir.path().join("isolated target");
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", &target);
+        let candidate = dir
+            .path()
+            .join("target/debug")
+            .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX));
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, "preserved candidate").unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::create_dir_all(package.join("tests")).unwrap();
@@ -9517,18 +9626,34 @@ fn default_integration_test_builds_a_guarded_binary() {
             dir.path(),
             "sess-artifact-default",
             &[
-                "cargo clippy -p gwt --all-features --all-targets --target-dir target -- -D warnings".to_string(),
-                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state --target-dir target"#.to_string(),
-                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --target-dir target --profile gwt-verify --retries 0"#.to_string(),
+                "cargo clippy -p gwt --all-features --all-targets -- -D warnings".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state"#.to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --profile gwt-verify --retries 0"#.to_string(),
             ],
         )
         .unwrap();
 
         assert!(record.all_passed, "{transcript}");
         assert_eq!(record.commands.len(), 4, "{transcript}");
+        assert!(
+            fs::read(&candidate).unwrap() == b"preserved candidate",
+            "candidate artifact was overwritten"
+        );
+        let restored = restore_gwtd_after_deferral_cancellable(
+            dir.path(),
+            "cargo test -p gwt --test artifact_state",
+            &VerificationHost::Inherit,
+            None,
+            None,
+        );
+        assert!(restored.contains("restoration: restored"), "{restored}");
+        assert!(
+            fs::read(&candidate).unwrap() == b"preserved candidate",
+            "deferred recovery overwrote candidate"
+        );
         let output = gwt_core::process::hidden_command(
-            dir.path()
-                .join("target/debug")
+            target
+                .join("debug")
                 .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX)),
         )
         .output()
@@ -9537,14 +9662,22 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert_eq!(
             (
                 String::from_utf8(output.stdout).unwrap().trim(),
-                record.commands[2].nextest.as_ref().map(|evidence| evidence.total_tests)
+                record.commands[2]
+                    .nextest
+                    .as_ref()
+                    .map(|evidence| evidence.total_tests)
             ),
             ("operational", Some(1)),
-            "verification must restore the fixed artifact path and retain prefixed Nextest evidence"
+            "verification must restore the attempt's artifact and retain prefixed Nextest evidence"
         );
         assert_eq!(
-            record.commands[3].command,
-            "cargo build -p gwt --bin gwtd --target-dir target"
+            crate::cli::verification_lease::effective_cargo_target(
+                dir.path(),
+                &record.commands[3].command,
+                false
+            )
+            .unwrap(),
+            Some(target)
         );
     }
 
@@ -9555,6 +9688,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
         fs::write(
@@ -9582,14 +9717,24 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
         assert_eq!(
-            record.commands[1].command,
-            "cargo build -p gwt --bin gwtd --target-dir target"
+            crate::cli::verification_lease::effective_cargo_target(
+                dir.path(),
+                &record.commands[1].command,
+                true
+            )
+            .unwrap(),
+            Some(expected_root.join("target"))
         );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
-        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit, None);
+        let recovery = restore_gwtd_after_deferral(
+            dir.path(),
+            "cargo test -p gwt --lib",
+            &VerificationHost::Inherit,
+            None,
+        );
         assert!(
             recovery.contains("gwtd artifact restoration: failed"),
             "{recovery}"
@@ -9603,13 +9748,20 @@ fn default_integration_test_builds_a_guarded_binary() {
     }
 
     // Issue #5094 AC-2: fail-fast still restores the operational gwtd.
-    #[cfg(not(windows))]
     #[test]
     fn raw_failure_still_runs_gwtd_artifact_restoration() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        let expected_root = dunce::canonicalize(dir.path()).unwrap();
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        let candidate = dir
+            .path()
+            .join("target/debug")
+            .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX));
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, "preserved candidate").unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::write(
@@ -9627,7 +9779,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
         fs::write(
             package.join("src/lib.rs"),
-            "#[test] fn fails() { panic!() }\n",
+            "#[test] fn passes() {}\n#[test] fn fails() { panic!() }\n",
         )
         .unwrap();
 
@@ -9635,21 +9787,69 @@ fn default_integration_test_builds_a_guarded_binary() {
             dir.path(),
             "sess-artifact-fail",
             &[
+                "cargo test -p gwt --lib passes --target-dir 'first target'".to_string(),
+                "cargo test -p gwt --lib fails --target-dir 'isolated target'".to_string(),
                 "cargo test -p gwt --lib".to_string(),
                 "git --version".to_string(),
             ],
         )
         .unwrap();
 
-        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
-        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
+        assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
+        assert_eq!(record.commands.len(), 4, "{transcript}");
+        for (result, target) in record.commands[2..]
+            .iter()
+            .zip(["first target", "isolated target"])
+        {
+            assert_eq!(
+                crate::cli::verification_lease::effective_cargo_target(
+                    dir.path(),
+                    &result.command,
+                    true
+                )
+                .unwrap(),
+                Some(expected_root.join(target))
+            );
+            assert_eq!(result.exit_code, 0, "{transcript}");
+        }
+        assert!(!record.all_passed, "{transcript}");
         assert_eq!(
-            record.commands[1].command,
-            "cargo build -p gwt --bin gwtd --target-dir target"
+            &record.skipped_after_failure[..2],
+            &["cargo test -p gwt --lib", "git --version"]
         );
+        assert!(
+            fs::read(&candidate).unwrap() == b"preserved candidate",
+            "unused target candidate was overwritten"
+        );
+
+        // A command-specific config may become unreadable after its test.
+        // Restoration must reuse its target without re-reading that config.
+        let config = dir.path().join("command-config.toml");
+        fs::write(&config, "").unwrap();
+        fs::write(
+            package.join("src/lib.rs"),
+            format!(
+                "#[test] fn corrupts_config() {{ std::fs::write({config:?}, \"[\").unwrap(); panic!(); }}\n"
+            ),
+        )
+        .unwrap();
+        let command = "cargo test -p gwt --lib corrupts_config --config command-config.toml --target-dir 'failed target'".to_string();
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-invalid-config",
+            std::slice::from_ref(&command),
+        )
+        .unwrap();
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
-        assert_eq!(record.skipped_after_failure, vec!["git --version"]);
+        assert!(gwtd_artifact_restoration(dir.path(), &[command]).is_err());
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().record_id,
+            record.record_id
+        );
     }
 
     // Re-entered in child processes so this regression also runs on Windows.
@@ -13376,7 +13576,7 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         // The actual caller is beneath this still-live OS parent. Retargeting
         // the sidecar child to the caller cannot escape its revoked ancestry.
-        let mut processes = sysinfo::System::new();
+        let mut processes = sysinfo::System::new().expect("capture caller ancestry");
         let caller = sysinfo::Pid::from_u32(pid);
         processes.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[caller]),
@@ -13389,7 +13589,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .unwrap()
             .as_u32();
         let parent_started = crate::process::host_process_start_time(parent_pid).unwrap();
-        assert!(crate::process::is_descendant_of(pid, parent_pid));
+        assert!(crate::process::is_descendant_of(pid, parent_pid).unwrap());
         prefs.monitor_runtime_stop_requests[0].child_pid = parent_pid;
         prefs.monitor_runtime_stop_requests[0].child_started_at = parent_started;
         // The revoked child remains authoritative after its old host is gone.
@@ -13746,6 +13946,14 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        // This recovery test needs successful admission in its private HOME,
+        // independent of the host's free disk space.
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let owner = generation_scoped_owner();
 
         let predecessor = initialize_generation_scoped_execution(dir.path(), "session-predecessor");
@@ -13810,7 +14018,11 @@ fn default_integration_test_builds_a_guarded_binary() {
         .unwrap();
         assert_eq!(code, 0, "{output}");
         let completed = load(dir.path()).unwrap().unwrap();
-        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
+        assert_eq!(
+            completed.execution_binding.as_ref(),
+            Some(&successor),
+            "{output}"
+        );
         assert!(completed.all_passed);
         assert_eq!(
             evaluate_evidence(dir.path(), "session-successor", Some(2359)),
@@ -15537,6 +15749,60 @@ fn default_integration_test_builds_a_guarded_binary() {
             !relative.contains('\\'),
             "Git path must use slash separators"
         );
+    }
+
+    #[test]
+    fn work_event_dirty_paths_reads_ignored_shards_with_one_git_process() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::write(fixture.repo.join(".git/info/exclude"), ".gwt/\n").unwrap();
+        fixture.write_event_shard("ignored-first", b"{}\n");
+        fixture.write_event_shard("ignored-second", b"{}\n");
+        fixture.write_event_log("ignored-legacy");
+        fs::write(
+            fixture
+                .repo
+                .join(WORK_EVENT_STORE_RELATIVE)
+                .join("invalid.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let shard = fixture.event_shard_path("ignored-first");
+        fs::write(
+            shard.with_file_name(format!(
+                ".{}.create-temp",
+                shard.file_name().unwrap().to_str().unwrap()
+            )),
+            b"{}\n",
+        )
+        .unwrap();
+        let trace_path = fixture.repo.join("git-trace.log");
+        let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+
+        let mut dirty = work_event_dirty_paths(&fixture.repo).unwrap();
+        dirty.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut expected = ["ignored-first", "ignored-second"].map(|id| WorkEventDirtyPath {
+            path: pending_work_event_shard_relative_path(&fixture.repo, id).unwrap(),
+            state: WorkEventPathState::Untracked,
+            basis: WorkEventDirtyBasis::GwtIgnoredShard,
+        });
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(dirty, expected);
+        let trace = fs::read_to_string(trace_path).unwrap();
+        let repo = dunce::canonicalize(&fixture.repo).unwrap();
+        let repositories = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["event"] == "def_repo"
+                    && event["worktree"]
+                        .as_str()
+                        .is_some_and(|path| dunce::canonicalize(path).ok().as_ref() == Some(&repo))
+            })
+            .count();
+        assert_eq!(repositories, 1, "one fresh Git operation: {trace}");
     }
 
     #[test]

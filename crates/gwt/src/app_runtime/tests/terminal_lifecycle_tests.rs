@@ -2069,7 +2069,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     let _child = KillOnDrop(
         gwt_core::process::hidden_command("sh")
             .arg("-c")
-            .arg("sleep 30")
+            .arg("exec sleep 30")
             .current_dir(&repo)
             .spawn()
             .expect("spawn live cwd process"),
@@ -2880,21 +2880,20 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
         &[WindowPreset::Shell],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     let shell_id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &shell_id);
-    runtime
-        .runtimes
-        .get(&shell_id)
-        .expect("runtime")
-        .pane
-        .lock()
-        .expect("pane lock")
-        .process_bytes(b"hello-repair");
+    process_test_owner_output(&mut runtime, &shell_id, b"hello-repair");
 
-    let events = runtime.client_pane_snapshot_repair_events(
+    let mut events = runtime.client_pane_snapshot_repair_events(
         "client-9",
         &[shell_id.clone(), "tab-1::missing-pane".to_string()],
     );
+    events.extend(drain_owner_snapshot_completions(&mut runtime));
+    let events = events
+        .into_iter()
+        .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
+        .collect::<Vec<_>>();
 
     assert_eq!(events.len(), 1, "unknown panes produce no repair events");
     assert!(
@@ -2914,6 +2913,7 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
         }
         other => panic!("expected TerminalSnapshot, got {other:?}"),
     }
+    close_test_owner_runtime(&mut runtime, &shell_id);
 }
 
 // Issue #4095 AC-1 / AC-2: a snapshot serialized while the PTY reader is ahead
@@ -2945,10 +2945,14 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         .next()
         .expect("agent window");
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     insert_test_pane_runtime(&mut runtime, &window_id);
     let (incarnation, pane) = {
         let window_runtime = runtime.runtimes.get(&window_id).expect("runtime");
-        (window_runtime.incarnation, Arc::clone(&window_runtime.pane))
+        (
+            window_runtime.incarnation,
+            owner_runtime_probe(&runtime, &window_id).pane,
+        )
     };
 
     let repair_queue = ClientQueue::default();
@@ -2966,13 +2970,20 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         // The event loop lags behind the reader for chunks 8..=19.
         let reader_ahead = (8..=19).contains(&index);
         if index == 19 {
-            for event in runtime
-                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id))
-            {
-                repair_queue.enqueue(&prepare_outbound_event(&event));
-            }
-            for event in runtime.frontend_sync_events("client-2") {
-                resync_queue.enqueue(&prepare_outbound_event(&event));
+            let mut events = runtime
+                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id));
+            events.extend(runtime.frontend_sync_events("client-2"));
+            events.extend(drain_owner_snapshot_completions(&mut runtime));
+            for event in events {
+                match &event.target {
+                    DispatchTarget::Client(client) if client == "client-1" => {
+                        repair_queue.enqueue(&prepare_outbound_event(&event))
+                    }
+                    DispatchTarget::Client(client) if client == "client-2" => {
+                        resync_queue.enqueue(&prepare_outbound_event(&event))
+                    }
+                    _ => false,
+                };
             }
             resync_connected = true;
         }
@@ -3028,8 +3039,8 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
         let target_root = case_root.join("target");
         fs::create_dir_all(&drain_root).unwrap();
         fs::create_dir_all(&target_root).unwrap();
-        init_repo(&drain_root);
-        init_repo(&target_root);
+        init_repo_with_initial_commit(&drain_root);
+        init_repo_with_initial_commit(&target_root);
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
         let tabs = vec![
             sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
@@ -3047,14 +3058,14 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
         };
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
         let mut runtime = sample_runtime(&case_root, tabs, Some("target"));
+        persist_lifecycle_host_catalog(&runtime);
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .branch("work/issue-5351-test")
             .build();
-        runtime
-            .spawn_agent_window("target", config, None)
-            .expect("an applied drain must not hold another project's launch");
+        let id = spawn_owner_codex_fixture(&mut runtime, "target", config, None);
         prefs.update_drain = None;
         assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+        close_test_owner_runtime(&mut runtime, &id);
 
         // Next-scan reconciliation also works without a resume marker or daemon.
         prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
@@ -3074,6 +3085,26 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
     }
 }
 
+fn persist_lifecycle_host_catalog(runtime: &AppRuntime) {
+    // The owner discovers cross-project holds through the canonical UI catalog.
+    // This is tab persistence, never a replacement Agent Session registry.
+    let state = gwt::PersistedSessionState {
+        tabs: runtime
+            .tabs
+            .iter()
+            .map(|tab| gwt::PersistedSessionTabState {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                project_root: tab.project_root.clone(),
+                kind: tab.kind,
+            })
+            .collect(),
+        legacy_active_tab_id: None,
+        recent_projects: Vec::new(),
+    };
+    gwt::save_session_state(&gwt_core::paths::gwt_session_state_path(), &state).unwrap();
+}
+
 fn stage_host_drain_update(temp: &Path, version: &str) {
     let payload = temp.join("staged-gwt");
     fs::write(&payload, b"staged payload").unwrap();
@@ -3089,6 +3120,198 @@ fn stage_host_drain_update(temp: &Path, version: &str) {
 }
 
 #[test]
+fn manual_successor_early_admission_cancel_requires_actual_cleanup_proof() {
+    use gwt::cli::execution_state::{self as execution, ContinuationAttemptStatus as Attempt};
+    use gwt::project_runtime::{events::OwnerCommand, test_support::OwnerLaunchStage};
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("manual-early-admission");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "work/issue-2359"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let (authority, choice) = owner_fresh_launch_seed(
+        &repo,
+        &operation_id,
+        execution::ExecutionOwnerKind::Issue,
+        2359,
+        false,
+    );
+    let predecessor_binding = choice.expected_binding.clone();
+    let ledger = execution::load_generation_ledger(&repo, authority)
+        .unwrap()
+        .unwrap();
+    let predecessor_generation = ledger.current_generation().unwrap().identity.clone();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let predecessor_path = sessions.join(format!(
+        "{}.toml",
+        choice.expected_predecessor.as_ref().unwrap().session_id
+    ));
+    let predecessor_before = fs::read(&predecessor_path).unwrap();
+    let work_before = tracked_workspace_work_store_snapshot(&repo);
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let owner = executor.block_on(production_owner_fixture(&repo));
+    let command = owner_fresh_agent_command(&owner, &repo, choice, None);
+    let manual = matches!(&command, OwnerCommand::LaunchAgent { metadata, config, .. }
+        if metadata.launch_feedback_context.is_none() && metadata.manual_successor.is_some()
+            && !config.suppress_execution_control);
+    let immutable_request = serde_json::to_value(&command).unwrap();
+    // Freeze the normal Manual request before introducing this private hold.
+    let observed: Result<serde_json::Value, String> = executor.block_on(async {
+        if !manual {
+            return Err("not the ordinary Manual execution-control route".into());
+        }
+        stage_host_drain_update(temp.path(), "99.0.0");
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|e| e.to_string())?;
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).map_err(|e| e.to_string())?;
+        let checkpoint = owner.pause_next_agent_launch_at(OwnerLaunchStage::MaterializedBeforeInstall).await?;
+        let client = owner.client();
+        let mut launch = tokio::spawn(async move { client.command(command).await });
+        let mut early = None;
+        let captured = tokio::select! {
+            result = &mut launch => { early = Some(result); None },
+            // test-hygiene: allow-wall-clock-deadline hang guard for the actual early-admission checkpoint
+            result = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait()) => result.ok(),
+        };
+        // No assertions while paused: preserve handles and release/join on Err too.
+        let premise: Result<_, String> = (|| {
+            let captured = captured.as_ref().ok_or("missing early-admission checkpoint")?;
+            if captured.operation_id != operation_id || !captured.current.load(Ordering::Acquire)
+                || captured.session.is_some() || captured.session_id.is_some()
+                || captured.pty.is_some() || captured.pending_fresh_execution.is_some() {
+                return Err("checkpoint is not current and unmaterialized".into());
+            }
+            let prepared = execution::continuation_attempt_for_operation(&repo, authority, &operation_id)
+                .map_err(|e| e.to_string())?.ok_or("no actual preparation")?;
+            let candidate = &prepared.request.initial_session_id;
+            let recovery_path = gwt::session_launch::durable_launch_recovery_path(&sessions, candidate)?;
+            let recovery: gwt::session_launch::recovery::DurableLaunchRecoveryRecord = serde_json::from_slice(
+                &fs::read(&recovery_path).map_err(|e| e.to_string())?,
+            ).map_err(|e| e.to_string())?;
+            let files = [
+                recovery_path,
+                sessions.join(format!("{candidate}.toml")),
+                gwt_agent::runtime_state_path(&sessions, candidate),
+            ];
+            if prepared.status != Attempt::Prepared || prepared.request.operation_id != operation_id
+                || prepared.predecessor != predecessor_generation || recovery.session_id != *candidate
+                || recovery.owner()? != authority || !matches!(&recovery.kind,
+                    gwt::session_launch::recovery::DurableLaunchRecoveryKind::FreshSuccessor { operation_id: known } if known == &operation_id)
+                || !files[1..].iter().all(|p| fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)) {
+                return Err("exact Prepared/recovery/no-Session premise is absent".into());
+            }
+            Ok((prepared, files, recovery))
+        })();
+        let mut cancel = None;
+        let mut revoked = false;
+        if let (Ok(_), Some(captured)) = (&premise, captured.as_ref()) {
+            let client = owner.client();
+            let request = OwnerCommand::PendingCancelExact {
+                id: captured.id.clone(),
+                operation_id: captured.operation_id.clone(),
+                expected_request: immutable_request.clone(),
+            };
+            cancel = Some(tokio::spawn(async move { client.command(request).await }));
+            // test-hygiene: allow-wall-clock-deadline hang guard for actual exact cancellation admission while paused
+            revoked = tokio::time::timeout(Duration::from_secs(30), async {
+                while captured.current.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.is_ok();
+        }
+        checkpoint.release();
+        let launch = match early {
+            Some(result) => result,
+            None => launch.await,
+        };
+        let cancel = match cancel {
+            Some(cancel) => Some(cancel.await),
+            None => None,
+        };
+        let (prepared, files, recovery) = premise?;
+        let launch = launch.map_err(|e| e.to_string())?;
+        let cancel = cancel.ok_or("cancel not started")?.map_err(|e| e.to_string())?;
+        let after = execution::continuation_attempt_for_operation(&repo, authority, &operation_id)
+            .map_err(|e| e.to_string())?.ok_or("unknown attempt after worker")?;
+        let absent = files.iter().map(|p| match fs::symlink_metadata(p) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e.to_string()),
+        }).collect::<Result<Vec<_>, _>>()?;
+        let recovery_after = if absent[0] {
+            None
+        } else {
+            Some(serde_json::from_slice::<gwt::session_launch::recovery::DurableLaunchRecoveryRecord>(
+                &fs::read(&files[0]).map_err(|e| e.to_string())?,
+            ).map_err(|e| e.to_string())?)
+        };
+        Ok(serde_json::json!({
+            "launch_result": if launch.is_ok() { "ok" } else { "err" },
+            "cancel_result": if cancel.is_ok() { "ok" } else { "err" },
+            "cancel_reconciliation_error": cancel.as_ref().err().is_some_and(|detail|
+                detail == "cancelled launch cleanup requires exact reconciliation"),
+            "revoked": revoked, "host_hold_error": launch.as_ref().err().is_some_and(|detail|
+                detail.contains("Host update_drain") && detail.contains("release.update.defer {\"version\":\"99.0.0\"}")),
+            "cancelled": cancel.as_ref().ok().and_then(|receipt| receipt["cancelled"].as_bool()),
+            "cancel_exact": cancel.as_ref().is_ok_and(|receipt| receipt["id"] == immutable_request["id"]
+                && receipt["operation_id"].as_str() == Some(operation_id.as_str())),
+            "attempt_exact": after.request == prepared.request, "attempt_status": after.status,
+            "attempt_unchanged": after == prepared, "recovery_unchanged": recovery_after.as_ref() == Some(&recovery),
+            "recovery_absent": absent[0], "session_absent": absent[1], "sidecar_absent": absent[2],
+            "predecessor_session_unchanged": fs::read(&predecessor_path).map_err(|e| e.to_string())? == predecessor_before,
+            "predecessor_binding_unchanged": execution::current_execution_binding(&repo, authority).map_err(|e| e.to_string())? == Some(predecessor_binding),
+            "work_unchanged": tracked_workspace_work_store_snapshot(&repo) == work_before,
+        }))
+    });
+    let deferred = gwt_core::update::defer_pending_update("99.0.0");
+    executor.block_on(owner.shutdown());
+    deferred.expect("setup/inconclusive: private staged hold release");
+    let summary = observed.expect("setup/inconclusive: Manual early-admission cancellation");
+    let cleaned_ack = summary["cancelled"] == true && summary["cancel_exact"] == true;
+    let reconciliation = summary["cancel_reconciliation_error"] == true;
+    assert!(
+        summary["revoked"] == true
+            && summary["host_hold_error"] == true
+            && (cleaned_ack || reconciliation)
+            && summary["attempt_exact"] == true
+            && summary["attempt_status"] != serde_json::json!(Attempt::Activated),
+        "setup/inconclusive: {summary}"
+    );
+    assert!(
+        summary["session_absent"] == true
+            && summary["sidecar_absent"] == true
+            && summary["predecessor_session_unchanged"] == true
+            && summary["predecessor_binding_unchanged"] == true
+            && summary["work_unchanged"] == true
+            && if cleaned_ack {
+                summary["attempt_status"] == serde_json::json!(Attempt::Aborted)
+                    && summary["recovery_absent"] == true
+            } else {
+                summary["attempt_status"] == serde_json::json!(Attempt::Prepared)
+                    && summary["attempt_unchanged"] == true
+                    && summary["recovery_absent"] == false
+                    && summary["recovery_unchanged"] == true
+            },
+        "cleanup consistency: {summary}"
+    );
+}
+
+#[test]
 fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_wide_release() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -3096,11 +3319,12 @@ fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_w
     fs::create_dir_all(&project).unwrap();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
     let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
             version: "99.0.0".into(),
             since: "2026-10-13T00:00:00Z".into(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
-            automatic: None,
+            automatic: Some(true),
             blocking: Vec::new(),
         }),
         ..Default::default()
@@ -3138,8 +3362,8 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).expect("drain project");
     fs::create_dir_all(&target_root).expect("target project");
-    init_repo(&drain_root);
-    init_repo(&target_root);
+    init_repo_with_initial_commit(&drain_root);
+    init_repo_with_initial_commit(&target_root);
     let mut prefs = gwt::IssueMonitorPrefs {
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
             version: "99.0.0".to_string(),
@@ -3154,21 +3378,32 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed drain");
     let tabs = vec![
         sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
-        sample_project_tab("target", "llmlb", target_root, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "target",
+            "llmlb",
+            target_root.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    persist_lifecycle_host_catalog(&runtime);
+    pin_live_pm_fixture_agents(&runtime, temp.path());
+    seed_owner_fixture_roster(&target_root, 8);
+    let owner = Arc::new(owner_fixture_block_on(production_owner_fixture(
+        &target_root,
+    )));
+    runtime
+        .test_project_owners
+        .insert(target_root.clone(), owner.clone());
     let config = || {
         gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&target_root)
             .branch("work/issue-5062-test")
             .build()
     };
-    let result = runtime.spawn_agent_window("target", config(), None);
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.contains("update_drain")),
-        "{result:?}"
-    );
+    let result = owner_monitor_admission_error(&owner, config(), None, None);
+    assert!(result.contains("update_drain"), "{result:?}");
     assert!(runtime
         .tab("target")
         .expect("tab")
@@ -3179,9 +3414,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
 
     prefs.update_drain = None;
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
-    runtime
-        .spawn_agent_window("target", config(), None)
-        .expect("spawn after release");
+    let id = spawn_owner_codex_fixture(&mut runtime, "target", config(), None);
     assert_eq!(
         runtime
             .tab("target")
@@ -3192,6 +3425,12 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
             .len(),
         1
     );
+    assert!(owner_runtime_probe(&runtime, &id)
+        .pty
+        .try_wait()
+        .unwrap()
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3366,62 +3605,57 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent],
+    let (owner, pane) = pane_control_tests::control_owner_agent(&repo, "agent-1", 42);
+    let session_id = pane.session.as_ref().unwrap().id.clone();
+    let mut runtime = managed_launch_tests::managed_project_owner_projection(
+        temp.path(),
+        &repo,
+        &owner,
+        &[&pane],
     );
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
     let window_id = combined_window_id("tab-1", "agent-1");
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-paused-offloop".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "work/paused-offloop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: repo.clone(),
-            agent_project_root: repo.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: "tab-1".to_string(),
-        },
-    );
-
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let started = Instant::now();
     runtime.stop_window_runtime(&window_id);
     let stop_call = started.elapsed();
-    // The stop call itself returns promptly (no synchronous multi-MB IO).
     assert!(
         stop_call < Duration::from_secs(2),
         "stop_window_runtime blocked for {stop_call:?}"
     );
-
-    // The Paused Work record still lands (background write).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut recorded = false;
-    while Instant::now() < deadline {
-        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
-            .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
-                updated_at: chrono::Utc::now(),
-                work_items: Vec::new(),
-            });
-        recorded = works.work_items.iter().any(|item| {
-            item.id == "work-session-session-paused-offloop"
-                && item.status_category
-                    == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
-        });
-        if recorded {
-            break;
-        }
-        // test-hygiene: allow-short-duration bounded polling of worker-persisted Work state; no completion event is exposed by this fixture
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(recorded, "Paused Work record must land in works.json");
+    assert!(
+        pane.pty.try_wait().unwrap().is_none(),
+        "the GUI acknowledgement only queues the physical stop"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the exact close runs off the event loop"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    assert!(
+        pane.pty.try_wait().unwrap().is_some(),
+        "the owner reaps its captured child"
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .expect("owner-persisted Work");
+    assert!(
+        works.work_items.iter().any(|item| {
+            item.status_category == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+                && item
+                    .events
+                    .iter()
+                    .any(|event| event.agent_session_id.as_deref() == Some(&session_id))
+        }),
+        "the exact stopped Session still records its Paused Work"
+    );
 }
 
 /// SPEC-2359 W-16 (FR-387): the tab-change ingest trigger is throttled to
@@ -3515,7 +3749,8 @@ fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
     let incarnation = runtime.runtimes[&id].incarnation;
     let data = b"worker captured output";
     let seq = {
-        let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+        let owner_probe = owner_runtime_probe(&runtime, &id);
+        let mut pane = owner_probe.pane.lock().unwrap();
         pane.process_bytes(data);
         pane.output_seq()
     };
@@ -3526,7 +3761,7 @@ fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
         seq,
         Some("worker captured output".into()),
     );
-    let pane = runtime.runtimes[&id].pane.clone();
+    let pane = owner_runtime_probe(&runtime, &id).pane.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
@@ -3553,15 +3788,13 @@ fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
 fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &id);
+    let (mut runtime, id) = terminal_approval_tests::runtime_state_hook_fixture(temp.path());
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let probe = owner_runtime_probe(&runtime, &id);
+    let hook = owner_runtime_status_event(&owner, &probe, "running", "PreToolUse");
+    let context = runtime.test_context();
+    runtime.handle_project_owner_event(&context, 1, owner.client().identity().unwrap(), hook);
+    let mut owner_events = owner.subscribe();
     let incarnation = runtime.runtimes[&id].incarnation;
     let chunks: [&[u8]; 2] = [
         b"Would you like to run the following command?\r\n\r\ncargo test\r\n",
@@ -3571,18 +3804,20 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let mut deadline = None;
     for chunk in chunks {
         let (seq, screen) = {
-            let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+            let owner_probe = owner_runtime_probe(&runtime, &id);
+            let mut pane = owner_probe.pane.lock().unwrap();
             pane.process_bytes(chunk);
             (pane.output_seq(), pane.screen().contents())
         };
+        owner_fixture_block_on(owner.observe_runtime_policy(
+            &probe.id,
+            probe.incarnation,
+            Utc::now(),
+            Instant::now(),
+        ))
+        .unwrap();
         bytes.extend_from_slice(chunk);
-        let events = runtime.handle_runtime_output_event(
-            id.clone(),
-            incarnation,
-            chunk.to_vec(),
-            seq,
-            Some(screen),
-        );
+        let events = runtime.handle_owner_runtime_output(id.clone(), chunk.to_vec(), seq, screen);
         assert_eq!(events.len(), 1, "only raw output is immediate");
         assert_eq!(events[0].terminal_stream_seq, Some(seq));
         assert!(
@@ -3603,7 +3838,10 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     assert!(runtime
         .flush_runtime_output_batches(deadline - Duration::from_millis(100))
         .is_empty());
-    assert!(!runtime.window_approval_waiting.contains_key(&id));
+    assert!(
+        owner_runtime_probe(&runtime, &id).policy.approval.is_some(),
+        "the owner classifies the same latest rendered screen"
+    );
     let events = runtime.flush_runtime_output_batches(deadline);
     assert_eq!(
         events
@@ -3612,8 +3850,9 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
             .count(),
         1
     );
+    relay_approval_owner_events(&mut runtime, &id, &mut owner_events);
     assert!(
-        runtime.window_approval_waiting.contains_key(&id),
+        runtime.window_status(&id) == Some(WindowProcessStatus::Waiting),
         "the same latest screen detects approval"
     );
     assert!(
@@ -3623,12 +3862,11 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     assert!(runtime
         .flush_runtime_output_batches(deadline + Duration::from_secs(1))
         .is_empty());
-    let events = runtime.handle_runtime_output_event(
-        id,
-        incarnation,
+    let events = runtime.handle_owner_runtime_output(
+        id.clone(),
         vec![b'x'; gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES],
         100,
-        Some("large burst".into()),
+        "large burst".into(),
     );
     assert!(
         runtime.next_runtime_output_deadline().is_none(),
@@ -3636,6 +3874,8 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     );
     assert!(events.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalPreview { text, .. } if text == "large burst")));
+    assert_eq!(runtime.runtimes[&id].incarnation, incarnation);
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3652,16 +3892,24 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
     let old = runtime.runtimes[&id].incarnation;
+    let predecessor = owner_runtime_probe(&runtime, &id);
     runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
-    runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
+    // Reuse the public id only after the exact physical predecessor drains.
+    close_test_owner_runtime(&mut runtime, &id);
+    assert!(predecessor.pty.try_wait().unwrap().is_some());
+    insert_test_pane_runtime(&mut runtime, &id);
+    let successor = owner_runtime_probe(&runtime, &id);
+    assert_ne!(successor.incarnation, old);
+    assert!(!Arc::ptr_eq(&predecessor.pty, &successor.pty));
+    assert!(successor.pty.try_wait().unwrap().is_none());
     let deadline = runtime.next_runtime_output_deadline().unwrap();
     assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
     let current = runtime.runtimes[&id].incarnation;
-    runtime.runtimes[&id]
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(b"final output");
+    assert_ne!(
+        current, old,
+        "replacement is an actual new owner incarnation"
+    );
+    process_test_owner_output(&mut runtime, &id, b"final output");
     runtime.handle_runtime_output_event(
         id.clone(),
         current,
@@ -3679,6 +3927,7 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     assert!(events.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalPreview { text, .. } if text == "final output")));
     assert!(runtime.next_runtime_output_deadline().is_none());
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3695,11 +3944,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
-    runtime.runtimes[&id]
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
+    process_test_owner_output(&mut runtime, &id, b"old\r\n  indented\r\n\r\nlast\r\n");
     let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
@@ -3711,6 +3956,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
         assert_eq!(preview["id"], id);
         assert_eq!(preview["text"], "  indented\n\nlast");
     }
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3809,22 +4055,33 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed unassigned delivery");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Starting,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let mut feedback = issue_monitor_feedback(42);
-    feedback.issue_monitor_project_root = Some(repo.clone());
-    runtime
-        .pending_launch_feedback_contexts
-        .insert(window_id.to_string(), feedback);
+    let input = gwt::project_runtime::installation::IssueMonitorLaunchClaimInput {
+        project_root: repo.clone(),
+        issue_number: 42,
+        delivery_id: "launch:effect-42".into(),
+        materializer_window_id: window_id.into(),
+        materializer_id: "transport-model-materializer".into(),
+        materializer_pid: host_pid,
+        fallback_timeout: gwt_core::deadline_budget::HANG_GUARD,
+        snapshot: Some(gwt::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.clone(),
+            windows: vec![gwt::IssueMonitorWindowObservation {
+                window_id: window_id.into(),
+                monitor_owned: true,
+                issue_number: Some(42),
+                status: WindowProcessStatus::Starting,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            }],
+        }),
+        snapshot_tabs: BTreeSet::from(["tab-1".into()]),
+    };
     assert_eq!(
-        runtime.window_status(window_id),
-        Some(WindowProcessStatus::Starting)
+        input.snapshot.as_ref().unwrap().windows[0].status,
+        WindowProcessStatus::Starting
     );
 
     // This tests canvas/claim ordering and durable readback, not the IPC budget.
@@ -3839,24 +4096,13 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
         )
     };
     assert!(
-        runtime
-            .claim_issue_monitor_launch_delivery_with_publishers(
-                &repo,
-                42,
-                "launch:effect-42",
-                window_id,
-                |_, _| Ok(()),
-                |_| Err(lost_ack()),
-            )
+        input
+            .claim_with_publishers(|_, _| Ok(()), |_| Err(lost_ack()),)
             .is_err(),
         "an uncommitted claim must remain uncertain"
     );
-    let accepted = runtime
-        .claim_issue_monitor_launch_delivery_with_publishers(
-            &repo,
-            42,
-            "launch:effect-42",
-            window_id,
+    let accepted = input
+        .claim_with_publishers(
             |snapshot, tabs| {
                 received.borrow_mut().push("snapshot");
                 assert_eq!(snapshot.windows[0].window_id, window_id);
@@ -3909,19 +4155,18 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
         accepted,
         "readback must confirm the exact materializer tuple"
     );
-    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    assert_eq!(input.snapshot.as_ref().unwrap().windows.len(), 1);
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .expect("reload daemon claim");
     let delivery = &prefs.pending_launch_deliveries[0];
     assert_eq!(
         delivery.materializer_id.as_deref(),
-        Some(runtime.issue_monitor_materializer_id.as_str())
+        Some(input.materializer_id.as_str())
     );
     assert_eq!(delivery.materializer_pid, Some(host_pid));
     assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
 
-    let retry =
-        runtime.capture_issue_monitor_launch_claim(&repo, 42, "launch:effect-42", window_id);
+    let retry = input.clone();
     let stamp = super::super::issue_monitor_prefs_stamp(&prefs_path);
     assert!(retry
         .claim_or_reuse()
@@ -4003,7 +4248,7 @@ fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
         source.author_login = author.map(str::to_string);
         cache.write_snapshot(&source).unwrap();
         assert_eq!(
-            input.preflight_claim(monitor.prefs(), None),
+            input.test_preflight_claim(monitor.prefs(), None),
             expected,
             "{author:?}: {body}"
         );
@@ -4023,7 +4268,7 @@ fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
     }
     fs::remove_dir_all(cache_root.join("42")).unwrap();
     assert!(
-        !input.preflight_claim(monitor.prefs(), None),
+        !input.test_preflight_claim(monitor.prefs(), None),
         "missing target cache must remain held"
     );
 }
@@ -4085,17 +4330,18 @@ fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission(
-        "tab-1",
-        config,
-        None,
-        feedback,
-        prepared.clone(),
+    pin_live_pm_fixture_agents(&runtime, temp.path());
+    seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["claude"]);
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let rejected = owner_monitor_admission_error(&owner, config, Some(feedback), None);
+    assert!(
+        rejected.contains("dependency admission refused Issue #42: Blocked by #43")
+            && !rejected.contains("(hold)"),
+        "actual owner admission: {rejected}"
     );
-    assert!(rejected.is_err_and(|reason| reason
-        .contains("dependency admission refused Issue #42: Blocked by #43")
-        && !reason.contains("(hold)")));
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    owner_fixture_block_on(owner.shutdown());
     fs::write(cache_root.join("43/body.md"), "Blocked-by: #42").unwrap();
     assert!(
         !prepared.is_current(&input.host_project_roots),

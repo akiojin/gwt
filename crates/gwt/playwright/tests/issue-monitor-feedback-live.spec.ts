@@ -45,7 +45,7 @@ test.describe("External feedback intake (isolated live backend)", () => {
       await expect(page.locator("#close-project-button")).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.locator('.op-rail [data-surface="issues"]').click();
-      const surface = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]:visible');
+      const surface = page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root:visible');
       await expect(surface).toBeVisible();
       // This existing control requests a real scan even with launches disabled.
       await sendLiveGwtEvent(page, { kind: "set_issue_monitor_allowed_labels", allowed_labels: [] });

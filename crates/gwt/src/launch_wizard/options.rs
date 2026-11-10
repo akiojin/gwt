@@ -1,10 +1,10 @@
 use super::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ModelDisplayOption {
-    pub(super) label: &'static str,
-    pub(super) stored_value: &'static str,
-    pub(super) description: &'static str,
+    pub(super) label: String,
+    pub(super) stored_value: String,
+    pub(super) description: String,
 }
 
 #[derive(Clone, Copy)]
@@ -75,131 +75,22 @@ pub(super) fn is_claude_effort_capable_model(model: &str) -> bool {
 // picker addresses models only through versionless CLI aliases. The 1m context
 // forms, `opusplan`, and `best` stay valid arguments a user can pass
 // explicitly; curating the rendered rows does not remove them.
-const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 5] = [
-    ModelDisplayOption {
-        label: "Default",
-        stored_value: CLAUDE_DEFAULT_MODEL_VALUE,
-        description: "Let Claude Code choose its default model",
-    },
-    ModelDisplayOption {
-        label: "Opus",
-        stored_value: "opus",
-        description: "Deep reasoning for complex problems",
-    },
-    ModelDisplayOption {
-        label: "Fable",
-        stored_value: "fable",
-        description: "Most capable for the hardest, longest-running tasks",
-    },
-    ModelDisplayOption {
-        label: "Sonnet",
-        stored_value: "sonnet",
-        description: "Balanced speed and capability",
-    },
-    ModelDisplayOption {
-        label: "Haiku",
-        stored_value: "haiku",
-        description: "Fastest option for light tasks",
-    },
+// (label, stored value, description)
+const CLAUDE_MODEL_OPTIONS: [(&str, &str, &str); 5] = [
+    (
+        "Default",
+        CLAUDE_DEFAULT_MODEL_VALUE,
+        "Let Claude Code choose its default model",
+    ),
+    ("Opus", "opus", "Deep reasoning for complex problems"),
+    (
+        "Fable",
+        "fable",
+        "Most capable for the hardest, longest-running tasks",
+    ),
+    ("Sonnet", "sonnet", "Balanced speed and capability"),
+    ("Haiku", "haiku", "Fastest option for light tasks"),
 ];
-
-#[derive(Clone, Copy)]
-pub(super) struct CodexModelCapability {
-    pub(super) model: ModelDisplayOption,
-    pub(super) default_effort: &'static str,
-    pub(super) max_effort: &'static str,
-}
-
-// SPEC-1921 US-20 / FR-121..FR-123 + Issue #4795: fixed 2026-09-30 Codex
-// picker snapshot, in the CLI's own picker order — the first row is the Codex
-// default model. Model rows and reasoning rows both derive from this single
-// capability table so stop counts and defaults cannot drift from the model
-// list. A later snapshot update edits this table together with the focused
-// tests; the wizard never reads a runtime model cache for these rows.
-const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 8] = [
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-6.1-sol",
-            stored_value: "gpt-6.1-sol",
-            description: "Latest workhorse model for coding and everyday work.",
-        },
-        default_effort: "low",
-        max_effort: "ultra",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-6-astra",
-            stored_value: "gpt-6-astra",
-            description: "Frontier intelligence for the most demanding work.",
-        },
-        default_effort: "medium",
-        max_effort: "ultra",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-6-sol",
-            stored_value: "gpt-6-sol",
-            description: "Previous generation workhorse model.",
-        },
-        default_effort: "medium",
-        max_effort: "ultra",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-6-luna",
-            stored_value: "gpt-6-luna",
-            description: "Fast and affordable model for easier tasks.",
-        },
-        default_effort: "medium",
-        max_effort: "max",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-5.6-sol",
-            stored_value: "gpt-5.6-sol",
-            description: "Older generation workhorse model.",
-        },
-        default_effort: "low",
-        max_effort: "ultra",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-5.6-terra",
-            stored_value: "gpt-5.6-terra",
-            description: "Older balanced model for straightforward work.",
-        },
-        default_effort: "medium",
-        max_effort: "ultra",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-5.6-luna",
-            stored_value: "gpt-5.6-luna",
-            description: "Older fast and efficient model.",
-        },
-        default_effort: "medium",
-        max_effort: "max",
-    },
-    CodexModelCapability {
-        model: ModelDisplayOption {
-            label: "gpt-5.5",
-            stored_value: "gpt-5.5",
-            description: "Legacy coding model.",
-        },
-        default_effort: "medium",
-        max_effort: "xhigh",
-    },
-];
-
-const CODEX_MODEL_OPTIONS: [ModelDisplayOption; CODEX_MODEL_CAPABILITIES.len()] = {
-    let mut options = [CODEX_MODEL_CAPABILITIES[0].model; CODEX_MODEL_CAPABILITIES.len()];
-    let mut index = 0;
-    while index < CODEX_MODEL_CAPABILITIES.len() {
-        options[index] = CODEX_MODEL_CAPABILITIES[index].model;
-        index += 1;
-    }
-    options
-};
 
 // Auto is the default: gwt skips the CLAUDE_CODE_EFFORT_LEVEL export so
 // Claude Code applies its own per-model default effort (`high` on
@@ -374,20 +265,26 @@ const CODEX_REASONING_LADDER: [ReasoningDisplayOption; 6] = [
 // Unknown or legacy persisted Codex models keep the conservative pre-5.6
 // surface so a stale saved model can never unlock stops the CLI would reject.
 const CODEX_FALLBACK_DEFAULT_EFFORT: &str = "medium";
-const CODEX_FALLBACK_MAX_EFFORT: &str = "xhigh";
+const CODEX_FALLBACK_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+// Issue #6933: stops come from the selected model's Codex catalog row
+// (`supported_reasoning_levels` / `default_reasoning_level`); rows keep the
+// ladder's labels and order, and efforts the ladder does not know are skipped.
 pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDisplayOption> {
-    let capability = CODEX_MODEL_CAPABILITIES
+    let rows = super::codex_models::current_rows();
+    let row = rows.iter().find(|row| row.slug == model);
+    let default_effort = row.map_or(CODEX_FALLBACK_DEFAULT_EFFORT, |row| {
+        row.default_effort.as_str()
+    });
+    CODEX_REASONING_LADDER
         .iter()
-        .find(|capability| capability.model.stored_value == model);
-    let default_effort = capability.map_or(CODEX_FALLBACK_DEFAULT_EFFORT, |row| row.default_effort);
-    let max_effort = capability.map_or(CODEX_FALLBACK_MAX_EFFORT, |row| row.max_effort);
-    let end = CODEX_REASONING_LADDER
-        .iter()
-        .position(|option| option.stored_value == max_effort)
-        .map_or(CODEX_REASONING_LADDER.len(), |index| index + 1);
-    CODEX_REASONING_LADDER[..end]
-        .iter()
+        .filter(|option| match row {
+            Some(row) => row
+                .efforts
+                .iter()
+                .any(|effort| effort == option.stored_value),
+            None => CODEX_FALLBACK_EFFORTS.contains(&option.stored_value),
+        })
         .map(|option| ReasoningDisplayOption {
             is_default: option.stored_value == default_effort,
             ..*option
@@ -775,18 +672,34 @@ pub(super) fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizar
     }
 }
 
-pub(super) fn current_model_options(agent_id: &str) -> Vec<&'static str> {
+pub(super) fn current_model_options(agent_id: &str) -> Vec<String> {
     model_display_options(agent_id)
-        .iter()
+        .into_iter()
         .map(|option| option.stored_value)
         .collect()
 }
 
-pub(super) fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
+pub(super) fn model_display_options(agent_id: &str) -> Vec<ModelDisplayOption> {
     match agent_id {
-        "claude" => &CLAUDE_MODEL_OPTIONS,
-        "codex" => &CODEX_MODEL_OPTIONS,
-        _ => &[],
+        "claude" => CLAUDE_MODEL_OPTIONS
+            .iter()
+            .map(|(label, stored_value, description)| ModelDisplayOption {
+                label: (*label).to_string(),
+                stored_value: (*stored_value).to_string(),
+                description: (*description).to_string(),
+            })
+            .collect(),
+        // Issue #6933: Codex's own picker list (models cache), or the
+        // bundled snapshot when the cache is unusable.
+        "codex" => super::codex_models::current_rows()
+            .iter()
+            .map(|row| ModelDisplayOption {
+                label: row.display_name.clone(),
+                stored_value: row.slug.clone(),
+                description: row.description.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1866,12 +1779,12 @@ mod tests {
             vec![
                 "gpt-6.1-sol",
                 "gpt-6-astra",
+                "gpt-6.1-terra",
                 "gpt-6-sol",
                 "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.5",
             ]
         );
         assert!(current_model_options("gemini").is_empty());
@@ -1883,34 +1796,26 @@ mod tests {
         assert!(!model_display_options("codex").is_empty());
     }
 
-    // SPEC-1921 US-20 / FR-121 + Issue #4795 AC-1/3/4: visible rows from
-    // the 2026-09-30 Codex v0.159.2 picker, in the CLI's order.
+    // Issue #6933 AC-1/2: without a usable Codex cache the picker shows the
+    // bundled snapshot (2026-11-09 codex-cli 0.167.0 `list` rows) with
+    // Codex's display names.
     #[test]
-    fn codex_model_catalog_matches_2026_09_30_snapshot() {
-        let rows: Vec<(&str, &str)> = model_display_options("codex")
-            .iter()
-            .map(|option| (option.label, option.description))
+    fn codex_model_catalog_matches_bundled_snapshot() {
+        let rows: Vec<(String, String)> = model_display_options("codex")
+            .into_iter()
+            .map(|option| (option.stored_value, option.label))
             .collect();
         assert_eq!(
             rows,
             vec![
-                (
-                    "gpt-6.1-sol",
-                    "Latest workhorse model for coding and everyday work."
-                ),
-                (
-                    "gpt-6-astra",
-                    "Frontier intelligence for the most demanding work."
-                ),
-                ("gpt-6-sol", "Previous generation workhorse model."),
-                ("gpt-6-luna", "Fast and affordable model for easier tasks."),
-                ("gpt-5.6-sol", "Older generation workhorse model."),
-                (
-                    "gpt-5.6-terra",
-                    "Older balanced model for straightforward work."
-                ),
-                ("gpt-5.6-luna", "Older fast and efficient model."),
-                ("gpt-5.5", "Legacy coding model."),
+                ("gpt-6.1-sol".into(), "GPT-6.1-Sol".into()),
+                ("gpt-6-astra".into(), "GPT-6-Astra".into()),
+                ("gpt-6.1-terra".into(), "GPT-6.1 Terra".into()),
+                ("gpt-6-sol".into(), "GPT-6-Sol".into()),
+                ("gpt-6-luna".into(), "GPT-6-Luna".into()),
+                ("gpt-5.6-sol".into(), "GPT-5.6-Sol".into()),
+                ("gpt-5.6-terra".into(), "GPT-5.6-Terra".into()),
+                ("gpt-5.6-luna".into(), "GPT-5.6-Luna".into()),
             ]
         );
         // Exact equality also excludes retired models and hidden cache rows
@@ -1955,6 +1860,8 @@ mod tests {
             codex_capability_row("gpt-5.6-luna"),
             (FIVE.to_vec(), "medium")
         );
+        assert_eq!(codex_capability_row("gpt-6.1-terra"), (SIX.to_vec(), "low"));
+        // Retired from the picker: conservative legacy surface.
         assert_eq!(codex_capability_row("gpt-5.5"), (FOUR.to_vec(), "medium"));
         assert_eq!(codex_capability_row("gpt-6-sol"), (SIX.to_vec(), "medium"));
         assert_eq!(
@@ -1967,12 +1874,12 @@ mod tests {
         let covered = [
             "gpt-6.1-sol",
             "gpt-6-astra",
+            "gpt-6.1-terra",
             "gpt-6-sol",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
-            "gpt-5.5",
         ];
         assert_eq!(current_model_options("codex"), covered.to_vec());
     }
@@ -2090,7 +1997,7 @@ mod tests {
 
         state.launch_target = LaunchTargetKind::Agent;
         state.agent_id = "codex".to_string();
-        state.model = "gpt-5.5".to_string();
+        state.model = "gpt-6.1-terra".to_string();
         state.reasoning = "high".to_string();
         state.mode = "resume".to_string();
         state.skip_permissions = true;
@@ -2108,7 +2015,7 @@ mod tests {
             step_default_selection(LaunchWizardStep::ModelSelect, &state),
             current_model_options("codex")
                 .iter()
-                .position(|model| model == &"gpt-5.5")
+                .position(|model| model == "gpt-6.1-terra")
                 .unwrap()
         );
         assert_eq!(
@@ -2308,8 +2215,8 @@ mod tests {
     // model value at all, so the launch omits the model argument.
     #[test]
     fn claude_model_rows_are_versionless_and_ordered() {
-        let labels: Vec<&str> = model_display_options("claude")
-            .iter()
+        let labels: Vec<String> = model_display_options("claude")
+            .into_iter()
             .map(|option| option.label)
             .collect();
         assert_eq!(labels, ["Default", "Opus", "Fable", "Sonnet", "Haiku"]);
@@ -2324,7 +2231,7 @@ mod tests {
     // to Claude Code, so no rendered Claude string may pin one.
     #[test]
     fn claude_display_strings_carry_no_version_numbers() {
-        let mut strings: Vec<&str> = Vec::new();
+        let mut strings: Vec<String> = Vec::new();
         for option in model_display_options("claude") {
             strings.push(option.label);
             strings.push(option.description);
@@ -2333,8 +2240,8 @@ mod tests {
             .iter()
             .chain(super::CLAUDE_SONNET_REASONING_OPTIONS.iter())
         {
-            strings.push(option.label);
-            strings.push(option.description);
+            strings.push(option.label.to_string());
+            strings.push(option.description.to_string());
         }
         for text in strings {
             assert!(

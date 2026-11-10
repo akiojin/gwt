@@ -27,6 +27,9 @@ mod work_items;
 
 pub(crate) use persistence::resolve_workspace_work_event_container;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use persistence::ScopedWorkItemsDecodeObserver;
+
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{
     can_upgrade_work_owner, canonical_work_id, successor_work_id, work_owner_for_branch,
@@ -93,7 +96,8 @@ pub use persistence::{
     update_workspace_projection_with_journal_for_resolved_work_target,
     update_workspace_projection_with_journal_for_work_event_root,
     update_workspace_projection_with_journal_paths,
-    update_workspace_projection_with_journal_paths_at, with_workspace_current_and_work_items_lock,
+    update_workspace_projection_with_journal_paths_at, with_exact_workspace_done_read_only,
+    with_workspace_current_and_work_items_lock, workspace_close_projection_needs_rebuild,
     workspace_projection_stale_reason, workspace_state_external_commit_resolution,
     workspace_state_external_commit_resolution_at, workspace_state_transaction_is_pending_at,
     workspace_work_event_from_board_entry, workspace_work_event_shard_matches,

@@ -35,7 +35,7 @@ test("shared clone state preserves drafts, query fences and clone actions", asyn
   const inject = (detail: Record<string, unknown>) => page.evaluate(payload => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
   }, detail);
-  const trigger = page.locator("#window-list-button");
+  const trigger = page.locator("#op-palette-button");
   await trigger.focus();
   // Invoke the existing picker entry without changing the real project catalog.
   await page.locator("#picker-clone-project").dispatchEvent("click");

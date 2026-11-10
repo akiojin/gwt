@@ -140,7 +140,8 @@ export function windowRuntimeDescription(status, preset) {
 }
 
 // SPEC-2356 — translate runtime state vocabulary to Operator telemetry states
-// (`running|idle|waiting|error|done`). The mapping stays intentionally narrow
+// (`running|idle|waiting|error|stopped|interrupted`). Runtime termination never
+// implies a Work outcome. The mapping stays intentionally narrow
 // so future runtime states surface as `idle` until the design language
 // explicitly handles them.
 //
@@ -161,7 +162,9 @@ export function mapAgentTelemetryState(runtimeState) {
       return "idle";
     case "stopped":
     case "exited":
-      return "done";
+      return "stopped";
+    case "interrupted":
+      return "interrupted";
     case "error":
       return "error";
     default:

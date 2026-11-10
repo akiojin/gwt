@@ -17,13 +17,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { useManagedBrowserSource } from "./_helpers/managed-browser-source";
 import {
+  focusLiveWindow,
   gotoLiveGwt,
   liveGwtProjectUrl,
   readLiveHubCatalog,
   sendLiveGwtEvent,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+
+useManagedBrowserSource(test);
 
 type Frame = { kind: string; scope: string | null; payload: any };
 
@@ -250,16 +254,18 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         // Known Recent, currently closed: direct access auto-opens it.
         const withRecent = await readLiveHubCatalog(page, base!, {
           send: { kind: "reopen_recent_project", path: recentRoot },
-          until: (catalog) => catalog.recent_projects.some((entry) => entry.path.includes("gwt-4538-recent-")),
+          until: (catalog, name) => catalog.recent_projects.some((entry) => entry.path.replaceAll('\\', '/').endsWith(`/${name}`)),
+          arg: recentRoot.replaceAll('\\', '/').split('/').at(-1),
         });
-        const recent = withRecent.recent_projects.find((entry) => entry.path.includes("gwt-4538-recent-"))!;
+        const recentName = recentRoot.replaceAll('\\', '/').split('/').at(-1);
+        const recent = withRecent.recent_projects.find((entry) => entry.path.replaceAll('\\', '/').endsWith(`/${recentName}`))!;
         const openEntry = await readLiveHubCatalog(page, base!, {
           until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
         recentProjectKey = openEntry.projects.find((entry) => entry.project_key === recent.project_key)!.project_key;
         await readLiveHubCatalog(page, base!, {
-          send: { kind: "preview_close_project", project_key: recentProjectKey },
-          until: (catalog, key) => !catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
+          send: { kind: "preview_close_project", project_key: recentProjectKey, project_wide: true },
+          until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key && entry.execution?.effective_state === "stopped"), arg: recent.project_key,
         });
         recentProjectKey = undefined;
         await page.goto(liveGwtProjectUrl(base!, recent.project_key!));
@@ -271,7 +277,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
       } finally {
         if (recentProjectKey) {
           await readLiveHubCatalog(page, base!, {
-            send: { kind: "preview_close_project", project_key: recentProjectKey },
+            send: { kind: "preview_close_project", project_key: recentProjectKey, project_wide: true },
           }).catch(() => {});
         }
         await rm(recentRoot, { recursive: true, force: true });
@@ -282,15 +288,5 @@ test.describe("Project-per-Browser-Tab (live)", () => {
 });
 
 async function showShell(page: Page, id: string) {
-  const windows = await page.evaluate(() => {
-    const workspace = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
-    return workspace.tabs.flatMap((tab: any) => tab.workspace.windows);
-  });
-  const index = windows.findIndex((window: any) => window.id === id);
-  expect(index, "the exact Shell belongs to this project").toBeGreaterThanOrEqual(0);
-  await page.locator("#window-list-button").click();
-  const rows = page.locator("#window-list-panel .window-list-row");
-  await expect(rows).toHaveCount(windows.length);
-  await rows.nth(index).click();
-  await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+  await focusLiveWindow(page, id);
 }

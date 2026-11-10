@@ -134,7 +134,7 @@ jobs:
 
   warm-macos:
     name: Warm cargo cache (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7

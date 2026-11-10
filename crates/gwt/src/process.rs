@@ -15,6 +15,8 @@
 //! front door's endpoint-slot handling entirely rather than by giving it a
 //! second liveness definition.
 
+pub mod windows_recovery;
+
 fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
     whoami_value
         .map(str::trim)
@@ -171,28 +173,56 @@ pub fn is_host_process_alive(pid: u32) -> bool {
 /// process tree (an agent pane's `gwtd verify.run`, for example). Walks the
 /// parent chain through `sysinfo`; a missing process or a chain longer than
 /// 64 hops counts as "not ours" so the drain never blocks on a stranger.
-pub fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
+/// Initialization errors remain unknown; protection callers must retain their
+/// guard, while callers requiring positive ownership must refuse it.
+pub fn is_descendant_of(pid: u32, ancestor: u32) -> Result<bool, sysinfo::Error> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
     if pid == 0 || ancestor == 0 || pid == ancestor {
-        return false;
+        return Ok(false);
     }
-    let mut system = System::new();
+    let mut system = System::new()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let mut current = sysinfo::Pid::from_u32(pid);
     for _ in 0..64 {
         let Some(parent) = system.process(current).and_then(sysinfo::Process::parent) else {
-            return false;
+            return Ok(false);
         };
         if parent.as_u32() == ancestor {
-            return true;
+            return Ok(true);
         }
         if parent.as_u32() <= 1 {
-            return false;
+            return Ok(false);
         }
         current = parent;
     }
-    false
+    Ok(false)
+}
+
+/// Runtime callers include the exact process, ordinary descendants, and a
+/// Windows recovery worker positively linked by its original caller's Job.
+pub fn is_runtime_descendant_of(pid: u32, ancestor: u32) -> bool {
+    checked_runtime_descendant_of(pid, ancestor, windows_recovery::capture_source())
+        .unwrap_or(false)
+}
+
+/// Keep uncertainty distinct from unrelated ancestry so revocation callers can
+/// deny on an unavailable proof, using the same captured source as admission.
+pub fn checked_runtime_descendant_of(
+    pid: u32,
+    ancestor: u32,
+    source: Option<&std::ffi::OsStr>,
+) -> std::io::Result<bool> {
+    if pid == 0 || ancestor == 0 {
+        return Ok(false);
+    }
+    if pid == ancestor || is_descendant_of(pid, ancestor).map_err(std::io::Error::other)? {
+        return Ok(true);
+    }
+    match source {
+        Some(source) => windows_recovery::checked_recovered_descendant_of(pid, ancestor, source),
+        None => Ok(false),
+    }
 }
 
 /// Return the start identity of one host process incarnation.
@@ -266,25 +296,69 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
     if let Some(epoch) = test_clock::start_epoch_secs(pid) {
         return epoch;
     }
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    #[cfg(windows)]
+    {
+        use windows::{
+            core::Owned,
+            Win32::{
+                Foundation::{FILETIME, WAIT_TIMEOUT},
+                System::Threading::{
+                    GetProcessTimes, OpenProcess, WaitForSingleObject,
+                    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                },
+            },
+        };
 
-    let mut system = System::new();
-    let pid = sysinfo::Pid::from_u32(pid);
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    system
-        .process(pid)
-        .map(sysinfo::Process::start_time)
-        .filter(|started_at| *started_at > 0)
+        // SAFETY: request a new, non-inherited handle with only query/wait
+        // access. Owned closes it on every return path.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+            .map(|handle| Owned::new(handle))
+        }
+        .ok()?;
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: all output pointers are valid, and the owned handle pins
+        // this process incarnation through the query and zero-timeout wait.
+        unsafe {
+            GetProcessTimes(*handle, &mut creation, &mut exit, &mut kernel, &mut user).ok()?;
+            if WaitForSingleObject(*handle, 0) != WAIT_TIMEOUT {
+                return None;
+            }
+        }
+        let ticks = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        (ticks / 10_000_000)
+            .checked_sub(11_644_473_600)
+            .filter(|started_at| *started_at > 0)
+    }
+    #[cfg(not(windows))]
+    {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let mut system = System::new().ok()?;
+        let pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        system
+            .process(pid)
+            .map(sysinfo::Process::start_time)
+            .filter(|started_at| *started_at > 0)
+    }
 }
 
 /// Inject Linux observations on any test host without changing its OS clock.
 #[cfg(test)]
 pub(crate) mod test_clock {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
     struct Observation {
         pid: u32,
@@ -296,7 +370,8 @@ pub(crate) mod test_clock {
         static OBSERVATION: RefCell<Option<Observation>> = const { RefCell::new(None) };
     }
 
-    pub(crate) struct ProcessClock(Option<Observation>);
+    // Drop must restore the observation on the thread that installed it.
+    pub(crate) struct ProcessClock(Option<Observation>, PhantomData<Rc<()>>);
 
     impl ProcessClock {
         pub(crate) fn new(pid: u32, start_ticks: u64, btime: u64) -> Self {
@@ -305,7 +380,7 @@ pub(crate) mod test_clock {
                 stat: format!("{pid} (gwt host) S {} {start_ticks}", ["0"; 18].join(" ")),
                 btime,
             };
-            Self(OBSERVATION.replace(Some(observation)))
+            Self(OBSERVATION.replace(Some(observation)), PhantomData)
         }
 
         pub(crate) fn set_btime(&self, btime: u64) {
@@ -550,6 +625,8 @@ mod tests {
         // Keep its handle alive: the terminated process object still exists,
         // and its exit code equals STILL_ACTIVE, but it is no longer running.
         assert!(!is_host_process_alive(child.id()));
+        assert_eq!(host_process_start_epoch_secs(child.id()), None);
+        assert_eq!(host_process_start_time(child.id()), None);
     }
 
     #[cfg(windows)]
@@ -598,9 +675,10 @@ mod tests {
         let before = thread_cpu();
         for _ in 0..1000 {
             assert!(is_host_process_alive(std::process::id()));
+            assert!(host_process_start_time(std::process::id()).is_some());
         }
         let cpu = thread_cpu() - before;
-        eprintln!("1000 Windows PID probes consumed {cpu:?} of thread CPU");
+        eprintln!("1000 Windows liveness/start-identity probes consumed {cpu:?} of thread CPU");
         assert!(
             cpu < std::time::Duration::from_millis(500),
             "PID probe CPU budget exceeded: {cpu:?}"

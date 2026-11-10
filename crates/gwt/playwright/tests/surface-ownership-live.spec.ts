@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const controlUrl = process.env.GWT_AC11_CONTROL_URL;
 
-type WindowData = { id: string; preset: string; agent_name?: string; session_id?: string; is_pm?: boolean; surface_owner?: string };
+type WindowData = { id: string; preset: string; z_index?: number; agent_name?: string; session_id?: string; is_pm?: boolean; surface_owner?: string };
 
 async function catalog(page: Page): Promise<WindowData[]> {
   return page.evaluate(() => {
@@ -253,9 +253,8 @@ async function showShell(page: Page, id: string) {
   const windows = await catalog(page);
   const index = windows.findIndex(window => window.id === id);
   expect(index, "the exact Shell is in the real project catalog").toBeGreaterThanOrEqual(0);
-  await page.locator("#window-list-button").click();
-  const rows = page.locator("#window-list-panel .window-list-row");
-  await expect(rows).toHaveCount(windows.length);
-  await rows.nth(index).click();
+  await page.evaluate(id => (window as any).__ac11ProjectSocket.send(JSON.stringify({ kind: "focus_window", id })), id);
+  await expect.poll(async () => (await catalog(page)).reduce((top, window) => !top || (window.z_index || 0) > (top.z_index || 0) ? window : top, null as WindowData | null)?.id).toBe(id);
+  await page.reload();
   await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
 }

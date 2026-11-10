@@ -381,7 +381,7 @@ fn assert_gate_text_is_not_misleading(text: &str) {
 fn the_permission_gate_precedes_the_window_on_every_managed_launch_route() {
     let root = repo_root();
 
-    let launch = read_source(&root, "crates/gwt/src/app_runtime/launch.rs");
+    let launch = read_source(&root, "crates/gwt/src/project_runtime/launch.rs");
     let gate = launch
         .find("permission_readiness::block_launch_if_unready")
         .expect("the producing-owner launch route must consult the permission gate");
@@ -392,23 +392,32 @@ fn the_permission_gate_precedes_the_window_on_every_managed_launch_route() {
         gate < install,
         "the permission gate must refuse before capability issuance, the Execution Control Record, and the PTY"
     );
+    let gui = read_source(&root, "crates/gwt/src/app_runtime/launch.rs");
+    let gui_gate = gui
+        .find("permission_readiness::pre_launch_block(")
+        .expect("the common GUI adapter screens permissions before creating a row");
+    let row = gui
+        .find(".add_window_with_title(")
+        .expect("the common GUI adapter creates the row");
+    assert!(
+        gui_gate < row,
+        "native gating cannot replace permission-before-GUI-row screening"
+    );
+    assert!(gui.contains("return self.queue_launch_permission_check(context, config, options)"));
 
     let wizard = read_source(&root, "crates/gwt/src/app_runtime/wizard.rs");
     let monitor_gate = wizard
         .find("permission_readiness::pre_launch_block")
         .expect("the Issue Monitor launch route must consult the permission gate");
-    for wrapper in [
-        "spawn_agent_window_with_prepared_monitor_admission(",
-        "spawn_agent_window_with_feedback(",
-    ] {
-        let spawn = wizard
-            .find(wrapper)
-            .expect("the monitor route spawns its window here");
-        assert!(
-            monitor_gate < spawn,
-            "the monitor route must refuse before the agent window exists via {wrapper}"
-        );
-    }
+    let spawn = wizard
+        .find(".spawn_agent_window_with_monitor_intent(")
+        .expect("implementation and independent review converge on the Monitor intent adapter");
+    assert!(
+        monitor_gate < spawn,
+        "both Monitor intents must refuse before their shared window adapter"
+    );
+    assert!(wizard[monitor_gate..spawn]
+        .contains("issue_monitor_review_dispatch: review_prompt.is_some()"));
 
     // AC-2's half of the same ordering: above the GitHub claim, not below it.
     let monitor = read_source(&root, "crates/gwt/src/issue_monitor.rs");

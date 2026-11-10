@@ -255,7 +255,7 @@ fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
 // surface titled itself "Workspace" while it lists Works.
 #[test]
 fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
-    assert_eq!(WindowPreset::Issue.title(), "Issue");
+    assert_eq!(WindowPreset::Issue.title(), "Issues");
     assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
     assert_eq!(WindowPreset::Spec.title(), "SPEC");
     assert_eq!(WindowPreset::Work.title(), "Work");
@@ -282,13 +282,14 @@ fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
     assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
     assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
 
-    // Issue #5321: persisted Work metadata remains readable, while Settings
-    // owns the current Issue-family entrypoint.
+    // Issue #4777 T24: persisted Work metadata remains readable, while Issues
+    // owns the independent Issue-family entrypoint.
     assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
     assert!(WindowPreset::ALL.contains(&WindowPreset::Settings));
+    assert!(WindowPreset::ALL.contains(&WindowPreset::Issue));
     assert_eq!(
         WindowPreset::Work.canonical_surface_preset(),
-        WindowPreset::Settings
+        WindowPreset::Issue
     );
 }
 

@@ -77,9 +77,9 @@ test.describe("Closed Issue retirement (live backend)", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some((entry: any) =>
         entry.payload.kind === "workspace_state"));
       await page.locator(".op-rail").getByRole("button", { name: "Issues", exact: true }).click();
-      const windows = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="settings"]');
+      const windows = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
       await expect(windows.first()).toBeVisible();
-      await expect(windows.first().locator('[data-settings-panel="issues"]')).toBeVisible();
+      await expect(windows.first().locator(".issue-bridge-root")).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
       await page.setViewportSize({ width: 1280, height: 1020 });
       await expect.poll(() => windows.first().evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(800);

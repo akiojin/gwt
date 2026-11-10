@@ -54,6 +54,18 @@ use crate::runtime_daemon_events::{
 /// [`publish_event_with_timeout`].
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Normal controls keep the hot-path default; outcome fixtures may pin it.
+const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new("ISSUE_MONITOR_CONTROL", DEFAULT_TIMEOUT);
+
+/// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
+/// this incidental budget explicitly; production still gets five seconds.
+pub const DURABLE_ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new(
+        "DURABLE_ISSUE_MONITOR_CONTROL",
+        Duration::from_secs(5),
+    );
+
 const ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CACHED_PROJECT_ROOTS: usize = 32;
 
@@ -176,7 +188,11 @@ pub fn publish_issue_monitor_control(
     project_root: &Path,
     payload: Value,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control_with_timeout(project_root, payload, DEFAULT_TIMEOUT)
+    publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
+    )
 }
 
 /// Publish a durable command from a CLI or background worker. These callers
@@ -186,7 +202,11 @@ pub fn publish_durable_issue_monitor_control(
     project_root: &Path,
     payload: Value,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control_with_timeout(project_root, payload, Duration::from_secs(5))
+    publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
+    )
 }
 
 /// Use a bounded custom budget for controls outside the GUI hot path.
@@ -319,7 +339,7 @@ enum AuthorityResolutionPurpose {
 
 enum ProjectAuthorityResolution {
     Missing,
-    Live(DaemonEndpoint),
+    Live(Box<DaemonEndpoint>),
     Recover,
 }
 
@@ -334,7 +354,7 @@ pub(crate) fn resolve_live_project_authority(
         is_process_alive,
         AuthorityResolutionPurpose::Route,
     )? {
-        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(endpoint)),
+        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(*endpoint)),
         ProjectAuthorityResolution::Missing => Ok(None),
         ProjectAuthorityResolution::Recover => {
             Err("Issue Monitor authority fence retains pending crash recovery".to_string())
@@ -375,6 +395,7 @@ fn resolve_project_authority(
                     return authority_owned_endpoint(gwt_home, scope, fence, &|pid| {
                         is_process_alive(pid)
                     })
+                    .map(Box::new)
                     .map(ProjectAuthorityResolution::Live);
                 }
                 Err(error) => {
@@ -389,6 +410,7 @@ fn resolve_project_authority(
         crate::IssueMonitorAuthorityFenceState::Missing => Ok(ProjectAuthorityResolution::Missing),
         crate::IssueMonitorAuthorityFenceState::Active(fence) if is_process_alive(fence.pid) => {
             authority_owned_endpoint(gwt_home, scope, &fence, &|pid| is_process_alive(pid))
+                .map(Box::new)
                 .map(ProjectAuthorityResolution::Live)
         }
         crate::IssueMonitorAuthorityFenceState::Active(_)
@@ -423,6 +445,7 @@ pub(crate) fn resolve_project_daemon_bootstrap(
         AuthorityResolutionPurpose::RecoverUnderLease,
     )? {
         ProjectAuthorityResolution::Live(endpoint) => {
+            let endpoint = *endpoint;
             return Ok(
                 if expected_version.is_some_and(|version| endpoint.daemon_version != version) {
                     DaemonBootstrapAction::RetireStaleVersion { endpoint }

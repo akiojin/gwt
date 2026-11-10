@@ -66,13 +66,16 @@ test("cleanup removes only the preview and unsubscribes parsed output", async ()
   assert.equal(sibling.parentElement, state.container);
 });
 
-test("Works tail shows exactly the latest three parsed lines without trailing blank rows", async () => {
+test("Works tail preserves the requested parsed lines including literal text, footer and native input", async () => {
   const { createTerminalTextPreview } = await import("../terminal-text-preview.js");
   const state = fixture();
-  state.terminal.rows = 6;
+  state.terminal.rows = 12;
   state.terminal.buffer.active.baseY = 0;
-  state.terminal.buffer.active.lines = ["older", "one", "two", "<three>", "", ""];
-  const cleanup = createTerminalTextPreview({ ...state, tailLines: 3 });
-  assert.equal(state.container.querySelector("pre").textContent, "one\ntwo\n<three>");
-  cleanup();
+  const lines = ["body one", "body two", "body three", "body four", "body five", "body six", "body seven", "<literal>", "footer status", "> native input"];
+  state.terminal.buffer.active.lines = [...lines, "", ""];
+  for (const tailLines of [3, 5, 10]) {
+    const cleanup = createTerminalTextPreview({ ...state, tailLines });
+    assert.equal(state.container.querySelector("pre").textContent, lines.slice(-tailLines).join("\n"));
+    cleanup();
+  }
 });

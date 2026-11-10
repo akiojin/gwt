@@ -32,26 +32,36 @@ fn run_queued_projection_prepare(
 fn issue_3777_runtime_hook_returns_before_full_projection_build() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("repo dir");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "codex-1",
-        repo,
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let owner = runtime.test_project_owners.values().next().unwrap().clone();
+    let status = owner_runtime_status_event(&owner, &probe, "Error", "Stop");
+    let context = runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    // Commit launch-time preparation before measuring this status request.
+    // test-hygiene: allow-wall-clock-deadline Bounds the existing setup; actual observer completion establishes ordering.
+    let preparation_deadline = Instant::now() + Duration::from_secs(5);
+    runtime.blocking_tasks = BlockingTaskSpawner::thread();
+    runtime.refresh_active_work_projection_for_project_root(&context.project_root);
+    wait_for_active_work_projection(&mut runtime);
+    // Work and census finish independently. A running census would correctly
+    // coalesce this next request instead of enqueueing another worker.
+    while super::super::workspace_views::local_agent_activity_refresh_is_running(
+        &runtime,
+        &context.project_root,
+    ) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Same setup hang guard; the observer's running state supplies ordering.
+            Instant::now() < preparation_deadline,
+            "launch-time census did not finish before measuring the next hook"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+    let events = runtime.handle_project_owner_event(&context, 1, &identity, status);
+    assert_eq!(runtime.runtimes[&id].status, WindowProcessStatus::Error);
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
@@ -66,8 +76,8 @@ fn issue_3777_runtime_hook_returns_before_full_projection_build() {
     );
     assert_eq!(
         tasks.lock().expect("queued tasks").len(),
-        3,
-        "one heartbeat, one census and one background projection worker must be queued",
+        2,
+        "the owner handled heartbeat; the GUI queues census and projection workers",
     );
 }
 
@@ -776,23 +786,36 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
         .open(work_items_path.with_extension("lock"))
         .expect("open Work lease");
     lease.lock_exclusive().expect("hold Work lease");
+    let clock_start = Instant::now();
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(clock_start);
+    let contention_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let decode_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let on_contention_clock = contention_clock.clone();
     let (contention_tx, contention_rx) = std::sync::mpsc::channel();
     let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
         &work_items_path.with_extension("lock"),
         move || {
+            *on_contention_clock.borrow_mut() =
+                Some(gwt_core::operation_deadline::ScopedOperationClock::set(
+                    clock_start + Duration::from_millis(120),
+                ));
             contention_tx
                 .send(())
                 .expect("report Work lease contention")
         },
     );
+    let on_decode_clock = decode_clock.clone();
+    let _decode = gwt_core::workspace_projection::ScopedWorkItemsDecodeObserver::set(move || {
+        // Parsing may legitimately take longer than waiting for the lock.
+        *on_decode_clock.borrow_mut() =
+            Some(gwt_core::operation_deadline::ScopedOperationClock::set(
+                clock_start + Duration::from_millis(360),
+            ));
+    });
     let release = thread::spawn(move || {
-        // Start the existing hold interval only after the loader is waiting.
         // Always unlock before reporting a missing notification to avoid a hang.
         // test-hygiene: allow-wall-clock-deadline Bounds a missing notification, not the measured lock wait; unlock before failing.
         let contention = contention_rx.recv_timeout(Duration::from_secs(30));
-        if contention.is_ok() {
-            thread::sleep(Duration::from_millis(120));
-        }
         lease.unlock().expect("release Work lease");
         contention.expect("observe Work lease contention before release");
     });
@@ -801,15 +824,13 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
     let completion = run_queued_projection_prepare(&tasks, &recorded_events);
     release.join().expect("join Work lease holder");
 
-    assert!(
-        completion.profile.lock_wait_ms >= 75,
-        "filesystem Work lease wait must be attributed to lock_wait_ms: {:?}",
-        completion.profile
+    assert_eq!(
+        completion.profile.lock_wait_ms, 120,
+        "filesystem Work lease wait must retain its own interval",
     );
-    assert!(
-        completion.profile.parse_ms < completion.profile.lock_wait_ms,
-        "parse_ms must exclude the Work lease wait: {:?}",
-        completion.profile
+    assert_eq!(
+        completion.profile.parse_ms, 240,
+        "parsing must exclude the separate Work lease interval",
     );
 }
 

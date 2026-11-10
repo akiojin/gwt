@@ -722,7 +722,7 @@ export function createProjectIndexSearchSurface({
           requestKnowledgeDetail(windowId, knowledgeKind, number);
           return;
         }
-        pendingIndexOpenTargetsByPreset.set(knowledgeKind === "issue" ? "settings" : preset, { knowledgeKind, number });
+        pendingIndexOpenTargetsByPreset.set(knowledgeKind === "issue" ? "issue" : preset, { knowledgeKind, number });
       }
 
       // SPEC-3064 Phase 3 (E3): the Index window mount moved here from the
