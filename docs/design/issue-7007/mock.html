@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gwt — Task-centered design preview</title>
+  <link rel="stylesheet" href="../../../crates/gwt/web/styles/tokens.css">
+  <link rel="stylesheet" href="../../../crates/gwt/web/styles/typography.css">
+  <style>
+    @font-face { font-family: "Mona Sans Preview"; src: url("../../../crates/gwt/web/fonts/MonaSans.woff2"); font-weight: 200 900; font-stretch: 75% 125%; }
+    @font-face { font-family: "Hubot Sans Preview"; src: url("../../../crates/gwt/web/fonts/HubotSans-Regular.woff2"); font-weight: 400; }
+    @font-face { font-family: "Hubot Sans Preview"; src: url("../../../crates/gwt/web/fonts/HubotSans-Bold.woff2"); font-weight: 700; }
+    /* Same Operator fonts; aliases resolve assets when this standalone file is opened locally. */
+    :root { --font-body: "Mona Sans Preview", system-ui, sans-serif; --font-display: "Hubot Sans Preview", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--color-canvas); color: var(--color-text); font: var(--type-base)/1.5 var(--font-body); }
+    button, select, textarea { font: inherit; }
+    button, select { padding: .55rem .85rem; border: 1px solid var(--color-button-border); border-radius: .4rem; color: var(--color-button-fg); background: var(--color-button-bg); cursor: pointer; }
+    button:hover { background: var(--color-button-bg-hover); }
+    :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; }
+    button[aria-pressed="true"], button[aria-current="page"] { border-color: var(--color-link); color: var(--color-link); background: var(--color-surface); }
+    h1, h2, h3, p { margin: 0; }
+    h1, h2, h3 { font-family: var(--font-display); line-height: 1.2; }
+    h1 { font-size: var(--type-3xl); letter-spacing: var(--tracking-tight); }
+    h2 { font-size: var(--type-xl); } h3 { font-size: var(--type-lg); }
+    small, .muted { color: var(--color-text-muted); }
+    .toolbar { border-bottom: 1px solid var(--color-border); padding: .8rem 1.5rem; display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; background: var(--color-surface); }
+    .toolbar strong { margin-right: auto; } .toolbar label { display: flex; gap: .5rem; align-items: center; }
+    .layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: calc(100vh - 78px); }
+    aside { background: var(--color-surface); border-right: 1px solid var(--color-border); padding: 1.5rem 1rem; }
+    .brand { font: 700 var(--type-2xl) var(--font-display); margin-bottom: 1.5rem; }
+    nav { display: grid; gap: .5rem; } nav button { text-align: left; }
+    .aside-note { margin-top: 2rem; font-size: var(--type-sm); }
+    main { width: 100%; max-width: 1140px; padding: 2rem 3rem; }
+    .eyebrow { color: var(--color-text-muted); font-size: var(--type-sm); margin-bottom: .5rem; }
+    .page-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+    .primary { border-color: var(--color-link); color: var(--color-link); background: var(--color-surface); }
+    .hero { padding: 1.75rem; border: 1px solid var(--color-border-strong); border-left: 4px solid var(--color-state-needs-input); background: var(--color-surface); border-radius: .6rem; margin-bottom: 1.5rem; }
+    .hero h2 { font-size: var(--type-2xl); margin-bottom: .6rem; } .hero button { margin-top: 1rem; }
+    .hero.clear { border-left-color: var(--color-state-done); }
+    .hero.loading { border-left-color: var(--color-state-idle); }
+    .stats { display: flex; flex-wrap: wrap; gap: 2rem; margin: 1.2rem 0 1.7rem; }
+    .stats strong { display: block; font: 700 var(--type-2xl) var(--font-display); }
+    .section-title { margin: 1.5rem 0 .8rem; }
+    .card { background: var(--color-surface); border: 1px solid var(--color-border); padding: 1.2rem 1.4rem; border-radius: .6rem; margin-bottom: .8rem; }
+    .card-top { display: flex; flex-wrap: wrap; gap: .6rem; justify-content: space-between; margin-bottom: .45rem; }
+    .badge { font-size: var(--type-sm); font-weight: 600; color: var(--color-state-active); }
+    .attention { color: var(--color-state-needs-input); }
+    .actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1rem; }
+    .meta { font-size: var(--type-sm); color: var(--color-text-muted); margin-top: .8rem; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    details { margin-top: 1rem; color: var(--color-text-muted); } summary { cursor: pointer; }
+    .error { border-left: 4px solid var(--color-state-blocked); }
+    .statusbar { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--color-border); font-size: var(--type-sm); color: var(--color-text-muted); }
+    #preview-feedback { min-height: 1.5em; margin-top: 1rem; color: var(--color-link); }
+    .legacy { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .legacy .card { overflow-wrap: anywhere; }
+    textarea { width: 100%; min-height: 8rem; color: var(--color-text); background: var(--color-surface); border: 1px solid var(--color-border-strong); border-radius: .4rem; padding: 1rem; }
+    @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } aside { border-right: 0; padding: 1rem; } .brand, .aside-note { display: none; } nav { grid-template-columns: repeat(4, 1fr); } main { padding: 1.5rem; } .split, .legacy { grid-template-columns: 1fr; } h1 { font-size: var(--type-2xl); } }
+  </style>
+</head>
+<body>
+  <header class="toolbar" aria-label="Design preview controls">
+    <strong>Design preview · Issue #7007</strong>
+    <button id="before-button" aria-pressed="false">Before</button>
+    <button id="after-button" aria-pressed="true">After</button>
+    <label>Scenario <select id="scenario"><option value="attention">Needs attention</option><option value="clear">All clear</option><option value="loading">Reconnecting</option></select></label>
+    <button id="theme-button">Use light theme</button>
+  </header>
+  <div class="layout">
+    <aside>
+      <div class="brand">gwt <small>/ example</small></div>
+      <nav aria-label="Main navigation">
+        <button data-page="home" aria-current="page">⌂ Home</button>
+        <button data-page="decide">◇ Decide</button>
+        <button data-page="progress">↗ Progress</button>
+        <button data-page="log">≡ Log</button>
+      </nav>
+      <p class="aside-note muted">Tools<br>Issues · Agents · Board<br><br>Advanced tools stay available.</p>
+    </aside>
+    <main>
+      <p class="eyebrow">Illustrative data · local preview only · no actions are sent</p>
+      <section id="before" hidden aria-label="Before, illustrative reconstruction">
+        <div class="page-header"><h1>Works</h1><span class="muted">Notifications 98</span></div>
+        <div class="stats"><div><strong>1.9M</strong>Tokens/min</div><div><strong>—</strong>Cost</div><div><strong>—</strong>Landed PRs</div></div>
+        <p class="muted">Cost unavailable: per-session USD is not supported. Landed PRs unavailable: daily merge data is not connected.</p>
+        <div class="legacy section-title">
+          <article class="card"><h3>Work A</h3><p>RUNNING</p><p class="meta">Input / Cache / Output<br>Context remaining: —<br>Branch / Ahead of develop 75<br>Verification —<br>Last action decision</p></article>
+          <article class="card"><h3>Work B</h3><p>NEEDS HUMAN</p><p class="meta">manual-profile-v1:example<br>2026-11-10T09:37:26+00:00</p></article>
+          <article class="card"><h3>Notifications</h3><p class="meta">Steering requested<br>Steering requested<br>Steering requested</p></article>
+        </div>
+        <div class="card error"><h3>Resize failed</h3><p>Owner is not Healthy; owner identity mismatch.</p></div>
+        <p class="statusbar">MONITOR Run Q9 A3/6 · WORK 3 · RUNNING 4 3 inline</p>
+      </section>
+      <div id="after">
+        <section data-view="home">
+          <div class="page-header"><div><p class="eyebrow">Your project at a glance</p><h1>Home</h1></div><button class="primary" data-page="create">+ Create task</button></div>
+          <div class="hero" id="home-summary"><p class="eyebrow">Your next step</p><h2 id="summary-title">2 decisions need your attention</h2><p id="summary-description">Review a result and help one task continue.</p><button class="primary" data-page="decide" id="summary-action">Review 2 decisions →</button><button id="retry-refresh" data-preview="Refresh project state" hidden>Try again</button></div>
+          <div class="stats" id="home-counts"><div><strong>3</strong>Tasks in progress</div><div><strong>9</strong>Tasks queued</div><div><strong>4</strong>Completed today</div></div>
+          <h2 class="section-title">Recent progress</h2>
+          <article class="card"><div class="card-top"><h3>Improve keyboard navigation</h3><span class="badge">In progress</span></div><p>Maya · Testing the keyboard shortcuts</p><p class="meta">Updated 3 minutes ago</p><div class="actions"><button data-page="progress">View progress →</button></div></article>
+          <article class="card" data-needs-decision><div class="card-top"><h3>Make launch errors easier to understand</h3><span class="badge attention">Needs your decision</span></div><p>Noah · Waiting for a choice before continuing</p><div class="actions"><button data-page="decide">Review decision →</button></div></article>
+        </section>
+        <section data-view="decide" hidden>
+          <div class="page-header"><div><p class="eyebrow">Only items that need your input</p><h1>Decide</h1></div><span class="badge attention" id="decision-count">2 decisions</span></div>
+          <div id="decision-items">
+            <article class="card"><div class="card-top"><h2>Review the task label improvements</h2><span class="badge attention">Review needed</span></div><p>The changes are ready for review. Choose whether to accept the result or ask for changes.</p><p class="meta">Clarify the task list labels · Maya · 3 minutes ago</p><div class="actions"><button class="primary" data-preview="Open the result and its evidence">Review result</button><button data-preview="Request changes">Request changes</button><button data-preview="Defer this decision; it remains unresolved">Later</button></div><details><summary>Evidence and technical details</summary><p>In the product, this area links to the owner's result, checks and available actions. No acceptance or closure is inferred by this mock.</p></details></article>
+            <article class="card"><div class="card-top"><h2>Help the error-message task continue</h2><span class="badge attention">Choice needed</span></div><p>The agent needs a choice about the recovery message before it can continue.</p><p class="meta">Make launch errors easier to understand · Noah · 8 minutes ago</p><div class="actions"><button class="primary" data-preview="Keep the proposed wording">Keep proposed wording</button><button data-preview="Ask the agent to revise the wording">Ask for a revision</button><button data-preview="Defer this decision; it remains unresolved">Later</button></div></article>
+          </div>
+          <div class="card" id="decision-empty" hidden><h2>No decisions waiting</h2><p>We will show anything that needs your input here.</p><button data-page="progress">View progress</button></div>
+          <p class="muted">Preview choices illustrate available actions; the product only shows actions supported by the current item and your permissions.</p>
+        </section>
+        <section data-view="progress" hidden>
+          <div class="page-header"><div><p class="eyebrow">Recent tasks · Counts include all tasks</p><h1>Progress</h1></div><button data-page="create">+ Create task</button></div>
+          <article class="card"><div class="card-top"><h2>Improve keyboard navigation</h2><span class="badge">In progress</span></div><p>Maya · Testing the keyboard shortcuts</p><p class="meta">Updated 3 minutes ago · No decision needed</p><details><summary>Task details</summary><p>Request → Implementation → Tests (current) → Review</p><p>Technical details, measured usage, branch and verification evidence live here, when available.</p></details></article>
+          <article class="card" data-needs-decision><div class="card-top"><h2>Make launch errors easier to understand</h2><span class="badge attention">Needs your decision</span></div><p>Noah · Waiting for a wording choice</p><div class="actions"><button data-page="decide">Review decision →</button></div></article>
+          <article class="card"><div class="card-top"><h2>Improve notification grouping</h2><span class="badge">In progress</span></div><p>Alex · Checking repeated notifications</p><p class="meta">Updated 5 minutes ago</p></article>
+          <h2 class="section-title">Queued · 9 tasks</h2><div class="card"><h3>Make settings easier to find</h3><p class="muted">Waiting for an agent to become available</p></div>
+        </section>
+        <section data-view="log" hidden>
+          <div class="page-header"><div><p class="eyebrow">Updates grouped by task and event</p><h1>Log</h1></div></div>
+          <article class="card"><div class="card-top"><h2>Decision needed</h2><span class="badge attention">Action required</span></div><p>Make launch errors easier to understand · A wording choice is waiting.</p><p class="meta">Repeated 18 times · Last updated 3 minutes ago</p><div class="actions"><button data-page="decide">Review decision →</button></div></article>
+          <article class="card"><div class="card-top"><h2>Task completed</h2><span class="badge">Completed</span></div><p>Improve search placeholders · Changes are available.</p><p class="meta">Today, 09:12 · Local time</p></article>
+          <article class="card error" id="error-example"><div class="card-top"><h2>The terminal could not resize</h2><span class="badge attention">Information</span></div><p>The terminal size may be out of date. Check task progress before retrying.</p><div class="actions"><button data-preview="Retry the terminal resize">Retry resize</button><button data-page="progress">View task</button></div><details><summary>Technical details</summary><p>Owner health: Degraded. Recovery is bounded; a retry will be offered only when supported.</p></details><p class="meta">2 minutes ago</p></article>
+        </section>
+        <section data-view="create" hidden>
+          <div class="page-header"><div><p class="eyebrow">Tell gwt what you want to achieve</p><h1>Create task</h1></div></div>
+          <label for="request">What would you like to do?</label><textarea id="request" placeholder="For example, make keyboard navigation easier to use"></textarea><div class="actions"><button class="primary" data-preview="Task submission">Preview request</button><button data-page="home">Back to Home</button></div><p class="meta">In the product, this uses the existing task request flow. This preview sends nothing.</p>
+        </section>
+        <p class="statusbar" id="statusbar">Auto-run: On · 9 queued · 3 in progress · Updated just now</p>
+      </div>
+      <p id="preview-feedback" role="status" aria-live="polite"></p>
+    </main>
+  </div>
+  <script>
+    // Design-only interactions. No backend, storage, task or decision mutations.
+    const $ = selector => document.querySelector(selector);
+    const scenario = $('#scenario');
+    function showPage(page) {
+      $('#before').hidden = true; $('#after').hidden = false;
+      $('#before-button').setAttribute('aria-pressed', 'false'); $('#after-button').setAttribute('aria-pressed', 'true');
+      document.querySelectorAll('[data-view]').forEach(view => { view.hidden = view.dataset.view !== page; });
+      document.querySelectorAll('nav button').forEach(button => { if (button.dataset.page === page) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current'); });
+      $('#preview-feedback').textContent = '';
+      const heading = document.querySelector('[data-view="' + page + '"] h1');
+      heading.tabIndex = -1; heading.focus();
+    }
+    document.querySelectorAll('[data-page]').forEach(button => button.addEventListener('click', () => showPage(button.dataset.page)));
+    document.querySelectorAll('[data-preview]').forEach(button => button.addEventListener('click', () => { $('#preview-feedback').textContent = 'Preview only — ' + button.dataset.preview + '. Nothing was sent or changed.'; }));
+    $('#before-button').addEventListener('click', () => { $('#before').hidden = false; $('#after').hidden = true; $('#before-button').setAttribute('aria-pressed', 'true'); $('#after-button').setAttribute('aria-pressed', 'false'); });
+    $('#after-button').addEventListener('click', () => showPage('home'));
+    $('#theme-button').addEventListener('click', () => { const dark = document.documentElement.dataset.theme === 'dark'; document.documentElement.dataset.theme = dark ? 'light' : 'dark'; $('#theme-button').textContent = dark ? 'Use dark theme' : 'Use light theme'; });
+    scenario.addEventListener('change', () => {
+      const loading = scenario.value === 'loading', clear = scenario.value === 'clear';
+      $('#home-summary').className = 'hero' + (loading ? ' loading' : clear ? ' clear' : '');
+      $('#summary-title').textContent = loading ? 'Reconnecting to your project' : clear ? 'No decisions waiting' : '2 decisions need your attention';
+      $('#summary-description').textContent = loading ? 'Last update: 3 minutes ago. The information below may be out of date.' : clear ? 'Your tasks are moving. We will let you know when you are needed.' : 'Review a result and help one task continue.';
+      $('#summary-action').hidden = loading || clear; $('#retry-refresh').hidden = !loading;
+      $('#decision-count').textContent = loading ? 'Refreshing — count unavailable' : clear ? '0 decisions' : '2 decisions';
+      $('#decision-items').hidden = loading || clear; $('#decision-empty').hidden = !clear;
+      $('#statusbar').textContent = loading ? 'Reconnecting · Last update: 3 minutes ago · Counts may be out of date' : 'Auto-run: On · 9 queued · 3 in progress · Updated just now';
+      // Historical examples are suppressed in variants that would contradict them.
+      document.querySelectorAll('[data-needs-decision]').forEach(card => { card.hidden = clear; });
+      document.querySelectorAll('[data-preview]').forEach(button => { button.disabled = loading && button.id !== 'retry-refresh'; });
+      document.querySelector('[data-view="log"] .card').hidden = clear;
+      $('#home-counts').hidden = loading;
+      $('#preview-feedback').textContent = loading ? 'Refreshing project data. Decision actions are unavailable until the current state is confirmed.' : '';
+    });
+  </script>
+</body>
+</html>
