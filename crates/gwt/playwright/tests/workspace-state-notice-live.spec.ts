@@ -68,14 +68,14 @@ test.describe("Workspace state diagnostics", () => {
       await control.focus();
       await control.hover();
       const burst = await page.evaluate(async () => {
-        const app = document.getElementById("app")!;
+        const island = document.querySelector("#app > .react-island")!;
         const focused = document.activeElement;
         let renders = 0;
         const observer = new MutationObserver(records => {
           renders += records.flatMap(record => [...record.addedNodes])
             .filter(node => node instanceof Element && node.matches(".workspace-state-notice")).length;
         });
-        observer.observe(app, { childList: true });
+        observer.observe(island, { childList: true });
         try {
           for (let index = 1; index <= 50; index++) {
             window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
