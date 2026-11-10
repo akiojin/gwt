@@ -1,6 +1,6 @@
 //! Issue #3917 — settle a delivered Issue on GitHub after its work merged.
 //!
-//! The Issue Monitor scan proposes one [`IssueMonitorEffectPayload::SettleMergedIssue`]
+//! Issues scan proposes one [`IssueMonitorEffectPayload::SettleMergedIssue`]
 //! per merged delivery; the daemon executor runs [`settle_merged_issue`], which
 //! posts the settlement comment (once, keyed by a marker) and, for
 //! [`MergedIssueSettlementAction::Close`], closes the Issue with a verified
@@ -96,7 +96,7 @@ pub fn render_settlement_comment(
     match action {
         MergedIssueSettlementAction::Close { .. } => {
             body.push_str(&format!(
-                "PR #{pr_number}（merge commit `{sha}`）が develop に merge されたため、gwt Issue Monitor が Issue #{issue_number} を close します。\n"
+                "PR #{pr_number}（merge commit `{sha}`）が develop に merge されたため、gwt Issues が Issue #{issue_number} を close します。\n"
             ));
             body.push_str("\n受け入れ基準はすべて `[x]` です。\n");
         }
@@ -122,7 +122,7 @@ pub fn render_settlement_comment(
             );
         }
     }
-    body.push_str("\nManaged by gwt Issue Monitor.\n");
+    body.push_str("\nManaged by gwt Issues.\n");
     body
 }
 

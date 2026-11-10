@@ -1,5 +1,5 @@
 /**
- * Issue #4963 AC-1: a disabled Monitor's ListIssueMonitor projection must
+ * Issue #4963 AC-1: a disabled Issues's ListIssueMonitor projection must
  * remain responsive with a cold/stale cache, including Launch Wizard cancel.
  * The isolated server's fake gh gates only state=all&page=1. Generation files
  * in gate_root rendezvous through armed -> started -> released -> completed;
@@ -30,7 +30,7 @@ type MonitorFixture = {
   gate_root: string;
 };
 
-test.describe("Issue Monitor cache responsiveness (live backend)", () => {
+test.describe("Issues cache responsiveness (live backend)", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
   test.setTimeout(120_000);
 

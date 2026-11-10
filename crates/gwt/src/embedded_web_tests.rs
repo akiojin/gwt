@@ -252,7 +252,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
         .collect();
     assert!(
         !paths.contains(&"/issue-monitor-surface.js"),
-        "the retired independent Issue Monitor asset must not be served"
+        "the retired independent Issues asset must not be served"
     );
 
     let html = app_js();
@@ -262,7 +262,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         !html.contains("surface === \"issue-monitor\""),
-        "the canvas must not mount a second Issue Monitor surface"
+        "the canvas must not mount a second Issues surface"
     );
     assert!(
         html.contains("preset === \"issue_monitor\"") && html.contains("return \"knowledge\";"),
@@ -290,15 +290,15 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         html.contains("case \"issue_monitor_status\""),
-        "app.js must handle issue monitor status events"
+        "app.js must handle Issues status events"
     );
     assert!(
         html.contains("case \"issue_monitor_inbox\""),
-        "app.js must handle issue monitor inbox events"
+        "app.js must handle Issues inbox events"
     );
     assert!(
         html.contains("case \"issue_monitor_toast\""),
-        "app.js must handle issue monitor toast events"
+        "app.js must handle Issues toast events"
     );
 }
 
@@ -317,7 +317,7 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     );
     assert!(
         surface_js.contains("issue_monitor_queue_move"),
-        "Issue Monitor must send terminal queue move events"
+        "Issues must send terminal queue move events"
     );
     assert!(
         surface_js.contains("↑")
@@ -328,7 +328,7 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     );
     assert!(
         surface_js.contains("Start") && surface_js.contains("Stop"),
-        "Issue Monitor processing control must use Start/Stop labels"
+        "Issues processing control must use Start/Stop labels"
     );
     assert!(
         surface_js.contains("Agent settings")
@@ -1499,7 +1499,7 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
     // say which face it was. Each face now carries its own label.
     assert!(
         js.contains(r#"issue: "Issue""#)
-            && js.contains(r#"issue_monitor: "Issue Monitor""#)
+            && js.contains(r#"issue_monitor: "Issues""#)
             && js.contains(r#"spec: "SPEC""#),
         "expected the three Issue-family presets to carry distinguishable role labels",
     );

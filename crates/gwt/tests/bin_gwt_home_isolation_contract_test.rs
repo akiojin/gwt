@@ -97,7 +97,7 @@ const HOME_IMPLICIT_PATH_HELPER_SOURCES: &[&str] = &[
 /// propagates from them to every test that uses them.
 const SHARED_FIXTURE_SOURCE: &str = "crates/gwt/src/app_runtime/tests.rs";
 
-/// Test entry points that enqueue the Issue Monitor scheduled scan worker.
+/// Test entry points that enqueue Issues scheduled scan worker.
 /// `run_scheduled_issue_monitor_scan_with_budgets` re-resolves the prefs path
 /// from `project_root` **on the worker thread**, where a `ScopedGwtHome`
 /// thread-local pin installed by the test body is not visible. These tests
@@ -525,7 +525,7 @@ fn every_scan_worker_test_holds_the_process_env_lock() {
     let violations = violations_for(&root, &watched, |function| function.holds_env_lock);
     assert!(
         violations.is_empty(),
-        "Issue #3609: {} test(s) enqueue the Issue Monitor scan worker without holding \
+        "Issue #3609: {} test(s) enqueue Issues scan worker without holding \
          `env_test_lock()`. The worker re-resolves the prefs path from the process-global \
          `HOME` on its own thread, where a `ScopedGwtHome` thread-local pin is invisible:\n{}",
         violations.len(),

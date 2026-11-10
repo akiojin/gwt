@@ -248,7 +248,7 @@ impl IssueMonitorPrefs {
             ));
         }
         self.advance_effect_authority_epoch()
-            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+            .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
         let mut monitor =
             IssueMonitorState::with_prefs(IssueMonitorConfig::default(), self.clone());
         monitor.set_issue_minimum_launch_tier(number, tier);

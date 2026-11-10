@@ -10,7 +10,7 @@ fn review_dispatch_feedback_context_does_not_own_the_issue_launch_binding() {
     // materializes its launch.
     let mut context = LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(42),
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: None,

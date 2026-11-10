@@ -31,7 +31,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Issue #6877 AC-2: the freshness a timer-driven Issue Monitor scan accepts
+/// Issue #6877 AC-2: the freshness a timer-driven Issues scan accepts
 /// for its GitHub reads. While a scope is entered on the scanning thread,
 /// Monitor list pages and the in-process timeline / PR lifecycle caches serve
 /// entries up to this age instead of spawning `gh` again. Control-driven scans

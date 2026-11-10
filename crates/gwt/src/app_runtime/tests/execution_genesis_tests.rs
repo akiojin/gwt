@@ -310,7 +310,7 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
         metadata: Box::new(OwnerLaunchMetadata {
             launch_feedback_context: Some(LaunchFeedbackContext {
                 client_id: "__issue_monitor__".into(),
-                title: "Issue Monitor".into(),
+                title: "Issues".into(),
                 issue_monitor_issue_number: Some(42),
                 issue_monitor_delivery_id: None,
                 issue_monitor_project_root: Some(project.clone()),

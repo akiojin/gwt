@@ -1,6 +1,6 @@
 /* SPEC-3671 — Issue window as the primary surface, amended by Issue #3884.
  *
- * An Issue Monitor auto-launch must not change the selected surface. It becomes an
+ * An Issues auto-launch must not change the selected surface. It becomes an
  * `issue_preview` placement that the Issue window mirrors read-only in its right
  * pane, and an explicit Windowize opens its live terminal in Agents. Since Issue
  * #3884 that placement is also visible without selection as a read-only status

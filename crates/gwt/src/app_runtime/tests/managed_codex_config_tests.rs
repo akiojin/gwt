@@ -1327,10 +1327,10 @@ fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
             &config,
             &worktrees,
         )
-        .expect("exact Issue Monitor worktree must validate");
+        .expect("exact Issues worktree must validate");
         assert!(managed.is_some(), "{mode:?} launch must mint managed proof");
     }
-    let managed = managed.expect("Codex Issue Monitor launch returns managed proof");
+    let managed = managed.expect("Codex Issues launch returns managed proof");
 
     let mut trust_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(worktree.path())
@@ -1863,7 +1863,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
     let _gwt_home = ScopedGwtHome::set(project.path());
     let complete = LaunchFeedbackContext {
         client_id: "client-1".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(42),
         issue_monitor_delivery_id: Some("delivery-42".to_string()),
         issue_monitor_project_root: Some(project.path().to_path_buf()),
@@ -1878,7 +1878,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
         Some(&complete),
     )
     .expect("complete provenance")
-    .expect("Issue Monitor candidate");
+    .expect("Issues candidate");
     assert_eq!(candidate.issue_number, 42);
     assert_eq!(candidate.project_root, project.path());
     assert_eq!(candidate.session_mode, gwt_agent::SessionMode::Normal);
@@ -1902,7 +1902,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
         &gwt_agent::AgentId::Codex,
         Some(&missing_mode),
     )
-    .expect_err("Issue Monitor ownership without a typed session mode must fail closed");
+    .expect_err("Issues ownership without a typed session mode must fail closed");
     assert!(error.contains("session mode provenance"), "{error}");
 
     let incomplete = LaunchFeedbackContext {
@@ -1913,7 +1913,7 @@ fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance()
         &gwt_agent::AgentId::Codex,
         Some(&incomplete),
     )
-    .expect_err("Issue Monitor ownership without project root must fail closed");
+    .expect_err("Issues ownership without project root must fail closed");
     assert!(error.contains("no project root provenance"), "{error}");
     assert!(super::super::issue_monitor_trust_candidate_from_feedback(
         &gwt_agent::AgentId::ClaudeCode,
@@ -1936,7 +1936,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     let delivery_id = format!("launch:{launch_effect_id}");
     let feedback = LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(42),
         issue_monitor_delivery_id: Some(delivery_id.clone()),
         issue_monitor_project_root: Some(project.clone()),
@@ -1949,7 +1949,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
         &gwt_agent::AgentId::Codex,
         Some(&feedback),
     )
-    .expect("typed Issue Monitor feedback")
+    .expect("typed Issues feedback")
     .expect("managed trust candidate");
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&worktree)
@@ -2072,7 +2072,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     assert_eq!(
         restored.active_count(),
         0,
-        "a fail-closed trust preflight must durably release its Issue Monitor slot"
+        "a fail-closed trust preflight must durably release its Issues slot"
     );
 }
 
@@ -2596,7 +2596,7 @@ fn codex_shared_hook_trust_survives_update_restart_and_new_window() {
 
 /// Issue #3967 AC-4: a pre-registration that cannot vouch for the gwt hooks
 /// must fail the launch with a concrete reason instead of handing the agent a
-/// human-only prompt that silently holds the Issue Monitor slot.
+/// human-only prompt that silently holds Issues slot.
 #[test]
 fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
     let home = tempdir().expect("home tempdir");
@@ -2642,7 +2642,7 @@ fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
 
 /// Issue #3967 AC-4: an unwritable Codex config used to be swallowed as a
 /// warning, which launched the agent straight into `Hooks need review` and let
-/// the pane hold its Issue Monitor slot in silence. The launch now fails with
+/// the pane hold its Issues slot in silence. The launch now fails with
 /// the reason so the slot is released and the cause is visible.
 #[test]
 fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {

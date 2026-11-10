@@ -2,7 +2,7 @@
 //!
 //! `<gwt_project_dir>/project-state/pm.json` is the source of truth for
 //! FR-001 (per-project PM singleton), FR-002 (auto-start opt-out), and the
-//! FR-003 restart-backoff bookkeeping. The writer mirrors the Issue Monitor
+//! FR-003 restart-backoff bookkeeping. The writer mirrors Issues
 //! prefs transaction: a stable sibling `.lock` inode serializes cross-process
 //! read-modify-write (GUI and gwtd both write this file), and the
 //! unique-scratch durable atomic write keeps concurrent writers from tearing
@@ -102,7 +102,7 @@ pub const PM_STEERING_CLAUSE: &str =
      more than twice the monitor scan interval), drifting outside its owner Issue's scope, or \
      waiting for its next action, and give the directive through `board.post` with a mention or \
      `pm.message.send` — the ruling channels only; never inject launch or bootstrap instructions \
-     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle. \
+     past Issues. A launch left idle without a directive is never a no-change cycle. \
      CI-RED or AUTO-MERGE-STALLED PRs (including owners gone before merge) and pending gwt-feedback \
      triage also require action or escalation before no-change.";
 
@@ -139,7 +139,7 @@ fn default_auto_start() -> bool {
 
 /// SPEC-3431 FR-026: the agent the PM runs as, chosen per project.
 ///
-/// Deliberately narrower than the Issue Monitor's launch profile. The PM is a
+/// Deliberately narrower than Issues' launch profile. The PM is a
 /// conversational role on the host: it never needs a Docker runtime, a resume
 /// mode, or `--dangerously-skip-permissions`, and offering those knobs would
 /// only let a user misconfigure the one agent that must always come up.
@@ -158,7 +158,7 @@ pub struct PmLaunchProfile {
 /// The agent a project falls back to when nothing is configured.
 ///
 /// A fresh project has no profile, and the PM must still start — this is the
-/// bootstrap trap the Issue Monitor hits when it refuses to launch without
+/// bootstrap trap Issues hits when it refuses to launch without
 /// one. The PM never inherits a profile from unrelated launches for the same
 /// reason: a stale Docker target or exotic model from some other work would
 /// silently become the PM's.
@@ -4717,7 +4717,7 @@ pub fn stop_pm_registration_in_repository(
 /// Per-writer-unique scratch path in the same directory as `path` so the
 /// final `rename` stays on one filesystem and is atomic. A fixed scratch name
 /// would let concurrent GUI/gwtd writers truncate the same file and tear the
-/// JSON (see the Issue Monitor prefs writer).
+/// JSON (see Issues prefs writer).
 fn unique_pm_scratch_path(path: &Path) -> PathBuf {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -4770,7 +4770,7 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
         })?;
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
-        // rename (same convention as the Issue Monitor prefs writer).
+        // rename (same convention as Issues prefs writer).
         timed_pm_prefs_stage("pm_prefs.rename", || {
             gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
             fs::rename(&scratch_path, path)?;
@@ -4880,7 +4880,7 @@ pub fn mutate_pm_prefs<T>(
 }
 
 /// Pause only autonomous PM work. Resume re-arms the existing loop once;
-/// registration, auto-start and Issue Monitor state remain intact.
+/// registration, auto-start and Issues state remain intact.
 pub fn set_pm_paused(repo_path: &Path, paused: bool) -> io::Result<PmPrefs> {
     let path = pm_prefs_path_for_repo_path(repo_path);
     with_pm_prefs_lock(&path, || {
@@ -5124,7 +5124,7 @@ pub struct PmStatusReport {
     /// refusal was transient — in both cases Restart is worth offering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_block: Option<PmStartBlock>,
-    /// FR-014: the PM never occupies an Issue Monitor implementation slot.
+    /// FR-014: the PM never occupies an Issues implementation slot.
     /// Always 0; kept explicit so operators can see the accounting rule.
     /// The global resource cap engine itself remains SPEC #3200's
     /// unimplemented FR — this report only exposes the PM bucket.
@@ -5132,7 +5132,7 @@ pub struct PmStatusReport {
     /// FR-014 visibility: resident PM bucket (1 while a PM is registered).
     pub pm_bucket: u32,
     /// FR-009 diagnostic visibility: whether the session asking for this
-    /// report is the registered PM, i.e. whether the asymmetric Issue Monitor
+    /// report is the registered PM, i.e. whether the asymmetric Issues
     /// boundary is lifted for it. `None` when the caller has no ambient
     /// session identity to judge.
     #[serde(skip_serializing_if = "Option::is_none")]

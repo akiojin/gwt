@@ -7,13 +7,13 @@
 //! sentinel into the endpoint slot, and the only code path that ever reached
 //! the serve loop was a human sending a `daemon.start` envelope. The result was
 //! a permanently unreachable control lane (`daemon_control_unavailable`,
-//! `daemon.subscribe` resolution failures) while the Issue Monitor still
+//! `daemon.subscribe` resolution failures) while Issues still
 //! reported a healthy snapshot.
 //!
 //! This module closes that gap. [`DaemonSupervisor::ensure_running`] is
 //! idempotent and cheap, so the caller does not need its own supervision
 //! thread, backoff schedule, or restart bookkeeping: calling it on the existing
-//! Issue Monitor tick both starts the daemon and replaces one that died.
+//! Issues tick both starts the daemon and replaces one that died.
 //!
 //! GUI residency follows authenticated Rust subscriber leases in the daemon.
 //! This supervisor only launches, authenticates incompatible-owner retirement,

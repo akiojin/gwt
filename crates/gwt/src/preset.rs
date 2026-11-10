@@ -24,7 +24,7 @@ pub enum WindowPreset {
     Logs,
     /// Independent Issues and Kanban surface.
     Issue,
-    /// Legacy-only value accepted so persisted Issue Monitor windows restore
+    /// Legacy-only value accepted so persisted Issues windows restore
     /// into Issues. It is not exposed in [`Self::ALL`].
     IssueMonitor,
     /// Legacy Issue-family alias restored into Issues.
@@ -107,7 +107,7 @@ impl WindowPreset {
             // SPEC-3671 FR-014: the three Knowledge-surface faces must be
             // tellable apart from an open window's title.
             Self::Issue => "Issues",
-            Self::IssueMonitor => "Issue Monitor",
+            Self::IssueMonitor => "Issues",
             Self::Spec => "SPEC",
             // SPEC-3671 FR-015: the surface lists Works (launches).
             Self::Work => "Work",
@@ -198,7 +198,7 @@ impl WindowPreset {
     }
 
     /// Issues mirrors auto-launched agents in its preview pane.
-    /// Legacy Issue Monitor hosts remain readable until workspace load migrates them.
+    /// Legacy Issues hosts remain readable until workspace load migrates them.
     pub fn hosts_issue_preview(self) -> bool {
         matches!(self, Self::Issue | Self::IssueMonitor)
     }
@@ -508,7 +508,7 @@ mod tests {
             WindowPreset::Settings.canonical_surface_preset(),
             WindowPreset::Settings
         );
-        assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
+        assert_eq!(WindowPreset::IssueMonitor.title(), "Issues");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
         assert_eq!(WindowPreset::Work.title(), "Work");

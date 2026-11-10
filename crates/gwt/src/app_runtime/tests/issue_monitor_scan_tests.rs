@@ -1125,7 +1125,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
 
 /// Issue #3528: the read/probe phase and the commit phase shared one deadline,
 /// so a scan slow enough to exhaust it failed at its own commit with
-/// `Issue Monitor authority commit check failed: operation deadline expired
+/// `Issues authority commit check failed: operation deadline expired
 /// during file lock` — every tick threw away what it had just learned and the
 /// monitor never advanced. An exhausted read phase must degrade its findings,
 /// never block the commit.

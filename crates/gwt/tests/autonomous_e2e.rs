@@ -1,4 +1,4 @@
-//! SPEC #3200 T-100 — end-to-end verification of the autonomous Issue Monitor
+//! SPEC #3200 T-100 — end-to-end verification of the autonomous Issues
 //! decision loop. This drives a complete autonomous resolution through every
 //! phase (eligibility → Implementing → Reviewing → gate → Delivering → merge)
 //! and asserts the core SAFETY property: the loop reaches a merge ONLY when the

@@ -1,6 +1,6 @@
 //! Issue #3478 (SPEC #3200 FR-025): an autonomous agent's confirmation
 //! question must be converted into a structured NeedsHuman handoff *before*
-//! the provider's question UI starts waiting, so the Issue Monitor's active
+//! the provider's question UI starts waiting, so Issues' active
 //! slot is released immediately instead of after `stuck_timeout_secs`.
 
 use gwt::autonomous_handoff::{

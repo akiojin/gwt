@@ -99,14 +99,14 @@ impl From<PaneRequestError> for SpecOpsError {
 #[cfg_attr(unix, allow(dead_code))]
 pub(super) fn request_issue_monitor_scan_now(project_root: &Path) -> Result<(), String> {
     let ws_url = pane_websocket_url_from_env().map_err(|error| {
-        tracing::warn!(%error, "Issue Monitor GUI command endpoint is unavailable");
+        tracing::warn!(%error, "Issues GUI command endpoint is unavailable");
         "gui_command_unavailable".to_string()
     })?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| {
-            tracing::warn!(%error, "failed to create Issue Monitor GUI command runtime");
+            tracing::warn!(%error, "failed to create Issues GUI command runtime");
             "gui_command_unavailable".to_string()
         })?;
     let expected_project_scope = gwt_core::paths::project_scope_hash(project_root);
@@ -121,7 +121,7 @@ async fn request_issue_monitor_scan_now_async(
     expected_project_scope: &str,
 ) -> Result<(), String> {
     let request = pane_websocket_request(ws_url).map_err(|error| {
-        tracing::warn!(%error, "Issue Monitor GUI command request is unavailable");
+        tracing::warn!(%error, "Issues GUI command request is unavailable");
         "gui_command_unavailable".to_string()
     })?;
     let mut socket = connect_async(request)
@@ -129,7 +129,7 @@ async fn request_issue_monitor_scan_now_async(
         .map(|(socket, _)| socket)
         .map_err(|error| {
             let code = issue_monitor_scan_connect_error(&error);
-            tracing::warn!(%error, code, "Issue Monitor GUI command connection failed");
+            tracing::warn!(%error, code, "Issues GUI command connection failed");
             code.to_string()
         })?;
     send_frontend_event(
@@ -141,14 +141,14 @@ async fn request_issue_monitor_scan_now_async(
     )
     .await
     .map_err(|error| {
-        tracing::warn!(%error, "Issue Monitor GUI scan request failed");
+        tracing::warn!(%error, "Issues GUI scan request failed");
         "scan_delivery_unknown".to_string()
     })?;
     tokio::time::timeout(ISSUE_MONITOR_SCAN_RESULT_DEADLINE, async {
         loop {
             let value = next_issue_monitor_scan_json(&mut socket).await?;
             let Some(reply) = parse_issue_monitor_scan_result(&value).map_err(|error| {
-                tracing::warn!(%error, "Issue Monitor GUI scan response was invalid");
+                tracing::warn!(%error, "Issues GUI scan response was invalid");
                 "scan_delivery_unknown".to_string()
             })?
             else {
@@ -185,16 +185,16 @@ async fn next_issue_monitor_scan_json(socket: &mut PaneWebSocket) -> Result<Valu
         .await
         .ok_or_else(|| "scan_delivery_unknown".to_string())?
         .map_err(|error| {
-            tracing::warn!(%error, "Issue Monitor GUI scan response failed");
+            tracing::warn!(%error, "Issues GUI scan response failed");
             "scan_delivery_unknown".to_string()
         })?;
     match message {
         Message::Text(text) => serde_json::from_str(text.as_ref()).map_err(|error| {
-            tracing::warn!(%error, "Issue Monitor GUI scan response was invalid JSON");
+            tracing::warn!(%error, "Issues GUI scan response was invalid JSON");
             "scan_delivery_unknown".to_string()
         }),
         Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
-            tracing::warn!(%error, "Issue Monitor GUI scan response was invalid JSON");
+            tracing::warn!(%error, "Issues GUI scan response was invalid JSON");
             "scan_delivery_unknown".to_string()
         }),
         Message::Close(Some(frame)) if frame.code == CloseCode::Policy => {

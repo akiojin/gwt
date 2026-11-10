@@ -484,7 +484,7 @@ impl AppRuntime {
         total
     }
 
-    /// Close a window whose Issue Monitor lifecycle transition was already
+    /// Close a window whose Issues lifecycle transition was already
     /// committed by the daemon or the fail-closed local fallback. Re-entering
     /// the normal window-closed hook here would publish a second control for
     /// the same lifecycle edge and could requeue the just-failed issue.

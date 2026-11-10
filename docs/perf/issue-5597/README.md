@@ -48,7 +48,7 @@ Build this checkout's `gwt` and `gwtd`, then run
 Canonical verification passes the same command through `verify.run`, selecting
 it in `headed_e2e_commands` so gwtd supplies headed Chromium and its reporter.
 
-The harness uses a fresh HOME, disables PM auto-start and Issue Monitor
+The harness uses a fresh HOME, disables PM auto-start and Issues
 launches, checks managed-hook convergence and cleans up its exact owned PID.
 Each Operator theme observes at least 65 seconds of real capacity and usage
 polling. It forces three unchanged usage refreshes, checks continuing snapshot

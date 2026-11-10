@@ -6,7 +6,7 @@ import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 test.skip(process.env.GWT_PLAYWRIGHT_ISSUE_6842 !== "1",
-  "requires checkout binaries and the isolated Monitor/provider fixture");
+  "requires checkout binaries and the isolated Issues/provider fixture");
 test.use({ headless: false, viewport: { width: 1600, height: 1100 } });
 
 for (const issueNumber of [5390, 3340]) {
@@ -112,7 +112,7 @@ try {
         && prefs.launch_bindings?.[confirmation.window_id] === fixture.issueNumber
         && !prefs.pending_launch_deliveries?.some((delivery: any) => delivery.issue_number === fixture.issueNumber);
     }, { timeout: Math.max(1, 120_000 - (Date.now() - started)),
-      message: "real provider, Session, running window and exact Monitor ACK within 120 seconds" }).toBe(true);
+      message: "real provider, Session, running window and exact Issues ACK within 120 seconds" }).toBe(true);
     const elapsedMs = Date.now() - started;
     expect(elapsedMs).toBeLessThan(120_000);
     expect(launch.pid).toBeGreaterThan(0);
@@ -125,7 +125,7 @@ try {
     const monitorStatus = typeof statusEnvelope.output === "string"
       ? JSON.parse(statusEnvelope.output) : statusEnvelope.output;
     Object.assign(evidence, { monitor_status: monitorStatus });
-    expect(monitorStatus.active_launch_details, "canonical Monitor pane and GUI alias share the provider Session")
+    expect(monitorStatus.active_launch_details, "canonical Issues pane and GUI alias share the provider Session")
       .toContainEqual(expect.objectContaining({ issue_number: fixture.issueNumber,
         window_id: confirmation.window_id, session_id: launch.gwt_session_id }));
     const session = await readFile(join(fixture.home, ".gwt/sessions", `${launch.gwt_session_id}.toml`), "utf8");
@@ -150,7 +150,7 @@ try {
         await info.attach(`launch-recovery-evidence-${theme}`, {
           body: JSON.stringify({ ...evidence, passed, browser_errors: errors,
             "User Verification Result": "n/a (autonomous)", "Agent Visual Check": passed ? "pass" : "fail",
-            limitation: "Cold startup pauses saved Running windows. This real checkout/owner/PTY run verifies delivery past a retained runtime-less placeholder; Rust acceptance covers the stale Running projection and bounded repeated preparation directly. GUI combined window IDs are presentation aliases; canonical Monitor window identity is verified through active_launch_details with the same provider Session.",
+            limitation: "Cold startup pauses saved Running windows. This real checkout/owner/PTY run verifies delivery past a retained runtime-less placeholder; Rust acceptance covers the stale Running projection and bounded repeated preparation directly. GUI combined window IDs are presentation aliases; canonical Issues window identity is verified through active_launch_details with the same provider Session.",
           }, null, 2), contentType: "application/json",
         });
       }

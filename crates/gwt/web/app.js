@@ -1656,7 +1656,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // are different faces. Collapsing them to one "Issue" label made an open
           // window's title unable to say which face it was.
           issue: "Issue",
-          issue_monitor: "Issue Monitor",
+          issue_monitor: "Issues",
           spec: "SPEC",
           // SPEC-3671 FR-015: the wire preset is `work` (`workspace` is only a
           // legacy deserialization alias), and the surface lists Works.
@@ -4874,7 +4874,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
           if (diagnostic) {
             const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
-            const notice = { ...diagnostic, title: `${transition?.title || "Issue Monitor"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
             if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
             else notificationCenter.recordError(notice);
           }
@@ -4882,12 +4882,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // Repeated launch attempts update one Issue notice until it is dismissed.
         if (event.level === "info" && !event.notification_transition
-          && event.message === "Issue Monitor launch requested"
+          && event.message === "Issues launch requested"
           && Number.isInteger(event.issue_number) && event.issue_number > 0) {
           notificationCenter.recordSurfaceNotice({
             key: `issue-monitor:launch-requested:${event.issue_number}`,
             level: event.level,
-            title: `Issue Monitor #${event.issue_number}`,
+            title: `Issues #${event.issue_number}`,
             message: event.message,
           });
           return;
@@ -4906,7 +4906,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         notificationCenter.record({
           kind: "issue-monitor",
           level: event?.level,
-          title: monitorNotice?.title || "Issue Monitor",
+          title: monitorNotice?.title || "Issues",
           message: event?.message,
           issueNumber: event?.issue_number,
         });

@@ -120,7 +120,7 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
 更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
 Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
-Issue Monitor のプロファイルと直接の Session Resume は従来の設定を維持します。
+Issues のプロファイルと直接の Session Resume は従来の設定を維持します。
 
 ## 前提
 
@@ -553,7 +553,7 @@ JSON object です。入力名、必須値、型、choice の選択肢を送信�
 
 managed hook とプロジェクト runtime の委譲は `gwtd` を使います。プロジェクトを
 開くと共有 daemon が起動、または既存 daemon に再接続します。daemon は agent pane
-と Issue Monitor を所有します。接続障害はそのプロジェクトだけに影響し、Hub と
+と Issues を所有します。接続障害はそのプロジェクトだけに影響し、Hub と
 他のプロジェクトは引き続き利用できます。GUI が起動した daemon は最後の GUI が
 切断し、再接続の猶予期間を過ぎると終了処理へ進みます。ただし、明示 Continue の
 未完了仕事がある間は、そのプロジェクトの runtime を保持します。GUI を一つ閉じても共有
@@ -584,7 +584,7 @@ signal で停止できます。
    登録する。設計が必要な作業は同じ Issue に `gwt-spec` design-required label と
    SPEC artifact を付ける。Intake は branch を作らない
 4. **Execute** レーンでは、登録済みの作業を実行する。`Open Workspace` が既存
-   branch 上で `Agent` を起動する、背後の `Issue Monitor` が登録済み Issue を
+   branch 上で `Agent` を起動する、背後の `Issues` が登録済み Issue を
    自動で拾う、または owner が既知なら Issue detail から `gwt-execute #N` で直接 Launch Agent する
 5. Execute 起動が確定した時にのみ、gwt が背後の `work/YYYYMMDD-HHMM[-n]`
    branch / worktree を materialize する（Intake session は branchless で ephemeral）
@@ -597,11 +597,11 @@ signal で停止できます。
 
 主なウィンドウ:
 
-- `Agent` — Intake / Open Workspace / Issue Monitor / Launch Agent から作成される実 coding-agent process window
+- `Agent` — Intake / Open Workspace / Issues / Launch Agent から作成される実 coding-agent process window
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます。Issue Monitor が自動起動した Agent は、
+  Work Item view を開きます。Issues が自動起動した Agent は、
   独立した Issues 面の右ペインに読み取り専用でミラー表示されます。入力
   したいときは `Windowize` で同じセッションを Works のネイティブ端末に開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
@@ -626,7 +626,7 @@ signal で停止できます。
   System には保存値・有効値と、更新の保留理由も表示します。GUI で変更するか、
   PM に `update.settings.set` の `auto_apply_updates` で変更を依頼できます。
   `update.settings.status` で状態を読み取れます。
-  この設定は Issue Monitor の設定から除外されています。
+  この設定は Issues の設定から除外されています。
   `Restart now` では稼働中 agent の件数、pending claim、verification lease、
   関連 Issue を確認してから適用します。作業中は `Apply after all agents finish`
   が既定の選択肢となり、新規起動を保留して既存作業の終了まで待ちます。
@@ -664,7 +664,7 @@ Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 マウス追跡中のアプリでは `Shift+drag`（macOS は `Option+drag`）で範囲選択できます。
 ターミナルにマウスを合わせると、この修飾キーの案内も表示されます。
 
-## Issue サーフェスと Issue Monitor
+## Issue サーフェスと Issues
 
 左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
 Active / Done の 4 列で表示します。各行の実行状態と操作はそのまま利用できます。
@@ -872,7 +872,7 @@ runtime 状態、ABA 履歴は対象外です。guard を省略した既存呼�
 返し、読み値が無い場合はその理由を返します。レートリミットの初回拒否で provider を
 hold し、全候補が hold 中なら最も早い既知の reset 時刻に自動再開します。
 reset がすべて不明なら定期再試行せず、`needs_human_fleet` の
-`launch_candidates_exhausted` として通知します。GUI の Issue Monitor 設定フォーム
+`launch_candidates_exhausted` として通知します。GUI の Issues 設定フォーム
 （`⚙ Settings`）は同じプールを Agent Settings の組として並べ、`＋` で組を追加、
 `−` で削除、矢印で並べ替えができ、保存した並び順がそのまま起動候補の順序になります。
 各 operation
@@ -1047,7 +1047,7 @@ Project の明示終了や GWT 再起動では許可を破棄します。クリ�
 
 各プロジェクトには常駐の **PM エージェント**ペインが 1 つ起動します。これが
 ユーザーの唯一の対話窓口です。自然言語で要望を伝えると、PM が Issue への分解・
-登録・design-required Issue の計画策定・意味的な実行順序の決定・Issue Monitor
+登録・design-required Issue の計画策定・意味的な実行順序の決定・Issues
 への起動指示までを行います。進捗の報告と `NeedsHuman` エスカレーションの提示も
 同じ会話の中で行われます。
 
@@ -1380,17 +1380,17 @@ Issue も計画の監査記録に残します。目標変更では、ロード�
 この記録だけでは作業をスケジュールせず、重複防止や通知済みの証明にもなりません。
 
 PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
-スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
+スキャンを要求するだけで、実際の起動は Issues の既存 claim/slot 経路が
 担うため、多重起動の防止機構はそのまま維持されます。
 
 - プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
 - PM 設定の **Pause / Resume** で自律ループを一時停止・再開できます。停止状態は
-  再起動後も維持され、PM との会話、Issue Monitor、稼働中の agent は継続します。
+  再起動後も維持され、PM との会話、Issues、稼働中の agent は継続します。
   Resume は最新の状態を再確認します。JSON operations `pm.pause` / `pm.resume`
   でも操作でき、`pm.status` は登録状態と別に `paused` を返します。
 - PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
   クラッシュループを防ぐバックオフが働きます。
-- Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
+- Issues の `enabled` / `autonomous_mode` を CLI から有効化できるのは
   PM だけです。他のエージェントセッションは GUI 操作が必要です。マージ判断は
   影響を受けません — 上記の強い自動ゲートが引き続きすべてのマージを決めます。
 - PM は project store 単位ではなく**リポジトリ単位**で 1 つです。state が
@@ -2205,7 +2205,7 @@ macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 1
 警告は観測結果であり、特定 worktree が原因である証明ではありません。
 稼働中のファイル監視利用者と Spotlight のプライバシー設定を確認してください。
 
-Spotlight のインデックス処理そのものは Issue Monitor の snapshot から読めます。
+Spotlight のインデックス処理そのものは Issues の snapshot から読めます。
 `issue.monitor.status` の `spotlight` は `mds_stores` プロセスとその CPU 率を
 列挙し、100% を超えたプロセスがある場合に `warning` を載せます。worktree が
 数百規模のホストでは、この daemon がエージェント本体を上回る CPU 消費者になり、

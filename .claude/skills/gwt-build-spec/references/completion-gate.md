@@ -58,7 +58,7 @@ The gate **fails** when any of:
 
 User Verification Result is optional unless the owner explicitly requests
 human confirmation. Missing, pending, or legacy deferred fields alone do not
-establish that request. An unattended Issue Monitor launch records
+establish that request. An unattended Issues launch records
 `n/a (autonomous)`. UI work requires `Agent Visual Check: pass` and measured
 passing headed Chromium dark/light results in the same fresh `verify.run`
 record, selected with `params.headed_e2e_commands`. The legacy

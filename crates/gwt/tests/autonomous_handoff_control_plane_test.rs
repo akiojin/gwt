@@ -1,4 +1,4 @@
-//! Issue #3478 (SPEC #3200 FR-025): Issue Monitor control-plane half of the
+//! Issue #3478 (SPEC #3200 FR-025): Issues control-plane half of the
 //! question handoff — applying a hook-written handoff must park the owner
 //! Issue for a human and free its active slot immediately, and answering it
 //! must resume the exact same session instead of launching a duplicate.

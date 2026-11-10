@@ -2,7 +2,7 @@
 //! Issue #3813).
 //!
 //! Pure functions only: the caller supplies the persisted
-//! [`AgentResourceConfig`], the launch repository's Issue Monitor
+//! [`AgentResourceConfig`], the launch repository's Issues
 //! `max_active`, and the host logical-core count. No config or prefs I/O
 //! happens here so the preset formulas stay table-testable.
 //!

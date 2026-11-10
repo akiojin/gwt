@@ -1,4 +1,4 @@
-// SPEC #5016 — Issue Monitor rows combine cached KnowledgeListItem content
+// SPEC #5016 — Issues rows combine cached KnowledgeListItem content
 // with live inbox lifecycle state in the shared presentation model.
 
 import assert from "node:assert/strict";
@@ -114,7 +114,7 @@ test("Issue #3165: missing saved settings explain why Start has not launched an 
   const { body, surface, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const guidance = body.querySelector('[data-role="monitor-setup-guidance"]');
-  assert.ok(guidance, "Monitor has contextual setup guidance");
+  assert.ok(guidance, "Issues has contextual setup guidance");
   assert.equal(guidance.hidden, true, "unknown profile status makes no launch claim");
   assert.equal(guidance.getAttribute("role"), "status");
   const status = { enabled: false, state: "disabled", active_count: 0, queue_len: 3 };
@@ -269,7 +269,7 @@ test("a failed Issue window renderer does not leave another window on the previo
   assert.match(second.querySelector('.knowledge-row').textContent, /Recorded work/);
 });
 
-test("a failed Monitor notification cannot prevent the controls from reading committed status", async (t) => {
+test("a failed Issues notification cannot prevent the controls from reading committed status", async (t) => {
   const { body, surface } = await makeFixture({ reportSurfaceError() { throw new Error("notification failed"); } });
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   assert.throws(() => surface.applyIssueMonitorStatus({ enabled: true, state: "active", queue_len: 1, active_count: 1, max_active_agents: 2, last_error: "scan failed" }), /notification failed/);
@@ -343,7 +343,7 @@ test("monitor state renderer is exhaustive and never aliases an unknown state to
   assert.equal(monitorStateView(""), null);
 });
 
-// SPEC #3885 Phase 5 (T-032): the monitor summary line became the Monitor
+// SPEC #3885 Phase 5 (T-032): the monitor summary line became the Issues
 // band — one state pill plus Active / Queue metrics; quota-hold detail lives in
 // the pill tooltip.
 function monitorBand(body) {
@@ -360,7 +360,7 @@ function monitorBand(body) {
   };
 }
 
-test("Issue Monitor band presents and clears the quota-hold provider and reset", async (t) => {
+test("Issues band presents and clears the quota-hold provider and reset", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const band = monitorBand(body);
@@ -429,7 +429,7 @@ test("Issue #5603: GitHub API read limits explain the reason and retry time, the
 // Issue #4366 AC-6 / AC-6b: a hold never rewrites the saved settings line; the
 // launch target and its reason are a separate line (now of the ⚙ tooltip) that
 // exists only while held.
-test("Issue Monitor keeps the saved agent settings and shows the held fallback separately", async (t) => {
+test("Issues keeps the saved agent settings and shows the held fallback separately", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const gear = body.querySelector('.knowledge-monitor-bar [data-action="monitor-settings"]');
@@ -464,7 +464,7 @@ test("Issue Monitor keeps the saved agent settings and shows the held fallback s
   assert.equal(gear.title, "Agent settings Saved: codex / gpt-5 / high");
 });
 
-test("Issue Monitor renders the JSON gui_status contract and follows updated limits", async (t) => {
+test("Issues renders the JSON gui_status contract and follows updated limits", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const response = {
@@ -599,7 +599,7 @@ test("Issue #3620: the Operator strip preserves a zero effective worker cap", as
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
 });
 
-test("Issue Monitor band preserves higher-priority states around quota-hold metadata", async (t) => {
+test("Issues band preserves higher-priority states around quota-hold metadata", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const band = monitorBand(body);
@@ -711,7 +711,7 @@ test("Issue rows render monitor projections and send controls from the full cano
   assert.ok(row42.querySelector(":scope > .knowledge-row-select"));
   assert.ok(row42.querySelector(":scope > .knowledge-row-actions"));
   assert.equal(row42.querySelector("button button"), null, "no nested interactive controls");
-  // SPEC #3885 T-004: the Monitor state is the row's single primary badge.
+  // SPEC #3885 T-004: the Issues state is the row's single primary badge.
   assert.equal(row42.querySelector(".knowledge-row-badge").textContent, "Queued");
   assert.equal(row42.querySelectorAll(".knowledge-row-badge").length, 1);
   assert.match(row42.textContent, /Queue 1/);
@@ -882,7 +882,7 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
   assert.equal(stateWord(), "On");
 
   // AC-5: Start/Stop is an action button (label = what the press does, state
-  // lives in the Monitor band pill) and it does not move on click either.
+  // lives in the Issues band pill) and it does not move on click either.
   const startStop = body.querySelector('[data-action="monitor-toggle"]');
   assert.equal(startStop.textContent, "Start");
   startStop.click();
@@ -902,7 +902,7 @@ test("Issue #6932 counts scan occurrences without treating repeated snapshots or
   const { surface } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const status = { enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1,
-    last_error_source: "scan_failure", last_error: "issue monitor scan failed at open-pr-readback stage: deadline exceeded after 30s", last_scan_at: "2026-11-09T00:00:00Z" };
+    last_error_source: "scan_failure", last_error: "Issues scan failed at open-pr-readback stage: deadline exceeded after 30s", last_scan_at: "2026-11-09T00:00:00Z" };
   surface.applyIssueMonitorStatus(status);
   surface.applyIssueMonitorStatus(status);
   assert.equal(spies.reported.length, 1);
@@ -919,7 +919,7 @@ test("Issue #6932 counts scan occurrences without treating repeated snapshots or
   assert.equal(spies.reported.length, 3, "a healthy scan does not repeat a retained Issue failure");
 });
 
-test("FR-017 / #5284: current Monitor error is read in the center through the labelled diagnostics action", async (t) => {
+test("FR-017 / #5284: current Issues error is read in the center through the labelled diagnostics action", async (t) => {
   const spies = errorSpies();
   const { body, surface, opened } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -928,7 +928,7 @@ test("FR-017 / #5284: current Monitor error is read in the center through the la
 
   surface.applyIssueMonitorStatus({ enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: "issue #3785: scan failed" });
   assert.deepEqual(spies.reported, [
-    { key: monitorDiagnostic({ message: "issue #3785: scan failed" }).key, title: "Issue Monitor", message: "issue #3785: scan failed" },
+    { key: monitorDiagnostic({ message: "issue #3785: scan failed" }).key, title: "Issues", message: "issue #3785: scan failed" },
   ]);
   assert.equal(body.querySelector(".surface-error-indicator"), null, "still nothing in the surface");
   body.querySelector('[data-action="monitor-diagnostics"]').click();
@@ -1125,7 +1125,7 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   assert.ok(band.nextElementSibling === filter, "filter follows actions");
   assert.equal(status.querySelector("button, input, select"), null, "status is read-only");
   assert.deepEqual([...status.querySelectorAll(".issue-monitor-stat-label")].map(node => node.textContent),
-    ["Monitor", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
+    ["Issues", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
   surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,
     max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z"});
   assert.equal(status.querySelector('[data-metric="capacity"]').textContent,"1 of 3");
@@ -1229,14 +1229,14 @@ test("Issue #6922: stopped Auto-refill explains Start beside the switch and in t
   const hint = () => body.querySelector('[data-role="monitor-refill-guidance"]');
   const empty = () => body.querySelector('[data-queue-column="queued"] .knowledge-empty');
   surface.applyIssueMonitorStatus({enabled:false,terminal_queue_auto_refill:true,terminal_queue:[]});
-  assert.ok(hint(), "the stopped explanation is visible near Monitor controls");
+  assert.ok(hint(), "the stopped explanation is visible near Issues controls");
   assert.equal(hint().hidden, false);
   assert.equal(hint().getAttribute("role"), "status");
-  assert.equal(hint().textContent, "Start the Monitor to begin Auto-refill.");
-  assert.match(empty().textContent, /Start the Monitor to begin Auto-refill/);
+  assert.equal(hint().textContent, "Start the Issues to begin Auto-refill.");
+  assert.match(empty().textContent, /Start the Issues to begin Auto-refill/);
   surface.applyIssueMonitorStatus({enabled:true});
   assert.equal(hint().hidden, true);
-  assert.doesNotMatch(empty().textContent, /Start the Monitor/);
+  assert.doesNotMatch(empty().textContent, /Start the Issues/);
   surface.applyIssueMonitorStatus({enabled:false,terminal_queue_auto_refill:false});
   assert.equal(hint().hidden, true);
   assert.match(empty().textContent, /turn on Auto-refill/);

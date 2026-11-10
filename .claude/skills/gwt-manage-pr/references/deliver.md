@@ -78,7 +78,7 @@ before the next code-changing push.
 
 CI pending/queued is a temporary wait; pending alone never counts toward the
 3 consecutive failed drive iterations. Read `execution.status` / `launch_route`:
-an autonomous / Issue Monitor launch must not ask a human to continue merely
+an autonomous / Issues launch must not ask a human to continue merely
 because the same checks are still running.
 
 At the bounded polling limit, post `board.post` with `params.kind:"status"`

@@ -314,7 +314,7 @@ export function createUpdateCtaController({
   }
 
   // Issue #3906 AC-12 — drain-and-apply. `update_drain` on
-  // issue_monitor_status means the Issue Monitor is holding new launches for
+  // issue_monitor_status means Issues is holding new launches for
   // a staged update and waiting for the host to go quiet. The CTA names the
   // version, how many blockers remain and how long the drain has lasted.
   function drainMinutes(since) {
@@ -801,7 +801,7 @@ export function createUpdateCtaController({
       el("p", {
         className: "update-modal__hint",
         text: anyway
-          ? `The Issue Monitor is draining agents and will apply it automatically once the host is quiet. ${waitingForText()} Apply now anyway restarts gwt immediately through the same graceful path; Stop waiting releases the drain and keeps the update staged.`
+          ? `Issues is draining agents and will apply it automatically once the host is quiet. ${waitingForText()} Apply now anyway restarts gwt immediately through the same graceful path; Stop waiting releases the drain and keeps the update staged.`
           : "Restart now to launch the new version.",
       }),
       releaseNotesLink,

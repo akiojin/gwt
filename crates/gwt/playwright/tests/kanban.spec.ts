@@ -108,7 +108,7 @@ test("Issue #6211: repository label choices preserve selections and bound colore
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
-test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async ({ page }, info) => {
+test("Issue #3165: Open Issues is pointer and keyboard navigation only", async ({ page }, info) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -123,8 +123,8 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
   const issues = page.locator('.workspace-window[data-preset="issue"]');
   await expect(issues).toHaveCount(1);
   const monitor = page.locator("#op-strip-issue-monitor");
-  await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
-  await expect(monitor).toHaveAttribute("title", "Open Monitor | Issue Monitor: Off");
+  await expect(monitor).toHaveAccessibleName("Open Issues: Off");
+  await expect(monitor).toHaveAttribute("title", "Open Issues | Issues: Off");
   const messageCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
   for (const activation of ["click", "Enter", "Space"]) {
     await page.locator('.op-rail__surface[data-surface="settings"]').click();
@@ -137,7 +137,7 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
     await expect(settings).toBeHidden();
     await expect(settings).toHaveCount(1);
     await expect(page.locator(".surface-knowledge")).toBeVisible();
-    await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+    await expect(monitor).toHaveAccessibleName("Open Issues: Off");
     const audit = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
       .filter(message => message.kind === "open_issue_monitor"), auditCursor);
     expect(audit, `${activation} records exactly one navigation audit`).toEqual([
@@ -146,13 +146,13 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
   }
   const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
     .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), messageCursor);
-  expect(controls, "opening Monitor must not enable, configure, reorder or launch").toEqual([]);
+  expect(controls, "opening Issues must not enable, configure, reorder or launch").toEqual([]);
   await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status: {
     enabled: true, state: "error", queue_len: 3, active_count: 0, max_active_agents: 2,
-    last_error: "Monitor navigation fixture error",
+    last_error: "Issues navigation fixture error",
   } }));
-  await expect(monitor).toHaveAccessibleName("Open Monitor: Error Q3 A0/2");
-  await expect(monitor).toHaveAttribute("title", /Open Monitor.*Monitor navigation fixture error/);
+  await expect(monitor).toHaveAccessibleName("Open Issues: Error Q3 A0/2");
+  await expect(monitor).toHaveAttribute("title", /Open Issues.*Issues navigation fixture error/);
   await expect(monitor).toHaveClass(/op-status-strip__cell--alert/);
   await page.screenshot({ path: info.outputPath(`monitor-navigation-${theme}.png`) });
   expect(errors, "zero console/page errors").toEqual([]);
@@ -1132,7 +1132,7 @@ test.describe("Issue Bridge load recovery", () => {
     );
     await expect(issueSurface.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(0);
     await expect(issueSurface.locator('[data-metric="active"]')).toHaveAttribute(
-      "aria-description", /Monitor agent capacity: 1\/2/,
+      "aria-description", /Issues agent capacity: 1\/2/,
     );
 
     const launchNow = issueSurface.locator('[data-issue-number="3273"] [data-action="launch-now"]');
@@ -1145,7 +1145,7 @@ test.describe("Issue Bridge load recovery", () => {
     await launchNow.click();
     const launchControls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
       .filter(message => /^(open_issue_monitor|set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), launchCursor);
-    expect(launchControls, "Launch now targets one issue without opening or starting Monitor").toEqual([
+    expect(launchControls, "Launch now targets one issue without opening or starting Issues").toEqual([
       { kind: "issue_monitor_launch_now", issue_number: 3273, linked_issue_kind: "spec" },
     ]);
     await expect(monitorStatus).toHaveText("Stopped");
@@ -1199,7 +1199,7 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(autonomous).toHaveAttribute("aria-checked", "true");
     await expect(issueSurface.locator('[data-metric="active"]')).toHaveText("Active —");
     await expect(issueSurface.locator('[data-metric="active"]')).toHaveAttribute(
-      "aria-description", /Monitor agent capacity: 1\/4/,
+      "aria-description", /Issues agent capacity: 1\/4/,
     );
     await expect(autonomousState).toHaveText("On");
     // The track color animates (motion-fast transition), so poll until the
@@ -1477,7 +1477,7 @@ test.describe("Issue Bridge load recovery", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test("renders a backend-normalized restored Issue Monitor in Issues", async ({
+  test("renders a backend-normalized restored Issues in Issues", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];

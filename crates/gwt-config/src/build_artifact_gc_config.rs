@@ -5,7 +5,7 @@
 //! `issue.monitor.status` and the automatic `worktree.gc_build_artifacts`
 //! sweep, so the warning and the reclaim can never disagree about what "low"
 //! means. They are read at each decision, so an edit takes effect on the next
-//! Issue Monitor scan without a restart.
+//! Issues scan without a restart.
 
 use serde::{Deserialize, Serialize};
 
