@@ -77,7 +77,7 @@ pub const PR_STALE_AFTER_HOURS: i64 = 72;
 pub const PR_ESCALATE_AFTER_UNCHANGED_CYCLES: u32 = 3;
 
 /// The PM fallback attached to rows whose `default_action` cannot be executed
-/// through the Issue Monitor (Issue #3868 AC-2). The order is fixed: triage
+/// through Issues (Issue #3868 AC-2). The order is fixed: triage
 /// first, rerun a flake, fresh-launch a regression, escalate when neither
 /// is possible.
 pub const PR_FALLBACK_WHEN_NOT_EXECUTABLE: &str = "PM triages the failure (#3790) → flake: \
@@ -352,7 +352,7 @@ pub struct PrInventoryFields {
     pub url: String,
     pub is_draft: bool,
     /// PR head branch (`headRefName`). A head sitting on the owner's launch
-    /// ref (`work/issue-<owner>`) is exactly what the Issue Monitor refuses
+    /// ref (`work/issue-<owner>`) is exactly what Issues refuses
     /// to fresh-launch over (unique commits), so it decides executability.
     pub head_ref_name: String,
     /// Measured head identity; missing fields remain unknown on older reads.
@@ -3875,7 +3875,7 @@ pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<Str
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
 }
 
-/// Fresh lifecycle evidence for the Issue Monitor's launch decision, without
+/// Fresh lifecycle evidence for Issues' launch decision, without
 /// the completion gate's review-thread and body hydration.
 pub fn try_fetch_pr_lifecycle_for_monitor(
     repo_path: &Path,
@@ -4687,7 +4687,7 @@ pub fn parse_pr_merge_readback(json: &str) -> Option<PrMergeReadback> {
     })
 }
 
-/// Checked readback of [`PrMergeReadback`] used by the Issue Monitor's
+/// Checked readback of [`PrMergeReadback`] used by Issues'
 /// deadline-integral scans (Issue #4726).
 pub fn try_fetch_pr_merge_readback(repo_path: &Path, number: u64) -> Result<PrMergeReadback> {
     try_fetch_pr_merge_readback_with(repo_path, number, run_gh_command)

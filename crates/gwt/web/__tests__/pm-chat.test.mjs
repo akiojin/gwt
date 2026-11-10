@@ -237,9 +237,9 @@ test('current card stays above history and distinguishes PM explanation from aut
 test('current card marks unknown automatic data instead of claiming an empty fleet', () => {
   const { root, update } = fixture();
   update([], null, { status: null, facts: { source: 'unavailable', active_windows: [], queue_head: null,
-    needs_human_count: null, release: null, release_observed_at: null, pending_update: null, error: 'Monitor unavailable' } });
+    needs_human_count: null, release: null, release_observed_at: null, pending_update: null, error: 'Issues unavailable' } });
   const facts = root.querySelector('[aria-label="Live facts"]');
-  assert.match(facts.textContent, /Monitor unavailable/);
+  assert.match(facts.textContent, /Issues unavailable/);
   assert.match(facts.textContent, /needs_human: Unknown/);
   assert.match(facts.textContent, /Release: Unknown/);
 });

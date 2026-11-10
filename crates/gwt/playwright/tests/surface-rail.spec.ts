@@ -572,7 +572,7 @@ test.describe("Surface rail", () => {
     await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
     const pm = settings.locator('[data-settings-panel="project-manager"]');
     for (const [role, pattern] of [
-      ["pm-autonomy-status", /autonomous coordination/i], ["pm-pause-toggle", /Issue Monitor stays unchanged/],
+      ["pm-autonomy-status", /autonomous coordination/i], ["pm-pause-toggle", /Issues stays unchanged/],
       ["pm-agent-select", /after restart/], ["pm-model-input", /after restart/], ["pm-effort-select", /after restart/],
       ["pm-loop-interval", /Minimum: 10 seconds/], ["pm-auto-start", /automatically/],
     ] as const) await explain(pm.locator(`[data-role="${role}"]`), pattern);

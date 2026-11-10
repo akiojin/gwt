@@ -404,7 +404,7 @@ pub const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// (#6299). Only the installed-runner version probe keeps the longer deadline.
 pub const CODEX_CONFIG_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Stable phrase for transient launch failures that Issue Monitor retries.
+/// Stable phrase for transient launch failures that Issues retries.
 pub const TRANSIENT_LAUNCH_RETRY_HINT: &str =
     "gwt retries this launch automatically without spending an attempt";
 

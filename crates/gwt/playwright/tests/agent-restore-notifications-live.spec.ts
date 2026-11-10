@@ -277,7 +277,7 @@ test("automatic restore errors stay in Notifications while manual errors open a 
 
 // Issue #4222: this checks presentation of backend fallback reasons; native
 // conversation ownership and resume selection are exercised by Rust tests.
-test("Issue Monitor fresh-session notifications retain each native conversation fallback reason", async ({ page }, testInfo) => {
+test("Issues fresh-session notifications retain each native conversation fallback reason", async ({ page }, testInfo) => {
   test.skip(!BASE || !process.env.GWT_PLAYWRIGHT_CHECK_HOME,
     "requires browser-check checkout binaries and a fresh HOME");
   const errors: string[] = [];
@@ -300,10 +300,10 @@ test("Issue Monitor fresh-session notifications retain each native conversation 
     await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
 
     const messages = [
-      "Issue Monitor started a fresh session because native conversation is missing",
-      "Issue Monitor started a fresh session because native conversation ownership does not match this worktree",
-      "Issue Monitor started a fresh session because native conversation could not be verified",
-      "Issue Monitor started a fresh session because native conversation is already held by window holder-window",
+      "Issues started a fresh session because native conversation is missing",
+      "Issues started a fresh session because native conversation ownership does not match this worktree",
+      "Issues started a fresh session because native conversation could not be verified",
+      "Issues started a fresh session because native conversation is already held by window holder-window",
     ];
     for (const [index, message] of messages.entries()) {
       await page.evaluate(message => {
@@ -380,7 +380,7 @@ test("degraded resume warnings retain the reason and Start Work recovery without
     await expect(drawer).toBeVisible();
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toHaveAttribute("data-level", "warn");
-    await expect(rows.first().locator(".notification-center__title")).toHaveText("Issue Monitor #3626");
+    await expect(rows.first().locator(".notification-center__title")).toHaveText("Issues #3626");
     await expect(rows.first().locator(".notification-center__message")).toHaveText(warning);
     await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
     await expect(drawer).toBeHidden();

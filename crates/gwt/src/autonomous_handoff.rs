@@ -99,7 +99,7 @@ fn one_line(text: &str) -> String {
     truncated
 }
 
-/// Lifecycle of one structured handoff. The Issue Monitor driver owns every
+/// Lifecycle of one structured handoff. Issues driver owns every
 /// transition out of [`Pending`](AutonomousHandoffState::Pending); the hook
 /// only ever appends a `Pending` record.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,7 +340,7 @@ pub struct AutonomousExecutionContext {
     pub session_id: String,
 }
 
-/// One durable question handoff. Persisted in the Issue Monitor control plane
+/// One durable question handoff. Persisted in Issues control plane
 /// so it survives a daemon restart and stays addressable after the answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousQuestionHandoff {
@@ -691,7 +691,7 @@ pub fn classify_handoff_reason(
 pub fn autonomous_decision_policy(context: &AutonomousExecutionContext) -> String {
     format!(
         "# Autonomous execution policy (Issue #{issue})\n\n\
-This session was launched unattended by the gwt Issue Monitor. No human is watching it.\n\n\
+This session was launched unattended by the gwt Issues. No human is watching it.\n\n\
 **Decide and continue** when the choice is reversible and inside the owner Issue / SPEC scope: \
 pick the smallest, fail-closed default, record the assumption and the reason in your work notes \
 and in the PR body, and keep going. Do not open a question UI for it.\n\n\

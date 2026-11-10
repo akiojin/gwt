@@ -192,7 +192,7 @@ acceptance requires `release` for both baseline and candidate; the TS check
 validates the executable profile path, and the retained verifier requires
 matching release records. The helper uses fresh HOME, a private copy of 14,841
 Session files (36,009,778 bytes), and the normal background index path. PM
-auto-start and Issue Monitor launch are disabled.
+auto-start and Issues launch are disabled.
 The copied fixture is never linked to the live Session store. Its manifest
 hash, executable hashes, relevant source hashes and exact owned process IDs
 are recorded in `launch.json`.

@@ -1343,7 +1343,7 @@ mod tests {
             "Steer them before you judge the cycle unchanged",
             "stalled, drifting out of scope, or waiting for its next action",
             "`board.post` with a mention or `pm.message.send`",
-            "never inject launch instructions past the Issue Monitor",
+            "never inject launch instructions past Issues",
             // Issue #4074 AC-4: the unlanded-branch stocktake.
             "read `unlanded_branches` from `pr.list`",
             "committed but has no PR carrying it",

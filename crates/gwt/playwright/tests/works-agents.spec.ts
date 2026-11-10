@@ -202,7 +202,7 @@ test.describe("Works and Agents approved baseline", () => {
     await openRail(page, "agents");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
 
-    // A Monitor reservation retains its slot without inventing a live member.
+    // A Issues reservation retains its slot without inventing a live member.
     await page.evaluate(() => {
       (window as any).__worksAgentsFixture.census([]);
       (window as any).__worksAgentsFixture.monitorActive(1);

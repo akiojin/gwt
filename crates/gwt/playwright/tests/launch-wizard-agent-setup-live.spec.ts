@@ -172,7 +172,7 @@ async function enterManualSetupSettings(page: Page): Promise<void> {
   if (await target.isVisible().catch(() => false)) {
     return;
   }
-  // #4963: cold Issue Monitor cache preparation can delay the first wizard.
+  // #4963: cold Issues cache preparation can delay the first wizard.
   // Let only this readiness fence use the existing 120s outer test deadline.
   const configure = wizard.getByRole("button", { name: /^Configure and start/ });
   await configure.waitFor({ state: "visible", timeout: 0 });

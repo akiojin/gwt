@@ -225,8 +225,8 @@ export function renderIssueMonitorStatus(doc, status = {}) {
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Open Monitor: ${view.value}`);
-  cell.setAttribute("title", `Open Monitor | ${view.title}`);
+  cell.setAttribute("aria-label", `Open Issues: ${view.value}`);
+  cell.setAttribute("title", `Open Issues | ${view.title}`);
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -279,7 +279,7 @@ function issueMonitorStatusStripView(status = {}) {
     return {
       state,
       value: "Off",
-      title: "Issue Monitor: Off",
+      title: "Issues: Off",
       alert: false,
     };
   }
@@ -299,7 +299,7 @@ function issueMonitorStatusStripView(status = {}) {
   return {
     state,
     value,
-    title: detail ? `Issue Monitor: ${value} | ${detail}` : `Issue Monitor: ${value}`,
+    title: detail ? `Issues: ${value} | ${detail}` : `Issues: ${value}`,
     alert: state === "error" || state === "auth_required",
   };
 }

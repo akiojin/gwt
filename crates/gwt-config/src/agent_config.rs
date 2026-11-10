@@ -148,7 +148,7 @@ pub enum AgentResourceConfigError {
 ///
 /// `priority`, `cpu_limit_percent`, and `build_jobs` only take effect with
 /// the `Custom` preset; `None` numeric values there mean automatic derivation
-/// from the repository's Issue Monitor `max_active` and the host logical-core
+/// from the repository's Issues `max_active` and the host logical-core
 /// count. Zero is rejected by [`Self::validate`] rather than treated as a
 /// sentinel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

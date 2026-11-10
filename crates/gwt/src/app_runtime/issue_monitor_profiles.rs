@@ -78,7 +78,7 @@ impl AppRuntime {
                     &worker_context.project_root, &patches, usage_threshold_percent,
                 )
             })).unwrap_or_else(|_| Err(IssueMonitorControlPublishError::OutcomeUnknown(
-                "Issue Monitor profile save worker panicked; reload settings to inspect the durable state".into(),
+                "Issues profile save worker panicked; reload settings to inspect the durable state".into(),
             )));
             proxy.send(UserEvent::IssueMonitorProfilesSaved(Box::new(
                 IssueMonitorProfilesSaveCompletion {
@@ -93,7 +93,7 @@ impl AppRuntime {
             return self.handle_issue_monitor_profiles_saved(IssueMonitorProfilesSaveCompletion {
                 context, client_id, request_id, ticket,
                 result: Err(IssueMonitorControlPublishError::Rejected(format!(
-                    "could not start Issue Monitor profile save: {error}",
+                    "could not start Issues profile save: {error}",
                 ))),
             });
         }
@@ -112,7 +112,7 @@ impl AppRuntime {
                 .and_then(|deadline| deadline.checked_duration_since(now()))
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| IssueMonitorControlPublishError::OutcomeUnknown(
-                    "Issue Monitor profile save deadline expired; reload settings to inspect the durable state".into(),
+                    "Issues profile save deadline expired; reload settings to inspect the durable state".into(),
                 ))
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
@@ -184,7 +184,7 @@ impl AppRuntime {
         let profiles = gwt::load_issue_monitor_prefs(&prefs_path)
             .map_err(|error| {
                 IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                    "Issue Monitor profiles committed but readback failed: {error}",
+                    "Issues profiles committed but readback failed: {error}",
                 ))
             })?
             .launch_profile_pool();

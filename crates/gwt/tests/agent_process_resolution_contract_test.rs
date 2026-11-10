@@ -505,7 +505,7 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
             .expect("job steps")
             .iter()
             .find(|step| {
-                step["name"].as_str() == Some("Run Issue Monitor launch_now control-path contracts")
+                step["name"].as_str() == Some("Run Issues launch_now control-path contracts")
             })
             .expect("Windows launch_now control-path step");
         assert_eq!(
@@ -544,10 +544,7 @@ fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
             "test-windows-rust-lib",
             "Run real Claude probe caller regressions",
         ),
-        (
-            "test-windows-rust",
-            "Run Issue Monitor scheduled driver contracts",
-        ),
+        ("test-windows-rust", "Run Issues scheduled driver contracts"),
     ] {
         let step = doc["jobs"][job_name]["steps"]
             .as_sequence()
@@ -559,7 +556,7 @@ fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
             step["shell"].as_str(), Some("bash"),
             "Windows multi-command step `{job_name}/{step_name}` must stop at the first failed test command"
         );
-        if step_name == "Run Issue Monitor scheduled driver contracts" {
+        if step_name == "Run Issues scheduled driver contracts" {
             let run = step["run"].as_str().expect("scheduled driver commands");
             assert!(
                 run.lines().any(|line| line.trim() == "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1"),
