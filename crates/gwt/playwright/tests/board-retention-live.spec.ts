@@ -22,6 +22,8 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
   }
   const board = page.locator('.workspace-window[data-preset="board"]').last();
   const logs = page.locator('.workspace-window[data-preset="logs"]').last();
+  await page.locator('.op-rail__surface[data-surface="board"]').click();
+  await expect(board).toBeVisible();
   await expect(board.locator(".board-destination-text")).toHaveText("Local");
   const boardId = (await board.getAttribute("data-id"))!;
   const logsId = (await logs.getAttribute("data-id"))!;
@@ -97,6 +99,7 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
     }, { boardId, logsId });
     expect(controls).toEqual({ sameBoard: true, sameLogs: true, sameInput: true, sameFilter: true,
       draft: "Unsent reconnect draft", selection: [2, 7], query: "retained reconnect filter", scope: "project" });
+    await expect(board).toBeVisible();
     await info.attach(`board-logs-reconnect-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     expect(errors, "zero console/page errors").toEqual([]);
   } finally {
