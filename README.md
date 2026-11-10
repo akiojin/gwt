@@ -1092,8 +1092,15 @@ monitor armed. The full gate design and threat model live in SPEC
 Once a work branch merges into `develop`, the monitor settles the delivered
 Issue itself (`Closes #N` only fires on the default branch). When every
 acceptance criterion is checked, it posts a comment carrying the PR number and
-merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
-`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open. With
+Autonomous on, the comment explains that remaining implementation work returns
+to the queue with a fresh session. If every remaining criterion is
+explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
+as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
+`awaiting_measurement`. Update its acceptance checklist
+after measurement to allow close, or choose **Return to queue** to resume work.
+With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
+`merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria
 does not bypass the unchecked checklist. Auto-close follows the
 `Autonomous` toggle by default; `issue.monitor.config.set` with
