@@ -1388,6 +1388,13 @@ V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
 ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
+# Issue #6979: an Issue refresh publishes a small delta generation over an
+# immutable base instead of copying every unchanged record into a new store.
+# The delta is compacted into a new base once it outgrows this bound.
+ISSUE_DELTA_FILENAME = "delta.json"
+ISSUE_BASE_MANIFEST_FILENAME = "base-manifest.json"
+ISSUE_DELTA_MIN_RECORDS = 128
+ISSUE_DELTA_MAX_FRACTION = 0.05
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
@@ -2109,8 +2116,9 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     retained = _SEARCH_WORKER_READ_CLIENTS
     cache_key = None
     # Closing the last Chroma client stops its System. Issue indexing always
-    # publishes a new generation. Other repo scopes update the active store
-    # in place, so retaining their readers would keep stale query vectors.
+    # publishes a new generation (base or delta, both immutable). Other repo
+    # scopes update the active store in place, so retaining their readers
+    # would keep stale query vectors.
     if (
         retained is not None
         and db_path.parent.name.endswith(GENERATIONS_DIR_SUFFIX)
@@ -2118,7 +2126,8 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
         and collection_name == V2_ISSUES_COLLECTION
     ):
         db_path = db_path.resolve()
-        cache_key = (db_path.parent, collection_name)
+        layer = "delta" if (db_path / ISSUE_DELTA_FILENAME).is_file() else "base"
+        cache_key = (db_path.parent, collection_name, layer)
         cached = retained.pop(cache_key, None)
         if cached is not None:
             if cached[0] == db_path:
@@ -4500,6 +4509,81 @@ def resolve_active_store(db_path: Path) -> Path:
     return db_path
 
 
+def _issue_delta_state(db_path: Path) -> Optional[Dict[str, Any]]:
+    """The active Issue delta layered over the base generation, if any.
+
+    An unreadable delta yields None: readers then serve the base alone, whose
+    count disagrees with the Issue meta, so health reports a repair.
+    """
+    pointer = _read_active_pointer(db_path)
+    if pointer is None or not isinstance(pointer.get("delta"), str):
+        return None
+    store = generations_root(db_path) / pointer["delta"]
+    try:
+        payload = json.loads((store / ISSUE_DELTA_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("base_generation") != pointer.get("generation")
+        or not isinstance(payload.get("shadowed"), list)
+    ):
+        return None
+    return {
+        "store": store,
+        "generation": pointer["delta"],
+        "base_generation": pointer["generation"],
+        "shadowed": frozenset(str(record_id) for record_id in payload["shadowed"]),
+    }
+
+
+def _active_store_layers(db_path: Path) -> List[tuple]:
+    """`(store, hidden_ids)` layers readers combine, base first."""
+    base = resolve_active_store(db_path)
+    delta = _issue_delta_state(db_path)
+    if delta is None:
+        return [(base, frozenset())]
+    return [(base, delta["shadowed"]), (delta["store"], frozenset())]
+
+
+def _issue_base_hashes(db_path: Path) -> Optional[Dict[str, str]]:
+    """Content hashes of the records stored in the active base generation."""
+    pointer = _read_active_pointer(db_path)
+    if pointer is None:
+        return None
+    path = generations_root(db_path) / pointer["generation"] / ISSUE_BASE_MANIFEST_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
+    ):
+        return None
+    return payload
+
+
+def _plan_issue_delta(db_path: Path, new_hashes: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Plan a delta over the active base, or None when a new base is due."""
+    pointer = _read_active_pointer(db_path)
+    base_hashes = _issue_base_hashes(db_path)
+    if pointer is None or base_hashes is None:
+        return None
+    changed = {
+        record_id for record_id, content_hash in new_hashes.items()
+        if base_hashes.get(record_id) != content_hash
+    }
+    deleted = set(base_hashes) - set(new_hashes)
+    limit = max(ISSUE_DELTA_MIN_RECORDS, int(len(base_hashes) * ISSUE_DELTA_MAX_FRACTION))
+    if len(changed) + len(deleted) > limit:
+        return None
+    return {
+        "base_generation": pointer["generation"],
+        "changed": changed,
+        "shadowed": sorted((changed & set(base_hashes)) | deleted),
+    }
+
+
 def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
     """Documents in the store readers currently resolve to, or None when that
     cannot be determined.
@@ -4511,13 +4595,7 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
     if not (store / "chroma.sqlite3").exists():
         return None
     try:
-        client, collection = _open_chroma_collection(
-            store, _scope_collection_name(scope)
-        )
-        try:
-            return _safe_collection_count(collection)
-        finally:
-            _close_chroma_client(client)
+        return _layered_document_count(db_path, scope)
     except Exception:
         return None
 
@@ -4548,8 +4626,13 @@ def _publish_generation(
     document_count: int,
     source_fingerprint: Optional[str] = None,
     after_publish=None,
+    delta_of: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Atomically publish `staging` as the new active generation (FR-390).
+
+    With `delta_of`, `staging` is an Issue delta (#6979): the pointer keeps
+    `delta_of` as its base generation and layers the new directory over it.
+    `document_count` is then the logical count readers see.
 
     Under the exclusive target lock: rename the staging store into an
     immutable generation directory, atomically replace `active.json`, clean
@@ -4593,7 +4676,8 @@ def _publish_generation(
                     (generation_dir / residue).unlink()
             pointer_payload = {
                 "schema_version": INDEX_SCHEMA_VERSION,
-                "generation": generation_name,
+                "generation": delta_of or generation_name,
+                **({"delta": generation_name} if delta_of else {}),
                 "scope": scope,
                 "document_count": document_count,
                 "published_at": _now_utc().isoformat(),
@@ -4621,7 +4705,9 @@ def _publish_generation(
                 gen_root,
                 keep={
                     generation_name,
+                    delta_of,
                     previous.get("generation") if previous else None,
+                    previous.get("delta") if previous else None,
                 },
             )
     except OSError as error:
@@ -5288,30 +5374,36 @@ def _copy_unchanged_records(
             ]
             if not unchanged:
                 return 0
-            prev_store = resolve_active_store(db_path)
-            if not (prev_store / "chroma.sqlite3").exists():
-                return 0
-            client, previous = _open_chroma_collection(prev_store, collection_name)
-            try:
-                batch = 64
-                for start in range(0, len(unchanged), batch):
-                    ids = unchanged[start : start + batch]
-                    got = previous.get(
-                        ids=ids, include=["embeddings", "documents", "metadatas"]
-                    )
-                    got_ids = got.get("ids") or []
-                    embeddings = got.get("embeddings")
-                    if not got_ids or embeddings is None:  # pragma: no cover - store drift
-                        continue
-                    staging_collection.upsert(
-                        ids=list(got_ids),
-                        embeddings=[list(vector) for vector in embeddings],
-                        documents=got.get("documents"),
-                        metadatas=got.get("metadatas"),
-                    )
-                    copied += len(got_ids)
-            finally:
-                _close_chroma_client(client)
+            # Newest layer first: a record in the Issue delta supersedes its
+            # shadowed base copy.
+            for prev_store, hidden in reversed(_active_store_layers(db_path)):
+                ids_left = [record_id for record_id in unchanged if record_id not in hidden]
+                if not ids_left or not (prev_store / "chroma.sqlite3").exists():
+                    continue
+                client, previous = _open_chroma_collection(prev_store, collection_name)
+                try:
+                    found: set = set()
+                    batch = 64
+                    for start in range(0, len(ids_left), batch):
+                        ids = ids_left[start : start + batch]
+                        got = previous.get(
+                            ids=ids, include=["embeddings", "documents", "metadatas"]
+                        )
+                        got_ids = got.get("ids") or []
+                        embeddings = got.get("embeddings")
+                        if not got_ids or embeddings is None:  # pragma: no cover - store drift
+                            continue
+                        staging_collection.upsert(
+                            ids=list(got_ids),
+                            embeddings=[list(vector) for vector in embeddings],
+                            documents=got.get("documents"),
+                            metadatas=got.get("metadatas"),
+                        )
+                        copied += len(got_ids)
+                        found.update(got_ids)
+                finally:
+                    _close_chroma_client(client)
+                unchanged = [record_id for record_id in unchanged if record_id not in found]
     except Exception:
         # Reuse is an optimization: whatever was not copied is re-embedded.
         return copied
@@ -7654,14 +7746,55 @@ def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
         return False, 0
     try:
         with acquire_lock(db_path, exclusive=False):
-            store = resolve_active_store(db_path)
-            client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
-            try:
-                return True, int(collection.count())
-            finally:
-                _close_chroma_client(client)
+            return True, _layered_document_count(db_path, scope)
     except Exception:
         return False, 0
+
+
+def _layered_document_count(db_path: Path, scope: str) -> int:
+    """Documents visible through the active layers. Caller holds a lock."""
+    total = 0
+    for store, hidden in _active_store_layers(db_path):
+        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
+        try:
+            total += int(collection.count())
+            if hidden:
+                total -= len(collection.get(ids=sorted(hidden), include=[])["ids"])
+        finally:
+            _close_chroma_client(client)
+    return total
+
+
+def _query_active_layers(
+    db_path: Path,
+    scope: str,
+    query: str,
+    fetch_n: int,
+    query_embedding: Optional[List[float]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Query every active layer and merge by distance. Caller holds a lock.
+
+    Base records shadowed by the Issue delta are over-fetched and dropped so
+    a changed or deleted Issue never surfaces with its stale base vector.
+    """
+    items: List[Dict[str, Any]] = []
+    count = 0
+    layers = _active_store_layers(db_path)
+    for store, hidden in layers:
+        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
+        try:
+            count += _safe_collection_count(collection) - len(hidden)
+            found = _search_collection_v2(
+                collection, query, fetch_n + len(hidden),
+                query_embedding=query_embedding, **_scope_record_filter(scope),
+            )
+        finally:
+            _close_chroma_client(client)
+        items.extend(item for item in found if item["id"] not in hidden)
+    if len(layers) > 1:
+        items.sort(key=lambda item: float("inf") if item.get("distance") is None else item["distance"])
+        items = items[:fetch_n]
+    return items, max(count, 0)
 
 
 def _scope_status_v2(
@@ -8027,6 +8160,18 @@ def _index_issues_v2_locked(
         mode = "full"
     new_entries = [{"path": record["id"],
                     "content_hash": _record_source_fingerprint([record])} for record in records]
+    new_hashes = {entry["path"]: entry["content_hash"] for entry in new_entries}
+    delta_plan = _plan_issue_delta(db_path, new_hashes) if mode == "incremental" else None
+    # Stage only what the new generation holds: the delta's changed records,
+    # or every record for a new base.
+    staged_records = (
+        [record for record in records if record["id"] in delta_plan["changed"]]
+        if delta_plan is not None else records
+    )
+    staging_fingerprint = (
+        f"{fingerprint}:delta:{delta_plan['base_generation']}"
+        if delta_plan is not None else fingerprint
+    )
 
     # Persist before staging. The held build lock distinguishes a live build
     # from an orphan left by process death. Normal yield/success clear it.
@@ -8044,13 +8189,13 @@ def _index_issues_v2_locked(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(records)
+    total = len(staged_records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
     if continuation is not None and (
         continuation.get("scope") != "issues"
-        or continuation.get("fingerprint") != fingerprint
+        or continuation.get("fingerprint") != staging_fingerprint
         or repair
     ):
         # The Issue cache moved since the parked build: restart staging.
@@ -8069,7 +8214,8 @@ def _index_issues_v2_locked(
                 staged_ids: set = set()
                 if continuation is None and mode == "incremental":
                     _copy_unchanged_records(db_path, "issues", collection, V2_ISSUES_COLLECTION,
-                                            {entry["path"]: entry["content_hash"] for entry in new_entries})
+                                            {record["id"]: new_hashes[record["id"]]
+                                             for record in staged_records})
                     staged_ids = set(collection.get().get("ids") or [])
                 if continuation is not None:
                     try:
@@ -8077,7 +8223,7 @@ def _index_issues_v2_locked(
                     except Exception:  # pragma: no cover - defensive chroma fallback
                         staged_ids = set()
                 pending: List[Dict[str, Any]] = [
-                    record for record in records if record["id"] not in staged_ids
+                    record for record in staged_records if record["id"] not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
                 _write_heavy_progress(
@@ -8097,7 +8243,7 @@ def _index_issues_v2_locked(
                     _write_continuation(
                         continuation_path,
                         scope="issues",
-                        fingerprint=fingerprint,
+                        fingerprint=staging_fingerprint,
                         done=done,
                         total=total,
                     )
@@ -8194,12 +8340,28 @@ def _index_issues_v2_locked(
             publication_error = error
 
     try:
+        # The layer descriptor travels inside the generation directory: a
+        # delta names its base and the base records it hides; a base records
+        # its content hashes so the next refresh can plan a delta over it.
+        if delta_plan is not None:
+            layer_name, layer_payload = ISSUE_DELTA_FILENAME, {
+                "schema_version": 1,
+                "base_generation": delta_plan["base_generation"],
+                "shadowed": delta_plan["shadowed"],
+                "document_count": staged_count,
+            }
+        else:
+            layer_name, layer_payload = ISSUE_BASE_MANIFEST_FILENAME, new_hashes
+        (staging / layer_name).write_text(
+            json.dumps(layer_payload, sort_keys=True, ensure_ascii=True), encoding="utf-8"
+        )
         publish = _publish_generation(
             db_path,
             staging,
             scope="issues",
             document_count=len(records),
             after_publish=_commit_issue_meta,
+            delta_of=delta_plan["base_generation"] if delta_plan is not None else None,
         )
         if publication_error is not None:
             raise publication_error
@@ -8215,8 +8377,8 @@ def _index_issues_v2_locked(
             allow_empty and published_health.get("reason") == "empty_corpus"
         ):
             actual = published_health.get("document_count", 0)
-            error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
-            return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
+            error_code = "COUNT_MISMATCH" if actual != len(records) else "INDEX_UNHEALTHY"
+            return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, len(records))
     except Exception as error:
         return _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total, error=str(error))
 
@@ -8759,14 +8921,8 @@ def action_search_v2(
         emit_progress({"phase": "complete", "scope": scope, "total": build.get("indexed", 0)})
 
     with acquire_lock(db_path, exclusive=False):
-        store = resolve_active_store(db_path)
-        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
-        try:
-            collection_count = _safe_collection_count(collection)
-            fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(collection, query, fetch_n, **_scope_record_filter(scope))
-        finally:
-            _close_chroma_client(client)
+        fetch_n = _search_fetch_count(scope, n_results, match_mode)
+        items, collection_count = _query_active_layers(db_path, scope, query, fetch_n)
 
     # Issue #2979: an issues/specs search whose corpus is empty *because the
     # source issue cache was never populated for this repo-hash* must not
@@ -9464,16 +9620,10 @@ def _search_scope_collection(
     """Query one verified scope store (no health gating, no auto-build)."""
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     with acquire_lock(db_path, exclusive=False):
-        store = resolve_active_store(db_path)
-        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
-        try:
-            fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(
-                collection, query, fetch_n, query_embedding=query_embedding,
-                **_scope_record_filter(scope),
-            )
-        finally:
-            _close_chroma_client(client)
+        fetch_n = _search_fetch_count(scope, n_results, match_mode)
+        items, _ = _query_active_layers(
+            db_path, scope, query, fetch_n, query_embedding=query_embedding
+        )
     strict_items, suggestion_items = _apply_match_mode(items, query, match_mode)
     payload = {
         _scope_result_key(scope): _format_scope_results(scope, strict_items, n_results),

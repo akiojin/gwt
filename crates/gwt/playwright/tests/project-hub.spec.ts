@@ -3,10 +3,45 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { HUB_URL, ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
+
+test("live Hub recovers an unanswered repository search after reconnect", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, 'Requires the isolated backend');
+  const errors = collectBrowserErrors(page);
+  await page.addInitScript(() => {
+    (window as any).__searchReads = [];
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      const message = typeof data === 'string' ? JSON.parse(data) : null;
+      if (message?.kind === 'github_repository_search') {
+        (window as any).__searchReads.push(message);
+        return; // never send test searches to GitHub
+      }
+      return send.call(this, data);
+    };
+  });
+  await gotoLiveGwt(page, new URL('/', base!).href, { hub: true, enableTestBridge: true });
+  await page.locator('[data-hub-action="clone"]').click();
+  const dialog = page.getByRole('dialog', { name: 'Clone Project' });
+  await dialog.locator('[data-clone-mode="search"]').click();
+  await dialog.locator('#clone-project-search-input').fill(' fixture ');
+  await dialog.locator('.clone-project-search-row button').click();
+  await page.evaluate(() => (window as any).__gwtPlaywrightSockets.find((socket: WebSocket) => socket.readyState === WebSocket.OPEN).close());
+  await expect.poll(() => page.evaluate(() => (window as any).__searchReads.length)).toBe(2);
+  await page.evaluate(() => {
+    const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) => candidate.readyState === WebSocket.OPEN);
+    socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ kind: 'github_repository_search_results', query: 'fixture', repositories: [] }) }));
+  });
+  await expect(dialog.locator('.clone-project-search-row button')).toBeEnabled();
+  await expect(dialog.locator('#clone-project-search-input')).toHaveValue(' fixture ');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', testInfo.project.name.includes('light') ? 'light' : 'dark');
+  await page.screenshot({ path: testInfo.outputPath('hub-search-recovered.png') });
+  expect(errors).toEqual([]);
+});
 
 test("live Clone opens the committed Project tab and offers an existing Project on duplicate", async ({ page, context }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
