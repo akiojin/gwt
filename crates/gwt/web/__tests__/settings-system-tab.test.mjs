@@ -808,7 +808,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   surface.resyncSettings();
   assert.deepEqual(sent, [
-    { kind: "list_issue_monitor" }, { kind: "get_issue_monitor_profiles" },
+    { kind: "list_issue_monitor" }, { kind: "get_repository_labels", refresh: false }, { kind: "get_issue_monitor_profiles" },
     { kind: "agent_roster", action: { kind: "read" }, expected_revision: null },
     { kind: "list_supported_agents" }, { kind: "get_system_settings" },
     { kind: "get_update_settings" }, { kind: "get_board_auth_status" },

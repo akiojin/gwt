@@ -4,6 +4,41 @@ use gwt::{
 };
 
 #[test]
+fn repository_labels_requests_support_cached_and_explicit_refresh_reads() {
+    for refresh in [false, true] {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "get_repository_labels", "refresh": refresh,
+        }));
+        assert!(
+            event.is_ok(),
+            "repository label request must decode: {event:?}"
+        );
+    }
+}
+
+#[test]
+fn repository_labels_reply_preserves_color_and_stale_error() {
+    let reply = BackendEvent::RepositoryLabels {
+        project_root: "/project".into(),
+        labels: vec![gwt::issue_cache::RepositoryLabel {
+            name: "backend".into(),
+            color: "123abc".into(),
+        }],
+        loaded: true,
+        error: Some("offline".into()),
+    };
+    assert_eq!(reply.delivery_policy().kind, "repository_labels");
+    assert_eq!(
+        format!("{:?}", reply.delivery_policy().backpressure),
+        "ClientScopedSnapshot"
+    );
+    let value = serde_json::to_value(reply).unwrap();
+    assert_eq!(value["labels"][0]["color"], "123abc");
+    assert_eq!(value["loaded"], true);
+    assert_eq!(value["error"], "offline");
+}
+
+#[test]
 fn agent_capacity_override_wire_accepts_auto_and_rejects_non_positive() {
     let automatic = serde_json::json!({
         "kind": "set_issue_monitor_max_active_agents",

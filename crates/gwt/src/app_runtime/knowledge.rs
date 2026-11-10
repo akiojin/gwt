@@ -1579,6 +1579,40 @@ fn parse_related_time_millis(value: &str) -> i64 {
 }
 
 impl AppRuntime {
+    pub(crate) fn repository_labels_events(
+        &self,
+        context: &super::ProjectContext,
+        client_id: &str,
+        refresh: bool,
+    ) -> Vec<OutboundEvent> {
+        let project_root = context.project_root.clone();
+        let client = client_id.to_string();
+        let proxy = self.proxy.for_project(context.clone());
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let snapshot = gwt::issue_cache::load_repository_labels(&project_root, refresh);
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client,
+                BackendEvent::RepositoryLabels {
+                    project_root: project_root.display().to_string(),
+                    labels: snapshot.labels,
+                    loaded: snapshot.loaded,
+                    error: snapshot.error,
+                },
+            )]));
+        }) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::RepositoryLabels {
+                    project_root: context.project_root.display().to_string(),
+                    labels: Vec::new(),
+                    loaded: false,
+                    error: Some(format!("Cannot load repository labels: {error}")),
+                },
+            )];
+        }
+        Vec::new()
+    }
+
     pub(crate) fn report_knowledge_error(&self, id: &str, stage: &str, message: &str) {
         if !matches!(stage, "load" | "render") || message.trim().is_empty() {
             return;
