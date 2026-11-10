@@ -1,6 +1,87 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.157.0] - 2026-11-10
+
+### Bug Fixes
+
+- **issue-monitor:** Normalize auto-refill limit when enabling
+- **notifications:** Coalesce recurring monitor failures
+- **notifications:** 診断の集約時も元の表示文を保持する
+- **terminal:** Keep stopped agent scrolling local
+- **hooks:** 転送前の残り時間と実際の失敗を記録する
+- **agents:** Deduplicate model reports across cache recovery
+- **agents:** Validate Codex cache rows and await picker renders
+- **test:** Inherit scoped ack budgets in coverage fixtures
+- **test:** Preserve finite refusal budgets in negative fixtures
+- **runtime:** Close daemon listener before draining owner publishers
+- **index:** Stop unchanged failed background refresh retries
+- **monitor:** Bound incremental PR timeline readback
+- **owner:** Recover exact cleanup without disconnecting live panes
+- **terminal:** Keep scrollback stable during mouse movement
+- **terminal:** Preserve link hover during history review
+- **index:** Ignore legacy cache transport updates
+- **monitor:** Preserve cached reads across routine maintenance
+
+### Documentation
+
+- **perf:** Record issue 5379 final 1800-second latency measurements
+
+### Features
+
+- **pm:** Expose native source IDs for intake lookup
+- **agents:** Follow Codex model cache and report weekly changes
+- **pm:** 質問を選択形式にする共通ガイダンスを追加
+- **pm:** Render numbered report choices and accept four options
+
+### Miscellaneous Tasks
+
+- **work:** Issue #6877 の Work event shard を記録
+- **work:** Record auto-refill pull request
+- **work:** Record auto-refill delivery evidence
+- **work:** Record issue 4735 bounded recheck
+- **work:** Reconcile issue 4735 delivered provider scope
+- **work:** Record mobile shutdown delivery
+- **work:** Issue #4499 の配信済み補修を記帳する
+- **work:** PR #6966 の配送参照を記録する
+- **work:** Record Issue 6909 pull request
+- **work:** Record resumed Issue 6909 delivery
+- **work:** Record PR #6969 delivery reference
+- **work:** Reconcile delivered scrollback acceptance
+- **work:** Preserve scrollback acceptance handoff
+- **work:** Record fetched-base scrollback acceptance audit
+- **work:** Record issue 5379 GUI blocking slice delivery
+- **work:** Record PR #6975 delivery reference
+- **work:** 4択Reportsの配信記録を照合する
+- **work:** Record PR 6976 delivery reference
+
+### Performance
+
+- **monitor:** Reuse cached reads for automatic scan retries
+- **gui:** Encode terminal snapshots on the client sender, not the GUI loop
+
+### Refactor
+
+- **agents:** Simplify model catalog expressions
+
+### Testing
+
+- **issue-monitor:** Align refill explanation with default limit
+- **git:** Freeze the clock in the worktree deadline test
+- **coordination:** Freeze the clock in the board deadline test
+- **monitor:** Scan期限テストを固定時計で決定化する
+- **agents:** Apply browser setup timeout before fixtures
+- **agents:** Avoid stale elements during model screenshots
+- **agents:** Audit model pickers from a managed source
+- **agents:** Use current models in settings save fixtures
+- **monitor:** Freeze durable write deadline test
+- **index:** 期限切れGit情報テストの時計を固定する
+- **daemon:** Require live reads in the routine retry fixture
+- **terminal:** Respect native wheel normalization in Codex fixture
+- **perf:** Restore owner runtime output measurements
+- **perf:** Decode gwtd output as UTF-8 in issue 5379 fixture
+- **e2e:** Register roster member before issue 5379 functional launch
+
 ## [9.156.0] - 2026-11-09
 
 ### Bug Fixes

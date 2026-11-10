@@ -2241,6 +2241,60 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("source:{:x}", digest.finalize()))
 }
 
+/// Legacy caches lack a canonical revision. Hash their indexed fields and
+/// full SPEC payloads without admitting transport metadata rewrites as input.
+fn legacy_issue_source_snapshot(cache_root: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    if let Some(source) =
+        crate::issue_cache::issue_cache_source_fingerprint(cache_root).map_err(io::Error::other)?
+    {
+        digest.update(source.fingerprint.as_bytes());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(cache_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+                .is_none()
+        {
+            continue;
+        }
+        let body = entry.path().join("body.md");
+        if body.is_file() {
+            paths.push(body);
+        }
+        let sections = entry.path().join("sections");
+        if sections.is_dir() {
+            for section in std::fs::read_dir(sections)? {
+                let section = section?;
+                if section.file_type()?.is_file()
+                    && section.path().extension() == Some(OsStr::new("md"))
+                {
+                    paths.push(section.path());
+                }
+            }
+        }
+    }
+    paths.sort();
+    for path in paths {
+        digest.update(
+            path.strip_prefix(cache_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .as_bytes(),
+        );
+        digest.update([0]);
+        let mut file = std::fs::File::open(&path)?;
+        digest.update(file.metadata()?.len().to_le_bytes());
+        io::copy(&mut file, &mut digest)?;
+    }
+    Ok(format!("source:{:x}", digest.finalize()))
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct RefreshSourceReads {
@@ -2276,17 +2330,34 @@ impl<'a> SourceRefreshPoll<'a> {
     fn submit_repo_sources(&mut self, root: &Path, repo_hash: &RepoHash) -> Result<(), String> {
         let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         for scope in REFRESH_REPO_SCOPES {
-            let snapshot = self.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+            let snapshot =
+                self.repo_snapshot(scope, repo_scope_source_paths(scope, &root, repo_hash))?;
             self.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)?;
         }
         Ok(())
     }
 
-    fn repo_snapshot(&mut self, paths: Vec<PathBuf>) -> Result<String, String> {
+    fn repo_snapshot(
+        &mut self,
+        scope: RefreshScope,
+        paths: Vec<PathBuf>,
+    ) -> Result<String, String> {
         match self.repo_fingerprints.get(&paths) {
             Some(snapshot) => Ok(snapshot.clone()),
             None => {
-                let snapshot = refresh_source_snapshot(&paths)?;
+                let snapshot = if matches!(scope, RefreshScope::Issues | RefreshScope::Specs)
+                    && paths.len() == 1
+                    && paths[0].is_dir()
+                {
+                    legacy_issue_source_snapshot(&paths[0]).map_err(|error| {
+                        format!(
+                            "legacy index source snapshot {}: {error}",
+                            paths[0].display()
+                        )
+                    })?
+                } else {
+                    refresh_source_snapshot(&paths)?
+                };
                 self.repo_fingerprints.insert(paths, snapshot.clone());
                 Ok(snapshot)
             }
@@ -2339,7 +2410,7 @@ fn submit_repo_scope_refresh(
 ) -> Result<(), String> {
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut poll = SourceRefreshPoll::new(broker)?;
-    let snapshot = poll.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+    let snapshot = poll.repo_snapshot(scope, repo_scope_source_paths(scope, &root, repo_hash))?;
     poll.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)
 }
 
@@ -4655,6 +4726,81 @@ mod tests {
         assert_eq!(
             before.target(&targets[1]).unwrap().quiet_deadline_millis(),
             after.target(&targets[1]).unwrap().quiet_deadline_millis()
+        );
+
+        std::fs::remove_file(cache_root.join("source-revision")).unwrap();
+        let issue_dir = cache_root.join("7");
+        std::fs::create_dir_all(issue_dir.join("sections")).unwrap();
+        let meta_path = issue_dir.join("meta.json");
+        std::fs::write(
+            &meta_path,
+            r#"{"title":"Legacy SPEC","state":"open","labels":["gwt-spec"],"generation":"initial"}"#,
+        )
+        .unwrap();
+        let body = format!("{}original ending", "x".repeat(2000));
+        std::fs::write(issue_dir.join("body.md"), &body).unwrap();
+        let section_path = issue_dir.join("sections/spec.md");
+        std::fs::write(&section_path, "Full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let legacy_before = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        std::fs::write(
+            &meta_path,
+            r#"{"title":"Legacy SPEC","state":"open","labels":["gwt-spec"],"generation":"refreshed transport"}"#,
+        )
+        .unwrap();
+        std::fs::write(cache_root.join("refresh-meta.json"), "{\"refreshed\":2}").unwrap();
+        std::fs::write(issue_dir.join("body.md"), &body).unwrap();
+        std::fs::write(&section_path, "Full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let legacy_after = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (
+                legacy_before.desired_snapshot(),
+                legacy_before.desired_epoch()
+            ),
+            (
+                legacy_after.desired_snapshot(),
+                legacy_after.desired_epoch()
+            ),
+            "legacy cache transport rewrites must not resume unchanged input"
+        );
+        std::fs::write(&section_path, "Changed full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let section_changed = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        assert_ne!(
+            legacy_after.desired_snapshot(),
+            section_changed.desired_snapshot()
+        );
+        std::fs::write(
+            issue_dir.join("body.md"),
+            format!("{}new ending", "x".repeat(2000)),
+        )
+        .unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        assert_ne!(
+            section_changed.desired_snapshot(),
+            broker
+                .inspect()
+                .unwrap()
+                .target(&issue_target)
+                .unwrap()
+                .desired_snapshot(),
+            "legacy full body edits beyond the Issue preview remain observable"
         );
     }
 

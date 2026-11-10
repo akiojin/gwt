@@ -15231,6 +15231,12 @@ impl IssueMonitorState {
         if self.released_completed_reason(item.issue.number).is_some() {
             return (false, None);
         }
+        // A slice merge is not completion while its Session still owns the launch.
+        if self.active_launches.contains(&item.issue.number)
+            && self.process_held_issues.contains(&item.issue.number)
+        {
+            return (false, None);
+        }
         if item.issue.state != IssueMonitorIssueState::Open {
             return (false, None);
         }
@@ -21560,7 +21566,8 @@ impl IssueMonitorState {
     /// the slot stays held and the row stays `launched`, so the claim-TTL
     /// expiry cannot relaunch the same Issue into the same worktree against
     /// the session that still holds its execution authority. Completion
-    /// evidence that does complete the Issue is applied regardless.
+    /// evidence that does complete the Issue is applied regardless of the
+    /// pane, but an active process-held Session retains its launch until exit.
     fn record_issue_completion_with_live_pane(
         &mut self,
         issue_number: u64,
@@ -21581,13 +21588,15 @@ impl IssueMonitorState {
             .as_ref()
             .map(Self::issue_completion_decision)
             .unwrap_or(IssueCompletionDecision::Unknown);
-        if decision != IssueCompletionDecision::Complete
-            && live_pane
-            && self.active_launches.contains(&issue_number)
+        // Both branch reconciliation and the Delivering worker enter here.
+        // Session evidence also vetoes release when the canvas is unavailable.
+        if self.active_launches.contains(&issue_number)
+            && (self.process_held_issues.contains(&issue_number)
+                || (decision != IssueCompletionDecision::Complete && live_pane))
         {
             tracing::info!(
                 issue_number,
-                "issue monitor kept a live launch through a partial merged delivery"
+                "issue monitor kept a live launch through a merged delivery"
             );
             return false;
         }
@@ -53870,6 +53879,92 @@ mod tests {
             0,
             "removing the finished pane frees its slot"
         );
+    }
+
+    #[test]
+    fn issue_6972_merge_retains_a_process_held_launch_until_session_exit() {
+        let now = "2026-06-26T01:00:00Z";
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.config.max_active = 1;
+        monitor.record_candidate(issue(43));
+        let branch = monitor.active_launched_branches()[0].1.clone();
+        let merged = BTreeSet::from([branch.clone()]);
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        monitor.record_merged_deliveries(&BTreeMap::from([(
+            branch,
+            merged_delivery(7, "delivered", "2026-06-26T00:30:00Z"),
+        )]));
+
+        // The Delivering worker calls this directly, without a canvas snapshot.
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert!(monitor.active_launches.contains(&42));
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::agent-42")
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(!monitor.queue.contains(&42));
+        assert!(monitor.next_launch_request(now).is_none());
+        let row = &monitor.agent_status_at(now).inbox[0];
+        assert!(!row.recoverable_merged);
+        assert_eq!(row.completion_reason, None);
+
+        // Ordinary branch reconciliation and repeated scans must retain it too.
+        assert!(monitor
+            .reconcile_merged_branches_at(&merged, now)
+            .is_empty());
+        monitor.record_merged(42);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        assert_eq!(monitor.reconcile_merged_branches_at(&merged, now), vec![42]);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.active_launches.contains(&42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.agent_status_at(now).inbox[0]
+                .completion_reason
+                .as_deref(),
+            Some("delivered_by_pr_7")
+        );
+    }
+
+    #[test]
+    fn issue_6972_completed_issue_waits_for_process_held_session_exit() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .unwrap()
+            .issue
+            .state = IssueMonitorIssueState::Closed;
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Merged
+        );
+        assert_eq!(monitor.active_count(), 0);
     }
 
     /// Issue #4852 AC-3 (negative half): with no pane on a fresh snapshot, or

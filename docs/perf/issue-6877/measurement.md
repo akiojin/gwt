@@ -125,3 +125,74 @@ maintenance helper 1件は ignored。fmt / clippy / checkout driver 復元も成
 Owner の AC-2（更新後 fleet の gh 起動数）、AC-4（6 agent の CPU）、
 AC-5（60分比較）は引き続き未証明。今回の CI 修正と source 配送で
 達成扱いにせず、Issue #6877 は OPEN を維持する。
+
+## 残存する TTL 迂回（2026-11-10 再開）
+
+サラ・カトウ / Codex。fetch 後の `origin/develop` と HEAD はともに
+`56abfcb8341ca12c96ed7a9d17ba8bd408261d91`。PR #6928 の source は
+base に配送済みで、今回の開始時点に未配送の production source はなかった。
+SPEC #4093 の plan / tasks に T-6877-R6〜R9 を追加し、readback を確認した。
+
+### 実 fleet と source の区別
+
+[relaunch-baseline.json](relaunch-baseline.json) に実測値と由来を保存した。
+稼働中の GUI は installed release v9.156.0、PID 33516、起動は
+2026-11-09T14:26:55Z。PR #6928 の merge より前から動いているため、
+この source の改善後計測にはならない。version の一致だけでは source の
+一致を保証できず、実行ファイルの SHA-256 も保存した。
+
+- 2026-11-10T02:45:00Z 以上、02:55:00Z 未満の600秒に、scan span 内の
+  `gh` start は139回。timelines 53回、issues 23回、PR lifecycle 54回、
+  open pulls 6回、closed pulls 3回。project_root は `E:\gwt` のみ。
+- 同じ枠の全ログで `git cherry` start は0回。親 PID はログに無いため、
+  gh の全件を GUI 直接子と見なさない。
+- 03:03:34Z から約5.054秒の GUI process CPU 差分は7.921875秒、
+  1 core = 100% の式で156.74%。RSS 約835MiB / private 約1300MiB。
+  この単一サンプルを60分の傾向に置き換えない。
+- 別時点の pane snapshot では running implementation agent は6本。
+  600秒間の連続6本稼働は証明していない。5分 / 60分の同条件比較も未測定。
+
+### 根因と実装境界
+
+1. worker は `RenewClaim` の正常更新を通常の remote effect 完了と同じ
+   fresh scan 要求にしていた。既定300秒の heartbeat が timer / retry の
+   600秒 read policy を迂回する。正常かつ現 authority の `Renewed` だけ
+   既存の periodic intent に接続する。所有権を失った `NotRenewed`、古い
+   receipt、他の effect 完了、明示 ScanNow は fresh のままにする。
+2. 共有 REST page の GC は呼出し側の120秒 TTL をディレクトリ全体に適用し、
+   別 consumer が600秒 / 900秒まで利用できる page を削除していた。
+   読取 freshness は呼出し側のまま、保存期間だけ既存最大 consumer の
+   900秒へ分離する。新しい cache schema や namespace は追加しない。
+
+GC は既知形式・valid array・通常ファイル・key/hash 一致・共通 lock の
+条件を維持する。期限切れデータを短い reader に返す変更ではない。
+reclamation が保持する期間は最大15分へ広がるが、期限切れカーソルの
+無期限蓄積には戻さない。Issue #5738 に120秒以内の回収要件はない。
+
+Goal はこの2経路の迂回解消。UI、Issue #6954 の timeline pagination、
+hook health、prefs-lock 設計、deadline、claim/permission/launch authority、
+live prelaunch confirmation は対象外。実 fleet の停止・再起動は行わない。
+rollback はこの2箇所の policy 修正を戻せばよく、データ migration は不要。
+
+### 決定的な再現結果
+
+- 修正前の既存 REST cache 14件と自動 retry worker 1件は成功。
+- mixed-TTL 回帰は修正前に `(Monitor5回, 通常5回)` で失敗した。
+  30秒間隔20scan / 600秒を仮想時刻で再現し、修正後は `(1回, 5回)`。
+  Monitor page の再取得は80%減り、通常 reader の120秒 freshness は維持。
+  関連16件すべて成功。既存900秒 refresh の取得時刻・期限切れの失敗伝播・
+  invalid payload・queue pagination・安全な既知page回収も成功した。
+- actual worker の claim 更新回帰は修正前に `(None, None)` で失敗した。
+  正常更新後600秒、続く明示 ScanNow は fresh という期待値は
+  `(Some(600), None)`。channel で scan と control の順序を固定し、
+  スケジューラの短時間応答に依存しない。
+  修正後はこの正常更新 case と `NotRenewed=(None, None)` の両方が成功した。
+
+この replay の fetch 回数は実 fleet の gh 子プロセス数ではない。
+AC-2 の20回/10分、AC-4 の6 agent CPU、AC-5 の5分 / 60分比較は
+更新後の同一実行ファイルで別途測定する。単体テスト成功を達成証拠に
+置き換えず、owner の未チェックを維持する。
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
