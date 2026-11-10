@@ -110,8 +110,10 @@ def _lower_process_priority() -> None:
             # CPU priority alone leaves Chroma's disk I/O at normal priority.
             # Enter resource background mode before loading model/Chroma so
             # their worker threads also inherit the lower I/O priority.
-            if not kernel.SetPriorityClass(handle, 0x00100000):  # BACKGROUND_BEGIN
-                kernel.SetPriorityClass(handle, 0x00004000)  # Below Normal fallback
+            kernel.SetPriorityClass(handle, 0x00100000)  # BACKGROUND_BEGIN
+            # Background mode resets the CPU class to Normal. Restore the
+            # FR-385 class while retaining background I/O; also covers failure.
+            kernel.SetPriorityClass(handle, 0x00004000)  # Below Normal
         except Exception:
             pass
     else:

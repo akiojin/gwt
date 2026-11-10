@@ -113,7 +113,10 @@ class QosThreadEnvTests(unittest.TestCase):
             ctypes, "windll", types.SimpleNamespace(kernel32=kernel), create=True
         ):
             runner._lower_process_priority()
-        kernel.SetPriorityClass.assert_called_once_with(123, 0x00100000)
+        self.assertEqual(
+            kernel.SetPriorityClass.call_args_list,
+            [mock.call(123, 0x00100000), mock.call(123, 0x00004000)],
+        )
         self.assertEqual(kernel.GetCurrentProcess.restype, ctypes.wintypes.HANDLE)
 
     def test_windows_background_mode_failure_keeps_cpu_priority_fallback(self):
