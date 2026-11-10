@@ -28,7 +28,7 @@ impl RuntimeNamespaceGcTask {
                         reasons = ?report.reasons, "runtime namespace GC"),
                     Err(error) => {
                         // A sibling GUI/daemon may already be collecting this root.
-                        if error.kind() == io::ErrorKind::WouldBlock {
+                        if gc_lock_is_contended(&error) {
                             tracing::debug!("runtime namespace GC already running");
                         } else {
                             tracing::warn!(%error, "runtime namespace GC retained uninspectable state");
@@ -57,9 +57,34 @@ impl RuntimeNamespaceGcTask {
     }
 }
 
+fn gc_lock_is_contended(error: &io::Error) -> bool {
+    gwt_core::operation_deadline::is_lock_contended(error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespace_gc_recognizes_native_lock_contention() {
+        use fs2::FileExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".runtime-gc.lock");
+        let held = std::fs::File::create(&path).unwrap();
+        FileExt::lock_exclusive(&held).unwrap();
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let error = FileExt::try_lock_exclusive(&probe).unwrap_err();
+
+        assert!(
+            gc_lock_is_contended(&error),
+            "a sibling collector's lock must not be reported as uninspectable: {error}"
+        );
+    }
 
     #[test]
     fn namespace_gc_runs_at_startup_periodically_and_stops_with_owner() {
