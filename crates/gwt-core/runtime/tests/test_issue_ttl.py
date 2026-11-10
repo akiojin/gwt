@@ -633,10 +633,12 @@ class IssueTtlTests(unittest.TestCase):
             self.assertEqual(health["document_count"], 40)
             search = runner.action_search_multi_v2(
                 args["repo_hash"], None, tmp, "Changed new body", 40, ["issues"], db_root=args["db_root"])
-            numbers = [item["number"] for item in search["issueResults"]]
-            self.assertEqual(len(numbers), len(set(numbers)), search)
-            self.assertNotIn(3, numbers, search)
-            self.assertEqual(numbers[0], 2, search)
+            titles = {item["number"]: item["title"] for item in search["issueResults"]}
+            self.assertEqual(len(titles), len(search["issueResults"]), search)
+            self.assertEqual(len(titles), 40, search)
+            self.assertNotIn(3, titles, search)
+            # The delta copy is served, never the shadowed base vector.
+            self.assertEqual(titles[2], "Changed", search)
 
             # A later refresh carries the earlier delta forward by reusing its
             # embeddings and only encodes the newly changed record.
