@@ -1929,8 +1929,10 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   unattended work, use `issue.monitor.config.set` under the existing
   registered-PM authority and `expected_config_token` rules, then read back
   status before attempting a launch. Respect an explicit instruction to keep
-  the Monitor off; the standing mandate does not override it. Config success
-  alone is not proof of launch availability or launch success.
+  the Monitor off; the standing mandate does not override it.
+  A launch-storm shutdown stays off until its cause is resolved, the affected Issue is explicitly
+  requeued, and the five-minute window expires; do not auto-enable it for other work.
+  Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
   approval/owner-handoff rules before asking the user to act. When recovery
@@ -3419,6 +3421,7 @@ mod tests {
         for phrase in [
             "authority recovery is blocked",
             "registered PM may use `issue.monitor.config.set` for OFF and capacity changes",
+            "A launch-storm shutdown stays off",
             "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
             "The direct `issue.monitor.stop` path still works when typed preferences are readable",
             "preserves the authority fence",

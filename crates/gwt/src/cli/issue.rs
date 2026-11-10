@@ -4929,6 +4929,7 @@ fn run_monitor_config_set<E: CliEnv>(
     let payload =
         crate::runtime_daemon_events::issue_monitor_payload("control", control, std::process::id());
     let publication = publish_monitor_config_set(&project_root, payload);
+    let mut recovery_off_only = false;
     if let Err(error) = publication {
         // Issue #4804: a blocked worker cannot grant authority, but the
         // registered PM must retain OFF and capacity control. Keep every other
@@ -4984,7 +4985,16 @@ fn run_monitor_config_set<E: CliEnv>(
             *prefs = candidate;
             Ok(())
         };
-        let commit = if recovery_control {
+        recovery_off_only =
+            recovery_control && enabled == Some(false) && max_active.is_none() && !max_active_auto;
+        let commit = if recovery_off_only {
+            crate::issue_monitor::disable_issue_monitor_during_recovery(
+                &prefs_path,
+                expected_config_token,
+                || super::pm::caller_is_registered_pm(&project_root),
+            )
+            .map(|prefs| (prefs, ()))
+        } else if recovery_control {
             // This is the same typed, locked transaction used by direct stop:
             // preserve the fence and reject unreadable prefs or epoch overflow.
             crate::try_mutate_issue_monitor_prefs(&prefs_path, mutation)
@@ -5007,7 +5017,9 @@ fn run_monitor_config_set<E: CliEnv>(
     .map_err(local_save_error)?;
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
-    monitor.refresh_agent_capacity(&project_root);
+    if !recovery_off_only {
+        monitor.refresh_agent_capacity(&project_root);
+    }
     out.push_str(
         &serde_json::json!({
             "config_token": prefs.config_token(),
@@ -15306,6 +15318,80 @@ mod tests {
                 std::fs::read(crate::machine_agent_settings::path()).unwrap(),
                 machine_before
             );
+        }
+        // Missing shared settings must not make an OFF-only recovery depend
+        // on their unavailable migration lock. Preserve the legacy capacity.
+        let legacy = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 11,
+            max_active_agents: 7,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            ..Default::default()
+        };
+        let mut legacy_json = serde_json::to_value(&legacy).unwrap();
+        legacy_json["auto_apply_updates"] = serde_json::json!(false);
+        std::fs::write(&prefs_path, serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+        std::fs::remove_file(crate::machine_agent_settings::path()).unwrap();
+        let machine_lock = crate::machine_agent_settings::path().with_extension("lock");
+        std::fs::remove_file(&machine_lock).unwrap();
+        std::fs::create_dir(&machine_lock).unwrap();
+        let token = legacy.config_token();
+        for (expected, max_active, succeeds) in [
+            ("stale-token", None, false),
+            (token.as_str(), Some(4), false),
+            (token.as_str(), None, true),
+        ] {
+            std::fs::remove_file(tmp.path().join("quota-hold.sock")).unwrap();
+            let before = std::fs::read(&prefs_path).unwrap();
+            let (stop, server) = spawn_quota_hold_clear_daemon(
+                tmp.path(),
+                env.repo_path(),
+                gwt_core::daemon::DaemonFrame::Error {
+                    message:
+                        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                            .into(),
+                },
+                "config_set_if_matches",
+            );
+            out.clear();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorConfigSet {
+                    expected_config_token: Some(expected.to_string()),
+                    allowed_labels: None,
+                    project_root: None,
+                    enabled: Some(false),
+                    autonomous_mode: None,
+                    max_active,
+                    max_active_auto: false,
+                    auto_close_merged_issues: None,
+                    launch_agent: None,
+                    update_drain: None,
+                },
+                &mut out,
+            );
+            stop.store(true, Ordering::Release);
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            if expected == "stale-token" {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR));
+            }
+            assert!(!crate::machine_agent_settings::path().exists());
+            if succeeds {
+                let saved = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+                assert!(!saved.enabled);
+                assert_eq!(saved.effect_authority_epoch, 12);
+                assert_eq!(saved.max_active_agents, 7);
+                assert_eq!(saved.max_active_agents_mode, legacy.max_active_agents_mode);
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+                assert_eq!(raw["auto_apply_updates"], false);
+            } else {
+                assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+            }
         }
     }
 

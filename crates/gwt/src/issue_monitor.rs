@@ -7141,6 +7141,14 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    save_issue_monitor_prefs_unlocked_with_policy_preservation(path, prefs, false)
+}
+
+fn save_issue_monitor_prefs_unlocked_with_policy_preservation(
+    path: &Path,
+    prefs: &IssueMonitorPrefs,
+    preserve_legacy_policy: bool,
+) -> io::Result<()> {
     let started = std::time::Instant::now();
     let mut normalized = prefs.clone();
     crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
@@ -7150,9 +7158,21 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
     validate_existing_issue_monitor_prefs_schema(path)?;
     let validated_at = std::time::Instant::now();
-    crate::machine_agent_settings::migration_before_project_save(path)?;
+    if !preserve_legacy_policy {
+        crate::machine_agent_settings::migration_before_project_save(path)?;
+    }
     let migrated_at = std::time::Instant::now();
-    let content = if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
+    let content = if preserve_legacy_policy {
+        // Emergency OFF changes no policy. Keep legacy migration inputs in the
+        // project until their independent machine migration can succeed.
+        let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
+        let previous: serde_json::Value =
+            serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+        if let Some(legacy) = previous.get("auto_apply_updates") {
+            value["auto_apply_updates"] = legacy.clone();
+        }
+        serde_json::to_string_pretty(&value).map_err(io::Error::other)?
+    } else if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
         let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
         let fields = value.as_object_mut().expect("Monitor preferences object");
         // Older readers require this key. It is a fixed safe compatibility
@@ -7177,7 +7197,9 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
         serde_json::to_string_pretty(prefs).map_err(io::Error::other)?
     };
     let serialized_at = std::time::Instant::now();
-    crate::update_settings::migrate_before_project_save(path, false)?;
+    if !preserve_legacy_policy {
+        crate::update_settings::migrate_before_project_save(path, false)?;
+    }
     let prepared_at = std::time::Instant::now();
     let committed = durable_atomic_write(path, content.as_bytes());
     let canonical_finished_at = std::time::Instant::now();
@@ -7745,6 +7767,36 @@ pub fn try_mutate_issue_monitor_prefs<T>(
             save_issue_monitor_prefs_unlocked(path, &prefs)?;
         }
         Ok((prefs, result))
+    })
+}
+
+/// Disable only, without requiring unrelated machine-policy migrations.
+/// The caller's PM authority and the observed config are rechecked under the
+/// project lock; schema validation, revocation and durable saves stay intact.
+pub(crate) fn disable_issue_monitor_during_recovery(
+    path: &Path,
+    expected_config_token: Option<&str>,
+    caller_is_registered_pm: impl FnOnce() -> bool,
+) -> io::Result<IssueMonitorPrefs> {
+    with_issue_monitor_prefs_lock(path, || {
+        if !caller_is_registered_pm() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "blocked Issues recovery control requires the registered PM",
+            ));
+        }
+        let before = load_issue_monitor_prefs_unlocked(path)?;
+        check_expected_issue_monitor_config_token(&before, expected_config_token)?;
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), before.clone());
+        monitor
+            .set_enabled_with_effect_revocation(false)
+            .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
+        let prefs = monitor.prefs();
+        if prefs != before {
+            save_issue_monitor_prefs_unlocked_with_policy_preservation(path, &prefs, true)?;
+        }
+        Ok(prefs)
     })
 }
 
@@ -19395,8 +19447,13 @@ impl IssueMonitorState {
         };
         self.recent_launches.retain(|_, launches| {
             launches.retain(|_, timestamp| {
-                parse_rfc3339_utc(timestamp)
-                    .is_none_or(|at| current.signed_duration_since(at).num_seconds() < 300)
+                let Some(at) = parse_rfc3339_utc(timestamp) else {
+                    // Keep the reservation fail-closed, but give corrupt history
+                    // a bounded window so operator recovery can succeed later.
+                    *timestamp = now.to_owned();
+                    return true;
+                };
+                current.signed_duration_since(at).num_seconds() < 300
             });
             !launches.is_empty()
         });
@@ -37607,6 +37664,33 @@ mod tests {
             Some(MonitorFailureKind::LaunchProcessExit),
             "classification does not depend on the surge"
         );
+    }
+
+    #[test]
+    fn issue_4804_invalid_launch_times_hold_once_and_then_allow_recovery() {
+        let now = "2026-11-11T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        monitor.recent_launches.insert(
+            42,
+            (0..5)
+                .map(|n| (format!("old-{n}"), "invalid".to_owned()))
+                .collect(),
+        );
+        assert!(monitor.next_launch_request(now).is_none());
+        assert!(!monitor.config.enabled);
+        assert!(monitor.recent_launches[&42].values().all(|at| at == now));
+        let later = "2026-11-11T00:05:01Z";
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "repaired clock", later),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        monitor.set_enabled_with_effect_revocation(true).unwrap();
+        assert_eq!(monitor.next_launch_request(later).unwrap().issue_number, 42);
     }
 
     #[test]
