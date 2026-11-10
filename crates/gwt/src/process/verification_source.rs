@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     use std::io::BufRead;
     use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
 
     #[test]
     fn member_fixture() {
@@ -300,7 +300,7 @@ mod tests {
     }
 
     fn start_probe(source: &Source, descriptor: &str, member: bool, hold: bool) -> Child {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        let mut command = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
         command
             .args([
                 "--exact",
