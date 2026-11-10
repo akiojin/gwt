@@ -97,13 +97,23 @@ def configure_qos_threads(qos: str, *, single_query: bool = False) -> None:
 
 
 def _lower_process_priority() -> None:
-    if os.name == "nt":  # pragma: no cover - Windows-only branch
+    if os.name == "nt":
         try:
             import ctypes
+            from ctypes import wintypes
 
-            below_normal_priority_class = 0x00004000
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ctypes.windll.kernel32.SetPriorityClass(handle, below_normal_priority_class)
+            kernel = ctypes.windll.kernel32
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.SetPriorityClass.restype = wintypes.BOOL
+            handle = kernel.GetCurrentProcess()
+            # CPU priority alone leaves Chroma's disk I/O at normal priority.
+            # Enter resource background mode before loading model/Chroma so
+            # their worker threads also inherit the lower I/O priority.
+            kernel.SetPriorityClass(handle, 0x00100000)  # BACKGROUND_BEGIN
+            # Background mode resets the CPU class to Normal. Restore the
+            # FR-385 class while retaining background I/O; also covers failure.
+            kernel.SetPriorityClass(handle, 0x00004000)  # Below Normal
         except Exception:
             pass
     else:
