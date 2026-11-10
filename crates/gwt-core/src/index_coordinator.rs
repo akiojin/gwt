@@ -966,6 +966,17 @@ impl IndexCoordinator {
     /// holding the root lock exclusively. Capacity counts physical locks;
     /// terminal or corrupt diagnostics cannot grant an extra slot.
     pub fn heavy_pool_status(&self) -> Result<HeavyPoolStatus, CoordinatorError> {
+        self.heavy_pool_status_with_disk_budgets(&[])
+            .map(|(status, _)| status)
+    }
+
+    /// Snapshot the same disk gate used by verification admission alongside
+    /// slot availability. A deferred caller has no resident queue entry to
+    /// carry its disk admission status.
+    pub fn heavy_pool_status_with_disk_budgets(
+        &self,
+        budgets: &[VerificationDiskBudget],
+    ) -> Result<(HeavyPoolStatus, Vec<VerificationDiskAdmission>), CoordinatorError> {
         struct ProbeLock<'a>(&'a File);
         impl Drop for ProbeLock<'_> {
             fn drop(&mut self) {
@@ -1038,17 +1049,36 @@ impl IndexCoordinator {
         };
         let queue =
             published_heavy_queue_with_disk(&self.heavy_pending_dir(), Some(disk_observation))?;
-        Ok(HeavyPoolStatus {
-            capacity,
-            used,
-            available: if legacy_occupied {
-                0
-            } else {
-                capacity.saturating_sub(used)
+        let admission = if budgets.is_empty() {
+            Vec::new()
+        } else {
+            if let Some(path) = disk_reservation_error {
+                return Err(CoordinatorError::Unavailable(format!(
+                    "verification disk reservations unavailable at {path}"
+                )));
+            }
+            budgets
+                .iter()
+                .map(|budget| {
+                    let free = fs2::available_space(&budget.path)?;
+                    Ok(disk_admission(budget, &disk_reservations, free))
+                })
+                .collect::<Result<Vec<_>, CoordinatorError>>()?
+        };
+        Ok((
+            HeavyPoolStatus {
+                capacity,
+                used,
+                available: if legacy_occupied {
+                    0
+                } else {
+                    capacity.saturating_sub(used)
+                },
+                queue,
+                slots,
             },
-            queue,
-            slots,
-        })
+            admission,
+        ))
     }
 
     /// Locate a lease's ticket across the legacy root and numbered slots.
@@ -3653,6 +3683,31 @@ mod tests {
         if let Some(hook) = hook {
             hook(allocator, root_probe);
         }
+    }
+
+    #[test]
+    fn free_verification_slots_do_not_override_the_disk_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 3).unwrap();
+        let mut budget = VerificationDiskBudget {
+            volume: "test-volume".into(),
+            path: tmp.path().to_path_buf(),
+            bytes: 0,
+            floor_bytes: u64::MAX,
+        };
+        let (pool, disks) = coordinator
+            .heavy_pool_status_with_disk_budgets(&[budget.clone()])
+            .unwrap();
+        assert_eq!(pool.available, 3);
+        assert_eq!(disks.len(), 1);
+        assert!(disks[0].blocked);
+        assert_eq!(disks[0].floor_bytes, budget.floor_bytes);
+
+        budget.floor_bytes = 0;
+        let (_, disks) = coordinator
+            .heavy_pool_status_with_disk_budgets(&[budget])
+            .unwrap();
+        assert!(!disks[0].blocked);
     }
 
     #[test]

@@ -437,7 +437,7 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
     await expect(statusPill).toHaveAttribute("data-tone", tone);
   }
   await root.locator('[data-action="monitor-diagnostics"]').click();
-  await expect(page.locator('[data-error-key="issue-monitor:last_error"]')).toContainText("Fixture current failure");
+  await expect(page.locator('.notification-center__item[data-error-key^="issue-monitor:"]').filter({ hasText: "Fixture current failure" })).toContainText("Fixture current failure");
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await page.evaluate(() => (window as any).__queueStatus({ state: "idle", last_error: null, active_count: 0, queue_len: 0 }));
   await expect(statusPill).toHaveText("Waiting · Empty");

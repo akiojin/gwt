@@ -184,7 +184,10 @@ impl AppRuntime {
         );
         let mut events = self.restore_prepared_open_project_windows(&context.tab_id, restores);
         events.extend(self.startup_auto_resume_ready_events());
-        if self.agent_maintenance.busy {
+        // Issue #5379: while the worker evaluates queued restores, the PM
+        // ensure waits for the drain's tail so a restored PM Session is seen
+        // as live by the singleton gate before a fresh PM is spawned.
+        if self.agent_maintenance.busy || self.startup_auto_resume_admission_in_flight {
             if !self.pending_startup_pm_tabs.contains(&context.tab_id) {
                 self.pending_startup_pm_tabs.push(context.tab_id.clone());
             }

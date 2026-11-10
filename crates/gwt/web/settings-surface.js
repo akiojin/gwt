@@ -307,9 +307,9 @@ function renderIssuesSettingsPanel(panel, options) {
   }
   const replenishment = group("Refill");
   const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
-  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 0);
   setControlExplanation(refill, "Automatically add eligible issues to the launch queue when it has fewer issues than the refill limit.", "settings-auto-refill");
-  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. 0 disables automatic refill.", "settings-refill-limit");
+  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. Turning Auto-refill on with 0 uses the default limit of 3.", "settings-refill-limit");
   limit.min = "0";
   limit.step = "1";
   const saveRefill = () => {
@@ -564,6 +564,12 @@ export function renderAgentsSettingsPanel(panel, options) {
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    // Issue #6933 AC-3: say so when the saved model left the tool's list; never swap it.
+    const modelUnavailable = document.createElement("p");
+    modelUnavailable.className = "settings-help";
+    modelUnavailable.setAttribute("role", "status");
+    modelUnavailable.dataset.modelUnavailable = "";
+    row.append(modelUnavailable);
     const modelSuggestions = document.createElement("datalist");
     modelSuggestions.id = `candidate-models-${Math.random().toString(36).slice(2)}`;
     row.appendChild(modelSuggestions);
@@ -619,6 +625,12 @@ export function renderAgentsSettingsPanel(panel, options) {
         if (agentChanged && !entry?.supports_skip_permissions) skip.checked = false;
       }
       const selectedModel = entry?.models.find(option => option.value === model.value);
+      const unlisted = Boolean(entry && (entry.id === "codex" || entry.models.length)
+        && model.value && !selectedModel);
+      modelUnavailable.textContent = unlisted
+        ? `Saved model ${model.value} is no longer offered by ${entry.name}. It is kept as saved and not replaced; choose a listed model before launching.`
+        : "";
+      modelUnavailable.hidden = !unlisted;
       const levels = selectedModel?.reasoning_options || entry?.reasoning_options || [];
       const defaultReasoning = selectedModel ? selectedModel.default_reasoning : entry?.default_reasoning;
       const level = agentChanged || changed === "model"

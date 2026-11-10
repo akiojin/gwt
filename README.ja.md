@@ -157,6 +157,11 @@ gwt は次の組み込みエージェントに対応しています。Launch Age
 インストール済みの組み込みエージェントだけが表示されます。その他の CLI コマンドは
 カスタムエージェントとして引き続き利用できます。
 
+Launch Wizard と Agents 設定の Codex モデル一覧は、ローカルの
+`models_cache.json` に追従し、取得できない場合は同梱の一覧を使います。
+一覧から消えた保存済みモデルは変更せず、警告を表示します。7日ごとに一覧と
+保存済みプロファイルの差分を確認し、新しい差分だけを PM Reports に1回報告します。
+
 **Settings > Supported Agents** では、全対応エージェントの導入状態と
 インストール済みバージョンを確認し、未導入の CLI をインストールできます。
 公式配布元の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
@@ -1099,11 +1104,18 @@ actor になるため、旧 operation の再実行は競合になります。現
 
 選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
 `selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
-対象 turn の ID・`prompt_sha256` を原文なしで返します。`window_only:true` と `detail`
+対象 turn の ID・`prompt_sha256`・サーバー計算の `source_id` を原文なしで返します。
+`window_only:true` と `detail`
 が示すのは件数・容量を制限した会話の範囲であり、履歴全件や永続 cursor ではありません。
 `selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
-で原文を 1 件取得します。両 native selector は Task 追跡の読取不能とは独立して
-利用できます。選択した turn を未分類の pending source として保存するには、
+で原文と同じ `source_id` を 1 件取得します。
+両 native selector は Task 追跡の読取不能とは独立して
+利用できます。まず `selector:{kind:"source",id:"<source_id>"}` で既保存の source と
+pending 状態を読み、native identity と本文 hash を照合してから、再受付せず分類や
+既存 Task を確認します。ID 自体は保存済みの証明でも権限でもありません。
+`missing_source` だけが返却 revision 時点での未保存を示します。読取不能・別 project・
+権限拒否は未受付とみなさず degraded として保持します。
+未保存の turn を未分類の pending source として保存するには、
 `pm.request_tasks.capture` に `operation_id`・現在の `expected_revision`・`reason` と、
 `provider`・`conversation_id`・`id`・`prompt_sha256` を指定します。原文・source・actor は
 サーバーが確定し、caller による原文・source・actor・authority の指定は拒否します。
@@ -1891,6 +1903,13 @@ gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
 
+PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲覧できます。未完了を優先し、
+親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
+で完了・取消も表示できます。プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
+長い概要は短縮しますが、保存済みの内容は保持します。読取り失敗時は最後に確認できた一覧を
+警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+同じツールバーから **Reports** と **Execution log** に切り替えられます。
+
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
 **Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
@@ -1903,6 +1922,8 @@ PM の更新は共通の短い概要で表示し、**Details** を開くと説�
 **Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
 切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
 1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
+判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Execution log** で
+番号または自由文を回答できます。**Copy** には番号付き選択肢と詳細を含めます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、

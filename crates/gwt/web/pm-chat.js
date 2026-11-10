@@ -6,6 +6,22 @@ function reportDetailsMarkdown(structured) {
     .filter(Boolean).join('\n\n');
 }
 
+// Stored summary text participates in journal replay validation. Format the
+// choices for display without rewriting that durable body or its receipt.
+function reportDisplayText(report) {
+  const summary = report.structured?.summary;
+  const decision = report.kind === 'decision' && summary?.decision;
+  if (!decision) return report.body || '';
+  const lines = [summary.result];
+  for (const [label, key] of [['Impact', 'impact'], ['Owner', 'owner'], ['Next', 'next_action']]) {
+    if (summary[key]) lines.push(`${label}: ${summary[key]}`);
+  }
+  lines.push(`Decision: ${decision.question}`, `Recommended: ${decision.recommendation} (${decision.reason})`,
+    ...decision.options.map((option, index) => `${index + 1}. ${option}`),
+    'Reply with the option number, or Other: your own answer.');
+  return lines.join('\n');
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
@@ -34,7 +50,8 @@ export function createPmWindowModel() {
   }
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
-      reportsVersion: null, reports: [], current: null, error: null, loaded: false };
+      reportsVersion: null, reports: [], current: null, error: null, loaded: false,
+      requestTasks: null, requestTasksError: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -74,10 +91,15 @@ export function createPmWindowModel() {
         request.force = null;
         request.needsSnapshot = false;
         if (version?.epoch === event.version.epoch && version.revision === event.version.revision) return state;
+        const taskOverview = event.current?.request_tasks;
+        const taskError = taskOverview?.state === 'error' ? taskOverview.message
+          : (!taskOverview ? event.error || 'Request tasks are unavailable. Reload this page to try again.' : null);
         next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
+          requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
+          requestTasksError: taskError,
           current: event.error ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
-            content: report.structured ? { type: 'text', body: report.body || '' }
+            content: report.structured ? { type: 'text', body: reportDisplayText(report) }
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
             detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
               body_html: report.details_html || '' } : null })) };
@@ -106,6 +128,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let session = sessionId;
   let disposed = false;
   let logs = false;
+  let activeView = 'tasks';
+  let includeCompleted = false;
+  let tasksDigest = '';
+  const taskRows = new Map();
   let digest = '';
   let currentDigest;
   let latestState;
@@ -122,10 +148,22 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const toolbar = element('div', 'pm-chat__toolbar');
   toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', 'PM view');
+  const tasksButton = element('button', '', 'Tasks');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  reportsButton.type = logButton.type = 'button';
-  toolbar.append(reportsButton, logButton);
+  tasksButton.type = reportsButton.type = logButton.type = 'button';
+  toolbar.append(tasksButton, reportsButton, logButton);
+  const tasksBody = element('section', 'pm-chat__tasks');
+  tasksBody.setAttribute('aria-label', 'Request tasks');
+  const tasksHeader = element('div', 'pm-chat__history-header');
+  const completedButton = element('button', '', 'Include completed');
+  completedButton.type = 'button';
+  completedButton.setAttribute('aria-pressed', 'false');
+  tasksHeader.append(element('h2', '', 'Tasks'), completedButton);
+  const tasksNotice = element('p', 'pm-chat__notice');
+  tasksNotice.setAttribute('role', 'status');
+  const taskList = element('div', 'pm-chat__task-list');
+  tasksBody.append(tasksHeader, tasksNotice, taskList);
   const body = element('div', 'pm-chat__body');
   const currentCard = element('section', 'pm-chat__current');
   currentCard.setAttribute('aria-label', 'PM status');
@@ -153,7 +191,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   transcript.setAttribute('aria-label', 'PM reports');
   historyHeader.append(element('h2', '', 'Reports'), filter);
   body.append(currentCard, historyHeader, notice, transcript);
-  root.append(toolbar, body);
+  root.append(toolbar, tasksBody, body);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -170,19 +208,77 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     ? new document.defaultView.ResizeObserver(restoreScroll) : null;
   resizeObserver?.observe(body);
 
-  function showLogs(value) {
-    if (value && !logs) rememberScroll();
-    logs = value;
-    body.hidden = logs;
+  function showView(value) {
+    if (activeView === 'reports') rememberScroll();
+    activeView = value;
+    logs = value === 'log';
+    body.hidden = value !== 'reports';
+    tasksBody.hidden = value !== 'tasks';
     root.classList.toggle('pm-chat--logs', logs);
-    reportsButton.setAttribute('aria-pressed', String(!logs));
+    tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
+    reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
-    if (!logs) restoreScroll();
+    if (value === 'reports') restoreScroll();
   }
-  const showReports = () => showLogs(false);
-  const showLog = () => showLogs(true);
+  const showTasks = () => showView('tasks');
+  const showReports = () => showView('reports');
+  const showLog = () => showView('log');
   const filterReports = () => update(latestState);
+  const filterTasks = () => {
+    includeCompleted = !includeCompleted;
+    completedButton.setAttribute('aria-pressed', String(includeCompleted));
+    renderTasks(latestState);
+  };
+  function renderTasks(state) {
+    const overview = state?.requestTasks;
+    const error = state?.requestTasksError;
+    const rows = overview?.state === 'ready' ? overview.tasks : [];
+    const visible = rows.filter(task => includeCompleted || !['completed', 'cancelled'].includes(task.status));
+    const nextDigest = JSON.stringify([includeCompleted, rows]);
+    if (nextDigest !== tasksDigest) {
+      tasksDigest = nextDigest;
+      const parents = new Map(rows.map(task => [task.key, task.title]));
+      const labels = { pending: 'Pending', in_progress: 'In progress', waiting: 'Waiting', completed: 'Completed', cancelled: 'Cancelled' };
+      const nodes = visible.map(task => {
+        let row = taskRows.get(task.key);
+        if (!row) {
+          row = element('article', 'pm-chat__task');
+          row.dataset.taskKey = task.key;
+          taskRows.set(task.key, row);
+        }
+        const digest = JSON.stringify([task, parents.get(task.parent_key)]);
+        if (row.dataset.digest !== digest) {
+          row.dataset.digest = digest;
+          row.classList.toggle('pm-chat__task--child', !!task.parent_key);
+          const title = element('h3', '', task.title);
+          const meta = element('p', 'pm-chat__task-meta', `${labels[task.status] || 'Unknown'} · ${task.assignee || 'Unassigned'}`);
+          const fields = [title, meta];
+          if (task.parent_key) fields.push(element('p', 'pm-chat__task-meta', `Part of: ${parents.get(task.parent_key) || 'Parent outside this preview'}`));
+          if (task.review_required) fields.push(element('p', 'pm-chat__task-review', 'PM reassessment required'));
+          if (task.wait_reason) fields.push(element('p', '', `Waiting: ${task.wait_reason}`));
+          if (task.next_action) fields.push(element('p', '', `Next: ${task.next_action}`));
+          row.replaceChildren(...fields);
+        }
+        return row;
+      });
+      // Keep stable rows attached: report-only polls cannot disturb reading
+      // position or selection inside an unchanged Task summary.
+      if (nodes.length !== taskList.children.length || nodes.some((node, index) => taskList.children[index] !== node)) {
+        taskList.replaceChildren(...nodes);
+      }
+      const keys = new Set(rows.map(task => task.key));
+      for (const key of taskRows.keys()) if (!keys.has(key)) taskRows.delete(key);
+    }
+    const pending = overview?.pending_intake || 0;
+    const summary = overview?.state === 'ready'
+      ? `${visible.length} of ${overview.total} recorded tasks shown${overview.total > rows.length ? ' (preview limited to 50; unfinished first)' : ''}. ${pending} request${pending === 1 ? '' : 's'} await classification.${!visible.length ? ' No unfinished tasks in this preview.' : ''}`
+      : overview?.state === 'absent' ? 'No request tasks have been recorded yet.' : 'Loading request tasks…';
+    const noticeText = error
+      ? `Task data could not be refreshed.${overview ? ` Showing the last confirmed list. Last confirmed summary (stale): ${summary}` : ''} ${error} Reopen Tasks after the store is recovered.`
+      : summary;
+    if (tasksNotice.textContent !== noticeText) tasksNotice.textContent = noticeText;
+  }
   function renderCurrent(current) {
     const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
     if (currentDigest === nextDigest) return;
@@ -263,6 +359,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
+    renderTasks(state);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
     const reports = state.reports;
@@ -287,7 +384,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         copy.addEventListener('click', async () => {
           try {
             await copyText(qa ? `Q: ${report.question || ''}\n\nA:\n${report.body}`
-              : [report.body, report.structured ? reportDetailsMarkdown(report.structured) : ''].filter(Boolean).join('\n\n'));
+              : [report.content.body, report.structured ? reportDetailsMarkdown(report.structured) : ''].filter(Boolean).join('\n\n'));
             if (!disposed) copy.textContent = 'Copied';
           } catch {
             if (!disposed) {
@@ -332,19 +429,26 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     if (disposed || session === nextSession) return;
     session = nextSession;
     expandedReports.clear();
+    taskRows.clear();
+    taskList.replaceChildren();
+    tasksDigest = '';
+    includeCompleted = false;
+    completedButton.setAttribute('aria-pressed', 'false');
     transcript.replaceChildren();
     body.scrollTop = 0;
     scrollTop = 0;
     followTail = true;
     digest = '';
     currentDigest = undefined;
-    showLogs(false);
+    showTasks();
   }
   function dispose() {
     disposed = true;
     expandedReports.clear();
     body.removeEventListener('scroll', rememberScroll);
     resizeObserver?.disconnect();
+    tasksButton.removeEventListener('click', showTasks);
+    completedButton.removeEventListener('click', filterTasks);
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
     kindSelect.removeEventListener('change', filterReports);
@@ -352,9 +456,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }
   reportsButton.addEventListener('click', showReports);
+  tasksButton.addEventListener('click', showTasks);
+  completedButton.addEventListener('click', filterTasks);
   logButton.addEventListener('click', showLog);
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
-  showLogs(false);
-  return { update, setSession, showReports, dispose };
+  showTasks();
+  return { update, setSession, showTasks, showReports, dispose };
 }

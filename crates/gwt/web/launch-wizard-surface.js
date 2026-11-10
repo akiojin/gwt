@@ -1810,8 +1810,9 @@ export function createLaunchWizardSurface({
                     model: value,
                   }),
               );
-            } else if ((launchWizard.model_options || []).length > 0) {
-              appendSelectField(
+            } else if ((launchWizard.model_options || []).length > 0
+              || (launchWizard.selected_agent_id === "codex" && launchWizard.selected_model)) {
+              const modelField = appendSelectField(
                 grid,
                 "Model",
                 launchWizard.model_options || [],
@@ -1822,10 +1823,17 @@ export function createLaunchWizardSurface({
                     model: value,
                   }),
               );
+              if (launchWizard.selected_agent_id === "codex" && launchWizard.selected_model
+                && !(launchWizard.model_options || []).some(option => option.value === launchWizard.selected_model)) {
+                const select = modelField.querySelector("select");
+                const saved = createNode("option", "", `${launchWizard.selected_model} · unavailable`);
+                saved.value = launchWizard.selected_model;
+                saved.disabled = true;
+                select.prepend(saved);
+                select.value = saved.value;
+              }
             }
-            // Issue #3962 AC-5: a saved model that left the agent's catalog
-            // falls back to the default instead of failing the launch. Say so
-            // next to the Model field so the swap is never silent.
+            // Explain restored model status beside the model field.
             if (launchWizard.model_fallback_notice) {
               const fallback = createLaunchField("Model changed", true);
               fallback.appendChild(

@@ -2364,10 +2364,7 @@ fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.tabs.len(),
@@ -2440,10 +2437,7 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime
         .tab("tab-home")
@@ -2542,10 +2536,7 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
         .expect("save stopped session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime
         .tab("tab-unclosed")
@@ -2631,10 +2622,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
         .expect("save stale stopped session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert!(
         runtime.pending_auto_resume_sources.is_empty(),
@@ -2762,10 +2750,7 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_surface_ready() {
     assert!(!runtime.issue_monitor_materializer_ready());
     assert!(runtime.issue_monitor_launch_preparations.is_empty());
 
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace

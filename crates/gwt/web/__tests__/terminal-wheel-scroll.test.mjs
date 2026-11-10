@@ -70,7 +70,7 @@ test("retained history takes wheel ownership while the application tracks the mo
 test("Ctrl and Meta wheel bypass terminal override for canvas zoom routing", () => {
   for (const modifier of ["ctrlKey", "metaKey"]) {
     const fixture = mountFixture({
-      isWindowsHost: () => true,
+      isWindowsHost: () => true, isRuntimeStopped: () => true,
       terminalOptions: {
         buffer: { active: { baseY: 180 } },
         modes: { mouseTrackingMode: "any" },
@@ -176,6 +176,40 @@ test("agent fullscreen wheel fallback still sends PageUp when mouse tracking is 
   assert.equal(event.defaultPrevented, true);
   assert.deepEqual(fixture.inputCalls, [APPLICATION_SCROLL_PAGE_UP]);
   assert.equal(fixture.bubbledWheelCount, 0);
+  fixture.dispose();
+});
+
+test("stopped fullscreen wheel scrolls locally without input or mouse reports", () => {
+  for (const mouseTrackingMode of ["none", "any"]) {
+    const fixture = mountFixture({
+      isWindowsHost: () => false,
+      applicationScrollFallback: true,
+      isRuntimeStopped: () => true,
+      terminalOptions: { modes: { mouseTrackingMode } },
+    });
+    const event = wheelEvent(fixture.window, { deltaY: -96 });
+    fixture.terminalRoot.dispatchEvent(event);
+    assert.deepEqual(fixture.inputCalls, []);
+    assert.deepEqual(fixture.scrollCalls, [-3]);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(fixture.bubbledWheelCount, 0);
+    fixture.dispose();
+  }
+});
+
+test("stopped touch scrolling follows the local wheel path and observes resume", () => {
+  let stopped = true;
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    isRuntimeStopped: () => stopped,
+  });
+  fixture.swipe([100, 148]);
+  assert.deepEqual(fixture.inputCalls, []);
+  assert.deepEqual(fixture.scrollCalls, [-3]);
+  stopped = false;
+  fixture.swipe([100, 148]);
+  assert.deepEqual(fixture.inputCalls, [APPLICATION_SCROLL_PAGE_UP]);
   fixture.dispose();
 });
 
@@ -392,6 +426,7 @@ function mountFixture({
   isWindowsHost,
   terminalOptions = {},
   applicationScrollFallback = false,
+  isRuntimeStopped,
 } = {}) {
   const terminalRoot = new FakeTerminalRoot();
   const scrollCalls = [];
@@ -411,6 +446,7 @@ function mountFixture({
       ...terminalOptions,
     },
     isApplicationScrollFallbackEnabled: () => applicationScrollFallback,
+    isRuntimeStopped,
     sendTerminalInput: (data, options) => {
       inputCalls.push(data);
       inputOptions.push(options);

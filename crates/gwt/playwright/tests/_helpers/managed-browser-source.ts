@@ -90,7 +90,12 @@ export async function startManagedBrowserSource(browser: Browser, info: TestInfo
         const blocked = /"decision"\s*:\s*"block"/.test(result.stdout);
         observation.hook = {status:result.status,signal:result.signal,blocked,
           error:result.error ? {name:result.error.name,code:result.error.code ?? null} : null};
-        if (result.error || result.status !== 0 || blocked) throw new Error('normal provider hook refused');
+        if (result.error || result.status !== 0 || blocked) {
+          // Keep the original refusal before the isolated source is cleaned up.
+          observation.hook.stdout = result.stdout ?? '';
+          observation.hook.stderr = result.stderr ?? '';
+          throw new Error('normal provider hook refused');
+        }
         hookCommands++;
       }
       if (!hookCommands) throw new Error('normal provider hook missing');

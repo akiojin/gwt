@@ -92,6 +92,7 @@ export function createTerminalWheelScrollController({
   window = globalThis,
   isWindowsHost: hostCheck,
   isApplicationScrollFallbackEnabled,
+  isRuntimeStopped = () => false,
   sendTerminalInput,
   pixelsPerLine = PIXELS_PER_LINE,
   pageLines = PAGE_LINES,
@@ -105,6 +106,18 @@ export function createTerminalWheelScrollController({
 
   let dispatchingTouchWheel = false;
   const handleWheel = (event) => {
+    // A retained stopped terminal can still advertise application mouse modes.
+    // Keep scrolling local before either fallback keys or xterm mouse reports.
+    if (isRuntimeStopped() && !event.ctrlKey && !event.metaKey) {
+      const lines = wheelDeltaToScrollLines(event, { pixelsPerLine, pageLines });
+      if (lines !== 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        terminal.scrollLines(lines);
+      }
+      return;
+    }
+
     const applicationScrollInput = applicationScrollInputForWheel(event, {
       terminal,
       enabled: isApplicationScrollFallbackEnabled,

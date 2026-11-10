@@ -698,6 +698,7 @@ pub struct WindowRuntime {
         gwt::project_runtime::events::OwnerCommand,
         RemoteRuntimeCommandKind,
     )>,
+    pending_owner_commands: std::collections::VecDeque<PendingRemoteRuntimeCommand>,
     pub(crate) output_seq: u64,
     pub(crate) status_revision: u64,
     pub(crate) raw_status: gwt::WindowProcessStatus,
@@ -739,6 +740,7 @@ impl WindowRuntime {
             input_in_flight: None,
             input_in_flight_reply: None,
             pending_input_commands: Default::default(),
+            pending_owner_commands: Default::default(),
             output_seq: 0,
             status_revision: 0,
             raw_status: gwt::WindowProcessStatus::Running,
@@ -791,8 +793,24 @@ impl WindowRuntime {
     }
 
     fn input_delivery_pending(&self) -> bool {
-        self.input_in_flight.is_some() || !self.pending_input_commands.is_empty()
+        self.input_in_flight.is_some()
+            || !self.pending_input_commands.is_empty()
+            || self
+                .pending_owner_commands
+                .iter()
+                .any(|pending| matches!(pending.kind, RemoteRuntimeCommandKind::Input { .. }))
     }
+}
+
+struct PendingRemoteRuntimeCommand {
+    command: gwt::project_runtime::events::OwnerCommand,
+    kind: RemoteRuntimeCommandKind,
+    session_id: Option<String>,
+    owner_identity: gwt::daemon_subscriber::ProjectOwnerIdentity,
+    queued_at: Instant,
+    retry_at: Instant,
+    attempts: u32,
+    reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1065,6 +1083,7 @@ mod title_sync;
 mod ui_trace;
 mod window;
 mod wizard;
+pub(crate) use startup::StartupAutoResumeAdmissionPrepared;
 pub(crate) use wizard::{
     IssueMonitorLaunchFactsPrefetched, IssueMonitorLaunchPrepared, IssueMonitorPreflightRejected,
 };
@@ -2191,6 +2210,11 @@ pub struct AppRuntime {
     /// the PTY is live or the window closes.
     pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
+    /// Issue #5379: a blocking worker holds the queued startup restores while
+    /// it evaluates their Project admission off the GUI thread.
+    pub(crate) startup_auto_resume_admission_in_flight: bool,
+    /// The startup restore drain phase, closed by the drain's tail.
+    pub(crate) startup_restore_drain_phase: Option<gwt::perf::startup::PhaseTimer>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
     /// terminal close, keyed by combined window id. Process-local only.
@@ -5192,6 +5216,8 @@ impl AppRuntime {
             pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
+            startup_auto_resume_admission_in_flight: false,
+            startup_restore_drain_phase: None,
             active_agent_sessions: HashMap::new(),
             issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),
@@ -9314,6 +9340,21 @@ impl AppRuntime {
                     .iter()
                     .find(|(tab_id, _)| *tab_id == worker_expected_project_tab_id)
                     .map(|(_, live_window_ids)| live_window_ids);
+                // Issue #6933 AC-4: the weekly Codex model-list check rides
+                // the scheduled scan worker; it is a no-op until seven days
+                // have passed; a failure does not stop the scan.
+                if let Err(error) = gwt::launch_wizard::codex_models::run_weekly_check(
+                    &worker_project_root,
+                    &gwt::launch_wizard::codex_models::saved_codex_profile_models(
+                        &worker_prefs_path,
+                    ),
+                    chrono::Utc::now(),
+                ) {
+                    tracing::warn!(
+                        project_root = %worker_project_root.display(),
+                        "Codex model list weekly check failed: {error}"
+                    );
+                }
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
@@ -14871,6 +14912,7 @@ impl AppRuntime {
         id: &str,
     ) -> Vec<OutboundEvent> {
         let mut events = self.flush_runtime_output_batch(id);
+        events.extend(self.discard_recovering_remote_commands(id));
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
@@ -16480,6 +16522,7 @@ impl AppRuntime {
             window_id,
             "Queued input was discarded because the pane runtime changed. Retype it.",
         ));
+        events.extend(self.discard_recovering_remote_commands(window_id));
         self.runtimes.remove(window_id);
         self.active_agent_sessions.remove(window_id);
         if let Some(tab) = self.tab_mut(&address.tab_id) {
@@ -16664,6 +16707,13 @@ impl AppRuntime {
                     },
                 )
             });
+        // These commands have never left the GUI. Keep them across owner
+        // replacement; the retry path checks the exact pane incarnation.
+        let pending_owner_commands = self
+            .runtimes
+            .get_mut(window_id)
+            .map(|runtime| std::mem::take(&mut runtime.pending_owner_commands))
+            .unwrap_or_default();
         let mut runtime = WindowRuntime::remote(
             snapshot.id.clone(),
             snapshot.incarnation,
@@ -16671,6 +16721,7 @@ impl AppRuntime {
             client,
             identity,
         );
+        runtime.pending_owner_commands = pending_owner_commands;
         if let Some((hint, observation, last_human_input_at, input_in_flight, pending)) =
             composer_hint
         {
@@ -16719,6 +16770,7 @@ impl AppRuntime {
             self.invalidate_workspace_projection_patch(&context.tab_id);
             events.extend(self.active_work_projection_broadcast_for_tab(&context.tab_id));
         }
+        events.extend(self.retry_remote_runtime_commands(window_id, Instant::now()));
         events
     }
 

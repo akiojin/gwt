@@ -1669,7 +1669,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*let replayedReleaseNotesId = null;\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true, recoverSnapshots\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*closeProjectController\.reconnect\(\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*let replayedReleaseNotesId = null;\s*let replayedRecoveryCenterId = null;\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*if \(recoverSnapshots === true && pending\.message\.kind === "load_knowledge_bridge"\) \{\s*const state = knowledgeBridgeStateMap\.get\(pending\.message\.id\);\s*if \(state\?\.loadQueued && state\.loadRequestId === pending\.message\.request_id\s*&& \(activeWorkspace\(\)\?\.windows \|\| \[\]\)\.some\(entry => entry\.id === pending\.message\.id\)\) continue;\s*\}\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*if \(pending\.message\.kind === "open_release_notes"\) replayedReleaseNotesId = pending\.message\.id;\s*if \(pending\.message\.kind === "load_recovery_center"\) replayedRecoveryCenterId = pending\.message\.request_id;\s*\}\s*recoveryCenterController\?\.reconnect\(replayedRecoveryCenterId\);"#,
     )
     .expect("valid regex");
 
@@ -4063,4 +4063,20 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );
+}
+
+#[test]
+fn embedded_web_pm_tasks_uses_the_shared_model_and_operator_tokens() {
+    let pm_chat = root_js_module_source("/pm-chat.js");
+    assert!(pm_chat.contains("requestTasks"));
+    assert!(pm_chat.contains("pm-chat__tasks"));
+    assert!(pm_chat.contains("showTasks"));
+    let styles = styles_components_css();
+    let tasks = styles.split(".pm-chat__tasks").nth(1).expect("Task styles");
+    let block = tasks.split('}').next().unwrap();
+    assert!(block.contains("var(--"));
+    assert!(!block.contains('#'));
+    assert!(!block.contains("rgb("));
+    assert!(!block.contains("rgba("));
+    assert!(!block.contains("position: fixed"));
 }

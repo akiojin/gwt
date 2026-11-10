@@ -332,6 +332,25 @@ test("Issue #6729: a grouped diagnostic activates the latest window after retry 
   assert.equal(center.count(), 1);
 });
 
+test("Issue #6932: removing resolved Agent attention retires its keyed history row", () => {
+  const { document, center } = setup();
+  const changes = [];
+  center.onUnreadChange((count, hasError) => changes.push([count, hasError]));
+  const notice = { key: "attention-project-issue-6932", level: "error", title: "Agent error" };
+  const row = center.recordSurfaceNotice(notice);
+  assert.equal(center.removeNotice(notice.key), true);
+  assert.equal(row.isConnected, false);
+  assert.equal(center.count(), 0);
+  assert.equal(center.unreadCount(), 0);
+  assert.equal(document.querySelector(".notification-center__empty").hidden, false);
+  assert.deepEqual(changes.at(-1), [0, false]);
+  assert.equal(center.removeNotice(notice.key), false);
+  const fresh = center.recordSurfaceNotice(notice);
+  assert.notEqual(fresh, row);
+  assert.equal(center.count(), 1);
+  assert.equal(center.unreadCount(), 1);
+});
+
 test("a dismissed error row does not resurrect on recurrence", () => {
   const { document, center } = setup();
   const row = center.recordError({ key: "k", title: "t", message: "m" });

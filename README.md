@@ -162,6 +162,12 @@ gwt supports the following built-in agents. Launch Agent lists only installed
 built-in agents that gwt detects; other CLI commands remain available through
 custom agents.
 
+Codex model choices follow its local `models_cache.json` in Launch Wizard and
+Agents settings, with a bundled fallback when the cache is unavailable. Saved
+models that disappear remain unchanged and show a warning. Once every seven
+days, gwt checks for catalog and saved-profile differences and adds each new
+difference to PM Reports once.
+
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
 official distribution metadata confirms a newer version: npm for Codex, Grok,
@@ -1211,11 +1217,19 @@ are still pending.
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
 the current `provider`, `conversation_id` and eligible turn IDs with
-`prompt_sha256`, without originals. `window_only:true` and `detail` describe a
+`prompt_sha256` and server-derived `source_id`, without originals.
+`window_only:true` and `detail` describe a
 bounded conversation window, not complete history or a durable cursor. Use
 `selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
-to read one original. Both native selectors work independently of unavailable
-Task tracking. To preserve that selected turn as an unclassified pending source,
+to read one original and the same `source_id`. Both native selectors work
+independently of unavailable Task tracking.
+First read `selector:{kind:"source",id:"<source_id>"}` to find
+an already saved source and its pending state. Compare its native identity and
+prompt hash before reconciling its classification or tasks without recapturing.
+The ID does not prove persistence or grant authority. Only `missing_source`
+means this source is absent at the returned revision; an unreadable, foreign or
+unauthorized result remains degraded. To preserve an absent selected turn as
+an unclassified pending source,
 call `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
 `reason`, `provider`, `conversation_id`, `id` and `prompt_sha256`. The server
 resolves the original, source and actor; caller-supplied originals, sources,
@@ -2068,6 +2082,16 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
+The PM window opens **Tasks**, a read-only preview of saved request tasks. It
+shows unfinished work first, including parent relationships, assignees, waiting
+reasons, next actions, and pending PM reassessment. **Include completed** also
+shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows the total and any requests awaiting classification. Long summaries are
+shortened; the saved tasks remain complete. A read failure retains the last
+confirmed list with a warning. Task editing, automatic intake, and history import
+are not available in this preview. **Reports** and **Execution log** remain
+available from the same toolbar.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
@@ -2083,6 +2107,9 @@ and references. **Copy** includes both. Unchanged observations create no new car
 including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
+Decision reports show two to four numbered choices with the recommendation and
+its reason. Use **Execution log** to reply with a choice number or your own answer;
+**Copy** includes the numbered choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected

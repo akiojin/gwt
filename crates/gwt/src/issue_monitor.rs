@@ -18672,7 +18672,7 @@ impl IssueMonitorState {
 
     pub fn set_terminal_queue_auto_refill(&mut self, enabled: bool, limit: usize) {
         self.terminal_queue_auto_refill = enabled;
-        self.terminal_queue_auto_refill_limit = limit;
+        self.terminal_queue_auto_refill_limit = if enabled && limit == 0 { 3 } else { limit };
     }
 
     fn retire_completed_terminal_queue(&mut self) {
@@ -44756,9 +44756,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("issue-monitor.json");
         fs::write(&path, b"original").expect("seed canonical bytes");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
-        );
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         let error = super::durable_atomic_write(&path, b"replacement")
             .expect_err("expired deadline must reject the canonical rename");
