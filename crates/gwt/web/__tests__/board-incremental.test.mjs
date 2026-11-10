@@ -116,6 +116,31 @@ test("Board destination batches settings while mount and popover read the latest
   }
   surface.applyProjectBoardConfigEventToBoard({ project_root: "", resolved_channel: "#invalid" });
   assert.equal(frames.size, 0);
+
+  document.querySelector("[data-action='board-destination']").click();
+  const popover = document.querySelector(".board-destination-popover");
+  const channelInput = popover.querySelector("input");
+  channelInput.value = "#unsaved-destination";
+  sent.length = 0;
+  surface.resyncBoardLogs(["board", "second"]);
+  assert.deepEqual(sent.filter(event => event.kind === "get_project_board_config"),
+    [{ kind: "get_project_board_config", project_root: "/project-a" }],
+    "reconnect refreshes the shared destination once even when already cached");
+  surface.applyProjectBoardConfigEventToBoard({ project_root: projectRoot,
+    resolved_provider: "local" });
+  flush();
+  for (const chip of document.querySelectorAll(".board-destination-text")) {
+    assert.equal(chip.textContent, "Local");
+  }
+  assert.equal(document.querySelector(".board-destination-popover"), popover);
+  assert.equal(popover.querySelector("input"), channelInput);
+  assert.equal(channelInput.value, "#unsaved-destination");
+  assert.ok(!sent.some(event => event.kind === "update_project_board_config"));
+  sent.length = 0;
+  surface.resyncBoardLogs(["logs"]);
+  projectRoot = "";
+  surface.resyncBoardLogs(["board"]);
+  assert.ok(!sent.some(event => event.kind === "get_project_board_config"));
 });
 
 test("Issue #5531: resync reissues lost Board and Logs reads without clearing the composer", () => {
