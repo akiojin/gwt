@@ -390,6 +390,27 @@ fn authenticated_scan_now_reports_unavailable_daemon_without_enqueuing() {
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     prefs.enabled = true;
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let census_host_pid = std::process::id();
+    let census_host_started_at = gwt::process::host_process_start_time(census_host_pid)
+        .expect("the actual census host process start time");
+    let census_host_key = format!("{census_host_pid}:{census_host_started_at}");
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the real initial census publication before comparing complete preference bytes; no scheduler delay authorizes the baseline.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if gwt::load_issue_monitor_prefs(&prefs_path)
+                    .unwrap()
+                    .monitor_runtime_counts
+                    .contains_key(&census_host_key)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the real initial host census must precede preference baselines");
+    });
     let before = fs::read(&prefs_path).unwrap();
     let scope = gwt_core::daemon::RuntimeScope::from_project_root(
         &repo,

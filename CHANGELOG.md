@@ -1,6 +1,60 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.158.0] - 2026-11-10
+
+### Bug Fixes
+
+- **issue-monitor:** Retain live launches across merged deliveries
+- **ui:** 再接続時に未完了のリポジトリ検索を回復する
+- **owner:** Retry each failed cleanup independently
+- **issue-monitor:** Fix quota release launch admission
+- **issue-monitor:** Preserve review failure routing
+- **monitor:** Group launch errors across delivery attempts
+- Reject verification runs missing registered plan commands
+- **ui:** ラベル選択一覧のスクロール位置を保持する
+- **ui:** ラベル取得先とカードの更新範囲を固定する
+- **ui:** 再接続時に関連作業検索を回復する
+- **index:** Preserve below-normal CPU class in background mode
+- **restore:** Restore マーク解除済み Session の自動復元を launch_failure にしない
+- **monitor:** Reduce JSON work before durable commit
+
+### Features
+
+- **ui:** GitHubラベルの選択とKanban色表示を追加
+
+### Miscellaneous Tasks
+
+- **work:** PR #6981の配送参照を記録する
+- **work:** Link issue-6934 follow-up pull request
+- **work:** Link issue-6934 error aggregation pull request
+- **work:** PR #6995 の配信参照を記録する
+- **work:** 関連作業検索の配送 PR を記録する
+- **work:** Record Issue 5542 delivery continuation
+- **work:** Record issue 6979 work events
+- **work:** Record issue 5561 delivery continuation
+- **work:** Issue #6991 の Work イベントを記録
+- **work:** Issue #6991 の Work イベントを記録
+- **work:** Record PR #7006 delivery reference
+
+### Performance
+
+- **index:** Publish Issue refreshes as a delta over an immutable base
+- **hook:** Avoid unrelated process metadata in ancestry checks
+- **index:** Lower Windows background refresh I/O priority
+- **memory:** Share pending work source metadata
+
+### Testing
+
+- **monitor:** Readback予算テストの時計を固定する
+- **index:** Assert delta-served content, not semantic rank
+- **daemon:** 起動時の期限失効テストの時計を固定する
+- **ui:** セッション内の監査と検証子プロセスを分離する
+- **ui:** ラベル選択に既存E2Eの期待値を合わせる
+- **ui:** 検索再接続の埋め込み契約を整合する
+- **monitor:** Observe initial census before scan baseline
+- **pm:** Cover native chat record projection
+
 ## [9.157.0] - 2026-11-10
 
 ### Bug Fixes

@@ -6850,13 +6850,24 @@ fn validate_existing_issue_monitor_prefs_schema(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(value) => value,
-        Err(error) if error.is_syntax() || error.is_eof() => return Ok(()),
-        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
-    };
-    if let Some(actual) = value.get("schema_version") {
-        let actual = serde_json::from_value(actual.clone())
+    // Only the schema header is needed here. Building a second complete Value
+    // tree for a large Monitor history consumes the short writer deadline.
+    let fields: BTreeMap<String, &serde_json::value::RawValue> =
+        match serde_json::from_str(&content) {
+            Ok(fields) => fields,
+            Err(error) if error.is_syntax() || error.is_eof() => return Ok(()),
+            Err(error) => {
+                // Full-snapshot saves historically replace valid non-object JSON.
+                if serde_json::from_str::<serde_json::Value>(&content)
+                    .is_ok_and(|value| !value.is_object())
+                {
+                    return Ok(());
+                }
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+            }
+        };
+    if let Some(actual) = fields.get("schema_version") {
+        let actual = serde_json::from_str(actual.get())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         validate_issue_monitor_prefs_schema_version(actual)?;
     }
@@ -7041,19 +7052,41 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
         }
     }
     let tmp = unique_prefs_tmp_path(path);
+    let started = std::time::Instant::now();
+    let remaining_budget_ms = gwt_core::operation_deadline::current().map(|deadline| {
+        deadline
+            .saturating_duration_since(gwt_core::operation_deadline::now())
+            .as_millis()
+    });
+    let mut stage = "scratch write";
+    let mut stage_started = started;
+    let mut written = started;
+    let mut synced = started;
+    let mut renamed = started;
     let result = (|| {
         let mut scratch = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&tmp)?;
         scratch.write_all(content)?;
+        written = std::time::Instant::now();
+        stage = "scratch sync";
+        stage_started = written;
         scratch.sync_all()?;
+        synced = std::time::Instant::now();
+        stage = "rename deadline check";
+        stage_started = synced;
         // Deadline-aware transactions may spend their remaining budget on
         // serialization or scratch fsync. Recheck immediately before the
         // canonical rename so an expired proposal cannot become visible after
         // its acceptance boundary.
         gwt_core::operation_deadline::ensure_remaining("Issues durable rename")?;
+        stage = "rename";
+        stage_started = std::time::Instant::now();
         fs::rename(&tmp, path)?;
+        renamed = std::time::Instant::now();
+        stage = "parent sync";
+        stage_started = renamed;
         #[cfg(test)]
         if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE")
             .is_some_and(|target| Path::new(&target) == path)
@@ -7068,6 +7101,26 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
         }
         sync_parent_directory(path)
     })();
+    let finished = std::time::Instant::now();
+    let elapsed = finished.duration_since(started);
+    if result.is_err() || elapsed >= std::time::Duration::from_millis(100) {
+        let stage_ms = finished.duration_since(stage_started).as_secs_f64() * 1000.0;
+        tracing::info!(
+            target: "gwt.issue_monitor.prefs",
+            path = %path.display(),
+            bytes = content.len(),
+            stage,
+            stage_ms,
+            remaining_budget_ms = ?remaining_budget_ms,
+            write_ms = if stage == "scratch write" { stage_ms } else { written.duration_since(started).as_secs_f64() * 1000.0 },
+            sync_ms = if stage == "scratch sync" { stage_ms } else { synced.saturating_duration_since(written).as_secs_f64() * 1000.0 },
+            rename_ms = if stage == "rename" { stage_ms } else { renamed.saturating_duration_since(synced).as_secs_f64() * 1000.0 },
+            parent_sync_ms = if stage == "parent sync" { stage_ms } else { 0.0 },
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            success = result.is_ok(),
+            "Issues durable write timing"
+        );
+    }
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -7075,15 +7128,19 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    let started = std::time::Instant::now();
     let mut normalized = prefs.clone();
     crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
         .map_err(io::Error::other)?;
     let prefs = &normalized;
+    let normalized_at = std::time::Instant::now();
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
     validate_existing_issue_monitor_prefs_schema(path)?;
+    let validated_at = std::time::Instant::now();
     crate::machine_agent_settings::migration_before_project_save(path)?;
-    let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
-    if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
+    let migrated_at = std::time::Instant::now();
+    let content = if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
+        let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
         let fields = value.as_object_mut().expect("Monitor preferences object");
         // Older readers require this key. It is a fixed safe compatibility
         // mirror, never this project's or the machine's requested policy.
@@ -7100,10 +7157,32 @@ fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> 
                 }
             ),
         );
-    }
-    let content = serde_json::to_string_pretty(&value).map_err(io::Error::other)?;
+        serde_json::to_string_pretty(&value).map_err(io::Error::other)?
+    } else {
+        // Roster snapshots already have their canonical shape. Serialize them
+        // directly instead of allocating and walking a complete Value tree.
+        serde_json::to_string_pretty(prefs).map_err(io::Error::other)?
+    };
+    let serialized_at = std::time::Instant::now();
     crate::update_settings::migrate_before_project_save(path, false)?;
+    let prepared_at = std::time::Instant::now();
     let committed = durable_atomic_write(path, content.as_bytes());
+    let elapsed = started.elapsed();
+    if committed.is_err() || elapsed >= std::time::Duration::from_millis(100) {
+        tracing::info!(
+            target: "gwt.issue_monitor.prefs",
+            path = %path.display(),
+            normalize_ms = normalized_at.duration_since(started).as_secs_f64() * 1000.0,
+            validate_ms = validated_at.duration_since(normalized_at).as_secs_f64() * 1000.0,
+            machine_migration_ms = migrated_at.duration_since(validated_at).as_secs_f64() * 1000.0,
+            serialize_ms = serialized_at.duration_since(migrated_at).as_secs_f64() * 1000.0,
+            update_migration_ms = prepared_at.duration_since(serialized_at).as_secs_f64() * 1000.0,
+            write_ms = prepared_at.elapsed().as_secs_f64() * 1000.0,
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            success = committed.is_ok(),
+            "Issues prefs save timing"
+        );
+    }
     // Invalidate even if parent sync failed after the rename became visible.
     // Local writers cannot rely on metadata granularity to distinguish a save.
     issue_monitor_prefs_cache()

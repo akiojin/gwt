@@ -103,6 +103,7 @@ pub fn is_expected_restore_exclusion(code: &str) -> bool {
             | "monitor_stopped"
             | "launch_revoked"
             | "unregistered_pm"
+            | "window_closed"
     )
 }
 
@@ -406,6 +407,11 @@ pub(crate) fn prepare_owner_saved_session_restore(
     }
     if restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore {
         if !session.restore_window_on_startup {
+            // Issue #6991: an expected exclusion, not a launch failure. A
+            // non-Stopped status still passes the GUI's legacy "window was
+            // open" check, so retire the source to stop the retry on every
+            // startup. Any retained placeholder stays as its diagnostic.
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             return Err(restore.refuse(
                 "window_closed",
                 "The saved Session is no longer marked for restore",

@@ -1,0 +1,168 @@
+{
+  "unit": "decimal MB/hour",
+  "method": "ordinary least squares over process age 5-60 minutes",
+  "limits": "Cold ongoing ingest; four deterministic PTYs; changing real checkout history/host load; instrumented System allocator. Neither matched real-model fleet nor a causal GUI budget proof.",
+  "allocator_samples": 64,
+  "process_samples": 697,
+  "allocator_duration_seconds": 3780.6839361,
+  "rates": {
+    "requested_live_mb_per_hour": 80.01340863729753,
+    "working_set_mb_per_hour": 96.03229003222285,
+    "private_mb_per_hour": 114.01970219639865
+  },
+  "snapshots": [
+    {
+      "requested_minute": 0,
+      "elapsed_seconds": 0.1681843,
+      "exact_requested_live_bytes": 7104321,
+      "exact_live_blocks": 1712,
+      "overflow_samples": 0,
+      "unresolved_frames": 15,
+      "process_console": null,
+      "top_sampled_owners": [
+        [
+          "gwt_core::logging::writer::build",
+          4096000
+        ],
+        [
+          "gwt_core::process_console::hub::impl$0::with_capacity::closure$0",
+          1200000
+        ],
+        [
+          "gwt::load_tray_icon_rgba",
+          1048576
+        ],
+        [
+          "gwt::main",
+          292736
+        ],
+        [
+          "gwt::main::closure$14",
+          262144
+        ],
+        [
+          "gwt_core::process_console::hub::ProcessConsoleHub::with_capacity",
+          73728
+        ],
+        [
+          "gwt::embedded_server::route_root_js_modules",
+          73216
+        ],
+        [
+          "gwt::embedded_server::impl$3::clone",
+          25984
+        ],
+        [
+          "gwt::embedded_server::EmbeddedServer::start_serving",
+          17408
+        ],
+        [
+          "gwt::perf::store::perf_log_dir",
+          15488
+        ]
+      ]
+    },
+    {
+      "requested_minute": 30,
+      "elapsed_seconds": 1800.5361831,
+      "exact_requested_live_bytes": 109719157,
+      "exact_live_blocks": 211372,
+      "overflow_samples": 0,
+      "unresolved_frames": 22,
+      "process_console": null,
+      "top_sampled_owners": [
+        [
+          "gwt::work_events_ingest::work_event_source_content",
+          16154208
+        ],
+        [
+          "unattributed",
+          5211264
+        ],
+        [
+          "gwt::cli::hook::health::surface_fingerprint",
+          4222464
+        ],
+        [
+          "gwt_core::logging::writer::build",
+          4096000
+        ],
+        [
+          "gwt::cli::hook::external_skill_conflicts::impl$12::clone",
+          3947904
+        ],
+        [
+          "gwt::cli::hook::health::cached_surface_audit",
+          2538896
+        ],
+        [
+          "gwt_core::process_console::hub::impl$0::with_capacity::closure$0",
+          2400000
+        ],
+        [
+          "gwt::work_events_ingest::push_scanned_shard",
+          1979648
+        ],
+        [
+          "gwt::cli::hook::health::audit_hook_binary",
+          1819648
+        ],
+        [
+          "gwt::work_events_ingest::impl$4::capture::closure$0",
+          1798160
+        ]
+      ]
+    },
+    {
+      "requested_minute": 60,
+      "elapsed_seconds": 3600.6711949,
+      "exact_requested_live_bytes": 143999376,
+      "exact_live_blocks": 226842,
+      "overflow_samples": 0,
+      "unresolved_frames": 22,
+      "process_console": null,
+      "top_sampled_owners": [
+        [
+          "gwt::work_events_ingest::work_event_source_content",
+          26598328
+        ],
+        [
+          "gwt::cli::hook::health::surface_fingerprint",
+          4222464
+        ],
+        [
+          "unattributed",
+          4123072
+        ],
+        [
+          "gwt_core::logging::writer::build",
+          4096000
+        ],
+        [
+          "gwt::cli::hook::external_skill_conflicts::impl$12::clone",
+          3947904
+        ],
+        [
+          "gwt::cli::hook::health::cached_surface_audit",
+          2538896
+        ],
+        [
+          "gwt::work_events_ingest::impl$4::capture::closure$0",
+          2528272
+        ],
+        [
+          "gwt::work_events_ingest::push_scanned_shard",
+          2311680
+        ],
+        [
+          "gwt_core::work_events_intake::content_fingerprint",
+          1953792
+        ],
+        [
+          "gwt::cli::hook::health::audit_hook_binary",
+          1819648
+        ]
+      ]
+    }
+  ]
+}
