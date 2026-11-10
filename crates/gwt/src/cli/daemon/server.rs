@@ -8661,17 +8661,21 @@ fn scan_issue_monitor_once_blocking(
     // changes only when the whole stage completes successfully.
     timing.next("merge-reconciliation");
     let mut reconciled_monitor = monitor.clone();
-    let merge_reconciliation = match crate::issue_monitor_worker::run_budgeted_readback_stage(
-        IssueMonitorScanStage::MergeReconciliation,
-        || {
-            crate::issue_monitor_worker::reconcile_issue_monitor_merges(
-                &mut reconciled_monitor,
-                &scope.project_root,
-                &owner,
-                &repo,
-                &loaded.linked_prs,
-            )
-        },
+    let merge_reconciliation = match crate::issue_monitor_worker::observe_optional_readback(
+        &scope.project_root,
+        "merge-reconciliation",
+        crate::issue_monitor_worker::run_budgeted_readback_stage(
+            IssueMonitorScanStage::MergeReconciliation,
+            || {
+                crate::issue_monitor_worker::reconcile_issue_monitor_merges(
+                    &mut reconciled_monitor,
+                    &scope.project_root,
+                    &owner,
+                    &repo,
+                    &loaded.linked_prs,
+                )
+            },
+        ),
     ) {
         Ok(reconciliation) => {
             monitor = reconciled_monitor;
@@ -17721,13 +17725,17 @@ exit 0
         assert!(error.contains("merge-reconciliation"), "{error}");
         assert!(error.contains(expected_error), "{error}");
         let rows = gwt_core::error_ledger::list_since(None).expect("scan ledger");
-        assert!(rows.iter().any(|row| {
-            row.kind == gwt_core::error_ledger::ErrorKind::ScanFailure
-                && row.context.get("stage").map(String::as_str) == Some("merge-reconciliation")
-                && row.message.contains(expected_error)
-                && row.context.get("continuation").map(String::as_str)
-                    == Some("continued_with_previous_candidates")
-        }));
+        assert_eq!(
+            rows.iter().any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::ScanFailure
+                    && row.context.get("stage").map(String::as_str) == Some("merge-reconciliation")
+                    && row.message.contains(expected_error)
+                    && row.context.get("continuation").map(String::as_str)
+                        == Some("continued_with_previous_candidates")
+            }),
+            mode != "merge_readback_hang",
+            "only actual merge-read failures enter the ledger"
+        );
         assert!(!monitor.agent_status().scan_aborted);
         assert!(
             error.contains("continued_with_previous_candidates"),
