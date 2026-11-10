@@ -12112,6 +12112,9 @@ mod tests {
 
     #[test]
     fn issue_6689_queue_push_releases_a_cold_timeout_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let test_home = gwt_config::home::user_home().expect("isolated test home");
         std::fs::create_dir_all(&test_home).expect("test home dir");
         let tmp = TempDir::new_in(test_home).expect("tempdir");
@@ -12148,6 +12151,9 @@ mod tests {
     /// #5133 AC-1/AC-4: queue.push and the Monitor run in different processes.
     #[test]
     fn queue_push_claim_launches_on_the_next_scan_from_another_monitor_pid() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let test_home = gwt_config::home::user_home().expect("isolated test home");
         std::fs::create_dir_all(&test_home).expect("test home dir");
         let tmp = TempDir::new_in(test_home).expect("tempdir");
@@ -12156,8 +12162,8 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo dir");
         let mut env = crate::cli::TestEnv::new(repo.clone());
         queue_push_issue(&mut env, 5133, None);
-        let (code, _) = run_queue_push(&mut env, vec![5133], false);
-        assert_eq!(code, 0);
+        let (code, payload) = run_queue_push(&mut env, vec![5133], false);
+        assert_eq!(code, 0, "queue.push refused: {payload}");
         let claims = gwt_github::issue_auto_claim::extract_claim_comments(
             &env.client.comments(IssueNumber(5133)),
         );

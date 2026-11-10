@@ -515,8 +515,12 @@ test('Execution log toggle retains Reports; stale sessions and native transcript
   assert.equal(root.querySelectorAll('article').length, 1);
   const previous = model.readPmWindowState().windows.pm;
   model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'stale', reports: [] });
-  model.applyPmWindowReceiveEvent({ kind: 'pm_conversation', id: 'pm', session_id: 'session', snapshot: { messages: [] } });
+  model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'session', reports: [] });
   assert.ok(model.readPmWindowState().windows.pm === previous);
+  model.applyPmWindowReceiveEvent({ kind: 'pm_conversation', id: 'pm', session_id: 'session',
+    snapshot: { availability: 'ready', messages: [{ id: 'm', role: 'assistant', text: 'Native transcript' }] } });
+  assert.equal(model.readPmWindowState().windows.pm.reports, previous.reports);
+  assert.doesNotMatch(root.querySelector('.pm-chat__transcript').textContent, /Native transcript/);
   model.bindPmWindowState('pm', 'replacement');
   assert.equal(root.querySelectorAll('article').length, 0);
   model.removePmWindowState('pm');
@@ -1017,4 +1021,57 @@ test('context-menu optional beforePaste runs once before clipboard awaits and pr
       if (withHook) assert.equal(args[1], context);
     } finally { controller.dispose(); }
   }
+});
+
+const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: 'pm', session_id: 'session',
+  snapshot: { conversation_id: 'c', availability: 'ready', detail: null, messages, ...extra } });
+
+test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([report()]);
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Tasks remains the default view');
+  assert.deepEqual(model.requestPmConversation('pm'), { kind: 'load_pm_conversation', id: 'pm' });
+  assert.equal(model.requestPmConversation('missing'), null);
+  model.applyPmWindowReceiveEvent(conversation([
+    { id: 'u1', role: 'user', text: 'Ship <b>it</b>?' },
+    { id: 'a1', role: 'assistant', text: '# Plan', text_html: '<h1>Plan</h1><table><tr><td>1</td></tr></table><pre><code>cargo test</code></pre>' },
+    { id: 'u2', role: 'user', text: 'Thanks' },
+  ]));
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Chat').click();
+  const chat = root.querySelector('.pm-chat__chat');
+  assert.equal(chat.hidden, false);
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  const bubbles = [...chat.querySelectorAll('.pm-chat__bubble')];
+  assert.deepEqual(bubbles.map(bubble => [bubble.dataset.messageId, bubble.dataset.role]),
+    [['u1', 'user'], ['a1', 'assistant'], ['u2', 'user']]);
+  assert.ok(bubbles[0].classList.contains('pm-chat__bubble--user'));
+  assert.ok(bubbles[1].classList.contains('pm-chat__bubble--assistant'));
+  assert.equal(bubbles[0].querySelector('b'), null, 'user text is never parsed as HTML');
+  assert.match(bubbles[0].textContent, /Ship <b>it<\/b>\?/);
+  assert.ok(bubbles[1].querySelector('h1') && bubbles[1].querySelector('table') && bubbles[1].querySelector('pre'));
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 1, 'Reports stay report-only');
+  view.showReports();
+  assert.equal(chat.hidden, true);
+});
+
+test('Chat rejects stale sessions and explains unavailable conversations', () => {
+  const { root, model, view } = fixture();
+  view.showChat();
+  const notice = () => root.querySelector('.pm-chat__chat [role="status"]').textContent;
+  assert.match(notice(), /Loading PM conversation/);
+  model.applyPmWindowReceiveEvent(conversation([], { availability: 'waiting', detail: 'Waiting for the PM session.' }));
+  assert.equal(notice(), 'Waiting for the PM session.');
+  model.applyPmWindowReceiveEvent(conversation([]));
+  assert.match(notice(), /No conversation yet/);
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Hello' }]));
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 1);
+  const before = model.readPmWindowState().windows.pm;
+  model.applyPmWindowReceiveEvent({ ...conversation([{ id: 'x', role: 'user', text: 'old' }]), session_id: 'stale' });
+  model.applyPmWindowReceiveEvent({ ...conversation([]), id: 'other' });
+  assert.equal(model.readPmWindowState().windows.pm, before);
+  assert.equal(model.readPmWindowState().windows.other, undefined);
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Hello' }]));
+  assert.equal(model.readPmWindowState().windows.pm, before, 'identical snapshots do not re-render');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0);
 });

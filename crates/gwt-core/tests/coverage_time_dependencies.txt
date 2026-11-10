@@ -239,7 +239,6 @@ crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|startup_orphan_inta
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|assert!(stop_call<Duration::from_secs(2),)|1
 crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|workspace_cleanup_failure_does_not_emit_done_work_item|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/board_read_receipts.rs|issue_3713_corrupt_receipt_and_expired_prompt_budget_warn_without_false_zero_or_denial|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_secs(1),)|1
-crates/gwt/src/board_read_receipts.rs|issue_3713_expired_prompt_budget_is_silent_without_exact_pm_registration|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-std::time::Duration::from_secs(1),)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_child_inherits_deadline_and_preserves_completed_results|letdeadline=Instant::now()+std::time::Duration::from_secs(5)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_deadline_returns_while_controlled_decoder_is_blocked|entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_deadline_returns_while_controlled_decoder_is_blocked|letdeadline=Instant::now()+std::time::Duration::from_millis(100)|1

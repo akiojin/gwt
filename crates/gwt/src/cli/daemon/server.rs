@@ -315,29 +315,61 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
 }
 
 #[cfg(test)]
+pub struct TestDaemonServer {
+    shutdown: Arc<DaemonShutdown>,
+    task: Option<tokio::task::JoinHandle<Result<i32, SpecOpsError>>>,
+    pub(crate) owner: crate::project_runtime::owner::OwnerHandle,
+}
+
+#[cfg(test)]
+impl TestDaemonServer {
+    pub async fn shutdown(mut self) {
+        self.shutdown.request();
+        let task = self.task.take().expect("test daemon server task");
+        task.await
+            .expect("test daemon server task failed")
+            .expect("test daemon shutdown failed");
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDaemonServer {
+    fn drop(&mut self) {
+        self.owner.stop();
+        self.shutdown.request();
+    }
+}
+
+#[cfg(test)]
 pub fn spawn_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,
     hub: BroadcastHub,
-) -> Result<tokio::task::JoinHandle<Result<i32, SpecOpsError>>, SpecOpsError> {
+) -> Result<TestDaemonServer, SpecOpsError> {
     // Bind synchronously so test clients never race a scheduled server task.
     // Pin only this synchronous fixture setup, on Unix and Windows alike.
     let _prefs_budget = pin_prefs_hang_guard();
     let authority_lease = acquire_daemon_startup_lease(&endpoint.scope)?;
     let bound = bind_daemon(&endpoint, &socket_path, &endpoint_path, authority_lease)?;
+    let owner = bound.project_transport.owner.clone();
     let shutdown = Arc::new(DaemonShutdown::new());
     spawn_signal_watcher(Arc::clone(&shutdown));
-    Ok(tokio::spawn(run_bound_server(
+    let task = tokio::spawn(run_bound_server(
         endpoint,
         endpoint_path,
         hub,
-        shutdown,
+        shutdown.clone(),
         crate::IssueMonitorConfig::default(),
         ISSUE_MONITOR_SCAN_TIMEOUT,
         bound,
         IssueMonitorWorkerTestHooks::default(),
-    )))
+    ));
+    Ok(TestDaemonServer {
+        shutdown,
+        task: Some(task),
+        owner,
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -8715,17 +8747,24 @@ fn try_commit_issue_monitor_effect_result(
                     tracing::info!(
                         issue = issue_number,
                         pr = pr_number,
-                        ?outcome,
+                        commented = outcome.commented,
+                        closed = outcome.closed,
+                        already_closed = outcome.already_closed,
+                        effective_action = ?outcome.rechecked_acceptance.as_ref().map(|(action, _)| action),
                         "merged issue settlement committed"
                     );
+                    let action = match outcome.rechecked_acceptance {
+                        Some((action, source)) => {
+                            candidate.refresh_settlement_acceptance_source(*issue_number, source);
+                            action
+                        }
+                        None => action.clone(),
+                    };
                     candidate.record_merged_issue_settlement(
                         *issue_number,
                         *pr_number,
                         merge_sha.clone(),
-                        outcome.unmet_acceptance.map_or_else(
-                            || action.clone(),
-                            |unmet| crate::MergedIssueSettlementAction::UnmetAcceptance { unmet },
-                        ),
+                        action,
                         &completed.completed_at,
                     );
                     settled = true;
@@ -20323,7 +20362,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 ));
                 assert!(
@@ -20365,10 +20404,13 @@ exit 0
 
     #[test]
     fn daemon_scan_hands_unmet_acceptance_to_a_human_instead_of_closing() {
-        // Issue #3917 AC-2 / AC-6: unchecked criteria → comment + needs_human.
+        // Manual mode retains Issue #3917's comment + needs_human contract.
         with_settlement_scan_fixture(
             "settle_unmet",
-            delivered_prefs(true),
+            crate::IssueMonitorPrefs {
+                auto_close_merged_issues: Some(true),
+                ..delivered_prefs(false)
+            },
             |_, prefs_path, mut monitor| {
                 let effect = settlement_effect(&monitor).expect("unmet criteria still settle");
                 assert!(
@@ -20392,7 +20434,7 @@ exit 0
                         commented: true,
                         closed: false,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 ));
                 assert_eq!(
@@ -20413,34 +20455,66 @@ exit 0
     }
 
     #[test]
-    fn daemon_scan_records_a_stale_close_as_unmet_acceptance() {
-        with_settlement_scan_fixture(
-            "settle_close",
-            delivered_prefs(true),
-            |_, prefs_path, mut monitor| {
-                let effect = settlement_effect(&monitor).expect("close proposed");
-                assert!(commit_settlement(
-                    prefs_path,
-                    &mut monitor,
-                    &effect,
-                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
-                        commented: true,
-                        closed: false,
-                        already_closed: false,
-                        unmet_acceptance: Some(vec!["AC-1".to_string()]),
-                    },
-                ));
-                assert_eq!(
-                    monitor.inbox_item(43).map(|item| item.state),
-                    Some(crate::MonitorInboxState::NeedsHuman)
-                );
-            },
-        );
+    fn daemon_scan_requeues_when_a_close_becomes_stale() {
+        for (autonomous, measurement) in [(true, false), (true, true), (false, true)] {
+            with_settlement_scan_fixture(
+                "settle_close",
+                crate::IssueMonitorPrefs {
+                    auto_close_merged_issues: Some(true),
+                    ..delivered_prefs(autonomous)
+                },
+                |_, prefs_path, mut monitor| {
+                    let effect = settlement_effect(&monitor).expect("close proposed");
+                    let source = format!(
+                        "## Acceptance Criteria\n- [ ] AC-1: remaining {}\n",
+                        if measurement {
+                            "(measurement)"
+                        } else {
+                            "implementation"
+                        }
+                    );
+                    let action = if measurement {
+                        crate::MergedIssueSettlementAction::AwaitMeasurement {
+                            unmet: vec!["AC-1".into()],
+                        }
+                    } else {
+                        crate::MergedIssueSettlementAction::UnmetAcceptance {
+                            unmet: vec!["AC-1".into()],
+                        }
+                    };
+                    assert!(commit_settlement(
+                        prefs_path,
+                        &mut monitor,
+                        &effect,
+                        crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                            commented: true,
+                            closed: false,
+                            already_closed: false,
+                            rechecked_acceptance: Some((action, source.clone())),
+                        },
+                    ));
+                    assert_eq!(
+                        monitor.inbox_item(43).map(|item| item.state),
+                        Some(if !autonomous {
+                            crate::MonitorInboxState::NeedsHuman
+                        } else if measurement {
+                            crate::MonitorInboxState::AwaitingMeasurement
+                        } else {
+                            crate::MonitorInboxState::Queued
+                        })
+                    );
+                    assert_eq!(
+                        monitor.inbox_item(43).unwrap().issue.body.as_deref(),
+                        Some(source.as_str())
+                    );
+                },
+            );
+        }
     }
 
     #[test]
     fn daemon_scan_keeps_delegated_unchecked_acceptance_open() {
-        // Issue #5126: delegation prose never substitutes for checked AC.
+        // Delegation prose cannot close unchecked AC; Auto continues the work.
         with_settlement_scan_fixture(
             "settle_delegated",
             delivered_prefs(true),
@@ -20451,7 +20525,7 @@ exit 0
                         effect.payload,
                         crate::IssueMonitorEffectPayload::SettleMergedIssue {
                             issue_number: 43,
-                            action: crate::MergedIssueSettlementAction::UnmetAcceptance { .. },
+                            action: crate::MergedIssueSettlementAction::ContinueWork { .. },
                             ..
                         }
                     ),
@@ -20466,13 +20540,17 @@ exit 0
                         commented: true,
                         closed: false,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 ));
                 assert_eq!(
                     monitor.inbox_item(43).map(|item| item.state),
-                    Some(crate::MonitorInboxState::NeedsHuman)
+                    Some(crate::MonitorInboxState::Queued)
                 );
+                assert!(monitor.prefs().closure_records.iter().all(|record| {
+                    record.issue_number != 43
+                        || record.state != crate::issue_monitor::IssueClosureState::Closed
+                }));
             },
         );
     }
@@ -20503,7 +20581,7 @@ exit 0
                     commented: true,
                     closed: false,
                     already_closed: false,
-                    unmet_acceptance: None,
+                    rechecked_acceptance: None,
                 },
             ));
             assert_eq!(
@@ -20547,7 +20625,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 );
                 holder.join().expect("prefs lock holder joins");
@@ -30017,9 +30095,8 @@ exit 1
         drop(write_half);
         drop(reader);
 
-        // Cancel the server (simulating SIGINT) by aborting.
-        server_handle.abort();
-        let _ = server_handle.await;
+        // Use the same cooperative shutdown as SIGINT.
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]

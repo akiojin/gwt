@@ -319,23 +319,26 @@ fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying(
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
-    let tabs = (1..=12)
-        .map(|number| {
-            let mut tab = sample_project_tab_with_window_at(
-                &format!("tab-{number}"),
-                "agent",
-                repo.clone(),
-                WindowPreset::Agent,
-                WindowProcessStatus::Running,
-            );
-            let mut persisted = tab.workspace.persisted().clone();
-            persisted.windows[0].linked_issue_number = Some(5600 + number);
-            tab.workspace = WindowRegistry::from_persisted(persisted);
-            tab
-        })
-        .collect();
-    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+    init_repo_with_initial_commit(&repo);
+    let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut persisted = tab.workspace.persisted().clone();
+    for number in 1..=12 {
+        let mut window = sample_window(
+            &format!("agent-{number}"),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        window.linked_issue_number = Some(5600 + number);
+        window.z_index = number as u32;
+        persisted.windows.push(window);
+    }
+    persisted.next_z_index = 13;
+    tab.workspace = WindowRegistry::from_persisted(persisted);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    for number in 1..=12 {
+        insert_test_pane_runtime(&mut runtime, &format!("tab-1::agent-{number}"));
+    }
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     assert!(runtime
@@ -358,6 +361,10 @@ fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying(
     assert!(events
         .iter()
         .all(|event| matches!(event, UserEvent::Dispatch(_))));
+    drop(events);
+    for number in 1..=12 {
+        close_test_owner_runtime(&mut runtime, &format!("tab-1::agent-{number}"));
+    }
 }
 
 #[test]
@@ -494,10 +501,12 @@ fn app_runtime_update_settings_retains_live_drain_blockers() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
     assert!(
         matches!(runtime.update_settings_event(Some(&repo)), BackendEvent::UpdateSettings { status, .. }
         if status.update_drain.as_ref().unwrap().blocking.iter().any(|blocker| matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })))
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 #[test]

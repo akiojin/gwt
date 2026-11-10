@@ -4235,10 +4235,29 @@ fn execute_command_on_daemon(
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     use crate::cli::daemon::verification_host::DelegatedRunError;
 
+    #[cfg(unix)]
+    let source = crate::process::verification_source::Source::new()
+        .map_err(|error| format!("verification source broker unavailable: {error}"))?;
+    #[cfg(unix)]
+    let request = {
+        let mut request = request.clone();
+        request
+            .env
+            .retain(|(key, _)| key != crate::process::verification_source::SOURCE_ENV);
+        request.env.push((
+            crate::process::verification_source::SOURCE_ENV.into(),
+            source.descriptor(),
+        ));
+        request
+    };
+    #[cfg(unix)]
+    let request = &request;
     let delegated = crate::cli::daemon::verification_host::run_cancellable(
         endpoint,
         request,
         |pid| {
+            #[cfg(unix)]
+            source.register(pid);
             let command_scope = progress.map(|progress| progress.start(pid));
             (
                 VerificationCommandActivity::start(Some(&request.cwd), pid),
@@ -4248,6 +4267,8 @@ fn execute_command_on_daemon(
         command_timeout(command, progress),
         check,
     );
+    #[cfg(unix)]
+    source.revoke();
     let (exit_code, signal, mut tail, mut output_streams) = match delegated {
         Err(DelegatedRunError::Cancelled) => {
             return Err("verification attempt canceled".to_string())
@@ -9520,7 +9541,8 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
-        let dir = tempfile::tempdir().unwrap();
+        let temporary = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tempfile::tempdir_in(temporary).unwrap();
         // Cargo metadata resolves the temporary-root symlink, unlike absolute overrides.
         let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let commands = ["cargo nextest run -p gwt --lib".to_string()];
@@ -9764,7 +9786,8 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::tempdir().unwrap();
+        let temporary = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tempfile::tempdir_in(temporary).unwrap();
         let expected_root = dunce::canonicalize(dir.path()).unwrap();
         let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let candidate = dir

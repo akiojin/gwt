@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn issue_7015_synchronous_launch_refusal_retires_starting_placeholder() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .suppress_execution_control()
+        .build();
+    assert!(runtime
+        .spawn_agent_window("tab-1", config, None)
+        .unwrap_err()
+        .contains("worker unavailable"));
+    let window = &runtime.tabs[0].workspace.persisted().windows[0];
+    assert_eq!(window.status, WindowProcessStatus::Error);
+    assert_eq!(
+        runtime.window_status(&combined_window_id("tab-1", &window.id)),
+        Some(WindowProcessStatus::Error)
+    );
+    assert!(runtime.inflight_launches.is_empty());
+    assert!(runtime.pending_launch_completions.is_empty());
+}
+
 type ActualManualHolderFixture = (
     AppRuntime,
     Arc<Mutex<Vec<UserEvent>>>,
@@ -995,6 +1023,16 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
     let completion = take_remote_owner_launch_completion(&recorded_events);
     let successor = completion.window_id.clone();
     assert!(
+        runtime
+            .capture_update_quiescence_inputs()
+            .0
+            .iter()
+            .any(|pane| {
+                pane.window_id == successor && pane.state == WindowProcessStatus::Starting
+            }),
+        "the exact retry protects its real pending launch"
+    );
+    assert!(
         completion.result.is_ok(),
         "normal GUI retry must reach the real owner: {:?}",
         completion.result.as_ref().err()
@@ -1203,6 +1241,18 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         failure = Some(runtime.handle_remote_owner_launch_complete(completion));
     });
     let failure = failure.expect("synchronous failure events");
+
+    assert!(
+        runtime
+            .pending_launch_completions
+            .values()
+            .any(|pending| { pending.current.load(Ordering::Acquire) }),
+        "exact recovery capability remains current"
+    );
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "a completed failed launch retained for retry has no process to drain"
+    );
 
     assert!(
         failure.iter().any(|event| matches!(

@@ -399,7 +399,9 @@ pub fn sync_issue_cache_from_remote_if_stale(
     if !issue_cache_refresh_is_stale(cache_root, ttl) {
         return Ok(false);
     }
-    sync_issue_cache_from_remote(repo_path, cache_root)?;
+    // Background retries share the Monitor's acquired pages. A failed full
+    // refresh leaves its marker stale, but its successful pages remain usable.
+    sync_issue_cache_from_remote_with_reuse(repo_path, cache_root, true)?;
     Ok(true)
 }
 
@@ -435,22 +437,34 @@ pub fn sync_issue_cache_from_remote_with_fingerprint(
 }
 
 pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Result<(), String> {
-    sync_issue_cache_from_remote_with_wait(repo_path, cache_root, &mut std::thread::sleep).map_err(
-        |error| {
-            // Issue #4087 AC-2: every full-refresh caller used to downgrade this
-            // to a log line, so a refresh that had stopped for hours was only
-            // discoverable through the Issues it failed to deliver.
-            gwt_core::error_ledger::record_fail_open(
-                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
-                format!("issue cache full refresh: {error}"),
-                gwt_core::error_ledger::ErrorTarget {
-                    project_root: Some(repo_path.display().to_string()),
-                    ..gwt_core::error_ledger::ErrorTarget::default()
-                },
-            );
-            error
-        },
+    sync_issue_cache_from_remote_with_reuse(repo_path, cache_root, false)
+}
+
+fn sync_issue_cache_from_remote_with_reuse(
+    repo_path: &Path,
+    cache_root: &Path,
+    reuse_pages: bool,
+) -> Result<(), String> {
+    sync_issue_cache_from_remote_with_page_cache(
+        repo_path,
+        cache_root,
+        &mut std::thread::sleep,
+        reuse_pages,
     )
+    .map_err(|error| {
+        // Issue #4087 AC-2: every full-refresh caller used to downgrade this
+        // to a log line, so a refresh that had stopped for hours was only
+        // discoverable through the Issues it failed to deliver.
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            format!("issue cache full refresh: {error}"),
+            gwt_core::error_ledger::ErrorTarget {
+                project_root: Some(repo_path.display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        error
+    })
 }
 
 /// [`sync_issue_cache_from_remote`] with the pacing wait injected.
@@ -469,6 +483,7 @@ pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Resu
 ///
 /// Progress is persisted per entry, so a resync cut short by a refusal resumes
 /// from where it stopped once the backoff window ends.
+#[cfg(test)]
 pub fn sync_issue_cache_from_remote_with_wait(
     repo_path: &Path,
     cache_root: &Path,
@@ -1385,6 +1400,22 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/cache-retry.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
         let cache_root = temp.path().join("cache");
         let log = temp.path().join("calls.txt");
         let fake = temp.path().join("gh.cmd");
@@ -1414,9 +1445,12 @@ echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-1
         let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake);
         let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_CALLS", &log);
         let _mode = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "fail");
-        for _ in 0..2 {
-            let error =
-                sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap_err();
+        for refresh in [
+            sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root),
+            sync_issue_cache_from_remote_if_stale(temp.path(), &cache_root, ISSUE_CACHE_TTL)
+                .map(|_| ()),
+        ] {
+            let error = refresh.unwrap_err();
             assert!(error.contains("queue unavailable"), "{error}");
             assert!(!issue_cache_refresh_meta_path(&cache_root).exists());
         }
@@ -1434,7 +1468,10 @@ echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-1
             .write_snapshot(&authoritative)
             .unwrap();
         let _success = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "ok");
-        sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap();
+        assert!(
+            sync_issue_cache_from_remote_if_stale(temp.path(), &cache_root, ISSUE_CACHE_TTL)
+                .unwrap()
+        );
         let entry = Cache::new(cache_root.clone())
             .load_entry(IssueNumber(7))
             .unwrap();

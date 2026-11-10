@@ -86,6 +86,28 @@ impl From<gwt_core::pm_report::PmReport> for PmReportView {
     }
 }
 
+/// PM replies are Markdown; their render-only HTML comes from the same host
+/// sanitizer as Reports. User text stays plain so the client never parses it.
+fn serialize_pm_conversation_snapshot<S: serde::Serializer>(
+    snapshot: &crate::pm_conversation::PmConversationSnapshot,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::pm_conversation::PmConversationRole;
+    let mut rendered = serde_json::to_value(snapshot).map_err(serde::ser::Error::custom)?;
+    for (message, value) in snapshot
+        .messages
+        .iter()
+        .zip(rendered["messages"].as_array_mut().into_iter().flatten())
+    {
+        if message.role == PmConversationRole::Assistant {
+            value["text_html"] = serde_json::Value::String(
+                crate::board_remote::markdown::markdown_to_html(&message.text),
+            );
+        }
+    }
+    rendered.serialize(serializer)
+}
+
 fn serialize_release_notes_entries<S: serde::Serializer>(
     entries: &[gwt_core::release_notes::ReleaseEntry],
     serializer: S,
@@ -2555,6 +2577,7 @@ pub enum BackendEvent {
     PmConversation {
         id: String,
         session_id: Option<String>,
+        #[serde(serialize_with = "serialize_pm_conversation_snapshot")]
         snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
     PmReports {
@@ -5497,6 +5520,47 @@ mod tests {
         }))
         .expect("PM conversation is requested through the authenticated window");
         assert!(format!("{request:?}").contains("tab-1::pm"));
+    }
+
+    #[test]
+    fn pm_conversation_renders_only_assistant_markdown_on_the_host() {
+        use crate::pm_conversation::{
+            PmConversationAvailability, PmConversationMessage, PmConversationRole,
+            PmConversationSnapshot,
+        };
+        let snapshot = PmConversationSnapshot {
+            conversation_id: Some("conversation".to_owned()),
+            availability: PmConversationAvailability::Ready,
+            messages: vec![
+                PmConversationMessage {
+                    id: "u1".to_owned(),
+                    role: PmConversationRole::User,
+                    text: "# not a heading <b>raw</b>".to_owned(),
+                },
+                PmConversationMessage {
+                    id: "a1".to_owned(),
+                    role: PmConversationRole::Assistant,
+                    text: "# Plan\n\n- one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n\n<script>alert(1)</script>".to_owned(),
+                },
+            ],
+            detail: None,
+        };
+        let value = serde_json::to_value(BackendEvent::PmConversation {
+            id: "pm".to_owned(),
+            session_id: Some("session".to_owned()),
+            snapshot: snapshot.clone(),
+        })
+        .unwrap();
+        let messages = value["snapshot"]["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["text"], snapshot.messages[0].text);
+        assert!(messages[0].get("text_html").is_none());
+        assert_eq!(messages[1]["text"], snapshot.messages[1].text);
+        let html = messages[1]["text_html"].as_str().unwrap();
+        for tag in ["<h1>", "<li>", "<table>", "<pre>"] {
+            assert!(html.contains(tag), "{tag} missing from {html}");
+        }
+        assert!(!html.contains("<script"), "{html}");
+        assert_eq!(value["snapshot"]["availability"], "ready");
     }
 
     #[test]

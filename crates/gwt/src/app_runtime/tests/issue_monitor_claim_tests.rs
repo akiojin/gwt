@@ -1,6 +1,106 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
+/// The returned guard pins the GUI control budget for the calling test thread:
+/// these fixtures assert the committed drain outcome through a real daemon ACK,
+/// not how fast a loaded runner answers within the 200ms hot-path deadline.
+#[must_use = "the control budget pin is released when the guard drops"]
+fn insert_monitored_update_pane(
+    runtime: &mut AppRuntime,
+    id: &str,
+) -> gwt_core::deadline_budget::ScopedDeadlineBudget {
+    let control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::ISSUE_MONITOR_CONTROL_BUDGET,
+    );
+    let root = runtime
+        .tab(&runtime.window_lookup[id].tab_id)
+        .unwrap()
+        .project_root
+        .clone();
+    let owner = Arc::new(
+        owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        )
+        .unwrap(),
+    );
+    configure_owner_fixture_start_gate(&owner);
+    runtime.test_project_owners.insert(root, owner);
+    insert_test_pane_runtime(runtime, id);
+    runtime.runtimes.get_mut(id).unwrap().status = WindowProcessStatus::Starting;
+    control_budget
+}
+
+fn committed_update_status_events(runtime: &mut AppRuntime, root: &Path) -> Vec<OutboundEvent> {
+    // Outcome contracts read the durable control commit after the real daemon
+    // ACK; the GUI's short status-query deadline is a separate performance seam.
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root)).unwrap();
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    runtime.issue_monitor_daemon_status_events(root, Box::new(monitor.status_view()))
+}
+
+#[test]
+fn issue_7015_update_drain_ignores_ownerless_starting_rows_but_protects_pending_launches() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "ghost",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "saved Starting rows have neither an owner pane nor a process"
+    );
+
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .suppress_execution_control()
+        .build();
+    runtime.spawn_agent_window("tab-1", config, None).unwrap();
+    let panes = runtime.capture_update_quiescence_inputs().0;
+    assert_eq!(
+        panes.len(),
+        1,
+        "a queued physical launch still protects the update boundary"
+    );
+    assert_ne!(panes[0].window_id, "tab-1::ghost");
+    let pending_id = panes[0].window_id.clone();
+    let address = runtime.window_lookup[&pending_id].clone();
+    runtime.set_window_status(&address.tab_id, &address.raw_id, WindowProcessStatus::Error);
+    assert_eq!(
+        runtime.capture_update_quiescence_inputs().0[0].state,
+        WindowProcessStatus::Starting,
+        "a pending successor overrides an old diagnostic presentation"
+    );
+
+    runtime.pending_launch_completions.clear();
+    insert_test_pane_runtime(&mut runtime, "tab-1::ghost");
+    assert_eq!(
+        runtime.capture_update_quiescence_inputs().0.len(),
+        1,
+        "the authenticated owner pane has a real child process"
+    );
+    runtime
+        .runtimes
+        .get_mut("tab-1::ghost")
+        .unwrap()
+        .exit_confirmed = true;
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "a retained exited projection is not a live process"
+    );
+    close_test_owner_runtime(&mut runtime, "tab-1::ghost");
+}
+
 #[test]
 fn repository_labels_read_runs_off_thread_for_the_requesting_project() {
     let temp = tempdir().unwrap();
@@ -2389,6 +2489,7 @@ fn issue_5062_daemon_drain_status_includes_other_project_window() {
     let active = sample_project_tab("active", "gwt", active_root.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![active, other], Some("active"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "other::agent-14");
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.set_update_drain(
         gwt::IssueMonitorUpdateDrainReason::Auto,
@@ -2415,6 +2516,7 @@ fn issue_5062_daemon_drain_status_includes_other_project_window() {
         label.contains("llmlb") && label.contains("SPEC #821 T012c"),
         "{label}"
     );
+    close_test_owner_runtime(&mut runtime, "other::agent-14");
 }
 
 #[test]
@@ -3368,6 +3470,8 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Starting;
 
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.terminal_queue_push(&[42], "operator", "2026-07-28T00:00:00Z");
@@ -3390,8 +3494,7 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
         "2026-09-06T01:00:00Z",
     );
 
-    // An Agent pane with a live PTY but no hook state yet composes to
-    // `Starting` (no agent session bound), which blocks just like Running.
+    // An owner-backed pane awaiting its first hook blocks just like Running.
     let blocking = runtime.update_drain_blockers(&monitor);
     assert_eq!(
         blocking,
@@ -3409,10 +3512,12 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert_eq!(
         runtime.update_drain_blockers(&monitor),
         vec![gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 }]
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4076 AC-2 (the 2026-09-07 01:52Z incident): staging an update in
@@ -3447,8 +3552,10 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
 
-    let events = runtime.update_staged_events_with("99.0.0", None);
+    let mut events = runtime.update_staged_events_with("99.0.0", None);
+    events.extend(committed_update_status_events(&mut runtime, &repo));
     let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
     assert!(
         log.lines().any(|line| {
@@ -3484,6 +3591,7 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
             .is_empty(),
         "staging sends no event-loop request that could restart gwt"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #5062 AC-2: once a staged update raised the drain, every drain tick
@@ -3514,6 +3622,8 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
     );
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.rebuild_window_lookup();
@@ -3548,6 +3658,7 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
             Some((tick + chrono::Duration::seconds(15)).to_rfc3339())
         );
     }
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4376 AC-1 / AC-2 / AC-7: a manual Update click (attended monitor,
@@ -3564,6 +3675,17 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let seed = || {
         gwt::save_issue_monitor_prefs(
@@ -3602,18 +3724,9 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             .auto_apply_deferred,
         "global OFF preserves the operator defer flag"
     );
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, user_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.rebuild_window_lookup();
     runtime.update_download_in_flight = Some("manual-client".into());
-    let events = runtime.update_staged_events_with("99.0.0", None);
+    let mut events = runtime.update_staged_events_with("99.0.0", None);
+    events.extend(committed_update_status_events(&mut runtime, &repo));
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -3672,6 +3785,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         "launch ledger untouched"
     );
 
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
     // Quiet host: no drain, the ready modal's Restart now applies as before.
     seed();
     let quiet_tab = sample_project_tab("tab-2", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -3748,6 +3862,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
         user_events
             .lock()
@@ -3796,6 +3911,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert!(runtime
         .update_drain_tick_events_and_drain_at(at(45))
         .is_empty());
@@ -3894,6 +4010,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             )),
         "the drained manual click never uses the Restart-now route"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4376 AC-4 / AC-7: after the restart that applied a manually
@@ -4148,6 +4265,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
     let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
         user_events
             .lock()
@@ -4214,6 +4332,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert!(runtime
         .update_drain_tick_events_and_drain_at(at(1815))
         .is_empty());
@@ -4270,6 +4389,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
             )),
         "the automatic path never uses the Restart-now route"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4076 AC-2 / AC-5 (#3906 AC-7 / AC-13): cancelling inside the grace
@@ -9841,6 +9961,9 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
     use crate::app_runtime::UpdateDrainObservation;
     let temp = tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
@@ -9849,6 +9972,8 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
         WindowProcessStatus::Idle,
     );
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let context = runtime.project_context("tab-1").unwrap();
@@ -9878,6 +10003,7 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".into(), WindowProcessStatus::Running);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Running;
     let outbound =
         runtime.update_drain_observed_events(now + chrono::Duration::seconds(15), vec![observe()]);
     assert!(!outbound
@@ -9889,4 +10015,5 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
         .iter()
         .any(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. })));
     drain_queued_blocking_tasks(&tasks);
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }

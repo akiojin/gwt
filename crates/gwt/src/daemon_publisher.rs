@@ -55,7 +55,7 @@ use crate::runtime_daemon_events::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Normal controls keep the hot-path default; outcome fixtures may pin it.
-const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+pub const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
     gwt_core::deadline_budget::DeadlineBudget::new("ISSUE_MONITOR_CONTROL", DEFAULT_TIMEOUT);
 
 /// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
