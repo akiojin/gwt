@@ -1600,15 +1600,6 @@ pub fn rebuild_index_target(
                 "project index rebuild started"
             );
             let output = run_rebuild_runner_for_target(&ctx, action, qos)?;
-            tracing::info!(
-                target: "gwt::index",
-                scope = rebuild_label,
-                worktree_hash = %rebuild_worktree_hash,
-                action = rebuild_action,
-                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
-                exit_status = %output.exit_status(),
-                "project index rebuild completed"
-            );
             if !output.success() {
                 return Err(output.failure());
             }
@@ -1634,6 +1625,15 @@ pub fn rebuild_index_target(
                 );
                 return Ok(BuildStep::Yielded);
             }
+            tracing::info!(
+                target: "gwt::index",
+                scope = rebuild_label,
+                worktree_hash = %rebuild_worktree_hash,
+                action = rebuild_action,
+                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+                exit_status = %output.exit_status(),
+                "project index rebuild completed"
+            );
             Ok(BuildStep::Done(()))
         },
     )?;
@@ -2061,9 +2061,15 @@ fn repo_scope_source_paths(scope: RefreshScope, root: &Path, repo_hash: &RepoHas
     let home = gwt_core::paths::gwt_project_dir(repo_hash);
     match scope {
         RefreshScope::Issues | RefreshScope::Specs => {
-            vec![crate::issue_cache::issue_cache_root_for_repo_hash(
-                repo_hash,
-            )]
+            let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+            let revision = cache_root.join("source-revision");
+            // Cache refresh rewrites transport metadata even when the source
+            // content is unchanged. Only its canonical revision admits retry.
+            vec![if revision.is_file() {
+                revision
+            } else {
+                cache_root
+            }]
         }
         RefreshScope::Memory | RefreshScope::Discussions => {
             let name = if scope == RefreshScope::Memory {
@@ -2592,6 +2598,19 @@ fn execute_claimed_refresh(
                 .complete()
                 .map_err(|err| format!("complete project index refresh claim: {err}"))
         }
+        Err(error) if error == REFRESH_QUANTUM_EXHAUSTED => {
+            tracing::info!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                desired_epoch = intent.desired_epoch,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh checkpointed for continuation"
+            );
+            claim
+                .defer()
+                .map_err(|err| format!("defer project index refresh claim: {err}"))
+        }
         Err(error) => {
             tracing::warn!(
                 target: "gwt::index",
@@ -2740,16 +2759,17 @@ fn execute_claimed_refresh_inner(
     Ok(())
 }
 
-/// File scopes of a refresh target, in build order. Non-file scopes
-/// (`Issues`) are handled by the claim's Issue-cache check, not here.
+/// One v2 action publishes both file scopes atomically; never start a second
+/// cold runner for the same view. Non-file scopes are handled separately.
 fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
     scopes
         .iter()
-        .filter_map(|scope| match scope {
+        .find_map(|scope| match scope {
             RefreshScope::Files => Some(IndexRebuildScope::Files),
             RefreshScope::FilesDocs => Some(IndexRebuildScope::FilesDocs),
             _ => None,
         })
+        .into_iter()
         .collect()
 }
 
@@ -2992,8 +3012,19 @@ mod tests {
 
     #[test]
     fn background_refresh_maintenance_has_one_finite_deadline() {
+        struct FixedBrokerClock;
+        impl gwt_core::index::broker::RefreshBrokerClock for FixedBrokerClock {
+            fn now_millis(&self) -> u64 {
+                10_000
+            }
+        }
         let temp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let broker = RefreshBroker::open_with_clock(
+            temp.path(),
+            Duration::ZERO,
+            std::sync::Arc::new(FixedBrokerClock),
+        )
+        .expect("broker");
         let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
         broker
             .submit(RefreshIntent {
@@ -3009,6 +3040,21 @@ mod tests {
         let claim = broker.claim_next().expect("claim").expect("claimable");
         let started = Instant::now();
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        execute_claimed_refresh(claim, |_| Err(REFRESH_QUANTUM_EXHAUSTED.to_string()))
+            .expect("checkpointed maintenance defers without failure");
+        let snapshot = broker.inspect().expect("snapshot");
+        let pending = snapshot.target(&target).expect("target");
+        assert_eq!(pending.completed_epoch(), None);
+        assert_eq!(pending.last_error(), None);
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.quiet_deadline_millis(), Some(10_000));
+        let claim = broker
+            .claim_next()
+            .expect("claim")
+            .expect("checkpointed input remains resumable");
         execute_claimed_refresh(claim, |_| {
             assert_eq!(
                 gwt_core::operation_deadline::current(),
@@ -3067,6 +3113,8 @@ mod tests {
         );
         assert_eq!(pending.desired_epoch(), 7);
         assert_eq!(pending.completed_epoch(), None);
+        assert_eq!(pending.quiet_deadline_millis(), None);
+        assert!(broker.claim_next().expect("stopped input").is_none());
         assert!(pending
             .last_error()
             .expect("error")
@@ -3176,7 +3224,11 @@ mod tests {
                 RefreshScope::FilesDocs,
                 RefreshScope::Issues
             ]),
-            vec![IndexRebuildScope::Files, IndexRebuildScope::FilesDocs]
+            vec![IndexRebuildScope::Files]
+        );
+        assert_eq!(
+            file_rebuild_scopes(&[RefreshScope::FilesDocs]),
+            vec![IndexRebuildScope::FilesDocs]
         );
     }
 
@@ -4528,6 +4580,10 @@ mod tests {
             roots.push(root);
         }
         let repo_hash = detect_repo_hash(&roots[0]).unwrap();
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::write(cache_root.join("source-revision"), "content-revision-1").unwrap();
+        std::fs::write(cache_root.join("refresh-meta.json"), "{}").unwrap();
         let issue_sources = repo_scope_source_paths(RefreshScope::Issues, &roots[0], &repo_hash);
         REFRESH_SOURCE_READS.with(|reads| *reads.borrow_mut() = RefreshSourceReads::default());
         poll_registered_project_index_sources(&broker).unwrap();
@@ -4558,6 +4614,9 @@ mod tests {
             })
             .collect();
         let before = broker.inspect().unwrap();
+        // A successful cache refresh can rewrite transport metadata while the
+        // canonical content revision remains unchanged.
+        std::fs::write(cache_root.join("refresh-meta.json"), "{\"refreshed\":true}").unwrap();
         std::fs::write(roots[0].join("lib.rs"), "fn changed_source() {}\n").unwrap();
         poll_registered_project_index_sources(&broker).unwrap();
         REFRESH_SOURCE_READS.with(|reads| {
@@ -4569,6 +4628,16 @@ mod tests {
             );
         });
         let after = broker.inspect().unwrap();
+        let issue_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Issues]);
+        assert_eq!(
+            before.target(&issue_target).unwrap().desired_snapshot(),
+            after.target(&issue_target).unwrap().desired_snapshot(),
+            "cache transport rewrites must not resume unchanged failed input"
+        );
+        assert_eq!(
+            before.target(&issue_target).unwrap().desired_epoch(),
+            after.target(&issue_target).unwrap().desired_epoch()
+        );
         let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
         assert_eq!(
             before.target(&memory_target).unwrap().desired_epoch(),
