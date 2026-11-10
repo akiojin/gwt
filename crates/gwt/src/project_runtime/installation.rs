@@ -1996,6 +1996,20 @@ impl PreparedIssueMonitorSpawnAdmission {
                     .all(IssueMonitorAdmissionFileStamp::is_current))
             && self.capacity_admits()
     }
+
+    /// Re-evaluate changed observations once, retaining all strict source fences.
+    pub fn revalidate_if_needed(
+        &mut self,
+        input: &IssueMonitorSpawnAdmissionInput,
+    ) -> Result<(), String> {
+        if !self.is_current(&input.host_project_roots) {
+            *self = input.refresh(self)?;
+            if !self.is_current(&input.host_project_roots) {
+                return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl IssueMonitorSpawnAdmissionInput {
@@ -2793,9 +2807,13 @@ pub(crate) fn prepare_owner_agent_admission(
             .as_ref()
             .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
-        if !prepared.is_current(input.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-        }
+        prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
+            project_root: input.project_root.into(),
+            host_project_roots: input.host_project_roots.to_vec(),
+            issue_number,
+            target_branch: config.branch.clone().unwrap_or_default(),
+            issue_link_cache_dir: input.issue_link_cache_dir.into(),
+        })?;
         let now = chrono::Utc::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch

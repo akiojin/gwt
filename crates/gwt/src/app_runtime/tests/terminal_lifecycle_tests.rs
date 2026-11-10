@@ -4647,9 +4647,10 @@ fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
         prepared.can_revalidate(&input.host_project_roots),
         "an unrelated target prefs rewrite must not force a full re-preparation"
     );
-    let revalidated = input
-        .refresh(&prepared)
-        .expect("the same decision keeps the launch");
+    let mut revalidated = prepared;
+    revalidated
+        .revalidate_if_needed(&input)
+        .expect("Issue #7016: owner admission must retain an unchanged decision after prefs churn");
     assert!(revalidated.is_current(&input.host_project_roots));
 
     // A busy project rewrites prefs faster than a slow host re-evaluates.
@@ -4677,6 +4678,10 @@ fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
         "a PR hold for the launched Issue stays a strict fence"
     );
     assert!(!revalidated.can_revalidate(&input.host_project_roots));
+    assert!(
+        revalidated.revalidate_if_needed(&input).is_err(),
+        "owner admission must still reject a newly added PR hold"
+    );
 
     prefs.open_pr_observations.clear();
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();

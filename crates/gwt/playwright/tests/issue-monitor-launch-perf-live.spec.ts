@@ -10,6 +10,7 @@ const HOME = process.env.GWT5596_HOME || '';
 const SEQUENTIAL = process.env.GWT5596_SEQUENTIAL === '1';
 const LAUNCH_ACCEPTANCE = process.env.GWT5596_LAUNCH_ACCEPTANCE === '1';
 const LAUNCH_COUNT = Number(process.env.GWT5596_LAUNCH_COUNT || '10');
+const EXE_SUFFIX = process.platform === 'win32' ? '.exe' : '';
 test.skip(!BASE || !HOME, 'requires scripts/verify-issue-5596.ps1');
 test.use({ headless: false });
 test(LAUNCH_ACCEPTANCE ? 'Issue #7016: six retained panes, ten single launches and two concurrent launches meet their deadlines'
@@ -28,7 +29,12 @@ test(LAUNCH_ACCEPTANCE ? 'Issue #7016: six retained panes, ten single launches a
   try {
     expect(fixture.issues).toHaveLength(count);
     expect(fixture.expected_deliveries).toHaveLength(count);
-    expect(fixture.checkout_binary.replaceAll('\\', '/')).toContain('/target/debug/gwt.exe');
+    if (fixture.launch_acceptance) {
+      const members = fixture.expected_deliveries.map((delivery: any) => delivery.agent_member_id);
+      expect(members.every((member: unknown) => typeof member === 'string' && member.length > 0)).toBe(true);
+      expect(new Set(members).size, 'confirmed deliveries retain distinct scheduled members').toBe(count);
+    }
+    expect(fixture.checkout_binary.replaceAll('\\', '/')).toContain(`/target/debug/gwt${EXE_SUFFIX}`);
     await page.addInitScript(theme => localStorage.setItem('gwt:ui:theme', theme), theme);
     await page.bringToFront();
     await gotoLiveGwt(page, BASE, { enableTestBridge: true, projectKey: fixture.project_key });
@@ -66,21 +72,24 @@ test(LAUNCH_ACCEPTANCE ? 'Issue #7016: six retained panes, ten single launches a
           const hook = JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8'));
           return hook.success === true
             && measurement.user_prompt_authenticated_sessions.includes(provider.session_id)
-            && measurement.user_prompt_matched_sessions.includes(provider.session_id)
+            && measurement.user_prompt_bound_sessions.includes(provider.session_id)
             && measurement.durable_launch_ack_complete
             && measurement.durable_launch_ack_rows.some((ack: any) => ack.complete
               && provider.argv.join(' ').includes(`#${ack.issue_number}`)
               && ack.matched_session_ids.includes(provider.session_id));
         } catch { return false; }
       }));
-    }, { timeout: 120_000, message: 'all exact UserPromptSubmit hooks are authenticated, matched and durably acknowledged by the GUI' }).toEqual(Array(count).fill(true));
+    }, { timeout: 120_000, message: 'all exact UserPromptSubmit hooks are authenticated and durably acknowledged by the GUI' }).toEqual(Array(count).fill(true));
     const windowListCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
     await sendLiveGwtEvent(page, { kind: 'list_windows' });
-    await expect.poll(() => page.evaluate(({ sessions, cursor }) => {
+    await expect.poll(() => page.evaluate(({ bindings, cursor }) => {
       const entry = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
       const windows = entry?.payload.windows || [];
-      return sessions.filter(session => windows.some((window: any) => window.session_id === session && ['running', 'idle'].includes(window.status))).length;
-    }, { sessions: providers.map(provider => provider.session_id), cursor: windowListCursor }), { timeout: 120_000, message: 'provider sessions are bound to running Work windows' }).toBe(count);
+      return bindings.filter(binding => windows.some((window: any) => window.linked_issue_number === binding.issue_number
+        && window.session_id === binding.session_id && ['running', 'idle'].includes(window.status))).length;
+    }, { bindings: measurement.durable_launch_ack_rows.map((ack: any) => ({
+      issue_number: ack.issue_number, session_id: ack.matched_session_ids[0],
+    })), cursor: windowListCursor }), { timeout: 120_000, message: 'provider sessions are bound to their exact running Work windows' }).toBe(count);
     // The summary contains only >50 ms handlers. Wait for a complete owned
     // minute after the final completion, so an absent target row has meaning.
     if (!fixture.sequential) {
@@ -162,7 +171,7 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
     // Confirm the normal daemon control lane before starting any delivery's
     // timer. Every subsequent enqueue includes its own acknowledged scan wake.
     await new Promise<void>((resolve, reject) => {
-      execFile(join(HOME, 'bin/enqueue.exe'), ['--ready'], {
+      execFile(join(HOME, `bin/enqueue${EXE_SUFFIX}`), ['--ready'], {
         cwd: fixture.project, timeout: 30_000, windowsHide: true,
       }, error => error ? reject(error) : resolve());
     });
@@ -183,7 +192,7 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
         // The helper links this checkout's production locked prefs mutation.
         // No shell, external GitHub write or whole-file read/replace is used.
         if (!secondConcurrent) await new Promise<void>((resolve, reject) => {
-          const child = execFile(join(HOME, 'bin/enqueue.exe'), [], {
+          const child = execFile(join(HOME, `bin/enqueue${EXE_SUFFIX}`), [], {
             cwd: fixture.project, timeout: 120_000, windowsHide: true,
           }, (error, _stdout, stderr) => error
             ? reject(new Error(`fixture enqueue failed: ${stderr.trim() || error.message}`))
@@ -232,10 +241,11 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
           const hook = JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8').catch(() => '{}'));
           if (!hook.success || !measurement.user_prompt_authenticated_sessions.includes(provider.session_id)) return false;
           await sendLiveGwtEvent(page, { kind: 'list_windows' });
-          const bound = await page.evaluate(({ session, cursor }: any) => {
+          const bound = await page.evaluate(({ session, issueNumber, cursor }: any) => {
             const reply = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
-            return reply?.payload.windows?.some((window: any) => window.session_id === session && ['running', 'idle'].includes(window.status));
-          }, { session: provider.session_id, cursor });
+            return reply?.payload.windows?.some((window: any) => window.linked_issue_number === issueNumber
+              && window.session_id === session && ['running', 'idle'].includes(window.status));
+          }, { session: provider.session_id, issueNumber: expected.issue_number, cursor });
           if (bound) Object.assign(receipt, { window_id: ack.window_id, session_id: provider.session_id });
           return bound === true;
         }, { timeout: Math.max(1, 120_000 - (Date.now() - Date.parse(enqueuedAt))), message: `#${expected.issue_number} exact ACK and live window within 120 seconds` }).toBe(true);
@@ -385,8 +395,12 @@ async function observe(fixture: any): Promise<any> {
   } catch (error) {
     prefsReadError = error instanceof SyntaxError ? 'invalid_json' : 'read_error';
   }
-  const matchedReceipts = promptReceipts.filter(row => row.fields.stage === 'window'
-    && row.fields.outcome === 'matched' && row.fields.route === 'live');
+  // The project owner routes authenticated hook events by Session identity;
+  // it no longer emits the legacy GUI's stage=window diagnostics. Join the
+  // receipt to the exact provider, then assert its live window binding above.
+  const authenticatedReceipts = promptReceipts.filter(row => row.fields.stage === 'receipt'
+    && row.fields.outcome === 'authenticated');
+  const providers = await launches();
   const durableAckRows = (fixture.expected_deliveries || []).map((expected: any) => {
     const confirmation = prefs.launch_confirmations?.[expected.issue_number];
     const windowId = confirmation?.window_id ?? null;
@@ -394,8 +408,9 @@ async function observe(fixture: any): Promise<any> {
     const launchedClaim = prefs.launched_claims?.[expected.issue_number] ?? null;
     const launchedIssueMatches = (prefs.launched_issues || []).some((launched: any) =>
       launched.issue_number === expected.issue_number && launched.window_id === windowId);
-    const matchedSessions = [...new Set(matchedReceipts.filter(row => row.fields.window_id === windowId)
-      .map(row => row.fields.gwt_session_id))];
+    const matchedSessions = providers.filter(provider => provider.argv.join(' ').includes(`#${expected.issue_number}`)
+      && authenticatedReceipts.some(row => row.fields.gwt_session_id === provider.session_id))
+      .map(provider => provider.session_id);
     return {
       issue_number: expected.issue_number, delivery_id: expected.delivery_id, claim_id: expected.claim_id,
       window_id: windowId, confirmation_delivery_id: confirmation?.delivery_id ?? null,
@@ -474,8 +489,7 @@ async function observe(fixture: any): Promise<any> {
   return {
     user_prompt_authenticated_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'receipt'
       && row.fields.outcome === 'authenticated').map(row => row.fields.gwt_session_id))],
-    user_prompt_matched_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'window'
-      && row.fields.outcome === 'matched' && row.fields.route === 'live').map(row => row.fields.gwt_session_id))],
+    user_prompt_bound_sessions: [...new Set(durableAckRows.flatMap((ack: any) => ack.matched_session_ids))],
     user_prompt_receipt_rows: promptReceipts,
     durable_launch_ack_rows: durableAckRows,
     durable_launch_ack_counts: durableAckCounts,

@@ -188,6 +188,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || delivery.branch_name != format!("work/issue-{}", delivery.issue_number) {
             return Err("foreign delivery refused".into());
         }
+        if fixture["launch_acceptance"].is_object()
+            && row["agent_member_id"].as_str() != delivery.agent_member_id.as_deref() {
+            return Err("delivery does not match its scheduled fixture member".into());
+        }
     }
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
@@ -315,6 +319,15 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $initialDeliveries = if ($Sequential) { @() } else { $deliveries }
   $initialPrefs = @{enabled=$true;autonomous_mode=$false;max_active_agents=$capacity;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=@($initialDeliveries)}
   if ($LaunchAcceptance) {
+    # apply_confirmed_claim persists the scheduler's member pin. Replaying
+    # a concurrent pair without those pins lets both preparations select the
+    # same idle member, which is not a confirmed production delivery.
+    $members = @($deliveries | ForEach-Object {
+      $memberId = [guid]::NewGuid().ToString()
+      $_.agent_member_id = $memberId
+      @{agent_member_id=$memberId;agent_id='codex';name="Fixture $($_.issue_number)";enabled=$true;created_at=$_.created_at;assignment=$null}
+    })
+    $initialPrefs.agent_roster = @{schema_version=1;revision=1;members=$members}
     # Retained historical context has no admission or process authority. Match
     # the observed production prefs size without copying the user's state.
     $initialPrefs.priority_reason_note = @{reason=('offline retained history ' * 48000);priority_order=@();recorded_at='2026-10-16T00:00:00Z'}
@@ -346,7 +359,11 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
     $blobSha = if ($fromCommit) { (& $realGit -C $repoRoot rev-parse "${sourceRevision}:$_").Trim() } else { (& $realGit -C $repoRoot hash-object -- $_).Trim() }
     @{path=$_;blob_sha=$blobSha;source= $(if ($fromCommit) { $sourceRevision } else { 'working-tree' })}
   }
-  $expectedDeliveries = @($deliveries | ForEach-Object { @{issue_number=$_.issue_number;delivery_id=$_.delivery_id;claim_id=$_.claim_id} })
+  $expectedDeliveries = @($deliveries | ForEach-Object {
+    $entry = @{issue_number=$_.issue_number;delivery_id=$_.delivery_id;claim_id=$_.claim_id}
+    if ($LaunchAcceptance) { $entry.agent_member_id = $_.agent_member_id }
+    $entry
+  })
   $fixture = @{phase=$Phase;sequential=[bool]$Sequential;launch_count=$fixtureCount;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
   if ($LaunchAcceptance) { $fixture.launch_acceptance = @{warmup_count=6;single_count=10;concurrent_count=2;capacity=$capacity;initial_prefs_bytes=(Get-Item -LiteralPath "$state/issue-monitor.json").Length} }
   $fixture.checkout_daemon = $gwtd
