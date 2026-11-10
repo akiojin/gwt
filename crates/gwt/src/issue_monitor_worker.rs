@@ -4299,9 +4299,17 @@ mod linked_pr_batch_tests {
 
     #[test]
     fn issue_3924_completion_batch_failure_is_recorded_once() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // HOME fixtures must remain under OS temp when compiler TEMP moves volumes.
+        // KnownFolder can cache a failure while another fixture replaces USERPROFILE.
         #[cfg(windows)]
-        let temp = tempfile::tempdir_in(dirs::data_local_dir().unwrap().join("Temp")).unwrap();
+        let temp = tempfile::tempdir_in(
+            std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("OS local app data"))
+                .join("Temp"),
+        )
+        .unwrap();
         #[cfg(not(windows))]
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
