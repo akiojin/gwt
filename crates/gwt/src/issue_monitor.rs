@@ -1526,8 +1526,8 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
-    /// Automatic reservations keep the primary's fixed tool. Explicit choices
-    /// and exact deliveries use their selected member's own registered tool.
+    /// Planned members and exact deliveries use their own registered tool;
+    /// an unplanned Issue uses the primary's tool.
     pub fn registered_launch_profiles_for_issue(
         &self,
         issue_number: u64,
@@ -1552,13 +1552,10 @@ impl IssueMonitorPrefs {
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
         let scheduled =
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
-        let explicit_member = delivery_member.or_else(|| {
-            reservation
-                .filter(|entry| entry.reason == AgentScheduleReason::AssignedByYou)
-                .map(|entry| entry.agent_member_id.as_str())
-        });
+        // Issue #7027: every planned member launches with its own registered
+        // tool, so an idle member of another pooled tool can take queued work.
         let tool = normalize_issue_monitor_provider(
-            &explicit_member
+            &scheduled
                 .and_then(|id| {
                     pool.iter()
                         .find(|profile| profile.agent_member_id.as_deref() == Some(id))
@@ -5240,6 +5237,9 @@ pub struct IssueMonitorState {
     // Automatic scan proposals are valid only against this exact source snapshot.
     #[serde(skip)]
     agent_schedule_source: Option<(AgentIssueSchedule, String, u64)>,
+    /// Issue #7027: idle members the last scan could not plan, with reasons.
+    #[serde(skip)]
+    agent_schedule_ineligible: BTreeMap<String, String>,
     #[serde(skip)]
     roster_machine_policy: Option<crate::machine_agent_settings::Policy>,
     /// Runtime identity of the repository actually read; never a saved approval.
@@ -8373,6 +8373,7 @@ impl IssueMonitorState {
             agent_issue_schedule: AgentIssueSchedule::default(),
             agent_switch_intents: BTreeMap::new(),
             agent_schedule_source: None,
+            agent_schedule_ineligible: BTreeMap::new(),
             roster_machine_policy: None,
             source_repository: IssueMonitorSourceRepository::Unresolved,
             queue_label_observation: None,
