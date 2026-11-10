@@ -16,7 +16,9 @@ test.describe("Agent window scrollback lifecycle", () => {
   test("mouse motion cannot return history review to the live screen", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     const id = "agent-1";
-    await emitTerminalText(page, id, numberedLines("tracking", 1200) + "\x1b[?1003h\x1b[?1006h");
+    const history = numberedLines("tracking", 1200).replace(/tracking \d+/g,
+      line => `\x1b]8;;https://example.com\x1b\\${line}\x1b]8;;\x1b\\`);
+    await emitTerminalText(page, id, history + "\x1b[?1003h\x1b[?1006h");
     await waitForScrollableTerminal(page, id);
     await expectWheelMovesScrollback(page, id, true, 1000);
     const before = await terminalScrollMetrics(page, id);
@@ -26,6 +28,7 @@ test.describe("Agent window scrollback lifecycle", () => {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     expect((await terminalScrollMetrics(page, id)).viewportY).toBe(before.viewportY);
     expect(await terminalInputs(page, id), "history coordinates stay local").toEqual(inputs);
+    await expect(agentTile(page, id).locator(".xterm-screen")).toHaveClass(/xterm-cursor-pointer/);
     await scrollTerminalToBottom(page, id);
     await page.mouse.move(box!.x + 80, box!.y + 80);
     await expect.poll(async () => (await terminalInputs(page, id)).length).toBeGreaterThan(inputs.length);

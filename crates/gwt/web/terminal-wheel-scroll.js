@@ -105,18 +105,6 @@ export function createTerminalWheelScrollController({
   }
 
   let dispatchingTouchWheel = false;
-  const handleMouseMove = (event) => {
-    const buffer = terminal.buffer?.active;
-    if (
-      !event.buttons && !event.shiftKey && !event.altKey &&
-      isTerminalMouseTrackingActive(terminal) &&
-      Number(buffer?.viewportY) < Number(buffer?.baseY)
-    ) {
-      // These coordinates describe history, not the application's live screen.
-      // xterm treats a mouse report as input and would jump back to the tail.
-      event.stopPropagation();
-    }
-  };
   const handleWheel = (event) => {
     // A retained stopped terminal can still advertise application mouse modes.
     // Keep scrolling local before either fallback keys or xterm mouse reports.
@@ -247,7 +235,6 @@ export function createTerminalWheelScrollController({
     capture: true,
     passive: false,
   });
-  terminalRoot.addEventListener("mousemove", handleMouseMove, { capture: true });
   terminalRoot.addEventListener("touchstart", handleTouchStart, {
     capture: true,
     passive: true,
@@ -264,7 +251,6 @@ export function createTerminalWheelScrollController({
       terminalRoot.removeEventListener("wheel", handleWheel, {
         capture: true,
       });
-      terminalRoot.removeEventListener("mousemove", handleMouseMove, { capture: true });
       terminalRoot.removeEventListener("touchstart", handleTouchStart, {
         capture: true,
       });

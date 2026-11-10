@@ -67,30 +67,6 @@ test("retained history takes wheel ownership while the application tracks the mo
   }
 });
 
-test("pointer motion stays local while reviewing history and resumes at the live screen", () => {
-  const buffer = { active: { type: "normal", baseY: 1200, viewportY: 200 } };
-  const modes = { mouseTrackingMode: "any" };
-  const fixture = mountFixture({
-    terminalOptions: { buffer, modes },
-  });
-  const move = (options = {}) => {
-    const event = wheelEvent(null, { type: "mousemove", ...options });
-    fixture.terminalRoot.dispatchEvent(event);
-    return event;
-  };
-  assert.equal(move().propagationStopped, true, "historical coordinates must not become application input");
-  assert.equal(move({ shiftKey: true }).propagationStopped, false, "forced selection stays enabled");
-  assert.equal(move({ altKey: true }).propagationStopped, false, "macOS forced selection stays enabled");
-  assert.equal(move({ buttons: 1 }).propagationStopped, false, "selection drags stay enabled");
-  buffer.active.viewportY = 1200;
-  assert.equal(move().propagationStopped, false, "live-screen mouse tracking stays enabled");
-  buffer.active.viewportY = 200;
-  modes.mouseTrackingMode = "none";
-  assert.equal(move().propagationStopped, false, "ordinary selection motion stays enabled");
-  fixture.dispose();
-  assert.equal(move().propagationStopped, false, "dispose removes the motion listener");
-});
-
 test("Ctrl and Meta wheel bypass terminal override for canvas zoom routing", () => {
   for (const modifier of ["ctrlKey", "metaKey"]) {
     const fixture = mountFixture({
