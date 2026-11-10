@@ -10270,6 +10270,22 @@ impl AppRuntime {
                 if !gwt::window_state::uses_agent_hook_state(window.preset) {
                     return None;
                 }
+                // A saved GUI alias is not proof of a physical pane. Failed
+                // launches can leave Starting rows without an owner runtime.
+                // Protect the actual launch interval before its runtime arrives.
+                let live_runtime = self
+                    .runtimes
+                    .get(window_id)
+                    .is_some_and(|runtime| runtime.child_pid.is_some() && !runtime.exit_confirmed);
+                let pending_launch =
+                    self.pending_launch_completions
+                        .get(window_id)
+                        .is_some_and(|pending| {
+                            pending.current.load(std::sync::atomic::Ordering::Acquire)
+                        });
+                if !live_runtime && !pending_launch {
+                    return None;
+                }
                 let resident_pm =
                     self.pm_session_for_root(&tab.project_root)
                         .is_some_and(|pm_session| {
@@ -10282,7 +10298,11 @@ impl AppRuntime {
                         tab.title,
                         window.purpose_title.as_deref().unwrap_or(&window.title)
                     ),
-                    state: self.window_status(window_id).unwrap_or(window.status),
+                    state: if pending_launch {
+                        WindowProcessStatus::Starting
+                    } else {
+                        self.window_status(window_id).unwrap_or(window.status)
+                    },
                     resident_pm,
                 })
             })

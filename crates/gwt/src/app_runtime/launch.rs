@@ -855,13 +855,30 @@ impl AppRuntime {
             self.inflight_launches
                 .insert(key, (window_id.clone(), std::time::Instant::now()));
         }
-        let mut events = self.queue_project_owner_launch(
+        let mut events = match self.queue_project_owner_launch(
             &context,
             window_id.clone(),
             generation,
             Box::new(config),
             Box::new(metadata),
-        )?;
+        ) {
+            Ok(events) => events,
+            Err(error) => {
+                self.inflight_launches.retain(|_, (id, _)| id != &window_id);
+                // No owner launch was queued. Converge the local placeholder
+                // through the same failure projection as asynchronous refusal,
+                // while preserving the original error for the caller.
+                self.apply_owner_terminal_launch_projection(
+                    &context,
+                    &window_id,
+                    None,
+                    None,
+                    WindowProcessStatus::Error,
+                    Some(error.clone()),
+                );
+                return Err(error);
+            }
+        };
         events.push(self.workspace_state_broadcast(&context));
         events.extend(self.status_events(
             window_id,

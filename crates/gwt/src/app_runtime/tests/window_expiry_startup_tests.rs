@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+fn issue_7015_synchronous_restore_refusal_retires_starting_placeholder() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = restore_fixture_tab("tab-1", &repo, &[("agent-1".into(), "source".into())]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    runtime.set_window_status("tab-1", "agent-1", WindowProcessStatus::Starting);
+    save_restore_fixture_session(&runtime.sessions_dir, "source", &repo, Some("native"), None);
+    let session = gwt_agent::Session::load(&runtime.sessions_dir.join("source.toml")).unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let events = runtime.spawn_prepared_restored_agent_session(
+        "tab-1",
+        session,
+        None,
+        super::super::startup::RestoreOrigin::Automatic,
+    );
+    assert_eq!(
+        runtime.window_status("tab-1::agent-1"),
+        Some(WindowProcessStatus::Error)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(runtime.restore_launch_windows.is_empty());
+    assert!(runtime.pending_launch_completions.is_empty());
+}
+
 /// Issue #3923 AC-2: a hold records what it was formed from — the matched
 /// screen text and the poller reading — so a false hold can be diagnosed
 /// instead of guessed at.
