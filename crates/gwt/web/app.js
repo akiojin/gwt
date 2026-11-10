@@ -1378,7 +1378,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         releaseNotesWindow.reconnect(replayedReleaseNotesId);
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
-        requestSupportedAgentRefresh();
+        if (socketProjectKey && rosterHost) {
+          // Registration needs both catalogs even when Settings is not mounted.
+          send({ kind: "list_supported_agents" });
+          send({ kind: "list_custom_agents" });
+        } else {
+          requestSupportedAgentRefresh();
+        }
       }
 
       function handleSocketMessage(event) {
