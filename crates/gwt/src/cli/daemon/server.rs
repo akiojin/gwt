@@ -10528,7 +10528,7 @@ mod scan_failure_contract_tests {
     #[test]
     fn settings_failure_does_not_revoke_an_independent_scan_commit() {
         use gwt_core::operation_deadline::{
-            ScopedNamedLockContentionObserver, ScopedOperationClock,
+            self, ScopedNamedLockContentionObserver, ScopedOperationClock,
         };
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
@@ -10577,13 +10577,19 @@ mod scan_failure_contract_tests {
             "test machine settings holder",
         )
         .unwrap();
+        let settings_before = std::fs::read(&machine_path).unwrap();
         let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let settings_deadline = std::rc::Rc::new(std::cell::Cell::new(None));
         let expire_settings_budget = || {
             let expired_clock = expired_clock.clone();
+            let settings_deadline = settings_deadline.clone();
             move || {
-                *expired_clock.borrow_mut() = Some(ScopedOperationClock::set(
-                    now + gwt_core::deadline_budget::HANG_GUARD * 2,
-                ));
+                let deadline = operation_deadline::current().expect("settings operation deadline");
+                settings_deadline.set(Some(deadline));
+                // Drop the old guard first so a later contention cannot reset
+                // the new clock and wait forever under a fixed test clock.
+                expired_clock.borrow_mut().take();
+                *expired_clock.borrow_mut() = Some(ScopedOperationClock::set(deadline));
             }
         };
         let settings_lock_path = machine_path.with_extension("lock");
@@ -10604,12 +10610,21 @@ mod scan_failure_contract_tests {
             .as_str()
             .unwrap()
             .contains("settings lock deadline"));
-        expired_clock.borrow_mut().take();
+        let failed_settings_deadline = settings_deadline
+            .get()
+            .expect("settings lock was contended");
+        // Keep the exhausted settings clock while the independent scan gets
+        // its own prefs deadline. An expired scan still must be rejected.
         let _scan_contention =
             ScopedNamedLockContentionObserver::set(&settings_lock_path, expire_settings_budget());
         let mut scanned = monitor.clone();
         crate::scan_issue_monitor_candidates(&mut scanned, &[], "2026-11-09T00:00:00Z");
         let epoch = monitor.effect_authority_epoch();
+        assert_eq!(
+            operation_deadline::now(),
+            failed_settings_deadline,
+            "settings budget must remain exhausted before scan commit"
+        );
         assert!(super::commit_issue_monitor_scan_if_current(
             project.path(),
             &prefs_path,
@@ -10617,6 +10632,11 @@ mod scan_failure_contract_tests {
             scanned,
             epoch,
         ));
+        assert_eq!(
+            operation_deadline::now(),
+            failed_settings_deadline,
+            "scan commit must preserve the exhausted settings clock"
+        );
         assert_eq!(
             crate::load_issue_monitor_prefs(&prefs_path)
                 .unwrap()
@@ -10628,6 +10648,7 @@ mod scan_failure_contract_tests {
             marker.exists(),
             "scan commit did not write machine settings"
         );
+        assert_eq!(std::fs::read(&machine_path).unwrap(), settings_before);
     }
 
     #[test]
