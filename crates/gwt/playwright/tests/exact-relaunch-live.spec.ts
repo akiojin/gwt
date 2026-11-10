@@ -1202,6 +1202,15 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const main = page.getByRole("region", { name: "Main pane", exact: true });
     const rows = main.locator(".works-surface:not(.works-surface--preview) .work-row");
+    const captureCapacity = async (phase: string) => {
+      for (const name of ["agent-capacity", "agent-settings"]) {
+        const body = await readFile(join(fixture.home, ".gwt", "machine-state", `${name}.json`))
+          .catch(error => Buffer.from(JSON.stringify({ unavailable: error.code })));
+        const path = info.outputPath(`${phase}-${name}.json`);
+        await writeFile(path, body);
+        await info.attach(`${phase}-${name}`, { path, contentType: "application/json" });
+      }
+    };
     let workspace: any = null, activity: any = null, usage: any = null;
     const activityObservations: any[] = [];
     // Observe the real wire independently of the bridge's bounded event log.
@@ -1317,10 +1326,17 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
+      await expect.poll(async () => {
+        const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));
+        const now = Date.now() / 1000;
+        return capacity.observed_at <= now && now < capacity.expires_at ? capacity.machine_budget ?? 0 : 0;
+      }, { timeout: 45_000, message: "the measured machine budget must support PM plus four workers before cold restore" }).toBeGreaterThanOrEqual(5);
       const coldOwner = await readLatestOwnActivity(page);
+      await captureCapacity("before-cold-restart");
       // Prevent the old document from reconnecting before the fresh navigation.
       await page.goto("about:blank");
       const restarted = await fixture.restart({ coldOwner }); workspace = null; usage = null; activity = null;
+      await captureCapacity("after-cold-restart");
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
@@ -1410,6 +1426,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     } finally {
       try {
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
+        await captureCapacity("final");
         const profiles = (await readdir(fixture.home)).filter(name => /^hook-[0-9a-f-]+\.jsonl$/.test(name));
         for (const name of profiles) {
           await info.attach(name, { body: await readFile(join(fixture.home, name)), contentType: "application/x-ndjson" });

@@ -306,6 +306,15 @@ fn validate_assignment_budget(previous: &Registry, next: &Registry) -> io::Resul
     if let Some((_, inventory)) = &census {
         let hostname = crate::process::current_hostname();
         for observed in &inventory.sessions {
+            // A cached census can outlive its child. Keep unknown observations
+            // and surviving descendant groups charged until the next sample.
+            if observed.session.child_pid > 0
+                && observed.session.child_started_at > 0
+                && crate::process::host_process_liveness(observed.session.child_pid) == Some(false)
+                && !crate::process::is_process_group_alive(observed.session.child_pid)
+            {
+                continue;
+            }
             let host_started_at =
                 crate::process::host_process_start_time(observed.session.host_pid);
             let project_key = observed.repo_hash.clone().or_else(|| {
@@ -4110,6 +4119,71 @@ mod tests {
             .cloned(),
             first.member.assignment
         );
+    }
+
+    #[test]
+    fn reaped_sampled_child_releases_capacity_before_the_census_expires() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let root = home.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        crate::machine_agent_settings::set(
+            Some(1),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-10T00:00:00Z",
+        )
+        .unwrap();
+        measured_machine_budget(2);
+        let census_path = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+        let mut census: serde_json::Value =
+            serde_json::from_slice(&fs::read(&census_path).unwrap()).unwrap();
+        let pid = std::process::id();
+        let birth = crate::process::host_process_start_time(pid).unwrap();
+        census["inventory"] = serde_json::json!({
+            "sessions": [{
+                "project_root": root, "repo_hash": null,
+                "role": "implementation", "monitor_owned": false, "resident_memory_bytes": null,
+                "session": {
+                    "session_id": "sampled-child", "issue_number": null,
+                    "execution_binding_missing": false, "agent_id": "codex",
+                    "worktree_path": root, "worktree_exists": true,
+                    "host_pid": pid, "child_pid": pid, "child_started_at": birth,
+                    "started_at": "2026-11-10T00:00:00Z", "launch_origin": "unknown",
+                    "launch_entrypoint": null, "restore_source_session_id": null
+                }
+            }],
+            "uncertainties": []
+        });
+        let reserve = || {
+            crate::agent_names::reserve_project_member(
+                &root,
+                &sessions,
+                "replacement",
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        fs::write(&census_path, serde_json::to_vec(&census).unwrap()).unwrap();
+        assert!(reserve().unwrap_err().contains("Machine Agent capacity"));
+        let absent_pid = i32::MAX as u32;
+        assert_eq!(
+            crate::process::host_process_liveness(absent_pid),
+            Some(false)
+        );
+        assert!(!crate::process::is_process_group_alive(absent_pid));
+        census["inventory"]["sessions"][0]["session"]["child_pid"] = absent_pid.into();
+        census["inventory"]["sessions"][0]["session"]["child_started_at"] = 0.into();
+        fs::write(&census_path, serde_json::to_vec(&census).unwrap()).unwrap();
+        assert!(reserve().unwrap_err().contains("Machine Agent capacity"));
+
+        census["inventory"]["sessions"][0]["session"]["child_started_at"] = birth.into();
+        fs::write(&census_path, serde_json::to_vec(&census).unwrap()).unwrap();
+        reserve()
+            .expect("a reaped sampled child must free its slot without waiting for census TTL");
     }
 
     #[test]
