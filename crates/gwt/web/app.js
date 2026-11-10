@@ -1510,7 +1510,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (hubSocket !== connection) return;
           if (socket === connection) handleSocketOpen();
           else connection.send(JSON.stringify({ kind: "frontend_ready" }));
-          for (const message of pendingHubMessages.splice(0)) connection.send(JSON.stringify(message));
+          const replayedCloneSearchQueries = [];
+          for (const message of pendingHubMessages.splice(0)) {
+            connection.send(JSON.stringify(message));
+            if (message.kind === "github_repository_search") replayedCloneSearchQueries.push(message.query);
+          }
+          resyncCloneProjectSearch(replayedCloneSearchQueries);
         });
         connection.addEventListener("message", (event) => {
           if (hubSocket === connection) dispatcher.handle(event);
@@ -4083,6 +4088,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const {
         sendOpenProjectDialog,
         closeCloneProjectModal,
+        resyncCloneProjectSearch,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,

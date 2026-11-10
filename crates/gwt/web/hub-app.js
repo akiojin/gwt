@@ -446,7 +446,20 @@ function createHubApp({ document: doc, window: win }) {
       catalogConnectionFresh = true;
       connection.send(JSON.stringify({ kind: "frontend_ready" }));
       closeController.reconnect();
-      for (const message of queued.splice(0)) connection.send(JSON.stringify(message));
+      const replayedCloneSearchQueries = [];
+      for (const message of queued.splice(0)) {
+        connection.send(JSON.stringify(message));
+        if (message.kind === "github_repository_search") replayedCloneSearchQueries.push(message.query);
+      }
+      const query = cloneState.query.trim();
+      if (cloneState.open && cloneState.searching && !cloneState.cloning) {
+        if (!query) {
+          cloneState = { ...cloneState, searching: false };
+          renderClone();
+        } else if (!replayedCloneSearchQueries.includes(query)) {
+          send({ kind: "github_repository_search", query });
+        }
+      }
     });
     connection.addEventListener("message", (message) => {
       if (socket !== connection) return;

@@ -91,6 +91,7 @@ function fixture({ routeProjectKey = null } = {}) {
       dispose() { context.overlayDisposed = true; },
     },
     clearTimeout() {}, clearPickerPending() {},
+    cloneSearchResyncs: [], resyncCloneProjectSearch: query => context.cloneSearchResyncs.push(query),
     setConnectionState(connected) { context.connectionStates.push(connected); }, syncRunningBranchCleanups() {},
     dispatcherOptions: [],
     disposedDispatchers: 0,
@@ -142,6 +143,18 @@ test("Hub bootstrap retains its catalog socket while selecting a project", () =>
   assert.equal(sockets.length, 2, "same scope must not reconnect in a loop");
   sockets[0].handlers.close();
   assert.equal(context.reconnectTimer, null, "stale close must not reset the new connection");
+});
+
+test("Project hub reconnect passes the flushed search to its recovery owner", () => {
+  const { context, sockets } = fixture({ routeProjectKey: '0123456789abcdef' });
+  context.connectHubSocket();
+  context.send({ kind: 'github_repository_search', query: 'fixture' });
+  sockets[0].open();
+  assert.equal(JSON.stringify(context.cloneSearchResyncs), JSON.stringify([['fixture']]));
+  sockets[0].close();
+  context.connectHubSocket();
+  sockets[1].open();
+  assert.equal(JSON.stringify(context.cloneSearchResyncs), JSON.stringify([['fixture'], []]), 'a lost sent reply is recovered after a fresh connection');
 });
 
 test("offline input is discarded while queued control messages retain project scope", () => {
