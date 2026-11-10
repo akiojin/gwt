@@ -2243,7 +2243,7 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
 
 /// Legacy caches lack a canonical revision. Hash their indexed fields and
 /// full SPEC payloads without admitting transport metadata rewrites as input.
-fn legacy_issue_source_snapshot(cache_root: &Path) -> io::Result<String> {
+pub(crate) fn legacy_issue_source_snapshot(cache_root: &Path) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     if let Some(source) =
