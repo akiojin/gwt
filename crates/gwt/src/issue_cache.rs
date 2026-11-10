@@ -459,14 +459,19 @@ pub fn sync_issue_cache_from_remote_for_monitor(
         true,
     )
     .map_err(|error| {
-        gwt_core::error_ledger::record_fail_open(
-            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
-            format!("issue cache full refresh: {error}"),
-            gwt_core::error_ledger::ErrorTarget {
-                project_root: Some(repo_path.display().to_string()),
-                ..gwt_core::error_ledger::ErrorTarget::default()
-            },
-        );
+        // The scan has a live list and can continue after this optional
+        // refresh exhausts its budget. Its outer outcome records degradation;
+        // an actual scan abort still records its own failure.
+        if !crate::issue_monitor_worker::is_readback_budget_deferral(&error) {
+            gwt_core::error_ledger::record_fail_open(
+                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+                format!("issue cache full refresh: {error}"),
+                gwt_core::error_ledger::ErrorTarget {
+                    project_root: Some(repo_path.display().to_string()),
+                    ..gwt_core::error_ledger::ErrorTarget::default()
+                },
+            );
+        }
         error
     })
 }
@@ -1145,6 +1150,27 @@ mod tests {
             panic!("a successfully loaded empty catalog is cached")
         });
         assert!(cached.loaded && cached.error.is_none());
+    }
+
+    #[test]
+    fn optional_monitor_refresh_budget_is_not_an_error_but_explicit_refresh_is() {
+        let temp = tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now(),
+        );
+        let cache = temp.path().join("cache");
+        let error = sync_issue_cache_from_remote_for_monitor(temp.path(), &cache).unwrap_err();
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+
+        sync_issue_cache_from_remote(temp.path(), &cache).unwrap_err();
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].kind,
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+        );
     }
 
     fn clear_gh_sandbox_markers() -> Vec<gwt_core::test_support::ScopedEnvVar> {

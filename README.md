@@ -677,6 +677,12 @@ Common windows include:
   and waits for the existing work to finish. Confirming `Restart now` instead
   stops active agents and restarts gwt immediately.
 
+If an exact pane cleanup fails, gwt retries it once after 30 seconds while
+keeping other running panes connected. Set a positive
+`[project_owner].reconciliation_timeout_secs` in `~/.gwt/config.toml` to change
+that delay. A failed retry leaves its exact cleanup pending and records a
+`needs_human` diagnostic in `errors.list`.
+
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
