@@ -8583,26 +8583,24 @@ fn try_commit_issue_monitor_effect_result(
                     tracing::info!(
                         issue = issue_number,
                         pr = pr_number,
-                        ?outcome,
+                        commented = outcome.commented,
+                        closed = outcome.closed,
+                        already_closed = outcome.already_closed,
+                        effective_action = ?outcome.rechecked_acceptance.as_ref().map(|(action, _)| action),
                         "merged issue settlement committed"
                     );
+                    let action = match outcome.rechecked_acceptance {
+                        Some((action, source)) => {
+                            candidate.refresh_settlement_acceptance_source(*issue_number, source);
+                            action
+                        }
+                        None => action.clone(),
+                    };
                     candidate.record_merged_issue_settlement(
                         *issue_number,
                         *pr_number,
                         merge_sha.clone(),
-                        outcome.unmet_acceptance.map_or_else(
-                            || action.clone(),
-                            |unmet| {
-                                if matches!(
-                                    action,
-                                    crate::MergedIssueSettlementAction::AwaitMeasurement { .. }
-                                ) {
-                                    crate::MergedIssueSettlementAction::ContinueWork { unmet }
-                                } else {
-                                    crate::MergedIssueSettlementAction::UnmetAcceptance { unmet }
-                                }
-                            },
-                        ),
+                        action,
                         &completed.completed_at,
                     );
                     settled = true;
@@ -19766,7 +19764,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 ));
                 assert!(
@@ -19838,7 +19836,7 @@ exit 0
                         commented: true,
                         closed: false,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 ));
                 assert_eq!(
@@ -19860,28 +19858,60 @@ exit 0
 
     #[test]
     fn daemon_scan_requeues_when_a_close_becomes_stale() {
-        with_settlement_scan_fixture(
-            "settle_close",
-            delivered_prefs(true),
-            |_, prefs_path, mut monitor| {
-                let effect = settlement_effect(&monitor).expect("close proposed");
-                assert!(commit_settlement(
-                    prefs_path,
-                    &mut monitor,
-                    &effect,
-                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
-                        commented: true,
-                        closed: false,
-                        already_closed: false,
-                        unmet_acceptance: Some(vec!["AC-1".to_string()]),
-                    },
-                ));
-                assert_eq!(
-                    monitor.inbox_item(43).map(|item| item.state),
-                    Some(crate::MonitorInboxState::Queued)
-                );
-            },
-        );
+        for (autonomous, measurement) in [(true, false), (true, true), (false, true)] {
+            with_settlement_scan_fixture(
+                "settle_close",
+                crate::IssueMonitorPrefs {
+                    auto_close_merged_issues: Some(true),
+                    ..delivered_prefs(autonomous)
+                },
+                |_, prefs_path, mut monitor| {
+                    let effect = settlement_effect(&monitor).expect("close proposed");
+                    let source = format!(
+                        "## Acceptance Criteria\n- [ ] AC-1: remaining {}\n",
+                        if measurement {
+                            "(measurement)"
+                        } else {
+                            "implementation"
+                        }
+                    );
+                    let action = if measurement {
+                        crate::MergedIssueSettlementAction::AwaitMeasurement {
+                            unmet: vec!["AC-1".into()],
+                        }
+                    } else {
+                        crate::MergedIssueSettlementAction::UnmetAcceptance {
+                            unmet: vec!["AC-1".into()],
+                        }
+                    };
+                    assert!(commit_settlement(
+                        prefs_path,
+                        &mut monitor,
+                        &effect,
+                        crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                            commented: true,
+                            closed: false,
+                            already_closed: false,
+                            rechecked_acceptance: Some((action, source.clone())),
+                        },
+                    ));
+                    assert_eq!(
+                        monitor.inbox_item(43).map(|item| item.state),
+                        Some(if !autonomous {
+                            crate::MonitorInboxState::NeedsHuman
+                        } else if measurement {
+                            crate::MonitorInboxState::AwaitingMeasurement
+                        } else {
+                            crate::MonitorInboxState::Queued
+                        })
+                    );
+                    assert_eq!(
+                        monitor.inbox_item(43).unwrap().issue.body.as_deref(),
+                        Some(source.as_str())
+                    );
+                },
+            );
+        }
     }
 
     #[test]
@@ -19912,7 +19942,7 @@ exit 0
                         commented: true,
                         closed: false,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 ));
                 assert_eq!(
@@ -19953,7 +19983,7 @@ exit 0
                     commented: true,
                     closed: false,
                     already_closed: false,
-                    unmet_acceptance: None,
+                    rechecked_acceptance: None,
                 },
             ));
             assert_eq!(
@@ -19997,7 +20027,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
-                        unmet_acceptance: None,
+                        rechecked_acceptance: None,
                     },
                 );
                 holder.join().expect("prefs lock holder joins");

@@ -16255,6 +16255,21 @@ impl IssueMonitorState {
         ))
     }
 
+    /// Use the executor's normalized live source before recording its decision.
+    pub(crate) fn refresh_settlement_acceptance_source(
+        &mut self,
+        issue_number: u64,
+        source: String,
+    ) {
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.issue.body = Some(source);
+        }
+    }
+
     /// Issue #3917: the settlement effect committed on GitHub. Records the
     /// delivery as settled, then applies the local consequence: close, continue
     /// remaining acceptance, await measurement, or retain the manual human gate.
@@ -16266,6 +16281,14 @@ impl IssueMonitorState {
         action: MergedIssueSettlementAction,
         settled_at: &str,
     ) {
+        if self.settlement_overridden_by_operator(&IssueMonitorEffectPayload::SettleMergedIssue {
+            issue_number,
+            pr_number,
+            merge_sha: merge_sha.clone(),
+            action: action.clone(),
+        }) {
+            return;
+        }
         let action = self.remaining_acceptance_action(issue_number, action);
         self.merged_issue_settlements.insert(
             issue_number,
@@ -16312,15 +16335,44 @@ impl IssueMonitorState {
                     }
                 }
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
-                self.fence_automatic_relaunch(
+                self.fence_relaunch_preserving_attempts(
                     issue_number,
                     "merged slice; remaining acceptance",
                     settled_at,
+                    false,
                 );
                 self.enforce_measurement_waits();
             }
             MergedIssueSettlementAction::AwaitClose { .. } => {}
         }
+    }
+
+    fn settlement_overridden_by_operator(&self, payload: &IssueMonitorEffectPayload) -> bool {
+        let IssueMonitorEffectPayload::SettleMergedIssue {
+            issue_number,
+            pr_number,
+            merge_sha,
+            action,
+        } = payload
+        else {
+            return false;
+        };
+        !matches!(action, MergedIssueSettlementAction::Close { .. })
+            && self
+                .released_failures
+                .get(issue_number)
+                .is_some_and(|release| release.operator_requested && release.retry_record.is_some())
+            && self
+                .merged_issue_settlements
+                .get(issue_number)
+                .is_some_and(|settlement| {
+                    settlement.pr_number == *pr_number
+                        && settlement.merge_sha == *merge_sha
+                        && matches!(
+                            settlement.action,
+                            MergedIssueSettlementAction::ContinueWork { .. }
+                        )
+                })
     }
 
     fn remaining_acceptance_action(
@@ -16805,6 +16857,7 @@ impl IssueMonitorState {
             || effect.state != IssueMonitorEffectState::Prepared
             || effect.authority_epoch != self.effect_authority_epoch
             || self.claim_effect_is_blocked_by_admission(&effect.payload)
+            || self.settlement_overridden_by_operator(&effect.payload)
             || (matches!(
                 &effect.payload,
                 IssueMonitorEffectPayload::RenewClaim { .. }
@@ -16832,6 +16885,7 @@ impl IssueMonitorState {
         let effect_id = effect_id.into();
         if effect_id.is_empty()
             || self.claim_effect_is_blocked_by_admission(&payload)
+            || self.settlement_overridden_by_operator(&payload)
             || (matches!(&payload, IssueMonitorEffectPayload::RenewClaim { .. })
                 && !self.claim_renewal_is_current(&payload))
             || matches!(&payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
@@ -18432,10 +18486,11 @@ impl IssueMonitorState {
             };
             if criteria.machine_checkable && remaining_work {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
-                self.fence_automatic_relaunch(
+                self.fence_relaunch_preserving_attempts(
                     issue_number,
                     "settled delivery; remaining work",
                     &format_rfc3339_utc(chrono::Utc::now()),
+                    false,
                 );
                 existing = self.inbox_item(issue_number).cloned();
             }
@@ -23145,7 +23200,7 @@ impl IssueMonitorState {
                 let attempts = self.attempt_count(issue_number);
                 self.terminal_queue_push(&[issue_number], "operator", now);
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Head);
-                self.fence_automatic_relaunch(issue_number, reason, now);
+                self.fence_relaunch_preserving_attempts(issue_number, reason, now, true);
                 return IssueMonitorRequeueOutcome::Requeued {
                     stale_window_id: None,
                     attempts_before: attempts,
@@ -23759,6 +23814,10 @@ impl IssueMonitorState {
     /// converged process cannot land in a different state than the one that
     /// issued the recovery.
     fn apply_failure_release(&mut self, issue_number: u64, revoke_claims: bool) {
+        // Reapply the explicit override after disk-owned effect refreshes too.
+        let mut pending = std::mem::take(&mut self.pending_effects);
+        pending.retain(|effect| !self.settlement_overridden_by_operator(&effect.payload));
+        self.pending_effects = pending;
         let retry_record = self
             .released_failures
             .get(&issue_number)
@@ -25290,7 +25349,12 @@ impl IssueMonitorState {
             });
         if next_slice {
             self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
-            self.fence_automatic_relaunch(number, "completed SPEC slice; remaining work", now);
+            self.fence_relaunch_preserving_attempts(
+                number,
+                "completed SPEC slice; remaining work",
+                now,
+                false,
+            );
         } else if settlement == IssueMonitorExecutionSettlement::Completed
             && self.terminal_queue_contains(number)
             && !self.issue_is_closed(number)
@@ -25306,7 +25370,12 @@ impl IssueMonitorState {
             // finished. Keep its selection while the existing gate waits
             // for readback, and fence the released launch across rebase.
             self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
-            self.fence_automatic_relaunch(number, "completed SPEC slice; refresh required", now);
+            self.fence_relaunch_preserving_attempts(
+                number,
+                "completed SPEC slice; refresh required",
+                now,
+                false,
+            );
         } else {
             self.terminal_queue_remove(&[number], now);
         }
@@ -25648,7 +25717,7 @@ impl IssueMonitorState {
         {
             item.error_message = Some(format!("binding_dead: {reason}"));
         }
-        self.fence_automatic_relaunch(issue_number, reason, now);
+        self.fence_relaunch_preserving_attempts(issue_number, reason, now, false);
         // The mode-gated queue would drop this: the dead-binding recovery that
         // reaches here runs precisely when autonomous mode is OFF, so an
         // attended operator would never learn the Monitor requeued the Issue.
@@ -25664,7 +25733,13 @@ impl IssueMonitorState {
     /// Preserve the retry budget and fresh-session policy through scan rebase.
     /// The monotonic release version also distinguishes successive slices whose
     /// GitHub Issue revision did not change.
-    fn fence_automatic_relaunch(&mut self, issue_number: u64, reason: &str, now: &str) {
+    fn fence_relaunch_preserving_attempts(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        now: &str,
+        operator_requested: bool,
+    ) {
         let attempts = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let release = IssueMonitorReleasedFailure {
@@ -25674,7 +25749,7 @@ impl IssueMonitorState {
             reason: reason.to_string(),
             attempts_before: attempts,
             attempts_after: attempts,
-            operator_requested: false,
+            operator_requested,
             retry_record: self.autonomous_record(issue_number).cloned(),
         };
         self.released_failures.insert(issue_number, release.clone());
@@ -51507,6 +51582,21 @@ mod tests {
             "2026-09-01T01:00:00Z",
         );
         // The CLI reconstructs only durable prefs, without an inbox census.
+        let stale_proposal = PendingIssueMonitorEffect::prepared(
+            "stale-measurement-settlement",
+            monitor.effect_authority_epoch(),
+            IssueMonitorEffectPayload::SettleMergedIssue {
+                issue_number: 42,
+                pr_number: 7,
+                merge_sha: Some("aaa".into()),
+                action: MergedIssueSettlementAction::ContinueWork {
+                    unmet: vec!["AC-1".into()],
+                },
+            },
+        );
+        assert!(monitor.prepare_effect(stale_proposal.clone()));
+        let old_key = stale_proposal.attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&old_key));
         let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert!(cold.inbox_item(42).is_none());
         assert!(matches!(
@@ -51514,6 +51604,26 @@ mod tests {
             IssueMonitorRequeueOutcome::Requeued { .. }
         ));
         monitor.rebase_daemon_driver_prefs(&cold.prefs());
+        assert!(
+            monitor.complete_pending_effect(&old_key).is_none(),
+            "old executor cannot commit"
+        );
+        assert!(
+            !monitor.prepare_effect(stale_proposal.clone()),
+            "stale scan cannot restore its proposal"
+        );
+        assert!(monitor
+            .prepare_pending_effect("stale-direct", stale_proposal.payload.clone())
+            .is_none());
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::AwaitMeasurement {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-09-01T01:01:00Z",
+        );
         assert!(matches!(
             monitor.merged_issue_settlement(42).unwrap().action,
             MergedIssueSettlementAction::ContinueWork { .. }

@@ -61,8 +61,8 @@ pub struct MergedIssueSettlementOutcome {
     pub closed: bool,
     /// The Issue was already closed when the attempt read it back.
     pub already_closed: bool,
-    /// A proposed close or measurement wait was downgraded by the live checklist.
-    pub unmet_acceptance: Option<Vec<String>>,
+    /// The effective action and the normalized live checklist that produced it.
+    pub rechecked_acceptance: Option<(MergedIssueSettlementAction, String)>,
 }
 
 /// The idempotency marker for one delivery.
@@ -125,7 +125,7 @@ pub fn render_settlement_comment(
             body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の slice を配信しました。Issue #{issue_number} は open のまま、残 AC を fresh launch の queue に戻します。\n\n未達 AC: {}\n", unmet.join(", ")));
         }
         MergedIssueSettlementAction::AwaitMeasurement { unmet } => {
-            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} は実測待ち（awaiting_measurement）です。測定後に AC を更新するか、明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
+            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} の未達 AC は実測専用です。Autonomous が on なら実測待ち（awaiting_measurement）、off なら needs_human として判断を待ちます。測定後に AC を更新するか、明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
         }
     }
     body.push_str("\nManaged by gwt Issue Monitor.\n");
@@ -283,7 +283,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             commented: false,
             closed: false,
             already_closed: true,
-            unmet_acceptance: None,
+            rechecked_acceptance: None,
         });
     }
     // Issue #5126: journaled Close effects may predate an Issue edit or an
@@ -312,23 +312,44 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
         snapshot.body.clone()
     };
     let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(&source);
-    let invalid_measurement_wait =
-        matches!(action, MergedIssueSettlementAction::AwaitMeasurement { .. })
-            && !criteria.only_measurement_remaining();
-    let unmet_acceptance = ((wants_close && !criteria.all_checked()) || invalid_measurement_wait)
-        .then_some(criteria.unchecked);
-    let effective_action = unmet_acceptance.as_ref().map(|unmet| {
-        if invalid_measurement_wait {
-            MergedIssueSettlementAction::ContinueWork {
-                unmet: unmet.clone(),
-            }
-        } else {
-            MergedIssueSettlementAction::UnmetAcceptance {
-                unmet: unmet.clone(),
-            }
+    let effective_action = match action {
+        MergedIssueSettlementAction::UnmetAcceptance { .. }
+            if criteria.only_measurement_remaining() =>
+        {
+            Some(MergedIssueSettlementAction::AwaitMeasurement {
+                unmet: criteria.unchecked.clone(),
+            })
         }
-    });
-    let action = effective_action.as_ref().unwrap_or(action);
+        MergedIssueSettlementAction::Close { .. } if !criteria.all_checked() => {
+            Some(if criteria.only_measurement_remaining() {
+                MergedIssueSettlementAction::AwaitMeasurement {
+                    unmet: criteria.unchecked.clone(),
+                }
+            } else {
+                MergedIssueSettlementAction::UnmetAcceptance {
+                    unmet: criteria.unchecked.clone(),
+                }
+            })
+        }
+        MergedIssueSettlementAction::ContinueWork { .. }
+        | MergedIssueSettlementAction::AwaitMeasurement { .. } => {
+            Some(if criteria.only_measurement_remaining() {
+                MergedIssueSettlementAction::AwaitMeasurement {
+                    unmet: criteria.unchecked.clone(),
+                }
+            } else {
+                MergedIssueSettlementAction::ContinueWork {
+                    unmet: criteria.unchecked.clone(),
+                }
+            })
+        }
+        _ => None,
+    };
+    let rechecked_acceptance = effective_action.map(|action| (action, source));
+    let action = rechecked_acceptance
+        .as_ref()
+        .map(|(action, _)| action)
+        .unwrap_or(action);
     let wants_close = matches!(action, MergedIssueSettlementAction::Close { .. });
     let marker = settlement_marker(pr_number, merge_sha);
     let already_commented = settlement_already_commented(
@@ -364,7 +385,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
     }
     let comment = render_settlement_comment(issue_number, pr_number, merge_sha, action);
     let commented = if already_commented
-        && (unmet_acceptance.is_none()
+        && (rechecked_acceptance.is_none()
             || snapshot
                 .comments
                 .iter()
@@ -390,7 +411,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
         commented,
         closed,
         already_closed: false,
-        unmet_acceptance,
+        rechecked_acceptance,
     })
 }
 
@@ -504,7 +525,7 @@ mod tests {
                 commented: true,
                 closed: true,
                 already_closed: false,
-                unmet_acceptance: None,
+                rechecked_acceptance: None,
             }
         );
         let comments = client.comments(IssueNumber(42));
@@ -570,12 +591,71 @@ mod tests {
             || Ok(()),
         )
         .unwrap();
-        assert_eq!(outcome.unmet_acceptance, Some(vec!["AC-1".to_string()]));
+        assert_eq!(
+            outcome
+                .rechecked_acceptance
+                .as_ref()
+                .map(|(action, _)| action),
+            Some(&MergedIssueSettlementAction::ContinueWork {
+                unmet: vec!["AC-1".into()]
+            })
+        );
         assert!(!outcome.closed);
         assert!(client
             .comments(IssueNumber(42))
             .iter()
             .any(|comment| comment.body.contains("fresh launch")));
+    }
+
+    #[test]
+    fn issue_6994_live_measurement_reclassifies_pending_continuation_and_close() {
+        for action in [
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()],
+            },
+            MergedIssueSettlementAction::ContinueWork {
+                unmet: vec!["AC-1".into()],
+            },
+            MergedIssueSettlementAction::Close { delegated: false },
+        ] {
+            let client = FakeIssueClient::new();
+            let repo = delivery_repo();
+            seed_open_issue(&client, 42, vec![]);
+            let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+            else {
+                panic!("snapshot")
+            };
+            snapshot.body =
+                "## Acceptance Criteria\n- [ ] AC-1: observe results (measurement)\n".into();
+            client.seed(snapshot);
+            let outcome = settle_merged_issue(
+                &client,
+                &repository(),
+                repo.path(),
+                42,
+                7,
+                Some("abc123"),
+                &action,
+                || Ok(()),
+            )
+            .unwrap();
+            assert!(!outcome.closed);
+            let (effective, source) = outcome.rechecked_acceptance.expect("live classification");
+            assert_eq!(
+                effective,
+                MergedIssueSettlementAction::AwaitMeasurement {
+                    unmet: vec!["AC-1".into()]
+                }
+            );
+            assert!(source.contains("observe results (measurement)"));
+            assert!(
+                client
+                    .comments(IssueNumber(42))
+                    .iter()
+                    .any(|comment| { comment.body.contains("awaiting_measurement") }),
+                "{action:?}"
+            );
+        }
     }
 
     #[test]
@@ -602,7 +682,15 @@ mod tests {
         )
         .expect("unchecked acceptance is handed off");
         assert!(!outcome.closed);
-        assert_eq!(outcome.unmet_acceptance, Some(vec!["AC-1".to_string()]));
+        assert_eq!(
+            outcome
+                .rechecked_acceptance
+                .as_ref()
+                .map(|(action, _)| action),
+            Some(&MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()]
+            })
+        );
         assert_eq!(client.owner_mutation_count(), 0);
         assert!(client.comments(IssueNumber(42)).iter().any(|comment| {
             comment.body.contains("needs_human") && comment.body.contains("AC-1")
@@ -721,7 +809,7 @@ mod tests {
                 commented: true,
                 closed: false,
                 already_closed: false,
-                unmet_acceptance: None,
+                rechecked_acceptance: None,
             }
         );
         let body = &client.comments(IssueNumber(42))[0].body;
@@ -782,7 +870,7 @@ mod tests {
                 commented: false,
                 closed: false,
                 already_closed: true,
-                unmet_acceptance: None,
+                rechecked_acceptance: None,
             }
         );
         assert!(client.comments(IssueNumber(42)).is_empty());
