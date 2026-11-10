@@ -121,7 +121,7 @@ test.describe("Closed Issue retirement (live backend)", () => {
       expect(await cli("issue.reopen", { number })).toMatchObject({ status: "open", changed: true });
       expect((await cli("issue.monitor.status")).gui_status.terminal_queue.map((entry: any) => entry.number)).not.toContain(number);
       expect((await cli("issue.monitor.queue.push", { numbers: [number] })).accepted).toContain(number);
-      // Monitor is disabled: queue.push writes durable admission without a scan
+      // Issues is disabled: queue.push writes durable admission without a scan
       // notification. Its source of truth is this entry and the GitHub label;
       // the GUI admission projection refreshes at the next scheduled scan.
       const pushed = JSON.parse(await readFile(prefsPath, "utf8"));

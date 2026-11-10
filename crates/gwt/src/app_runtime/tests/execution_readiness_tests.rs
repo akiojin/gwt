@@ -1012,7 +1012,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
 
 /// SPEC #3200 FR-052: a fresh linked-owner launch is not producing until
 /// SessionStart authenticates, so `spawn_agent_window_with_options` defers
-/// the Issue Monitor completion. The SessionStart finalizer therefore owns the
+/// Issues completion. The SessionStart finalizer therefore owns the
 /// durable delivery ACK — if it emitted the plain "launch succeeded" events the
 /// delivery tuple would stay pending forever and the daemon would redeliver it.
 #[test]
@@ -1423,7 +1423,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             .as_deref()
             .expect("durable actionable failure");
         if failure.starts_with("startup-timeout") {
-            assert!(reason.starts_with("Issue Monitor startup timed out after "));
+            assert!(reason.starts_with("Issues startup timed out after "));
             assert!(gwt_agent::is_transient_launch_failure(reason));
             assert_eq!(
                 monitor.inbox_item(2359).unwrap().state,

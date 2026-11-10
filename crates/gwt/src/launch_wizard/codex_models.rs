@@ -413,7 +413,7 @@ pub fn run_weekly_check(
     Ok(outcome)
 }
 
-/// Models of the saved Codex launch profiles in an Issue Monitor prefs file.
+/// Models of the saved Codex launch profiles in an Issues prefs file.
 pub fn saved_codex_profile_models(prefs_path: &Path) -> Vec<String> {
     let Ok(prefs) = crate::load_issue_monitor_prefs(prefs_path) else {
         return Vec::new();

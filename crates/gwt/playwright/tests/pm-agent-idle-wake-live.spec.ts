@@ -75,7 +75,7 @@ test.describe("Agent idle PM wake (isolated checkout)", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_AGENT_IDLE_WAKE !== "1",
     "GWT_PLAYWRIGHT_AGENT_IDLE_WAKE=1 is not set; checkout idle-wake E2E skipped");
   test.skip(process.platform === "win32", "the fake provider fixture requires POSIX executables");
-  test.setTimeout(240_000); // The first scheduled Monitor tick is 300 seconds.
+  test.setTimeout(240_000); // The first scheduled Issues tick is 300 seconds.
   test.use({ viewport: { width: 1440, height: 1000 } });
 
   test("running to idle reaches the PM before a tick and dedupes the pane", async ({ page }, testInfo) => {
@@ -180,7 +180,7 @@ ${marker}
       await hook(agent, "SessionStart");
       await waitForSessionState(page, agent, "idle");
       await expect.poll(async () => (await wakeReceipts(pm)).length,
-        { timeout: 30_000, message: "idle edge reaches the actual PM PTY without a Monitor tick" }).toBe(1);
+        { timeout: 30_000, message: "idle edge reaches the actual PM PTY without a Issues tick" }).toBe(1);
       expect(Date.now() - edgeAt).toBeLessThan(30_000);
 
       await hook(agent, "SessionStart");

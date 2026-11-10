@@ -957,7 +957,7 @@ pub fn prepare_agent_launch(
 /// for a launch whose repository is `repo_path`, handing the build
 /// parallelism to build tools through `env` where it is not already pinned. Settings come from
 /// the global profile config; `max_active` from the repository's persisted
-/// Issue Monitor preferences (missing preferences count as one agent).
+/// Issues preferences (missing preferences count as one agent).
 pub fn resolve_agent_resource_launch(
     profile_config_path: &Path,
     repo_path: &Path,
@@ -1164,7 +1164,7 @@ mod delivered_owner_launch_tests {
     }
 }
 
-/// Provenance carried only by Issue Monitor launches. Possessing this value is
+/// Provenance carried only by Issues launches. Possessing this value is
 /// not sufficient to trust a path: [`validate_issue_monitor_managed_codex_worktree`]
 /// still reconciles it with the resolved launch and Git's authoritative
 /// worktree inventory.
@@ -1176,7 +1176,7 @@ pub struct IssueMonitorTrustCandidate {
     pub review_dispatch: bool,
 }
 
-/// A canonical worktree whose Issue Monitor ownership and Git inventory have
+/// A canonical worktree whose Issues ownership and Git inventory have
 /// been checked together. Keep the path private so an arbitrary launch cwd
 /// cannot be passed directly to the Codex trust writer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1203,17 +1203,17 @@ pub fn issue_monitor_trust_candidate_from_feedback(
         return Ok(None);
     };
     let project_root = context.issue_monitor_project_root.clone().ok_or_else(|| {
-        format!("Issue Monitor launch for Issue #{issue_number} has no project root provenance")
+        format!("Issues launch for Issue #{issue_number} has no project root provenance")
     })?;
     let session_mode = context.issue_monitor_session_mode.ok_or_else(|| {
-        format!("Issue Monitor launch for Issue #{issue_number} has no session mode provenance")
+        format!("Issues launch for Issue #{issue_number} has no session mode provenance")
     })?;
     if !matches!(
         session_mode,
         gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
     ) {
         return Err(format!(
-            "Issue Monitor managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
+            "Issues managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
         ));
     }
     Ok(Some(IssueMonitorTrustCandidate {
@@ -1540,19 +1540,18 @@ pub fn validate_issue_monitor_managed_codex_worktree(
         return Ok(None);
     };
 
-    let candidate_root =
-        canonical_launch_path(&candidate.project_root, "Issue Monitor project root")?;
+    let candidate_root = canonical_launch_path(&candidate.project_root, "Issues project root")?;
     let actual_root = canonical_launch_path(actual_project_root, "launch project root")?;
     if candidate_root != actual_root {
         return Err(format!(
-            "Issue Monitor project root {} does not match launch project root {}",
+            "Issues project root {} does not match launch project root {}",
             candidate_root.display(),
             actual_root.display()
         ));
     }
     if config.linked_issue_number != Some(candidate.issue_number) {
         return Err(format!(
-            "Issue Monitor linked Issue #{} does not match launch metadata {:?}",
+            "Issues linked Issue #{} does not match launch metadata {:?}",
             candidate.issue_number, config.linked_issue_number
         ));
     }
@@ -1562,7 +1561,7 @@ pub fn validate_issue_monitor_managed_codex_worktree(
     ) || config.session_mode != candidate.session_mode
     {
         return Err(format!(
-            "Issue Monitor session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
+            "Issues session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
             candidate.session_mode, config.session_mode
         ));
     }
@@ -1570,13 +1569,13 @@ pub fn validate_issue_monitor_managed_codex_worktree(
     let expected_branch = format!("work/issue-{}", candidate.issue_number);
     if !candidate.review_dispatch && config.branch.as_deref() != Some(expected_branch.as_str()) {
         return Err(format!(
-            "Issue Monitor branch must be {expected_branch}, got {:?}",
+            "Issues branch must be {expected_branch}, got {:?}",
             config.branch
         ));
     }
 
     let configured_worktree = config.working_dir.as_deref().ok_or_else(|| {
-        "Issue Monitor Codex launch has no resolved working directory to validate".to_string()
+        "Issues Codex launch has no resolved working directory to validate".to_string()
     })?;
     let configured_worktree = canonical_launch_path(configured_worktree, "launch worktree")?;
     if candidate.review_dispatch {
@@ -1591,7 +1590,7 @@ pub fn validate_issue_monitor_managed_codex_worktree(
             || !is_ephemeral_worktree_path(&configured_worktree)
         {
             return Err(
-                "Issue Monitor review trust requires an isolated read-only detached launch".into(),
+                "Issues review trust requires an isolated read-only detached launch".into(),
             );
         }
         if !worktrees.iter().any(|worktree| {
@@ -1601,25 +1600,22 @@ pub fn validate_issue_monitor_managed_codex_worktree(
                     .is_ok_and(|path| path == configured_worktree)
         }) {
             return Err(
-                "Issue Monitor review checkout is not an authoritative detached gwt worktree"
-                    .into(),
+                "Issues review checkout is not an authoritative detached gwt worktree".into(),
             );
         }
         let reviewed_sha = config
             .ephemeral_base_ref
             .as_deref()
             .filter(|sha| !sha.is_empty())
-            .ok_or_else(|| "Issue Monitor review trust requires its reviewed SHA".to_string())?;
+            .ok_or_else(|| "Issues review trust requires its reviewed SHA".to_string())?;
         let head = gwt_core::process::run_git_logged(
             &["rev-parse", "--verify", "HEAD"],
             Some(&configured_worktree),
         )
-        .map_err(|error| {
-            format!("failed to inspect Issue Monitor review checkout HEAD: {error}")
-        })?;
+        .map_err(|error| format!("failed to inspect Issues review checkout HEAD: {error}"))?;
         if !head.status.success() || String::from_utf8_lossy(&head.stdout).trim() != reviewed_sha {
             return Err(format!(
-                "Issue Monitor review checkout HEAD does not match reviewed SHA {reviewed_sha}"
+                "Issues review checkout HEAD does not match reviewed SHA {reviewed_sha}"
             ));
         }
         return Ok(Some(ManagedCodexWorktree(configured_worktree)));
@@ -1627,7 +1623,7 @@ pub fn validate_issue_monitor_managed_codex_worktree(
     let authoritative_worktree =
         crate::launch_runtime::usable_worktree_path_for_branch(worktrees, &expected_branch)
             .ok_or_else(|| {
-                format!("Issue Monitor branch {expected_branch} has no authoritative gwt worktree")
+                format!("Issues branch {expected_branch} has no authoritative gwt worktree")
             })?;
     let authoritative_worktree =
         canonical_launch_path(&authoritative_worktree, "authoritative gwt worktree")?;

@@ -66,7 +66,7 @@ class DetectionTests(unittest.TestCase):
             closed_issue(3972, "2026-09-06T12:15:05Z", {"__typename": "PullRequest", "number": 4026}),
             # Closed by a commit message landing on main with the merge -> unintended.
             closed_issue(3973, "2026-09-06T12:15:06Z", {"__typename": "Commit", "oid": "abc123"}),
-            # Closed earlier through the API (Issue Monitor settlement) -> intended.
+            # Closed earlier through the API (Issues settlement) -> intended.
             closed_issue(3917, "2026-09-05T17:48:55Z", None),
             # Closed after the merge by a human -> intended.
             closed_issue(3990, "2026-09-06T13:00:00Z", None),

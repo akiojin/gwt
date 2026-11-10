@@ -330,10 +330,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     automatic.setAttribute('aria-label', 'Live facts');
     automatic.append(element('h3', '', 'Live facts'));
     const facts = current?.facts;
-    if (!facts) automatic.append(element('p', '', 'Loading Monitor facts…'));
+    if (!facts) automatic.append(element('p', '', 'Loading Issues facts…'));
     else {
       const issueLabel = issue => `${issue.issue_number ? `#${issue.issue_number}` : 'Unassigned issue'} ${issue.title || 'Unknown title'}`;
-      automatic.append(element('p', 'pm-chat__current-meta', `Monitor: ${facts.source === 'daemon' ? 'Connected' : facts.source === 'degraded_cache' ? 'Cached (Monitor disconnected)' : 'Unavailable'}`));
+      automatic.append(element('p', 'pm-chat__current-meta', `Issues: ${facts.source === 'daemon' ? 'Connected' : facts.source === 'degraded_cache' ? 'Cached (Issues disconnected)' : 'Unavailable'}`));
       if (facts.error) automatic.append(element('p', 'pm-chat__current-stale', facts.error));
       const windows = element('ul', '');
       for (const item of facts.active_windows || []) {

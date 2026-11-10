@@ -720,7 +720,7 @@ impl AgentLaunchBuilder {
     }
 
     /// SPEC-3248 P8a: mark this launch as subordinate to another session's
-    /// execution (e.g. the Issue Monitor's independent review dispatch) so no
+    /// execution (e.g. Issues' independent review dispatch) so no
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;

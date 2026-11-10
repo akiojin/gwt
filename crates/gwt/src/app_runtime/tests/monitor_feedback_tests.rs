@@ -352,7 +352,7 @@ fn monitor_scan_recovery_failure_emits_one_attention_notice() {
         Some("tab-a"),
     );
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
-    monitor.record_control_commit_error("Issue Monitor authority recovery is blocked: project-state/issue-monitor.shutdown-revoke is malformed");
+    monitor.record_control_commit_error("Issues authority recovery is blocked: project-state/issue-monitor.shutdown-revoke is malformed");
     let first = runtime.issue_monitor_daemon_status_events(&repo, Box::new(monitor.status_view()));
     assert_eq!(
         first

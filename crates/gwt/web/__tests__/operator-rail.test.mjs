@@ -21,7 +21,7 @@ import { createUiStateStore } from "../ui-state-store.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
 
-test("Monitor strip batches the latest status while model reads and other subscribers stay synchronous", async () => {
+test("Issues strip batches the latest status while model reads and other subscribers stay synchronous", async () => {
   const { subscribeIssueMonitorStatus } = await importOperatorShell();
   const fixture = await mountFixture();
   const frames = new Set();
@@ -158,7 +158,7 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
   );
 });
 
-test("Issue Monitor status strip cell stays visible and requests the canonical Issue entry", async () => {
+test("Issues status strip cell stays visible and requests the canonical Issue entry", async () => {
   const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const originalCustomEvent = globalThis.CustomEvent;
@@ -166,10 +166,10 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
   try {
     const cell = document.getElementById("op-strip-issue-monitor");
     const value = document.getElementById("op-strip-issue-monitor-value");
-    assert.ok(cell, "expected Issue Monitor status cell in the strip");
-    assert.ok(value, "expected Issue Monitor status value in the strip");
-    assert.equal(cell.getAttribute("aria-label"), "Open Monitor: Off");
-    assert.match(cell.getAttribute("title"), /^Open Monitor.*Issue Monitor: Off/);
+    assert.ok(cell, "expected Issues status cell in the strip");
+    assert.ok(value, "expected Issues status value in the strip");
+    assert.equal(cell.getAttribute("aria-label"), "Open Issues: Off");
+    assert.match(cell.getAttribute("title"), /^Open Issues.*Issues: Off/);
 
     const commands = [];
     document.addEventListener("op:command", (event) => {
@@ -186,8 +186,8 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
 
     assert.equal(value.textContent, "Run Q3 A1/2");
     assert.equal(cell.dataset.state, "launching");
-    assert.equal(cell.getAttribute("aria-label"), "Open Monitor: Run Q3 A1/2");
-    assert.match(cell.getAttribute("title"), /^Open Monitor.*Run Q3 A1\/2/);
+    assert.equal(cell.getAttribute("aria-label"), "Open Issues: Run Q3 A1/2");
+    assert.match(cell.getAttribute("title"), /^Open Issues.*Run Q3 A1\/2/);
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
 
     renderIssueMonitorStatus(document, {
@@ -211,7 +211,7 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
   }
 });
 
-test("Issue Monitor status strip distinguishes and clears a quota hold", async () => {
+test("Issues status strip distinguishes and clears a quota hold", async () => {
   const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const cell = document.getElementById("op-strip-issue-monitor");
@@ -251,7 +251,7 @@ test("Issue Monitor status strip distinguishes and clears a quota hold", async (
   assert.match(quotaHoldTitle, /Reset 2026-09-04T09:30:00Z/);
 });
 
-test("Issue Monitor status strip preserves higher-priority states around quota-hold metadata", async () => {
+test("Issues status strip preserves higher-priority states around quota-hold metadata", async () => {
   const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const cell = document.getElementById("op-strip-issue-monitor");

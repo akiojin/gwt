@@ -120,7 +120,7 @@ durable Session at launch, which is the only party that knows.
 
 | Launch mode | Detection | User Verification Handoff |
 |---|---|---|
-| `autonomous` | `execution.status` reports `launch_route: autonomous` — an unattended gwt Issue Monitor launch | **Waived.** Nobody is watching the session. |
+| `autonomous` | `execution.status` reports `launch_route: autonomous` — an unattended gwt Issues launch | **Waived.** Nobody is watching the session. |
 | `interactive` | `launch_route: manual`, or absent | Optional; required only when the owner explicitly requests a human check. |
 
 `GWT_AUTONOMOUS_EXECUTION` is a **legacy** signal. Treat it as autonomous when

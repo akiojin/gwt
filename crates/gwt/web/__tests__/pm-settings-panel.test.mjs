@@ -154,7 +154,7 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   panel.applyStatus(RUNNING_STATUS);
   const view = views[0];
   for (const [role, meaning] of [
-    ["pm-autonomy-status", /coordination.*Issue Monitor/i],
+    ["pm-autonomy-status", /coordination.*Issues/i],
     ["pm-pause-toggle", /keeping the Project Manager available/i],
     ["pm-loop-interval", /Minimum: 10 seconds/i],
     ["pm-auto-start", /automatically.*opens/i], ["pm-restart", /new conversation/i],
@@ -412,7 +412,7 @@ test("#3812 AC-5: Pause/Resume is unavailable before project hydration", () => {
   assert.deepEqual(sent, []);
 });
 
-test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Monitor", () => {
+test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Issues", () => {
   const { document, views, sent, panel } = fixture({ mounts: 2 });
   panel.applyStatus({ ...RUNNING_STATUS, is_running: false, paused: false });
   const toggle = required(views[0], '[data-role="pm-pause-toggle"]');

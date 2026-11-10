@@ -91,7 +91,7 @@ impl DaemonSubscriber {
 
     /// Spawn the GUI's daemon subscriber. This is deliberately separate from
     /// the general observer API: only this path acquires the daemon's
-    /// connection-bound Issue Monitor materializer lease.
+    /// connection-bound Issues materializer lease.
     pub fn spawn_materializer_with_resolver<R, F>(
         resolver: R,
         channels: Vec<String>,

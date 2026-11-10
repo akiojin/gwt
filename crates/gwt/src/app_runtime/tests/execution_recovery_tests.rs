@@ -3134,7 +3134,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     assert_eq!(settled_status.state, "idle");
     assert_eq!(settled_status.active_count, 0);
     assert_eq!(settled_status.last_error, status.last_error);
@@ -3149,7 +3149,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let item = inbox
         .iter()
         .find(|item| item.issue.number == 42)
@@ -3202,7 +3202,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     assert_eq!(
         status.state, "active",
         "the proven live physical pane still consumes capacity"
@@ -3218,7 +3218,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let item = inbox
         .iter()
         .find(|item| item.issue.number == 42)

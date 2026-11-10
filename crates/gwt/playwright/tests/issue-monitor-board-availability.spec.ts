@@ -68,7 +68,7 @@ test("Issue #5287 real backend journals Issue load and render causes in errors.l
       items: [{ issue: { number: 528701, title: "Diagnostic fixture", state: "open", labels: [] }, state: "queued" }],
     } }));
   }, theme);
-  // The live Monitor may refresh immediately after injection; the fixture E2E
+  // The live Issues may refresh immediately after injection; the fixture E2E
   // holds that response to assert visible failure and recovery. Here assert the
   // emitted diagnostic and actual backend ledger independently of refresh timing.
   await expect.poll(() => page.evaluate(() => ((window as any).__availabilityReports ?? [])

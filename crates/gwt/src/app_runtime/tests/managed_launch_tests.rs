@@ -4398,13 +4398,13 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
     )));
 }
 
-/// SPEC-3431 FR-065: a dead agent frees its Issue Monitor slot even while its
+/// SPEC-3431 FR-065: a dead agent frees its Issues slot even while its
 /// pane is kept on screen for diagnosis.
 ///
 /// `WindowProcessStatus::Error` on an agent window comes from `try_wait`
 /// (`gwt-terminal/src/pane.rs:175-186`), so the process is gone. Keeping the
 /// session record is a **display** concern (#3274: show the user the final
-/// screen instead of an empty window); the Issue Monitor's slot accounting is
+/// screen instead of an empty window); Issues' slot accounting is
 /// a different question and was wrongly gated on the same flag.
 ///
 /// Observed live: an agent hit its provider usage limit and exited. Its last

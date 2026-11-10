@@ -359,7 +359,7 @@ test.describe("Issue #5322 Settings", () => {
           .getByRole("checkbox", { name: "project-b", exact: true })).toBeChecked();
 
         // AC-1/2: opening an existing Settings window selects, focuses and
-        // reveals Issues execution settings. The Monitor gear uses the same route.
+        // reveals Issues execution settings. The Issues gear uses the same route.
         const originalWindow = await settings(page).getAttribute("data-id");
         expect(originalWindow).toBeTruthy();
         await openSettings(page, "agents");
@@ -408,7 +408,7 @@ test.describe("Issue #5322 Settings", () => {
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(false);
         await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
 
-        // Edit the remaining project-local controls while Monitor is stopped.
+        // Edit the remaining project-local controls while Issues is stopped.
         await autonomous(page).click();
         await expect.poll(async () => (await readPreferences(a)).autonomous_mode).toBe(true);
         await expect(autonomous(page)).toBeFocused();

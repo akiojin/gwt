@@ -86,7 +86,7 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
         [source.gwt_session_id, companion.gwt_session_id].includes(pane.session_id)).length).toBe(2);
       const sourceId = (await windows()).find((pane: any) => pane.session_id === source.gwt_session_id).id;
       const companionId = (await windows()).find((pane: any) => pane.session_id === companion.gwt_session_id).id;
-      // The scheduled Monitor close path must not make this pass. Its runtime
+      // The scheduled Issues close path must not make this pass. Its runtime
       // convergence observer remains active while automatic admission is off.
       await sendLiveGwtEvent(page, { kind: "set_issue_monitor_enabled", enabled: false });
       await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
@@ -156,7 +156,7 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
         ecr_status: "completed", settlement_severity: "warning", settlement_obligation_open: true,
         work_event_receipt_matches_current_generation: true,
       });
-      // Works membership arrives separately from the window catalog and Monitor
+      // Works membership arrives separately from the window catalog and Issues
       // census. Prove its real activity projection converged before capture.
       const currentWorks = page.getByRole("list", { name: "Current agent works" });
       await expect(currentWorks.locator(".work-row")).toHaveCount(1, { timeout: 30_000 });

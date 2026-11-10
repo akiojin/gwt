@@ -4783,7 +4783,7 @@ mod tests {
 
         let code = super::dispatch(&mut env, "gwtd");
 
-        assert_eq!(code, 0, "the resident PM may turn the Issue Monitor on");
+        assert_eq!(code, 0, "the resident PM may turn Issues on");
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs after the PM's ON");
         assert!(prefs.enabled, "the PM's ON must persist");
         assert!(prefs.autonomous_mode, "the PM's autonomous ON must persist");

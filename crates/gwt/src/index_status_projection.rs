@@ -552,6 +552,22 @@ fn verify_closure(
     let Some(view_compatibility) = semantic_compatibility(&descriptor.compatibility) else {
         return false;
     };
+    let expected_store = if descriptor.compatibility.writer_protocol == "file-index-v2-records" {
+        "records"
+    } else {
+        "store"
+    };
+    if [
+        &base.files_generation,
+        &base.files_docs_generation,
+        &overlay.files_generation,
+        &overlay.files_docs_generation,
+    ]
+    .iter()
+    .any(|reference| reference.store != expected_store)
+    {
+        return false;
+    }
     if base.base_generation_id != descriptor.base_generation_id
         || base.repo_hash != descriptor.repo_hash
         || overlay.overlay_generation_id != descriptor.overlay_generation_id

@@ -1329,7 +1329,7 @@ fn pm_launch_config_exports_project_state_scratch_dir() {
 /// — it subscribes, reconciles, registers Issues, and instructs launches with
 /// no user present. A permission prompt in that loop is a deadlock nobody is
 /// watching, so the PM always launches with permissions skipped. This mirrors
-/// `force_skip_permissions_for_autonomous` on the Issue Monitor's own
+/// `force_skip_permissions_for_autonomous` on Issues' own
 /// unattended launches; it is not a per-project choice, because a PM that can
 /// be configured into a hang is a PM that will eventually hang.
 #[test]

@@ -1894,7 +1894,7 @@ fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
     );
 }
 
-/// Issue #3702 AC-1: the Issue Monitor activity wake uses the same inject
+/// Issue #3702 AC-1: Issues activity wake uses the same inject
 /// path and must also wait while the user is mid-prompt.
 #[test]
 fn issue_monitor_activity_wake_does_not_inject_while_pm_pane_has_unsent_input() {

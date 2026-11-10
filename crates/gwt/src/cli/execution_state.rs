@@ -1,7 +1,7 @@
 //! Execution Control Record (SPEC-3248 P8a, FR-033/FR-034).
 //!
 //! Every Execution launch with a linked owner — SPEC or plain Issue, from
-//! Issue Monitor or Start Work — materializes a worktree-local Execution
+//! Issues or Start Work — materializes a worktree-local Execution
 //! Control Record **before prompt injection** (T-107). The record makes the
 //! execution lifecycle machine-visible independent of skill state: the Stop
 //! gate (`hook/execution_control_stop_check`) keeps the session working until
@@ -821,7 +821,7 @@ pub fn holder_status_permits_generation_reclaim(status: gwt_agent::AgentStatus) 
 
 /// Issue #3964: the refusal every fresh launch produces while an owner's
 /// generation is held by another Session. The GUI launch path formats it and
-/// the Issue Monitor keys its stranded-hold release on it, so the text has one
+/// Issues keys its stranded-hold release on it, so the text has one
 /// source.
 pub const EXECUTION_GENERATION_CONFLICT_PREFIX: &str = "an execution generation already exists for";
 
@@ -834,13 +834,13 @@ pub fn is_execution_generation_conflict(message: &str) -> bool {
 /// Issue #3964 AC-1 / AC-4: what still holds an owner's generation, read from
 /// the owner ledger alone.
 ///
-/// The Issue Monitor keeps an `agent_failed` row for every launch the held
+/// Issues keeps an `agent_failed` row for every launch the held
 /// generation refused. Once the generation is Blocked or Completed the hold
 /// protects nothing — a fresh launch takes the successor route — so the row
 /// can return to the queue without an operator.
 ///
 /// Issue #4042 AC-1: this is the single projection of a held generation. The
-/// Issue Monitor's reclaim probe and the launch refusal both read the holder
+/// Issues's reclaim probe and the launch refusal both read the holder
 /// through it, so the two can never describe one holder differently, and the
 /// generation id lets the Monitor tell a repeated refusal on the generation it
 /// just released from a refusal on a successor.
@@ -886,7 +886,7 @@ pub fn owner_generation_hold_from_ledger(
 
 /// The refusal a fresh launch produces while `owner`'s generation is held
 /// (Issue #3426 / #3964). Formatted from the same [`OwnerGenerationHold`] the
-/// Issue Monitor reclaim reads, so the text names the generation and the
+/// Issues reclaim reads, so the text names the generation and the
 /// holder state the reclaim will see; `None` describes a ledger without a
 /// current generation.
 #[must_use]
@@ -1020,7 +1020,7 @@ pub(crate) fn live_active_owner_generation(
 /// current generation from the repository's owner ledger tree.
 ///
 /// Resolved from the project root like [`owner_generation_hold_for_project`],
-/// because the Issue Monitor asks about owners whose worktree publication does
+/// because Issues asks about owners whose worktree publication does
 /// not exist: the launch it is about to retry is the one that never happened.
 pub fn blocking_prepared_transactions_for_project(
     project_root: &Path,
@@ -3392,7 +3392,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
             if runtime_releases {
                 diagnosis.recommended_recovery = "generation-reaper".to_string();
                 diagnosis.recommended_recovery_reason =
-                    "The holder is gone. The next Issue Monitor scan reaper releases this generation, and the launch after it succeeds."
+                    "The holder is gone. The next Issues scan reaper releases this generation, and the launch after it succeeds."
                         .to_string();
             } else if matches!(runtime, Some(ExactSessionRuntimeDisposition::Live)) {
                 diagnosis.recommended_recovery = "execution.continue".to_string();
@@ -3411,7 +3411,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     // Issue #4161: a Prepared successor/takeover fences the generation whatever
     // its status is, so it decides the recovery route. Recommending a launch
     // that the fence will refuse is how an owner became unlaunchable from both
-    // the Issue Monitor and the GUI with no route out.
+    // Issues and the GUI with no route out.
     diagnosis.blocking_prepared_transactions =
         blocking_prepared_transactions(&sessions_dir, &ledger);
     if !diagnosis.blocking_prepared_transactions.is_empty() {
@@ -3468,7 +3468,7 @@ fn diagnose_legacy_active_owner(
         diagnosis.generation_activated_at = Some(record.launched_at);
         diagnosis.holder_runtime = Some("unknown".to_string());
         diagnosis.recommended_recovery_reason =
-            "A legacy Active execution exists without a generation ledger. The next Issue Monitor launch will import it while preserving its holder and Active status, then refuse duplicate production. Read execution.status again after import and use its issue.monitor.stop recovery before requeueing."
+            "A legacy Active execution exists without a generation ledger. The next Issues launch will import it while preserving its holder and Active status, then refuse duplicate production. Read execution.status again after import and use its issue.monitor.stop recovery before requeueing."
                 .to_string();
         if has_generation_pointer {
             diagnosis.recommended_recovery = "unavailable".to_string();
@@ -4536,7 +4536,7 @@ pub enum GenerationPublicationHeal {
 /// a marker-less sibling and survives). Both used to make every later launch
 /// on the same worktree fail before the PTY with
 /// "execution generation pointer is missing after ledger ownership was
-/// established", burning the Issue Monitor retry budget on a state that only
+/// established", burning Issues retry budget on a state that only
 /// a rewrite could fix.
 ///
 /// The repair is limited to the exact invariant violation: the trusted
@@ -12291,7 +12291,7 @@ pub fn detect_owner_kind_evidence(repo_path: &Path, number: u64) -> Option<Execu
 }
 
 /// Derive the launch entrypoint for the record: the `$gwt-*` skill token from
-/// the initial prompt when the launch carried one (Issue Monitor / Start Work
+/// the initial prompt when the launch carried one (Issues / Start Work
 /// inject e.g. `$gwt-execute #N` as the trailing argv), `resume` for resumed
 /// sessions, `launch` otherwise.
 #[must_use]
@@ -13755,7 +13755,7 @@ fn base_execution_recoveries(
 /// (Issue #4217 FR-002).
 ///
 /// `GWT_AUTONOMOUS_EXECUTION` is written only when the project opted into
-/// unattended autonomous mode, so an Issue Monitor launch made while that
+/// unattended autonomous mode, so an Issues launch made while that
 /// preference reads false looked human-driven to every gate downstream — the
 /// agent then demanded a visual check from a human who was never there
 /// (#3777, #3697). The Session record is written by the launcher on every
@@ -13792,7 +13792,7 @@ pub fn session_launch_route_from_session(session: &gwt_agent::Session) -> gwt_ag
     session.launch_route
 }
 
-/// Whether the Issue Monitor composed this session's launch prompt.
+/// Whether Issues composed this session's launch prompt.
 ///
 /// The prompt is written into `launch_args` by the launcher and says so in
 /// its own words, so it is evidence from the launch route itself — the same
@@ -13802,7 +13802,7 @@ fn launched_by_issue_monitor(session: &gwt_agent::Session) -> bool {
     session
         .launch_args
         .iter()
-        .any(|arg| arg.contains(crate::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE))
+        .any(|arg| crate::issue_monitor::has_issue_monitor_launch_provenance(arg))
 }
 
 /// Whether a settlement reason blames a human who was supposed to look at the
@@ -20143,7 +20143,7 @@ mod tests {
     /// successor appends an Aborted event and leaves the original Prepared
     /// event in place. A guard that scans raw events instead of the latest
     /// event per operation therefore fences the generation forever: every
-    /// later launch is refused, the Issue Monitor records the same failure on
+    /// later launch is refused, Issues records the same failure on
     /// every scan, and the owner can only be worked on under a new number.
     #[test]
     fn aborted_successor_does_not_fence_a_completed_generation_forever() {
@@ -22374,7 +22374,7 @@ mod tests {
         );
     }
 
-    /// Issue #4042 AC-1: the Issue Monitor's reclaim probe and the launch
+    /// Issue #4042 AC-1: Issues' reclaim probe and the launch
     /// refusal used to read the holder Session through two separate code
     /// paths and describe it in two vocabularies (`unreadable` versus
     /// `durable Session unreadable`), which is how production ended up with a
@@ -22450,7 +22450,7 @@ mod tests {
         assert!(bare.contains("(unknown generation)"), "unexpected: {bare}");
     }
 
-    /// Issue #3964 AC-1 / AC-4: the Issue Monitor releases a stranded
+    /// Issue #3964 AC-1 / AC-4: Issues releases a stranded
     /// `agent_failed` row by asking whether the owner's generation is still
     /// Active. That question has to be answerable from a project root and
     /// from the owner ledger alone, because the refused launch never published
@@ -28940,11 +28940,30 @@ exit 1
             stamp_session_launch_route(session_id, route);
         }
 
-        /// Issue #4510 AC-1: a `Manual` stamp on a session the Issue Monitor
+        /// Issue #4510 AC-1: a `Manual` stamp on a session Issues
         /// started is a mis-stamp, not a human. The launch prompt the Monitor
         /// composed is in `launch_args`, and it says in its own words that no
         /// human authored it — so the route is read back from that, the same
         /// class of launch-route fact as the `gwt-auto-improve:` claim prefix.
+        #[test]
+        fn legacy_monitor_prompt_keeps_autonomous_route() {
+            let mut session = gwt_agent::Session::new(
+                Path::new("/fixture"),
+                "work/issue-5333",
+                gwt_agent::AgentId::Codex,
+            );
+            session.launch_route = gwt_agent::LaunchRoute::Manual;
+            session.launch_args = vec![concat!(
+                "$gwt-execute #5333\n\nThis prompt was generated by Issue",
+                " Monitor. It is not a statement, approval, or visual confirmation by a human user."
+            )
+            .to_string()];
+            assert_eq!(
+                session_launch_route_from_session(&session),
+                gwt_agent::LaunchRoute::Autonomous
+            );
+        }
+
         #[test]
         fn a_monitor_launch_reads_back_autonomous_despite_a_manual_stamp() {
             let _env_lock = crate::env_test_lock()

@@ -13061,7 +13061,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             )
             .expect("the actual publication must satisfy the receiver's wire envelope")
         else {
-            panic!("command progress must use the Issue Monitor control channel");
+            panic!("command progress must use Issues control channel");
         };
         assert_eq!(payload["source_pid"], std::process::id());
         assert_eq!(event["event"], "control");

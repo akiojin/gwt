@@ -9331,7 +9331,7 @@ impl OwnerState {
                 && !snapshot
                     .launch_args
                     .iter()
-                    .any(|arg| arg.contains(crate::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE))
+                    .any(|arg| crate::issue_monitor::has_issue_monitor_launch_provenance(arg))
             {
                 return None;
             }
@@ -10800,7 +10800,7 @@ impl OwnerState {
                     .clone()
                     .unwrap_or(super::launch_payload::LaunchFeedbackContext {
                         client_id: "__issue_monitor__".into(),
-                        title: "Issue Monitor".into(),
+                        title: "Issues".into(),
                         issue_monitor_issue_number: Some(issue_number),
                         issue_monitor_delivery_id: delivery_id.clone(),
                         issue_monitor_project_root: Some(self.root.clone()),
@@ -10918,7 +10918,7 @@ impl OwnerState {
             agent.monitor_owner = Some((self.root.clone(), self.host_instance_id.clone()));
             agent.feedback = Some(super::launch_payload::LaunchFeedbackContext {
                 client_id: "__issue_monitor__".into(),
-                title: "Issue Monitor".into(),
+                title: "Issues".into(),
                 issue_monitor_issue_number: Some(issue_number),
                 issue_monitor_delivery_id: delivery_id,
                 issue_monitor_project_root: Some(self.root.clone()),
@@ -12100,7 +12100,7 @@ fn retry_unclaimed_monitor_capacity(
     detail: &str,
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
-        detail.starts_with("Issue Monitor max_active reached (")
+        detail.starts_with("Issues max_active reached (")
             && !feedback.issue_monitor_review_dispatch
             && feedback.issue_monitor_autonomous_handoff.is_none()
             && current.load(Ordering::Acquire)
@@ -12339,7 +12339,7 @@ mod worker_tests {
         }))
         .unwrap();
         let current = AtomicBool::new(false);
-        let message = "Issue Monitor max_active reached (8/8) before launching Issue #42";
+        let message = "Issues max_active reached (8/8) before launching Issue #42";
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         assert!(
             !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)

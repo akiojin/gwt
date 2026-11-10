@@ -219,7 +219,7 @@ fn issue_monitor_non_head_selection_toast(
         issue = issue_number,
         agent = %selected_agent_id,
         reasons = %reasons,
-        "Issue Monitor selected a non-head launch candidate"
+        "Issues selected a non-head launch candidate"
     );
     Some(OutboundEvent::project(
         context.project_key.clone(),
@@ -327,57 +327,58 @@ fn resolve_silent_issue_monitor_launch_request_with_cache(
             .wizard
             .error
             .clone()
-            .unwrap_or_else(|| "Issue Monitor launch settings are incomplete".to_string())
+            .unwrap_or_else(|| "Issues launch settings are incomplete".to_string())
     })?;
-    let completion =
-        match completion {
-            LaunchWizardCompletion::ResolveRuntime(_config) => {
-                let branch_name = session.wizard.branch_name.clone();
-                let preferred_agent_id = previous_profiles.preferred_agent_id().map(str::to_string);
-                let mut hydration = match prepared_hydration {
-                    Some(hydration) => hydration,
-                    None => resolve_launch_wizard_runtime_context_hydration(
-                        project_root,
-                        branch_name,
-                        cache.clone(),
-                    )?,
-                };
-                // A silent fresh fallback must use the current saved Monitor
-                // profile, not a target-branch Quick Start Session. Leaving
-                // these entries populated lets the predecessor conversation
-                // overwrite the selected provider/model during hydration.
-                hydration.quick_start_entries.clear();
-                hydration.previous_profiles = Some(previous_profiles);
-                session.wizard.apply_runtime_context(hydration);
-                if let Some(agent_id) = preferred_agent_id {
-                    session
-                        .wizard
-                        .apply(gwt::LaunchWizardAction::SetAgent { agent_id });
-                }
+    let completion = match completion {
+        LaunchWizardCompletion::ResolveRuntime(_config) => {
+            let branch_name = session.wizard.branch_name.clone();
+            let preferred_agent_id = previous_profiles.preferred_agent_id().map(str::to_string);
+            let mut hydration = match prepared_hydration {
+                Some(hydration) => hydration,
+                None => resolve_launch_wizard_runtime_context_hydration(
+                    project_root,
+                    branch_name,
+                    cache.clone(),
+                )?,
+            };
+            // A silent fresh fallback must use the current saved Monitor
+            // profile, not a target-branch Quick Start Session. Leaving
+            // these entries populated lets the predecessor conversation
+            // overwrite the selected provider/model during hydration.
+            hydration.quick_start_entries.clear();
+            hydration.previous_profiles = Some(previous_profiles);
+            session.wizard.apply_runtime_context(hydration);
+            if let Some(agent_id) = preferred_agent_id {
                 session
                     .wizard
-                    .apply(gwt::LaunchWizardAction::UseStartMethod {
-                        method: gwt::LaunchWizardStartMethodKind::StartWithLastSettings,
-                    });
-                session.wizard.completion.take().ok_or_else(|| {
-                    session.wizard.error.clone().unwrap_or_else(|| {
-                        "Issue Monitor launch settings are incomplete".to_string()
-                    })
-                })?
+                    .apply(gwt::LaunchWizardAction::SetAgent { agent_id });
             }
-            completion => completion,
-        };
+            session
+                .wizard
+                .apply(gwt::LaunchWizardAction::UseStartMethod {
+                    method: gwt::LaunchWizardStartMethodKind::StartWithLastSettings,
+                });
+            session.wizard.completion.take().ok_or_else(|| {
+                session
+                    .wizard
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Issues launch settings are incomplete".to_string())
+            })?
+        }
+        completion => completion,
+    };
     match completion {
         LaunchWizardCompletion::Launch(config) => Ok(*config),
         LaunchWizardCompletion::UpdateAgent { .. } => {
-            Err("A CLI update is not an Issue Monitor launch".to_string())
+            Err("A CLI update is not an Issues launch".to_string())
         }
         LaunchWizardCompletion::FocusWindow { window_id } => Err(format!(
-            "Issue Monitor launch resolved to existing window {window_id}"
+            "Issues launch resolved to existing window {window_id}"
         )),
-        LaunchWizardCompletion::Cancelled => Err("Issue Monitor launch was cancelled".to_string()),
+        LaunchWizardCompletion::Cancelled => Err("Issues launch was cancelled".to_string()),
         LaunchWizardCompletion::ResolveRuntime(_) => {
-            Err("Issue Monitor launch runtime context is unresolved".to_string())
+            Err("Issues launch runtime context is unresolved".to_string())
         }
     }
 }
@@ -464,7 +465,7 @@ impl IssueMonitorGuiPhase {
             issue_number = self.issue_number, delivery_id = self.delivery_id.as_deref().unwrap_or("none"),
             elapsed_ms = self.elapsed_ms, prefs_stamp_elapsed_ms = self.prefs_stamp_elapsed_ms,
             captured_at = %self.captured_at.to_rfc3339(), thread = "gui", emitter = "worker",
-            "Issue Monitor launch phase");
+            "Issues launch phase");
     }
 }
 
@@ -547,7 +548,7 @@ fn record_issue_monitor_gui_phase_with_prefs(
 
 fn record_issue_monitor_worker_phase(phase: &'static str, started: &mut std::time::Instant) {
     let now = std::time::Instant::now();
-    tracing::info!(target: "gwt.launch.timing", phase, elapsed_ms = now.duration_since(*started).as_millis() as u64, thread = "worker", "Issue Monitor launch phase");
+    tracing::info!(target: "gwt.launch.timing", phase, elapsed_ms = now.duration_since(*started).as_millis() as u64, thread = "worker", "Issues launch phase");
     *started = now;
 }
 
@@ -1268,7 +1269,7 @@ fn prepare_issue_monitor_launch(
 /// SPEC #3200 Option A: build the independent-review agent's prompt from a
 /// dispatch — the adversarial review prompt (criteria + diff as untrusted data,
 /// bound to the reviewed SHA) plus the instruction to report the verdict back to
-/// the Issue Monitor daemon via the `ReviewVerdict` control for this exact SHA.
+/// Issues daemon via the `ReviewVerdict` control for this exact SHA.
 fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> String {
     let base = gwt::issue_monitor_review::build_review_prompt(
         &dispatch.required_criteria,
@@ -1289,7 +1290,7 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
          verdict for the originally reviewed SHA {sha} so the daemon's existing \
          head/closure gate can route recovery. Never review or approve the new head \
          under the old SHA.\n\n\
-         After producing the refreshed verdict JSON, report it to the Issue Monitor \
+         After producing the refreshed verdict JSON, report it to Issues \
          daemon by running the gwtd JSON operation `issue.monitor.review_verdict` \
          with params {{\"issue_number\": {issue}, \"reviewed_sha\": \"{sha}\", \
          \"verdict_raw\": <the verdict JSON as a string>}}. The daemon re-judges the \
@@ -1325,13 +1326,13 @@ use crate::usable_worktree_path_for_branch;
 /// Issue #4911 AC-6: shown next to `−` and returned when the last set is
 /// removed anyway.
 const AGENT_SETTINGS_LAST_SET_REASON: &str =
-    "At least one Agent Settings set is required: Issue Monitor needs an agent to launch.";
+    "At least one Agent Settings set is required: Issues needs an agent to launch.";
 const AGENT_SETTINGS_ALL_AGENTS_USED_REASON: &str =
     "Every available agent already has an Agent Settings set.";
 /// Issue #4911 AC-8: the form writes the whole pool, so it refuses to write
 /// over a pool it did not open.
 const AGENT_SETTINGS_CHANGED_ELSEWHERE_REASON: &str =
-    "Issue Monitor settings changed in another window or through issue.monitor.profiles.set \
+    "Issues settings changed in another window or through issue.monitor.profiles.set \
      while this form was open. Nothing was saved. Cancel and reopen the settings to edit the \
      current Agent Settings sets.";
 
@@ -1559,7 +1560,7 @@ impl AppRuntime {
                 .or_else(|| save_context.pool.first())
                 .and_then(|profile| profile.agent_member_id.clone());
             view.agent_options.clear();
-            view.title = "Configure Issue Monitor".to_string();
+            view.title = "Configure Issues".to_string();
             if view.primary_action_label == "Create and launch"
                 || view.primary_action_label == "Launch"
             {
@@ -3347,7 +3348,7 @@ impl AppRuntime {
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
-                    message: "Issue Monitor launch requires a Git project".to_string(),
+                    message: "Issues launch requires a Git project".to_string(),
                     issue_number: Some(issue_number),
                 },
             )
@@ -3424,7 +3425,7 @@ impl AppRuntime {
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "info".to_string(),
-                            message: "Issue Monitor launch prepared".to_string(),
+                            message: "Issues launch prepared".to_string(),
                             issue_number: Some(issue_number),
                         },
                     ),
@@ -3534,7 +3535,7 @@ impl AppRuntime {
                 .wizard
                 .base_branch_name
                 .clone()
-                .expect("Issue Monitor base branch"),
+                .expect("Issues base branch"),
             self.launch_wizard_cache.agent_options(),
             Vec::new(),
             previous_profiles,
@@ -3591,8 +3592,8 @@ impl AppRuntime {
             .into_iter()
             .map(|mut event| {
                 if let BackendEvent::IssueMonitorToast { message, .. } = &mut event.event {
-                    if message == "Issue Monitor launch prepared" {
-                        *message = "Issue Monitor settings opened".to_string();
+                    if message == "Issues launch prepared" {
+                        *message = "Issues settings opened".to_string();
                     }
                 }
                 if matches!(event.event, BackendEvent::LaunchWizardState { .. }) {
@@ -3632,7 +3633,7 @@ impl AppRuntime {
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
-                    message: "Issue Monitor settings require a Git project".to_string(),
+                    message: "Issues settings require a Git project".to_string(),
                     issue_number: None,
                 },
             )
@@ -3645,9 +3646,8 @@ impl AppRuntime {
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
-                    message:
-                        "Complete the project migration before configuring Issue Monitor settings"
-                            .to_string(),
+                    message: "Complete the project migration before configuring Issues settings"
+                        .to_string(),
                     issue_number: None,
                 },
             )
@@ -3741,7 +3741,7 @@ impl AppRuntime {
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "info".to_string(),
-                    message: "Issue Monitor settings opened".to_string(),
+                    message: "Issues settings opened".to_string(),
                     issue_number: None,
                 },
             ),
@@ -3794,7 +3794,7 @@ impl AppRuntime {
         wizard.issue_monitor_profile_choices(profiles)
     }
 
-    /// The Issue Monitor settings form, pre-filled from one saved profile. It
+    /// Issues settings form, pre-filled from one saved profile. It
     /// configures a launch profile rather than a launch, so it has no branch,
     /// session or Docker context of its own.
     fn issue_monitor_settings_wizard(
@@ -4253,7 +4253,7 @@ impl AppRuntime {
         if elapsed < super::ISSUE_MONITOR_MATERIALIZING_TTL {
             tracing::debug!(target: "gwt.launch.timing", issue_number = request.issue_number,
                 %delivery_id, %window_id, elapsed_ms = elapsed.as_millis(),
-                reason = "accepted owner projection pending", "Issue Monitor observation deferred");
+                reason = "accepted owner projection pending", "Issues observation deferred");
             return Vec::new();
         }
         let Some(super::IssueMonitorLaunchDeliveryState::Materializing {
@@ -4272,7 +4272,7 @@ impl AppRuntime {
                 .and_then(|state| state.project_owner_identity.as_ref()),
             window_exists = self.tracked_window_exists(window_id),
             reason = "accepted owner projection unavailable within materialization budget",
-            "Issue Monitor owner observation failed; accepted launch retained");
+            "Issues owner observation failed; accepted launch retained");
         self.issue_monitor_control_error_events(
             Some(&request.project_root), None,
             gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
@@ -4297,7 +4297,7 @@ impl AppRuntime {
         let Some(context) = self.project_context_for_root(project_root) else {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = delivery_id.as_deref().unwrap_or("none"),
-                reason = "project context unavailable", "Issue Monitor preparation deferred");
+                reason = "project context unavailable", "Issues preparation deferred");
             return Vec::new();
         };
         let request = super::DeferredIssueMonitorLaunch {
@@ -4310,7 +4310,7 @@ impl AppRuntime {
         if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
-                reason = "startup generation reaper pending", "Issue Monitor preparation deferred");
+                reason = "startup generation reaper pending", "Issues preparation deferred");
             deferred.push(request);
             return Vec::new();
         }
@@ -4319,7 +4319,7 @@ impl AppRuntime {
         if self.issue_monitor_issue_launch_pending(&context, issue_number, linked_issue_kind) {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
-                reason = "another launch worker owns this Issue", "Issue Monitor preparation deferred");
+                reason = "another launch worker owns this Issue", "Issues preparation deferred");
             self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
@@ -4362,7 +4362,7 @@ impl AppRuntime {
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id, %window_id,
-                            reason = "existing materialization still active", "Issue Monitor preparation deferred");
+                            reason = "existing materialization still active", "Issues preparation deferred");
                         return Vec::new();
                     }
                 }
@@ -4388,7 +4388,7 @@ impl AppRuntime {
                 }
                 Some(super::IssueMonitorLaunchDeliveryState::Rejecting { .. }) => {
                     tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id,
-                        reason = "owner preflight rejection pending", "Issue Monitor preparation deferred");
+                        reason = "owner preflight rejection pending", "Issues preparation deferred");
                     return Vec::new();
                 }
                 _ => {}
@@ -4398,7 +4398,7 @@ impl AppRuntime {
         if self.issue_monitor_launch_preparations.contains(&key) {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
-                reason = "same delivery preparation already registered", "Issue Monitor preparation deferred");
+                reason = "same delivery preparation already registered", "Issues preparation deferred");
             return Vec::new();
         }
         if self.issue_monitor_launch_lane_busy(&context)
@@ -4410,7 +4410,7 @@ impl AppRuntime {
         {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
-                reason = "project preparation lane or earlier queued delivery pending", "Issue Monitor preparation deferred");
+                reason = "project preparation lane or earlier queued delivery pending", "Issues preparation deferred");
             self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
@@ -4453,7 +4453,7 @@ impl AppRuntime {
                 let error = gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED;
                 tracing::error!(target: "gwt.launch.timing", issue_number,
                     delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = error,
-                    "Issue Monitor full preparation budget exhausted");
+                    "Issues full preparation budget exhausted");
                 let rejection = prefs.as_ref().and_then(|prefs|
                     capture_monitor_preflight_rejection(&request, prefs, &sessions_dir, error));
                 proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(IssueMonitorLaunchPrepared {
@@ -4502,7 +4502,7 @@ impl AppRuntime {
                             }
                         }
                         facts.choice = choice;
-                        tracing::info!(target: "gwt.launch.timing", issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none"), phase = "monitor_facts_reused", thread = "worker", "Issue Monitor launch phase");
+                        tracing::info!(target: "gwt.launch.timing", issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none"), phase = "monitor_facts_reused", thread = "worker", "Issues launch phase");
                         return Ok(IssueMonitorLaunchPreparation::Launch(facts));
                     }
                     prepare_issue_monitor_launch(
@@ -4785,7 +4785,7 @@ impl AppRuntime {
             Err(error) => {
                 tracing::error!(target: "gwt.launch.timing", issue_number = completion.issue_number,
                     delivery_id = completion.delivery_id.as_deref().unwrap_or("none"), reason = %error,
-                    "Issue Monitor owner could not settle preflight rejection");
+                    "Issues owner could not settle preflight rejection");
                 if let Some(delivery_id) = completion.delivery_id.as_ref() {
                     self.issue_monitor_launch_deliveries.remove(delivery_id);
                 }
@@ -4802,7 +4802,7 @@ impl AppRuntime {
             }
             _ => {
                 tracing::error!(target: "gwt.launch.timing", issue_number = completion.issue_number,
-                    reason = "preflight receipt operation changed", "Issue Monitor rejection receipt discarded");
+                    reason = "preflight receipt operation changed", "Issues rejection receipt discarded");
                 return Vec::new();
             }
         };
@@ -4849,7 +4849,7 @@ impl AppRuntime {
         if !repeated {
             tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
-                "Issue Monitor launch did not reach an owner pane");
+                "Issues launch did not reach an owner pane");
         }
         self.issue_monitor_launch_preparations
             .remove(&issue_monitor_launch_preparation_key(&context, &request));
@@ -4914,7 +4914,7 @@ impl AppRuntime {
         if !self.project_context_is_current(&context) {
             tracing::warn!(target: "gwt.launch.timing", issue_number = correlation_issue_number,
                 delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"),
-                reason = "project context changed", "Issue Monitor prepared launch discarded");
+                reason = "project context changed", "Issues prepared launch discarded");
             if let Some(attempt) = delivery.unsubmitted_handoff_attempt() {
                 return self.schedule_issue_monitor_launch_failure(
                     context,
@@ -4928,7 +4928,7 @@ impl AppRuntime {
         if !registered {
             tracing::warn!(target: "gwt.launch.timing", issue_number = correlation_issue_number,
                 delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"),
-                reason = "preparation registration missing", "Issue Monitor prepared launch discarded");
+                reason = "preparation registration missing", "Issues prepared launch discarded");
             return Vec::new();
         }
         if let Some(rejection) = rejection {
@@ -5080,7 +5080,7 @@ impl AppRuntime {
                     } else {
                         String::new()
                     };
-                    tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_revalidate", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), admission_stale, prefs_changed, provider_changed, changed_prefs_keys = %changed_prefs_keys, thread = "worker", "Issue Monitor launch facts re-evaluated against newer inputs");
+                    tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_revalidate", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), admission_stale, prefs_changed, provider_changed, changed_prefs_keys = %changed_prefs_keys, thread = "worker", "Issues launch facts re-evaluated against newer inputs");
                     let mut started = std::time::Instant::now();
                     revalidate_issue_monitor_launch_prepared(
                         &mut refreshed,
@@ -5122,7 +5122,7 @@ impl AppRuntime {
                     } else {
                         String::new()
                     };
-                    tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, revalidated, changed_prefs_keys = %changed_prefs_keys, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issue Monitor launch facts require revalidation");
+                    tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, revalidated, changed_prefs_keys = %changed_prefs_keys, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issues launch facts require revalidation");
                 });
             });
             let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)
@@ -5170,7 +5170,7 @@ impl AppRuntime {
         else {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = delivery_id.as_deref().unwrap_or("none"),
-                reason = "project tab unavailable", "Issue Monitor launch deferred before spawn");
+                reason = "project tab unavailable", "Issues launch deferred before spawn");
             return Vec::new();
         };
         // Issue #4378 AC-2: hold deliveries until the startup generation
@@ -5178,7 +5178,7 @@ impl AppRuntime {
         if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = delivery_id.as_deref().unwrap_or("none"),
-                reason = "startup generation reaper pending", "Issue Monitor launch deferred before spawn");
+                reason = "startup generation reaper pending", "Issues launch deferred before spawn");
             deferred.push(super::DeferredIssueMonitorLaunch {
                 project_root: project_root.to_path_buf(),
                 issue_number,
@@ -5199,7 +5199,7 @@ impl AppRuntime {
         {
             tracing::warn!(target: "gwt.launch.timing", issue_number,
                 delivery_id = delivery_id.as_deref().unwrap_or("none"),
-                reason = "another launch worker owns this Issue", "Issue Monitor launch deferred before spawn");
+                reason = "another launch worker owns this Issue", "Issues launch deferred before spawn");
             let reusable = prepared
                 .as_ref()
                 .and_then(|delivery| delivery.reusable_fresh_launch(launch_session_strategy));
@@ -5266,7 +5266,7 @@ impl AppRuntime {
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id, %window_id,
-                            reason = "existing materialization still active", "Issue Monitor launch deferred before spawn");
+                            reason = "existing materialization still active", "Issues launch deferred before spawn");
                         return Vec::new();
                     }
                     self.issue_monitor_launch_deliveries.remove(delivery_id);
@@ -5336,7 +5336,7 @@ impl AppRuntime {
                 }
                 Some(super::IssueMonitorLaunchDeliveryState::Rejecting { .. }) => {
                     tracing::warn!(target: "gwt.launch.timing", issue_number, %delivery_id,
-                        reason = "owner preflight rejection pending", "Issue Monitor launch deferred before spawn");
+                        reason = "owner preflight rejection pending", "Issues launch deferred before spawn");
                     return Vec::new();
                 }
                 None => {}
@@ -5413,7 +5413,7 @@ impl AppRuntime {
             Ok(None) => {
                 tracing::warn!(target: "gwt.launch.timing", issue_number,
                     delivery_id = delivery_id.as_deref().unwrap_or("none"),
-                    reason = "launch profile unavailable; configuration required", "Issue Monitor did not spawn");
+                    reason = "launch profile unavailable; configuration required", "Issues did not spawn");
                 if self.launch_wizard_for(&context).is_some() {
                     recovery_events.push(OutboundEvent::project(
                         context.project_key.clone(),
@@ -5421,7 +5421,7 @@ impl AppRuntime {
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "info".to_string(),
-                            message: "Issue Monitor settings are already open".to_string(),
+                            message: "Issues settings are already open".to_string(),
                             issue_number: Some(issue_number),
                         },
                     ));
@@ -5499,7 +5499,7 @@ impl AppRuntime {
                             notification_transition_id: None,
                             level: "error".to_string(),
                             message: format!(
-                                "Issue Monitor could not continue the exact answered session;{disposition}: {error}"
+                                "Issues could not continue the exact answered session;{disposition}: {error}"
                             ),
                             issue_number: Some(issue_number),
                         },
@@ -5533,7 +5533,7 @@ impl AppRuntime {
             if !self.runtimes.contains_key(window_id) {
                 tracing::warn!(target: "gwt.launch.timing", issue_number, %window_id,
                     reason = "persisted pane has no owner runtime for adoption",
-                    "Issue Monitor ignores unconnected pane metadata");
+                    "Issues ignores unconnected pane metadata");
                 return false;
             }
             self.issue_monitor_window_is_live(window_id)
@@ -5604,7 +5604,7 @@ impl AppRuntime {
         tracing::warn!(
             issue_number,
             window_id = %live_window_id,
-            "Issue Monitor launch refused: the Issue's worktree already has a live agent pane"
+            "Issues launch refused: the Issue's worktree already has a live agent pane"
         );
         let mut events = self.queue_issue_monitor_launch_delivery_ack(
             project_root,
@@ -5621,7 +5621,7 @@ impl AppRuntime {
                 notification_transition_id: None,
                 level: "warn".to_string(),
                 message: format!(
-                    "Issue Monitor did not open a second pane for #{issue_number}: window {live_window_id} is already working it"
+                    "Issues did not open a second pane for #{issue_number}: window {live_window_id} is already working it"
                 ),
                 issue_number: Some(issue_number),
             },
@@ -5825,7 +5825,7 @@ impl AppRuntime {
             .as_ref()
             .and_then(|prepared| prepared.admission.clone());
         if project_kind != gwt::ProjectKind::Git {
-            return Err("Issue Monitor launch requires a Git project".to_string());
+            return Err("Issues launch requires a Git project".to_string());
         }
         if migration_pending {
             return Err(
@@ -6129,7 +6129,7 @@ impl AppRuntime {
             config.resume_session_id = None;
         }
         // Issue #4217 (AC-2): every launch that reaches this path was started
-        // by the Issue Monitor, so the route is recorded before — and
+        // by Issues, so the route is recorded before — and
         // independently of — the `autonomous_mode` preference read below.
         launch_request.set_issue_monitor_launch_route();
         // SPEC #3200 T-040/FR-006: in unattended autonomous mode the
@@ -6206,7 +6206,7 @@ impl AppRuntime {
         };
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
+            title: "Issues".to_string(),
             issue_monitor_issue_number: Some(issue_number),
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.clone()),
@@ -6234,7 +6234,7 @@ impl AppRuntime {
                     },
                 )?,
             LaunchWizardLaunchRequest::Shell(_) => {
-                return Err("Issue Monitor automatic launch requires an agent target".to_string());
+                return Err("Issues automatic launch requires an agent target".to_string());
             }
         };
         record_issue_monitor_gui_phase(
@@ -6250,16 +6250,16 @@ impl AppRuntime {
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "warn".to_string(),
-                    message: format!("Issue Monitor started a fresh session because {reason}"),
+                    message: format!("Issues started a fresh session because {reason}"),
                     issue_number: Some(issue_number),
                 },
             ));
         }
         events.extend(non_head_selection_toast);
         let message = if review_prompt.is_some() {
-            "Issue Monitor independent review launched".to_string()
+            "Issues independent review launched".to_string()
         } else {
-            "Issue Monitor launch requested".to_string()
+            "Issues launch requested".to_string()
         };
         events.push(OutboundEvent::project(
             context.project_key.clone(),
@@ -6339,12 +6339,12 @@ impl AppRuntime {
                 // A materializing window reserves the native writer identity
                 // but is not yet a conversation that can accept an answer.
                 tracing::warn!(target: "gwt.launch.timing", issue_number, %holder_window_id,
-                    reason = "answer holder has not published its Session", "Issue Monitor answer delivery deferred");
+                    reason = "answer holder has not published its Session", "Issues answer delivery deferred");
                 return Ok((Some(Vec::new()), None));
             }
             let Some(runtime) = self.runtimes.get(&holder_window_id) else {
                 tracing::warn!(target: "gwt.launch.timing", issue_number, %holder_window_id,
-                    reason = "answer holder has no connected owner runtime", "Issue Monitor answer delivery deferred");
+                    reason = "answer holder has no connected owner runtime", "Issues answer delivery deferred");
                 return Ok((Some(Vec::new()), None));
             };
             let client = runtime.client.clone();
@@ -6358,7 +6358,7 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. }) if window_id == &holder_window_id)
             {
                 tracing::warn!(target: "gwt.launch.timing", issue_number, %holder_window_id,
-                    reason = "exact answer delivery already materializing", "Issue Monitor answer delivery deferred");
+                    reason = "exact answer delivery already materializing", "Issues answer delivery deferred");
                 return Ok((Some(Vec::new()), None));
             }
             self.issue_monitor_launch_deliveries.insert(
@@ -6478,7 +6478,7 @@ impl AppRuntime {
 
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
+            title: "Issues".to_string(),
             issue_monitor_issue_number: Some(issue_number),
             issue_monitor_delivery_id: delivery_id.clone(),
             issue_monitor_project_root: Some(project_root.to_path_buf()),
@@ -6503,7 +6503,7 @@ impl AppRuntime {
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "info".to_string(),
-                message: "Issue Monitor resumed existing session".to_string(),
+                message: "Issues resumed existing session".to_string(),
                 issue_number: Some(issue_number),
             },
         ));
@@ -7001,7 +7001,7 @@ impl AppRuntime {
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited => {
                 Ok(super::ManualLaunchGenerationDisposition::Unknown(
-                    "The holder's PTY process has exited. The next Issue Monitor scan releases its generation; retry after that scan."
+                    "The holder's PTY process has exited. The next Issues scan releases its generation; retry after that scan."
                         .to_string(),
                 ))
             }
@@ -7812,7 +7812,7 @@ impl AppRuntime {
         } = save_context;
         let LaunchWizardLaunchRequest::Agent(config) = config else {
             session.wizard.error =
-                Some("Issue Monitor settings require an agent launch target".to_string());
+                Some("Issues settings require an agent launch target".to_string());
             self.store_launch_wizard(session);
             return vec![self.launch_wizard_state_outbound(&context)];
         };
@@ -7848,8 +7848,7 @@ impl AppRuntime {
                 }
                 if prefs.advance_effect_authority_epoch().is_none() {
                     return Err(
-                        "Failed to save Issue Monitor settings: authority epoch overflow"
-                            .to_string(),
+                        "Failed to save Issues settings: authority epoch overflow".to_string()
                     );
                 }
                 if let Some(profiles) = sets.as_ref() {
@@ -7886,8 +7885,7 @@ impl AppRuntime {
                 return vec![self.launch_wizard_state_outbound(&context)];
             }
             Err(error) => {
-                session.wizard.error =
-                    Some(format!("Failed to save Issue Monitor settings: {error}"));
+                session.wizard.error = Some(format!("Failed to save Issues settings: {error}"));
                 self.store_launch_wizard(session);
                 return vec![self.launch_wizard_state_outbound(&context)];
             }
@@ -7900,7 +7898,7 @@ impl AppRuntime {
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "info".to_string(),
-                    message: "Issue Monitor settings saved".to_string(),
+                    message: "Issues settings saved".to_string(),
                     issue_number,
                 },
             ),
@@ -8687,7 +8685,7 @@ fn issue_monitor_owner_launch_profile_choice(
             );
             let index = selection.selected.ok_or_else(|| {
                 codex_config_error
-                    .unwrap_or("No eligible Issue Monitor launch candidate: every provider is held")
+                    .unwrap_or("No eligible Issues launch candidate: every provider is held")
                     .to_string()
             })?;
             let profile = pool[index].clone();
@@ -8730,7 +8728,7 @@ fn issue_monitor_owner_launch_profile_choice(
     )
     .ok_or_else(|| {
         codex_config_error
-            .unwrap_or("No eligible Issue Monitor automatic tier candidate")
+            .unwrap_or("No eligible Issues automatic tier candidate")
             .to_string()
     })?;
     Ok(IssueMonitorLaunchProfileChoice {
@@ -8791,7 +8789,7 @@ fn issue_monitor_launch_profile_choice(
                     tracing::warn!(
                         project_root = %project_root.display(),
                         skipped = ?selection.skipped,
-                        "every Issue Monitor launch candidate is held; previewing the saved pool head"
+                        "every Issues launch candidate is held; previewing the saved pool head"
                     );
                     (0, Vec::new())
                 }

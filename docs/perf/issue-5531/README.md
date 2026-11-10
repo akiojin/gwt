@@ -61,7 +61,7 @@ second mutable response state.
   `--project=chromium-dark` or `--project=chromium-light` to collect one theme
   independently. Each accepted after theme has its own launch manifest.
 - Use this checkout's `target/debug/gwt.exe`, a fresh HOME, disabled PM and
-  Issue Monitor, managed-hook fallback, and a recorded owned PID. Compare
+  Issues, managed-hook fallback, and a recorded owned PID. Compare
   all ten measured frontend assets with the assets actually served.
 - Minimize the native Chromium window. A private Playwright 1.49.1 copy
   disables its forced focus emulation, and Chromium's default background

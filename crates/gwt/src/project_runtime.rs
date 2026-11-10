@@ -178,7 +178,7 @@ pub fn spawn_unbound_pane_with_attempt_observer(
         };
         // Unbound launches and automatic restores need the same physical
         // process observation as producing launches. This does not grant
-        // execution authority or reserve an Issue Monitor slot.
+        // execution authority or reserve an Issues slot.
         let observation = (|| -> std::io::Result<()> {
             let child_pid = child_pid
                 .ok_or_else(|| std::io::Error::other("agent PTY process id is unavailable"))?;

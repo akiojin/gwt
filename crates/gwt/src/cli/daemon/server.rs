@@ -1227,10 +1227,10 @@ async fn run_bound_server(
     match tokio::time::timeout(worker_grace, &mut issue_monitor_worker).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            tracing::warn!(error = %error, "issue monitor worker failed during daemon shutdown");
+            tracing::warn!(error = %error, "Issues worker failed during daemon shutdown");
         }
         Err(_) => {
-            tracing::error!("issue monitor worker exceeded daemon shutdown grace");
+            tracing::error!("Issues worker exceeded daemon shutdown grace");
             issue_monitor_worker.abort();
         }
     }
@@ -1559,7 +1559,7 @@ fn spawn_issue_monitor_worker_with_lease(
                 loaded.recovery_blocked = true;
                 loaded.monitor.record_authority_recovery_blocked(
                     format!(
-                        "Issue Monitor authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved. {}",
+                        "Issues authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved. {}",
                         prefs_path.display(),
                         issue_monitor_shutdown_revoke_marker_path(&prefs_path).display(),
                         ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
@@ -1643,7 +1643,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     return;
                 }
                 Err(error) => {
-                    tracing::error!(%error, "Issue Monitor authority retry worker failed");
+                    tracing::error!(%error, "Issues authority retry worker failed");
                     hub.close_issue_monitor_controls();
                     return;
                 }
@@ -1719,12 +1719,12 @@ fn spawn_issue_monitor_worker_with_lease(
                     .iter()
                     .map(|record| record.issue_number)
                     .collect::<Vec<_>>(),
-                "issue monitor: deferring review resume until durable effects reconcile"
+                "Issues: deferring review resume until durable effects reconcile"
             );
         }
         publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
         let Some(mut control_rx) = control_rx else {
-            tracing::error!("issue monitor control receiver already claimed; stopping worker");
+            tracing::error!("Issues control receiver already claimed; stopping worker");
             hub.close_issue_monitor_controls();
             return;
         };
@@ -1869,7 +1869,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                     continue;
                                 }
                                 let Some(next_revision) = revision.checked_add(1) else {
-                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    tracing::error!("Issues revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
                                     close_issue_monitor_control_lane(
                                         &hub,
@@ -1957,7 +1957,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                         captured_revision = revision,
                                         invalidates_scan = !launch_authority_unchanged || capacity_policy_changed,
                                         capacity_policy_changed,
-                                        "Issue Monitor control scan fence"
+                                        "Issues control scan fence"
                                     );
                                     if !launch_authority_unchanged || capacity_policy_changed {
                                         revision = next_revision;
@@ -2018,7 +2018,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     };
                     let Some(next_revision) = revision.checked_add(1) else {
                         tracing::error!(
-                            "issue monitor revision exhausted before control retry; stopping worker"
+                            "Issues revision exhausted before control retry; stopping worker"
                         );
                         close_issue_monitor_control_lane(
                             &hub,
@@ -2158,7 +2158,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     if let Some(admission) = in_flight_admission.as_mut() {
                         admission.watchdog_fired = true;
                         admission.handle.abort();
-                        tracing::warn!("immediate Issue Monitor admission reached its deadline");
+                        tracing::warn!("immediate Issues admission reached its deadline");
                     }
                 }
                 (captured_revision, captured_authority_epoch, captured_deadline, admission_result) = wait_for_issue_monitor_scan(&mut in_flight_admission) => {
@@ -2181,7 +2181,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // starve the candidate refresh it is waiting for.
                                 if monitor.prefs() != before {
                                     let Some(next_revision) = revision.checked_add(1) else {
-                                        tracing::error!("issue monitor revision exhausted; stopping worker");
+                                        tracing::error!("Issues revision exhausted; stopping worker");
                                         break;
                                     };
                                     revision = next_revision;
@@ -2196,11 +2196,11 @@ fn spawn_issue_monitor_worker_with_lease(
                             }
                         }
                         Ok(Err(failure)) => {
-                            tracing::warn!(error = %failure, "immediate Issue Monitor admission failed");
+                            tracing::warn!(error = %failure, "immediate Issues admission failed");
                             scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                         }
                         Err(error) => {
-                            tracing::warn!(%error, "immediate Issue Monitor admission worker failed");
+                            tracing::warn!(%error, "immediate Issues admission worker failed");
                             scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                         }
                     }
@@ -2214,7 +2214,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         &scope.project_root,
                     ) {
                         let Some(next_revision) = revision.checked_add(1) else {
-                            tracing::error!("issue monitor revision exhausted; stopping worker");
+                            tracing::error!("Issues revision exhausted; stopping worker");
                             break;
                         };
                         revision = next_revision;
@@ -2249,7 +2249,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             };
                             if accepted {
                                 let Some(next_revision) = revision.checked_add(1) else {
-                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    tracing::error!("Issues revision exhausted; stopping worker");
                                     break;
                                 };
                                 revision = next_revision;
@@ -2264,11 +2264,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                     chrono::Utc::now()
                                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                                     "outer-watchdog",
-                                    "issue monitor scan completed at or after the outer watchdog boundary".into(),
+                                    "Issues scan completed at or after the outer watchdog boundary".into(),
                                     &scope.project_root,
                                 );
                                 let Some(next_revision) = revision.checked_add(1) else {
-                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    tracing::error!("Issues revision exhausted; stopping worker");
                                     break;
                                 };
                                 revision = next_revision;
@@ -2301,7 +2301,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 &scope.project_root,
                             );
                             let Some(next_revision) = revision.checked_add(1) else {
-                                tracing::error!("issue monitor revision exhausted; stopping worker");
+                                tracing::error!("Issues revision exhausted; stopping worker");
                                 break;
                             };
                             revision = next_revision;
@@ -2318,7 +2318,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 &scope.project_root,
                             );
                             let Some(next_revision) = revision.checked_add(1) else {
-                                tracing::error!("issue monitor revision exhausted; stopping worker");
+                                tracing::error!("Issues revision exhausted; stopping worker");
                                 break;
                             };
                             revision = next_revision;
@@ -2361,12 +2361,12 @@ fn spawn_issue_monitor_worker_with_lease(
                                 let settled = match transition {
                                     Ok(settled) => settled,
                                     Err(error) => {
-                                        tracing::warn!(%error, "issue monitor effect result commit failed");
+                                        tracing::warn!(%error, "Issues effect result commit failed");
                                         false
                                     }
                                 };
                                 let Some(next_revision) = revision.checked_add(1) else {
-                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    tracing::error!("Issues revision exhausted; stopping worker");
                                     break;
                                 };
                                 revision = next_revision;
@@ -2389,7 +2389,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         Err(error) => {
                             tracing::warn!(
                                 error = %error,
-                                "issue monitor effect executor task failed"
+                                "Issues effect executor task failed"
                             );
                         }
                     }
@@ -2420,7 +2420,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             );
                         }
                         let Some(next_revision) = revision.checked_add(1) else {
-                            tracing::error!("issue monitor revision exhausted; stopping worker");
+                            tracing::error!("Issues revision exhausted; stopping worker");
                             break;
                         };
                         revision = next_revision;
@@ -2502,7 +2502,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         // completing: it must also run while that lane is stuck.
                         if expire_daemon_windowless_launches(&prefs_path, &mut monitor, &scope.project_root) {
                             let Some(next_revision) = revision.checked_add(1) else {
-                                tracing::error!("issue monitor revision exhausted; stopping worker");
+                                tracing::error!("Issues revision exhausted; stopping worker");
                                 break;
                             };
                             revision = next_revision;
@@ -2844,7 +2844,7 @@ fn load_issue_monitor_state_for_daemon_with_lease(
             let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
             monitor.record_authority_recovery_blocked(
                 format!(
-                    "Issue Monitor authority recovery is blocked; prefs={} authority_marker={}; automation disabled and durable state preserved: {error}. {}",
+                    "Issues authority recovery is blocked; prefs={} authority_marker={}; automation disabled and durable state preserved: {error}. {}",
                     prefs_path.display(),
                     issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
                     ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
@@ -2909,7 +2909,7 @@ fn settle_issue_monitor_effect_authority_for_shutdown(
         }
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "Issue Monitor authority fence identity changed during shutdown",
+            "Issues authority fence identity changed during shutdown",
         )),
         Err(error) => Err(error),
     };
@@ -2917,7 +2917,7 @@ fn settle_issue_monitor_effect_authority_for_shutdown(
         tracing::error!(
             error = %error,
             path = %issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
-            "issue monitor lifetime authority fence is not durably owned during shutdown"
+            "Issues lifetime authority fence is not durably owned during shutdown"
         );
     }
 
@@ -2938,7 +2938,7 @@ fn settle_issue_monitor_effect_authority_for_shutdown(
                 tracing::error!(
                     error = %error,
                     path = %prefs_path.display(),
-                    "issue monitor abnormal-exit authority snapshot is unreadable"
+                    "Issues abnormal-exit authority snapshot is unreadable"
                 );
                 false
             }
@@ -2952,7 +2952,7 @@ fn settle_issue_monitor_effect_authority_for_shutdown(
                 tracing::error!(
                     error = %error,
                     path = %issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
-                    "issue monitor authority is revoked but lifetime fence clear is unsettled"
+                    "Issues authority is revoked but lifetime fence clear is unsettled"
                 );
                 IssueMonitorShutdownAuthoritySettlement::Unsettled
             }
@@ -2962,7 +2962,7 @@ fn settle_issue_monitor_effect_authority_for_shutdown(
     } else {
         tracing::error!(
             path = %prefs_path.display(),
-            "fatal: issue monitor lifetime fence and authority revocation are both unsettled"
+            "fatal: Issues lifetime fence and authority revocation are both unsettled"
         );
         IssueMonitorShutdownAuthoritySettlement::Unsettled
     }
@@ -2998,14 +2998,14 @@ fn revoke_issue_monitor_effect_authority_for_shutdown(
             true
         }
         Ok((_, false)) => {
-            tracing::error!("issue monitor authority epoch exhausted during shutdown");
+            tracing::error!("Issues authority epoch exhausted during shutdown");
             false
         }
         Err(error) => {
             refresh_monitor_after_wait_error(monitor, &error);
             tracing::error!(
                 error = %error,
-                "issue monitor failed to persist shutdown authority revocation"
+                "Issues failed to persist shutdown authority revocation"
             );
             false
         }
@@ -3047,7 +3047,7 @@ fn expire_issue_monitor_scan_at_watchdog(
         monitor,
         now,
         "outer-watchdog",
-        "issue monitor scan timed out at outer watchdog stage".into(),
+        "Issues scan timed out at outer watchdog stage".into(),
         project_root,
     );
     true
@@ -3843,7 +3843,7 @@ fn record_issue_monitor_control_recovery_blocked(
         "accepted control could not be applied"
     };
     monitor.record_authority_recovery_blocked(format!(
-        "Issue Monitor authority recovery is blocked: {cause}; control={control:?}; \
+        "Issues authority recovery is blocked: {cause}; control={control:?}; \
          effect_authority_epoch={epoch}; prefs={} authority_marker={}. {}",
         prefs_path.display(),
         issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
@@ -5179,7 +5179,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             }
             if receipt_convergence_failed {
                 monitor.record_control_commit_error(
-                    "issue monitor control receipt matched durable state but volatile convergence was not exact; ACK withheld",
+                    "Issues control receipt matched durable state but volatile convergence was not exact; ACK withheld",
                 );
                 return IssueMonitorControlCommit::RetryableFailure;
             }
@@ -5201,7 +5201,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "issue monitor control prefs transaction failed; volatile mutation revoked"
+                "Issues control prefs transaction failed; volatile mutation revoked"
             );
             // A parent-directory sync can fail after the atomic rename became
             // visible. Adopt the applied candidate only when a lock-free reread
@@ -5228,7 +5228,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             // that serialized snapshot equality cannot observe.
             refresh_monitor_after_wait_error(monitor, &error);
             monitor.record_control_commit_error(format!(
-                "issue monitor control commit failed at prefs-lock stage: {error}"
+                "Issues control commit failed at prefs-lock stage: {error}"
             ));
             IssueMonitorControlCommit::RetryableFailure
         }
@@ -7290,7 +7290,7 @@ fn scan_join_failure_fallback(
         &mut preserved,
         now,
         "worker-join",
-        format!("issue monitor worker join failed: {error}"),
+        format!("Issues worker join failed: {error}"),
         project_root,
     );
     preserved
@@ -7384,7 +7384,7 @@ fn expire_daemon_windowless_launches(
         }
         Err(error) => {
             refresh_monitor_after_wait_error(monitor, &error);
-            tracing::warn!(%error, "issue monitor launch deadline transaction failed");
+            tracing::warn!(%error, "Issues launch deadline transaction failed");
             false
         }
     }
@@ -7419,7 +7419,7 @@ fn persist_daemon_issue_monitor_state_observed(
             refresh_monitor_after_wait_error(monitor, &error);
             tracing::warn!(
                 error = %error,
-                "issue monitor daemon prefs transaction failed"
+                "Issues daemon prefs transaction failed"
             );
             false
         }
@@ -7449,7 +7449,7 @@ fn resume_deferred_restart_reviews(
     deferred_restart_reviews.clear();
     tracing::info!(
         issues = ?resumed,
-        "issue monitor: resumed startup-deferred reviews after durable effects reconciled"
+        "Issues: resumed startup-deferred reviews after durable effects reconciled"
     );
 }
 
@@ -7468,7 +7468,7 @@ fn commit_issue_monitor_scan_if_current(
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         tracing::info!(target: "gwt.issue_monitor.scan", project_root = %project_root.display(),
             captured_authority_epoch, current_authority_epoch = monitor.effect_authority_epoch(),
-            reason = "authority-changed", "Issue Monitor scan proposal rejected");
+            reason = "authority-changed", "Issues scan proposal rejected");
         return false;
     }
     scanned.merge_scan_observations_from(monitor);
@@ -7572,7 +7572,7 @@ fn commit_issue_monitor_scan_if_current(
             refresh_monitor_after_wait_error(monitor, &error);
             tracing::warn!(
                 error = %error,
-                "issue monitor scan proposal commit failed"
+                "Issues scan proposal commit failed"
             );
             false
         }
@@ -7602,7 +7602,7 @@ fn accept_completed_issue_monitor_scan(
         tracing::info!(target: "gwt.issue_monitor.scan", project_root = %project_root.display(),
             captured_revision, current_revision,
             reason = if expired { "deadline-expired" } else { "revision-changed" },
-            "Issue Monitor scan proposal rejected");
+            "Issues scan proposal rejected");
         return false;
     }
     commit_issue_monitor_scan_if_current(
@@ -7687,7 +7687,7 @@ fn fence_next_issue_monitor_effect_with_permit(
             refresh_monitor_after_wait_error(monitor, &error);
             tracing::warn!(
                 error = %error,
-                "issue monitor effect fence commit failed"
+                "Issues effect fence commit failed"
             );
             None
         }
@@ -7915,7 +7915,7 @@ fn expire_issue_monitor_effect_at_watchdog(
     // The exact Attempting tuple stays durable. Its remote result is unknown;
     // the next executor pass must begin with fresh readback before any retry.
     monitor.record_control_commit_error(
-        "issue monitor effect executor timed out at outer watchdog stage; remote outcome unknown",
+        "Issues effect executor timed out at outer watchdog stage; remote outcome unknown",
     );
     true
 }
@@ -8378,7 +8378,7 @@ fn commit_issue_monitor_effect_result(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "issue monitor effect result commit failed"
+                "Issues effect result commit failed"
             );
             false
         }
@@ -8819,7 +8819,7 @@ fn try_commit_issue_monitor_effect_result(
                 _ => {
                     tracing::error!(
                         effect = %completed.effect.effect_id,
-                        "issue monitor effect result/payload mismatch"
+                        "Issues effect result/payload mismatch"
                     );
                 }
             }
@@ -9178,7 +9178,7 @@ fn scan_issue_monitor_once_blocking(
         if !proposed.is_empty() {
             tracing::info!(
                 issues = ?proposed,
-                "issue monitor proposed merged issue settlements"
+                "Issues proposed merged issue settlements"
             );
         }
     }
@@ -9363,7 +9363,7 @@ fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::Issue
     let mut status = monitor.agent_status_at(&now);
     crate::cli::issue::attach_github_budget(&mut status);
     hub.set_issue_monitor_status(
-        serde_json::to_value(status).expect("Issue Monitor agent status serializes"),
+        serde_json::to_value(status).expect("Issues agent status serializes"),
     );
 }
 
@@ -9649,7 +9649,7 @@ async fn handle_connection(
             }
             Ok(ClientFrame::Publish { channel, payload }) => {
                 if channel == crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL {
-                    // Issue Monitor control is a command, not a lossy
+                    // Issues control is a command, not a lossy
                     // notification. Await the bounded worker queue first so an
                     // Ack means the exact frame was accepted. During daemon
                     // startup an unready-worker Ack would make the GUI skip its
@@ -9663,7 +9663,7 @@ async fn handle_connection(
                         target: "gwtd::daemon",
                         %channel,
                         queued,
-                        "issue monitor control frame accepted by worker queue"
+                        "Issues control frame accepted by worker queue"
                     );
                     continue;
                 }
@@ -12307,7 +12307,7 @@ exit 0
         super::try_commit_issue_monitor_effect_result(prefs_path, monitor, completed)
             .unwrap_or_else(|error| {
                 panic!(
-                    "issue monitor effect commit transaction failed on {}: {error}",
+                    "Issues effect commit transaction failed on {}: {error}",
                     prefs_path.display()
                 )
             })
@@ -12343,7 +12343,7 @@ exit 0
         );
         assert!(
             commit != super::IssueMonitorControlCommit::RetryableFailure,
-            "issue monitor control transaction failed on {}: {}",
+            "Issues control transaction failed on {}: {}",
             prefs_path.display(),
             monitor
                 .status_view()
@@ -12965,7 +12965,7 @@ exit 0
         );
     }
 
-    /// Issue #3596: every Issue Monitor frame names the actual worker store,
+    /// Issue #3596: every Issues frame names the actual worker store,
     /// and its status projection stays semantically aligned with the fresh
     /// agent-facing snapshot for that same store.
     #[test]
@@ -12995,7 +12995,7 @@ exit 0
         let hub = BroadcastHub::new();
         let _control_receiver = hub
             .take_issue_monitor_control_receiver()
-            .expect("ready Issue Monitor projection");
+            .expect("ready Issues projection");
         let mut receiver = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
 
         super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -13005,7 +13005,7 @@ exit 0
         let mut saw_inbox = false;
         while let Ok(frame) = receiver.try_recv() {
             let DaemonFrame::Event { channel, payload } = frame else {
-                panic!("Issue Monitor publisher emitted a non-event frame");
+                panic!("Issues publisher emitted a non-event frame");
             };
             assert_eq!(channel, crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
             assert_eq!(
@@ -13027,11 +13027,9 @@ exit 0
         assert!(frame_count >= 2, "status and inbox snapshots must publish");
         assert!(saw_inbox, "inbox snapshot must publish");
         let status: crate::IssueMonitorStatusView = status.expect("status event");
-        let fresh_status: crate::IssueMonitorAgentStatus = serde_json::from_value(
-            hub.issue_monitor_status()
-                .expect("fresh hub Issue Monitor status"),
-        )
-        .expect("deserialize fresh hub status");
+        let fresh_status: crate::IssueMonitorAgentStatus =
+            serde_json::from_value(hub.issue_monitor_status().expect("fresh hub Issues status"))
+                .expect("deserialize fresh hub status");
         assert_eq!(status.enabled, fresh_status.enabled);
         assert_eq!(status.autonomous_mode, fresh_status.autonomous_mode);
         assert_eq!(status.max_active_agents, fresh_status.max_active);
@@ -13471,9 +13469,8 @@ exit 0
             .write(true)
             .truncate(false)
             .open(lock_path)
-            .expect("open issue monitor prefs lock");
-        lock.lock_exclusive()
-            .expect("hold issue monitor prefs lock");
+            .expect("open Issues prefs lock");
+        lock.lock_exclusive().expect("hold Issues prefs lock");
         lock
     }
 
@@ -14771,7 +14768,7 @@ exit 0
                 let request = worker_rx.recv().await.expect("accepted request");
                 let _guard = super::IssueMonitorControlLaneGuard::new(hub);
                 let _request_owns_uncommitted_receipt = request;
-                panic!("simulated issue monitor worker panic");
+                panic!("simulated Issues worker panic");
             }
         });
         let publisher = tokio::spawn({
@@ -17373,7 +17370,7 @@ exit 0
                 .expect("bounded receipt")
                 .err()
                 .map(|error| error.message()),
-            Some("issue monitor control rejected: scan_already_in_flight")
+            Some(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR)
         );
         assert!(
             !probe.overlap_observed(),
@@ -18516,7 +18513,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
@@ -18703,7 +18700,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
@@ -18859,7 +18856,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
@@ -18974,7 +18971,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
@@ -19058,7 +19055,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
@@ -19144,7 +19141,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
@@ -19224,7 +19221,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
@@ -19339,7 +19336,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
@@ -19469,7 +19466,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
@@ -19582,7 +19579,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
@@ -19718,7 +19715,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
         monitor.record_scan_error(
@@ -19865,7 +19862,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &preserved.prefs(),
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
             .expect("a rate-limited completion readback must not discard the scan");
@@ -19960,7 +19957,7 @@ exit 0
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &preserved.prefs(),
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
 
         let failure = super::scan_issue_monitor_once_blocking(scope, preserved.clone(), true)
             .expect_err("claim completion readback failure stays typed");
@@ -20788,7 +20785,7 @@ exit 0
         // reaches the fake `gh` this test wants to hang, so a budget sized to
         // "just enough" lets a loaded runner spend it before the spawn and
         // fail the *precondition* — which is how this test reddened PRs that
-        // had not touched the Issue Monitor at all. `GIT_PROLOGUE_DELAY` below
+        // had not touched Issues at all. `GIT_PROLOGUE_DELAY` below
         // makes that prologue expensive on purpose: the runner may delay the
         // cut, it may never decide whether the hang was reached.
         const GIT_PROLOGUE_DELAY: Duration = Duration::from_secs(1);
@@ -20836,7 +20833,7 @@ exit 0
                 ..crate::IssueMonitorPrefs::default()
             },
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
         // Issue #4033 AC-3: stand in for the loaded runner. Every `git` the
         // scan prologue spawns now costs a full second — far more than the
         // three-fold slowdown that reddened unrelated PRs.
@@ -21467,7 +21464,7 @@ exit 0
                 ..crate::IssueMonitorPrefs::default()
             },
         )
-        .expect("seed issue monitor prefs");
+        .expect("seed Issues prefs");
 
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
@@ -23148,7 +23145,7 @@ exit 1
             .expect("blocked recovery explains the scan stall");
         assert!(stall.contains(&marker.display().to_string()), "{stall}");
         assert!(
-            stall.contains("parse Issue Monitor authority fence failed"),
+            stall.contains("parse Issues authority fence failed"),
             "{stall}"
         );
         assert_eq!(
@@ -28176,7 +28173,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         write_issue_monitor_prefs_without_lock(&prefs_path, &newer_disk);
-        FileExt::unlock(&lock).expect("release issue monitor prefs lock");
+        FileExt::unlock(&lock).expect("release Issues prefs lock");
 
         let (persisted, committed_monitor) = done_rx
             .recv_timeout(HANG_GUARD)
@@ -28387,7 +28384,7 @@ exit 1
         );
 
         write_issue_monitor_prefs_without_lock(&prefs_path, &crate::IssueMonitorPrefs::default());
-        FileExt::unlock(&lock).expect("release issue monitor prefs lock");
+        FileExt::unlock(&lock).expect("release Issues prefs lock");
 
         let (commit, committed_monitor) = done_rx
             .recv_timeout(HANG_GUARD)

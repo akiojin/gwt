@@ -2131,7 +2131,7 @@ pub struct ActiveWorkItemView {
 }
 
 /// Read-only membership measured from this GUI host's current agent children.
-/// This does not grant launch, close, or Issue Monitor slot authority.
+/// This does not grant launch, close, or Issues slot authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalAgentActivityView {
     pub project_key: String,

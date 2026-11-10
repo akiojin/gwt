@@ -689,7 +689,7 @@ fn drive_switch(
                 .transition_agent_switch(
                     &intent.request.operation_id,
                     LaunchingNext,
-                    Some("Launching the next planned issue through Issue Monitor…".into()),
+                    Some("Launching the next planned issue through Issues…".into()),
                 )
                 .map_err(switch_io)?;
             Ok(())

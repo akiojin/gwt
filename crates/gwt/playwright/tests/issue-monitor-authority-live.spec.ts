@@ -89,7 +89,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const panel = settings.locator('[data-settings-panel="issues"]');
       await expect(panel).toBeVisible();
-      // Independent Settings controls project the same confirmed Monitor state.
+      // Independent Settings controls project the same confirmed Issues state.
       const monitoring = panel.getByRole("checkbox", { name: "Monitoring", exact: true });
       const autonomous = panel.getByRole("checkbox", { name: "Autonomous", exact: true });
       await expect(monitoring).not.toBeChecked();

@@ -41,7 +41,7 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
       });
       return text.split("\n").filter(Boolean).map(line => JSON.parse(line))
         .filter(report => report.body.startsWith("# Codex model list changed")).length;
-    }, { timeout: 60_000, message: "weekly comparison runs even with Monitor disabled" }).toBe(1);
+    }, { timeout: 60_000, message: "weekly comparison runs even with Issues disabled" }).toBe(1);
 
     const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
     let readSequence = 0;

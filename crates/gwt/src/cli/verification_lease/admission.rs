@@ -27,7 +27,7 @@ use crate::cli::CliEnv;
 
 /// Default admission wait when `params.max_wait_secs` is absent.
 pub(crate) const DEFAULT_MAX_WAIT_SECS: u64 = 300;
-/// Hard cap for `params.max_wait_secs`. Must stay below the Issue Monitor's
+/// Hard cap for `params.max_wait_secs`. Must stay below Issues'
 /// default `stuck_timeout_secs` (1800) so one bounded wait never reads as a
 /// stalled agent.
 pub(crate) const MAX_WAIT_SECS: u64 = 1500;
@@ -241,7 +241,7 @@ pub(crate) fn resolve_max_wait(requested: Option<u64>) -> Result<Duration, SpecO
     if secs > MAX_WAIT_SECS {
         return Err(unexpected(format!(
             "max_wait_secs must be at most {MAX_WAIT_SECS} (got {secs}); a longer wait inside one \
-             call would read as a stalled agent to the Issue Monitor — rerun `verify.run` instead"
+             call would read as a stalled agent to Issues — rerun `verify.run` instead"
         )));
     }
     Ok(Duration::from_secs(secs))
@@ -1112,7 +1112,7 @@ mod tests {
         );
     }
 
-    /// AC-3: the bounded wait must never outlive the Issue Monitor's stuck
+    /// AC-3: the bounded wait must never outlive Issues' stuck
     /// window, or a single `verify.run` call would consume an autonomous
     /// attempt while doing exactly what it was told to.
     #[test]

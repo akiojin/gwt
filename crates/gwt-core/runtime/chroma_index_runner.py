@@ -1412,7 +1412,8 @@ V2_WORKS_COLLECTION = "works"
 V2_REPORTS_COLLECTION = "reports"
 
 FILE_INDEX_V2_LAYOUT_VERSION = 2
-FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2"
+FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2-records"
+FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL = "file-index-v2"
 FILE_INDEX_V2_MODEL_ID = "intfloat/multilingual-e5-base"
 FILE_INDEX_V2_MODEL_REVISION = "d128750597153bb5987e10b1c3493a34e5a4502a"
 FILE_INDEX_V2_COMPATIBILITY_FIELDS = (
@@ -1613,7 +1614,9 @@ def _validated_file_index_descriptor(descriptor: Any) -> Dict[str, Any]:
         raise ValueError("invalid file-index-v2 compatibility descriptor")
     if descriptor.get("layout_version") != FILE_INDEX_V2_LAYOUT_VERSION:
         raise ValueError("unsupported file-index-v2 layout version")
-    if descriptor.get("writer_protocol") != FILE_INDEX_V2_WRITER_PROTOCOL:
+    if descriptor.get("writer_protocol") not in {
+        FILE_INDEX_V2_WRITER_PROTOCOL, FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL
+    }:
         raise ValueError("unsupported file-index-v2 writer protocol")
     return descriptor
 
@@ -1800,6 +1803,7 @@ def _file_index_v2_pin(
         "protected_paths": [
             "bases",
             "cas",
+            "record-stores",
             f"worktrees/{safe_worktree_hash}",
         ],
         "owner_pid": os.getpid(),
@@ -3082,9 +3086,8 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> None:
-    """Publish a verified immutable directory before a durable head names it."""
-    for current_root, _directories, filenames in os.walk(staging, topdown=False):
+def _fsync_file_index_v2_directory(path: Path) -> None:
+    for current_root, _directories, filenames in os.walk(path, topdown=False):
         current = Path(current_root)
         for filename in filenames:
             # Windows rejects fsync on a read-only handle (EBADF), so open
@@ -3092,6 +3095,11 @@ def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> Non
             with (current / filename).open("r+b") as artifact:
                 os.fsync(artifact.fileno())
         _fsync_directory(current)
+
+
+def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> None:
+    """Publish a verified immutable directory before a durable head names it."""
+    _fsync_file_index_v2_directory(staging)
     target.parent.mkdir(parents=True, exist_ok=True)
     _replace_staging_generation(staging, target)
     _fsync_directory(target.parent)
@@ -3330,6 +3338,111 @@ def _plan_file_index_v2_overlay(
     }
 
 
+def _uses_file_record_pool(descriptor: Dict[str, Any]) -> bool:
+    return descriptor["compatibility"]["writer_protocol"] == FILE_INDEX_V2_WRITER_PROTOCOL
+
+
+def _file_artifact_store(artifact_dir: Path, descriptor: Dict[str, Any]) -> Path:
+    if not _uses_file_record_pool(descriptor):
+        return artifact_dir / "store"
+    v2_root = artifact_dir.parent.parent if descriptor["kind"] == "base" else artifact_dir.parents[3]
+    contract_id = _sha256_json(_semantic_file_index_contract(descriptor["compatibility"]))
+    return v2_root / "record-stores" / FILE_INDEX_V2_WRITER_PROTOCOL / contract_id / "store"
+
+
+def _file_record_id(entry: Dict[str, Any]) -> str:
+    # Git-vs-filesystem provenance does not change the persisted document.
+    return _sha256_json({key: value for key, value in entry.items() if key != "source_object"})
+
+
+def _file_member_ids(entries: Sequence[Dict[str, Any]], scope: str) -> List[str]:
+    return [_file_record_id(entry) for entry in entries if entry["scope"] == scope]
+
+
+def _file_members_exist(collection, ids: Sequence[str]) -> bool:
+    for start in range(0, len(ids), FILE_INDEX_V2_VECTOR_BATCH):
+        batch = list(ids[start:start + FILE_INDEX_V2_VECTOR_BATCH])
+        if set(collection.get(ids=batch, include=[])["ids"]) != set(batch):
+            return False
+    return True
+
+
+def _prune_file_record_pool(v2_root: Path) -> int:
+    """Prune at most one batch, with no live reader or writer and exact marks.
+
+    Retain all completed manifests, including previous Views and generations
+    awaiting Rust GC. The registry lock fences new pins; a live per-pin lock
+    prevents collection even when that pin's diagnostic marker is unreadable.
+    """
+    pools_root = v2_root / "record-stores" / FILE_INDEX_V2_WRITER_PROTOCOL
+    if not pools_root.is_dir():
+        return 0
+    leases_root = v2_root / "leases"
+    try:
+        with acquire_lock(leases_root, exclusive=True, blocking=False):
+            for pin in leases_root.iterdir():
+                if pin.is_dir():
+                    with acquire_lock(pin, exclusive=True, blocking=False):
+                        pass
+            marks: Dict[str, Dict[str, set[str]]] = {}
+            containers = [v2_root / "bases"]
+            worktrees = v2_root / "worktrees"
+            if worktrees.is_dir():
+                containers.extend(path / "overlays" for path in worktrees.iterdir() if path.is_dir())
+            for container in containers:
+                if not container.is_dir():
+                    continue
+                for artifact in container.iterdir():
+                    if not artifact.is_dir() or artifact.name.startswith("."):
+                        continue
+                    descriptor = _read_artifact_descriptor(artifact)
+                    if descriptor is None or not _is_exact_file_index_v2_compatibility(descriptor.get("compatibility")):
+                        return 0
+                    base = container.name == "bases"
+                    if (set(descriptor) != (_BASE_DESCRIPTOR_FIELDS if base else _OVERLAY_DESCRIPTOR_FIELDS)
+                            or descriptor.get("schema_version") != 1
+                            or descriptor.get("kind") != ("base" if base else "overlay")):
+                        return 0
+                    if not _uses_file_record_pool(descriptor):
+                        continue
+                    if any(descriptor[field]["store"] != "records"
+                           for field in ("files_generation", "files_docs_generation")):
+                        return 0
+                    manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
+                    entries = manifest["entries"]
+                    if (_manifest_entries_digest_from_file(artifact / "manifest.json")
+                            != descriptor["manifest_digest"]
+                            or _validated_file_index_v2_manifest_scope_paths(entries) is None
+                            or _file_index_v2_artifact_generation_id(descriptor, entries) != artifact.name):
+                        return 0
+                    pool_id = _file_artifact_store(artifact, descriptor).parent.name
+                    pool_marks = marks.setdefault(pool_id, {"files": set(), "files-docs": set()})
+                    for scope in pool_marks:
+                        pool_marks[scope].update(_file_member_ids(entries, scope))
+            for pool in pools_root.iterdir():
+                if not pool.is_dir() or pool.is_symlink() or not _is_sha256(pool.name):
+                    continue
+                for scope, collection_name in (
+                    ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
+                ):
+                    client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
+                    try:
+                        retained = marks.get(pool.name, {}).get(scope, set())
+                        for offset in range(0, collection.count(), FILE_INDEX_V2_VECTOR_BATCH):
+                            ids = collection.get(limit=FILE_INDEX_V2_VECTOR_BATCH, offset=offset, include=[])["ids"]
+                            unused = [record_id for record_id in ids if record_id not in retained]
+                            if unused:
+                                collection.delete(ids=unused)
+                                return len(unused)
+                    finally:
+                        _close_chroma_client(client)
+    except Exception:
+        # Cleanup cannot invalidate a completed refresh. Contention, malformed
+        # membership or a failed store open withholds deletion until next time.
+        return 0
+    return 0
+
+
 def _manifest_entries_digest_from_file(path: Path) -> Optional[str]:
     """Hash canonical manifest entries with constant auxiliary memory."""
     prefix = b'{"entries":'
@@ -3361,7 +3474,7 @@ def _artifact_pair_metadata_is_verified(
     records: Sequence[Dict[str, Any]],
     descriptor_identity: Dict[str, Any],
 ) -> bool:
-    store = artifact_dir / "store"
+    store = _file_artifact_store(artifact_dir, descriptor_identity)
     existing_descriptor = _read_artifact_descriptor(artifact_dir)
     dynamic_fields = {"manifest_digest", "created_at", "verified_at"}
     expected_fields = set(descriptor_identity) | dynamic_fields
@@ -3396,6 +3509,15 @@ def _artifact_pair_metadata_is_verified(
         != manifest_digest
     ):
         return False
+    pooled = _uses_file_record_pool(descriptor_identity)
+    entries = []
+    if pooled:
+        try:
+            entries = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))["entries"]
+        except (OSError, ValueError, KeyError):
+            return False
+        if _validated_file_index_v2_manifest_scope_paths(entries) is None:
+            return False
     for bucket, collection_name in (
         ("code", V2_FILES_CODE_COLLECTION),
         ("docs", V2_FILES_DOCS_COLLECTION),
@@ -3408,7 +3530,12 @@ def _artifact_pair_metadata_is_verified(
                 expected_count = sum(
                     record["bucket"] == bucket for record in records
                 )
-                if _safe_collection_count(collection) != expected_count:
+                if pooled:
+                    scope = "files" if bucket == "code" else "files-docs"
+                    ids = _file_member_ids(entries, scope)
+                    if len(ids) != expected_count or not _file_members_exist(collection, ids):
+                        return False
+                elif _safe_collection_count(collection) != expected_count:
                     return False
             finally:
                 _close_chroma_client(client)
@@ -3432,7 +3559,8 @@ def _staged_artifact_vectors_are_verified(
         )
     ):
         return False
-    store = artifact_dir / "store"
+    store = _file_artifact_store(artifact_dir, descriptor_identity)
+    pooled = _uses_file_record_pool(descriptor_identity)
     embedding_contract = _embedding_contract(descriptor_identity["compatibility"])
     expected_dimension = _expected_file_index_vector_dimension(
         descriptor_identity["compatibility"]
@@ -3466,7 +3594,7 @@ def _staged_artifact_vectors_are_verified(
                     expected_vectors.append(vector)
                 collection = opened[bucket][1]
                 stored = collection.get(
-                    ids=[records[index]["path"] for index in selected],
+                    ids=[_file_record_id(manifest_entries[index]) if pooled else records[index]["path"] for index in selected],
                     include=["documents", "metadatas", "embeddings"],
                 )
                 stored_ids = list(stored.get("ids") or [])
@@ -3493,7 +3621,8 @@ def _staged_artifact_vectors_are_verified(
                 for index, expected_vector in zip(selected, expected_vectors):
                     record = records[index]
                     manifest_entry = manifest_entries[index]
-                    stored_record = stored_by_id.get(record["path"])
+                    record_id = _file_record_id(manifest_entry) if pooled else record["path"]
+                    stored_record = stored_by_id.get(record_id)
                     if stored_record is None:
                         return False
                     document, metadata, embedding = stored_record
@@ -3544,7 +3673,12 @@ def _materialize_file_artifact_pair(
     """
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
-    with acquire_lock(lock_dir, exclusive=True):
+    pooled = _uses_file_record_pool(descriptor_identity)
+    pool_lock = (
+        acquire_lock(_file_artifact_store(artifact_dir, descriptor_identity).parent, exclusive=True)
+        if pooled else contextlib.nullcontext()
+    )
+    with acquire_lock(lock_dir, exclusive=True), pool_lock:
         # This artifact's writer lock also proves any previous staging writer
         # has exited, including when the completed artifact is already reusable.
         staging_pattern = rf"\.{re.escape(artifact_dir.name)}\.staging-\d+-\d+"
@@ -3572,7 +3706,7 @@ def _materialize_file_artifact_pair(
             f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
         )
         shutil.rmtree(staging, ignore_errors=True)
-        store = staging / "store"
+        store = _file_artifact_store(staging, descriptor_identity)
         manifest_entries: List[Dict[str, Any]] = []
         computed = 0
         hits = 0
@@ -3622,17 +3756,40 @@ def _materialize_file_artifact_pair(
                 )
                 for bucket in ("code", "docs"):
                     selected = [
-                        (record, vector)
-                        for record, vector in zip(batch_records, vectors)
+                        (record, vector, entry)
+                        for record, vector, entry in zip(batch_records, vectors, manifest_entries[start:stop])
                         if record["bucket"] == bucket
                     ]
                     if not selected:
                         continue
+                    if pooled:
+                        stored = opened[bucket][1].get(
+                            ids=[_file_record_id(entry) for _, _, entry in selected],
+                            include=["documents", "metadatas", "embeddings"],
+                        )
+                        raw_vectors = stored.get("embeddings")
+                        stored_records = dict(zip(
+                            stored["ids"], zip(
+                                stored.get("documents") or [],
+                                stored.get("metadatas") or [],
+                                list(raw_vectors) if raw_vectors is not None else [],
+                            )
+                        ))
+                        missing = []
+                        for record, vector, entry in selected:
+                            previous = stored_records.get(_file_record_id(entry))
+                            if (previous is None or previous[0] != record["document"]
+                                    or previous[1] != record["metadata"]
+                                    or not _chroma_vector_matches_cas(previous[2], vector)):
+                                missing.append((record, vector, entry))
+                        selected = missing
+                    if not selected:
+                        continue
                     opened[bucket][1].upsert(
-                        ids=[record["path"] for record, _ in selected],
-                        embeddings=[list(vector) for _, vector in selected],
-                        documents=[record["document"] for record, _ in selected],
-                        metadatas=[record["metadata"] for record, _ in selected],
+                        ids=[_file_record_id(entry) if pooled else record["path"] for record, _, entry in selected],
+                        embeddings=[list(vector) for _, vector, _ in selected],
+                        documents=[record["document"] for record, _, _ in selected],
+                        metadatas=[record["metadata"] for record, _, _ in selected],
                     )
                 # FR-418: hand the heavy lease back at the checkpoint boundary
                 # when an interactive search is queued behind this build. Only
@@ -3661,7 +3818,12 @@ def _materialize_file_artifact_pair(
                 expected_count = sum(
                     record["bucket"] == bucket for record in records
                 )
-                if _safe_collection_count(opened[bucket][1]) != expected_count:
+                scope = "files" if bucket == "code" else "files-docs"
+                valid = (
+                    _file_members_exist(opened[bucket][1], _file_member_ids(manifest_entries, scope))
+                    if pooled else _safe_collection_count(opened[bucket][1]) == expected_count
+                )
+                if not valid:
                     raise RuntimeError(
                         f"file-index-v2 {bucket} collection count mismatch"
                     )
@@ -3690,6 +3852,10 @@ def _materialize_file_artifact_pair(
                 cas_root,
             ):
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
+            if pooled:
+                _fsync_file_index_v2_directory(store)
+                for parent in list(store.parents)[:4]:
+                    _fsync_directory(parent)
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
         finally:
@@ -3806,7 +3972,10 @@ def _is_exact_file_index_v2_compatibility(value: Any) -> bool:
 
 
 def _is_generation_reference(value: Any, collection: str) -> bool:
-    return value == {"store": "store", "collection": collection}
+    return value in (
+        {"store": "store", "collection": collection},
+        {"store": "records", "collection": collection},
+    )
 
 
 def _is_sorted_unique_string_list(value: Any) -> bool:
@@ -3955,6 +4124,10 @@ def _load_verified_file_index_v2_artifact(
         ):
             return None
 
+    expected_store = "records" if _uses_file_record_pool(descriptor) else "store"
+    if any(descriptor[field]["store"] != expected_store for field in ("files_generation", "files_docs_generation")):
+        return None
+
     manifest_path = artifact_dir / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -3992,10 +4165,15 @@ def _load_verified_file_index_v2_artifact(
     ):
         try:
             client, collection = _open_file_index_v2_collection(
-                artifact_dir / "store", collection_name
+                _file_artifact_store(artifact_dir, descriptor), collection_name
             )
             try:
-                if _safe_collection_count(collection) != manifest_counts[scope]:
+                valid = (
+                    _file_members_exist(collection, _file_member_ids(entries, scope))
+                    if _uses_file_record_pool(descriptor)
+                    else _safe_collection_count(collection) == manifest_counts[scope]
+                )
+                if not valid:
                     return None
             finally:
                 _close_chroma_client(client)
@@ -4976,7 +5154,7 @@ def _action_index_files_protocol_v2(
         "migration",
         db_root,
     ):
-        return _action_index_files_protocol_v2_pinned(
+        result = _action_index_files_protocol_v2_pinned(
             project_root,
             repo_hash,
             worktree_hash,
@@ -4985,6 +5163,9 @@ def _action_index_files_protocol_v2(
             compatibility_descriptor,
             qos=qos,
         )
+    if result.get("published") or result.get("already_active"):
+        _prune_file_record_pool(resolve_file_index_v2_root(repo_hash, db_root=db_root))
+    return result
 
 
 def _action_index_files_protocol_v2_pinned(
@@ -5075,12 +5256,13 @@ def _action_index_files_protocol_v2_pinned(
         "files": sum(record["bucket"] == "code" for record in overlay_records),
         "files-docs": sum(record["bucket"] == "docs" for record in overlay_records),
     }
+    artifact_store = "records" if descriptor["writer_protocol"] == FILE_INDEX_V2_WRITER_PROTOCOL else "store"
     files_generation = {
-        "store": "store",
+        "store": artifact_store,
         "collection": V2_FILES_CODE_COLLECTION,
     }
     files_docs_generation = {
-        "store": "store",
+        "store": artifact_store,
         "collection": V2_FILES_DOCS_COLLECTION,
     }
     base_descriptor_identity = {
@@ -8505,15 +8687,20 @@ def _search_collection_v2(
     n_results: int,
     query_embedding: Optional[List[float]] = None,
     where: Optional[Dict[str, Any]] = None,
+    ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    if ids == []:
+        return []
     try:
         count = collection.count()
     except Exception:
         return []
     if count == 0:
         return []
-    actual_n = min(n_results, count)
+    actual_n = min(n_results, count, len(ids) if ids is not None else count)
     filters = {"where": where} if where is not None else {}
+    if ids is not None:
+        filters["ids"] = ids
     if query_embedding is not None:
         # Phase 70 AS-2: reuse one query embedding across every scope in a
         # batch request instead of re-encoding per scope.
@@ -9158,6 +9345,8 @@ def _file_index_v2_view_contract_kind(descriptor: Any) -> str:
 
 def _file_index_v2_reader_compatible(compatibility: Dict[str, Any]) -> bool:
     expected = default_file_index_compatibility()
+    if compatibility.get("writer_protocol") == FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL:
+        expected["writer_protocol"] = FILE_INDEX_V2_LOCAL_WRITER_PROTOCOL
     if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
         # The deterministic test runtime deliberately uses compact vectors;
         # every other semantic field remains reader-pinned.
@@ -9248,6 +9437,16 @@ def _inspect_file_index_v2_view(
             "reason": "overlay_descriptor_missing",
             "corrupt_component": overlay_dir,
         }
+    base_descriptor = _read_artifact_descriptor(base_dir)
+    memberships = {}
+    for role, artifact_dir, artifact_descriptor in (
+        ("base", base_dir, base_descriptor), ("overlay", overlay_dir, overlay_descriptor)
+    ):
+        if _uses_file_record_pool(artifact_descriptor):
+            entries = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))["entries"]
+            memberships[role + "_members"] = {
+                scope: _file_member_ids(entries, scope) for scope in ("files", "files-docs")
+            }
     return {
         "kind": "compatible",
         "view": {
@@ -9255,8 +9454,9 @@ def _inspect_file_index_v2_view(
             "view_dir": view_dir,
             "compatibility": descriptor["compatibility"],
             "visible_counts": descriptor["visible_counts"],
-            "base_store": base_dir / "store",
-            "overlay_store": overlay_dir / "store",
+            "base_store": _file_artifact_store(base_dir, base_descriptor),
+            "overlay_store": _file_artifact_store(overlay_dir, overlay_descriptor),
+            **memberships,
             "files_shadow": frozenset(overlay_descriptor["files_shadow"]),
             "files_docs_shadow": frozenset(
                 overlay_descriptor["files_docs_shadow"]
@@ -9547,6 +9747,8 @@ def _search_file_index_v2_scope(
         pinned_view["tombstones"]
     )
     target = max(1, _search_fetch_count(scope, n_results, match_mode))
+    base_members = pinned_view.get("base_members", {}).get(scope)
+    overlay_members = pinned_view.get("overlay_members", {}).get(scope)
     overlay_client = None
     base_client = None
     try:
@@ -9560,11 +9762,14 @@ def _search_file_index_v2_scope(
         # a query failure, never an empty result or a legacy-health fallback.
         int(overlay_collection.count())
         base_count = int(base_collection.count())
+        if base_members is not None:
+            base_count = len(base_members)
         overlay_items = _search_collection_v2(
             overlay_collection,
             query,
             target,
             query_embedding=query_embedding,
+            **({"ids": overlay_members} if overlay_members is not None else {}),
         )
         base_fetch = target
         ranked: List[Dict[str, Any]] = list(overlay_items)
@@ -9574,6 +9779,7 @@ def _search_file_index_v2_scope(
                 query,
                 base_fetch,
                 query_embedding=query_embedding,
+                **({"ids": base_members} if base_members is not None else {}),
             )
             visible_base = [
                 item
@@ -9605,6 +9811,10 @@ def _search_file_index_v2_scope(
         if overlay_client is not None:
             _close_chroma_client(overlay_client)
 
+    # Storage hashes select immutable members; term matching keeps the public
+    # file identity so an opaque hash can never become searchable text.
+    for item in ranked:
+        item["id"] = _file_index_v2_item_path(item)
     strict_items, suggestion_items = _apply_match_mode(ranked, query, match_mode)
     payload = {
         "results": _format_scope_results(scope, strict_items, n_results),

@@ -6,7 +6,7 @@
 //! Codex initializes `state_*.sqlite` / `logs_*.sqlite` there while it boots,
 //! and SQLite refuses the second writer with `database is locked` when two
 //! Codex processes reach that window together. gwt starts Codex agents in
-//! parallel (Issue Monitor fan-out plus manual launches), so the mitigation
+//! parallel (Issues fan-out plus manual launches), so the mitigation
 //! belongs here.
 //!
 //! Two halves, matching the two acceptance criteria that survive together:
@@ -119,14 +119,14 @@ pub fn is_codex_shared_state_lock_failure(output: &str) -> bool {
 ///
 /// It states the cause, says the work is intact, and names the one lever the
 /// operator has. It also carries [`TRANSIENT_LAUNCH_RETRY_HINT`], which is what
-/// keeps the Issue Monitor from spending an attempt on someone else's lock
+/// keeps Issues from spending an attempt on someone else's lock
 /// contention.
 pub fn codex_shared_state_lock_detail() -> String {
     format!(
         "Codex could not start: several Codex agents initialized the shared ~/.codex state \
          directory at the same time and SQLite refused the second writer. Nothing about this \
          work failed. gwt spaces Codex launches apart and {TRANSIENT_LAUNCH_RETRY_HINT}. If it \
-         keeps happening, lower the Issue Monitor's max_active so fewer Codex agents start \
+         keeps happening, lower Issues' max_active so fewer Codex agents start \
          together."
     )
 }
@@ -302,7 +302,7 @@ mod tests {
         );
         assert!(
             crate::prepare::is_transient_launch_failure(&detail),
-            "the detail must not spend an Issue Monitor attempt: {detail}"
+            "the detail must not spend an Issues attempt: {detail}"
         );
     }
 }

@@ -1506,7 +1506,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     assert_eq!(
         runtime.update_drain_released_projects,
         vec![marker.projects[0].hash.clone()],
-        "the drained project is released for the Issue Monitor (#4037 seam)"
+        "the drained project is released for Issues (#4037 seam)"
     );
 
     let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
@@ -1594,7 +1594,7 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
     assert_eq!(
         runtime.update_drain_released_projects,
         vec![marker.projects[0].hash.clone()],
-        "the Issue Monitor must not stay drained after a failed apply"
+        "Issues must not stay drained after a failed apply"
     );
 
     let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");

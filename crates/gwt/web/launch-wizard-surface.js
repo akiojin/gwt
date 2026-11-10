@@ -240,7 +240,7 @@ export function createLaunchWizardSurface({
         return note;
       }
 
-      // Issue #4079 AC-2: the Issue Monitor Agent Settings form always writes
+      // Issue #4079 AC-2: Issues Agent Settings form always writes
       // candidate 1 of the launch pool, so the backend derives which candidate
       // that replaces and the pool summary the save will produce. Rendering it
       // here is what stops a switch from looking like it did nothing when the
@@ -261,7 +261,7 @@ export function createLaunchWizardSurface({
         return note;
       }
 
-      // Issue #4911: the Issue Monitor settings form repeats the Agent
+      // Issue #4911: Issues settings form repeats the Agent
       // Settings block once per launch candidate, in launch order. The backend
       // owns the list — it holds one editable draft, so only the open set
       // carries the form and the others show what they launch with. Returns
@@ -1767,7 +1767,7 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // Issue #4911: in the Issue Monitor settings form the sections below
+        // Issue #4911: in Issues settings form the sections below
         // are one Agent Settings set, so they render inside the open set.
         const setupParent = (
           showSetupForms

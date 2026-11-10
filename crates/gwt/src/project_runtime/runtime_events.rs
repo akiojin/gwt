@@ -174,7 +174,7 @@ fn tagged_agent_error_detail(
     // is a nested stack trace that tells the operator nothing actionable.
     // Checked before truncation because the lock refusal is the tail of a long
     // path-heavy message and would be cut off. The replacement carries the
-    // transient-retry hint, so the Issue Monitor requeues without spending an
+    // transient-retry hint, so Issues requeues without spending an
     // attempt on host contention.
     if gwt_agent::is_codex_shared_state_lock_failure(tail) {
         return (
@@ -318,7 +318,7 @@ pub fn issue_monitor_launch_failed_payload_with_retryability(
         .flatten()
     {
         launch_failed["failure"] =
-            serde_json::to_value(failure).expect("Issue Monitor failure serializes");
+            serde_json::to_value(failure).expect("Issues failure serializes");
     }
     serde_json::json!({ "launch_failed": launch_failed })
 }
@@ -366,8 +366,7 @@ pub fn issue_monitor_agent_failed_payload_with_failure(
         agent_failed["issue_number"] = serde_json::json!(issue_number);
     }
     if let Some(failure) = failure {
-        agent_failed["failure"] =
-            serde_json::to_value(failure).expect("Issue Monitor failure serializes");
+        agent_failed["failure"] = serde_json::to_value(failure).expect("Issues failure serializes");
     }
     serde_json::json!({ "agent_failed": agent_failed })
 }
@@ -970,7 +969,7 @@ mod tests {
         );
         assert!(
             gwt_agent::is_transient_launch_failure(&detail),
-            "the Issue Monitor must requeue this without spending an attempt: {detail}"
+            "Issues must requeue this without spending an attempt: {detail}"
         );
     }
 
