@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
+    <title>gwt 全画面刷新モック（対話型）</title>
+    <style>
+      button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) { min-height: 2rem; }
+        </style>
+    <style>
+      :root{
+        --bg:#f2f3f5; --panel:#ffffff; --panel2:#e9ebee; --ink:#1b1e24; --ink2:#4c5462; --ink3:#7c8594;
+        --line:#d8dce2; --line2:#c3c9d2;
+        --accent:#0f766e; --accent-ink:#0b5a53; --accent-soft:#e2f1ee;
+        --amber:#b45309; --amber-soft:#fbf0dd;
+        --red:#b3261e; --red-soft:#fbe9e7;
+        --blue:#2563eb; --blue-soft:#e5ecfd;
+        --gray-soft:#eceef1;
+        --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+        --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+        --shadow:0 10px 30px rgba(20,26,38,.10),0 2px 6px rgba(20,26,38,.06);
+      }
+      @media (prefers-color-scheme: dark){
+        :root{
+          --bg:#121418; --panel:#1b1e24; --panel2:#23262e; --ink:#e8eaee; --ink2:#aab2bf; --ink3:#79828f;
+          --line:#2e323b; --line2:#3d434f;
+          --accent:#2dd4bf; --accent-ink:#5eead4; --accent-soft:#10312d;
+          --amber:#f0b269; --amber-soft:#3a2c14;
+          --red:#f08a80; --red-soft:#3d1f1c;
+          --blue:#8db0f5; --blue-soft:#1d2a47;
+          --gray-soft:#262a31;
+          --shadow:0 10px 30px rgba(0,0,0,.45),0 2px 6px rgba(0,0,0,.35);
+        }
+      }
+      *{box-sizing:border-box}
+      html{scroll-behavior:smooth}
+      body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.65;font-size:15px}
+      .wrap{max-width:1060px;margin:0 auto;padding:0 18px 90px}
+
+      /* ---------- document header ---------- */
+      header.doc{padding:44px 0 8px}
+      .doc-kicker{font-size:12.5px;letter-spacing:.14em;color:var(--accent-ink);font-weight:700;text-transform:uppercase}
+      h1{font-size:31px;line-height:1.3;margin:10px 0 12px;font-weight:800;letter-spacing:-.01em}
+      .lead{font-size:16px;color:var(--ink2);max-width:46em;margin:0}
+      .lead strong{color:var(--ink)}
+
+      /* ---------- principles ---------- */
+      .principles{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:26px 0 6px}
+      @media (max-width:720px){.principles{grid-template-columns:1fr}}
+      .pr{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+      .pr h3{margin:0 0 6px;font-size:15.5px}
+      .pr h3 .n{display:inline-block;background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;font-size:12.5px;margin-right:8px;vertical-align:2px}
+      .pr p{margin:0;font-size:13.8px;color:var(--ink2)}
+      .pr p strong{color:var(--ink)}
+      .snapshot-note{background:var(--accent-soft);border:1px solid var(--line);border-radius:10px;padding:13px 18px;margin:16px 0 0;font-size:13.8px}
+      .snapshot-note strong{color:var(--accent-ink)}
+
+      /* ---------- vocab table ---------- */
+      .vocab{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13.8px}
+      .vocab th,.vocab td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+      .vocab tr:last-child td{border-bottom:none}
+      .vocab th{background:var(--panel2);font-size:12.5px;letter-spacing:.06em;color:var(--ink2)}
+      .vocab td.before{font-family:var(--mono);font-size:12.8px;color:var(--red)}
+      .vocab td.after{font-weight:600}
+
+      /* ---------- sticky nav ---------- */
+      nav.screens{position:sticky;top:0;z-index:40;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);margin:34px -18px 0;padding:10px 18px}
+      nav.screens .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;max-width:1060px;margin:0 auto}
+      nav.screens a{color:var(--ink2);text-decoration:none;font-size:13px;font-weight:600;padding:7px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel)}
+      nav.screens a:hover{color:var(--ink);border-color:var(--line2)}
+      nav.screens .master{margin-left:auto;display:flex;gap:6px;align-items:center}
+      nav.screens .master span{font-size:12px;color:var(--ink3);font-weight:600}
+
+      /* ---------- sections ---------- */
+      section.screen{margin-top:56px;scroll-margin-top:76px}
+      section.screen>h2{font-size:23px;margin:0 0 4px;font-weight:800;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+      section.screen>h2 .en{font-size:13px;color:var(--accent-ink);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+      .why{color:var(--ink2);font-size:14.5px;max-width:52em;margin:0 0 14px}
+      .why strong{color:var(--ink)}
+      .points{margin:14px 0 0;padding:0;list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:8px 22px}
+      @media (max-width:720px){.points{grid-template-columns:1fr}}
+      .points li{font-size:13.8px;color:var(--ink2);padding-left:20px;position:relative}
+      .points li::before{content:"";position:absolute;left:2px;top:.62em;width:7px;height:7px;border-radius:2px;background:var(--accent)}
+      .points li strong{color:var(--ink)}
+      .prob{font-size:12px;color:var(--red);font-weight:700}
+
+      /* ---------- Before/After toggle ---------- */
+      .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px;margin:0 0 12px}
+      .seg button{border:0;background:transparent;font:inherit;font-size:13px;font-weight:700;color:var(--ink2);padding:6px 18px;border-radius:999px;cursor:pointer;min-height:36px}
+      .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.18)}
+      section.screen[data-mode="before"] .view-a{display:none}
+      section.screen[data-mode="after"] .view-b{display:none}
+
+      /* ---------- mock window (shared) ---------- */
+      .mock{background:var(--panel);border:1px solid var(--line2);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;font-size:13.5px}
+      .mock-head{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+      .dots{display:flex;gap:6px}
+      .dots i{width:11px;height:11px;border-radius:50%;display:block}
+      .dots i:nth-child(1){background:#e0655f}.dots i:nth-child(2){background:#e5b95c}.dots i:nth-child(3){background:#63b06a}
+      .mock-title{font-size:12.8px;color:var(--ink2);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .mock-title b{color:var(--ink)}
+      .mock-body{display:flex;min-height:120px}
+      .content{flex:1;padding:18px 20px;min-width:0}
+      @media (max-width:640px){.content{padding:14px}}
+
+      /* After app rail */
+      .rail{width:196px;flex:none;border-right:1px solid var(--line);padding:14px 10px;background:var(--panel);display:flex;flex-direction:column;gap:2px}
+      @media (max-width:640px){.rail{display:none}}
+      .pm-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--accent-soft)}
+      .pm-card .who{display:flex;align-items:center;gap:9px}
+      .pm-ava{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex:none}
+      .pm-card .nm{font-weight:800;font-size:13.5px;line-height:1.25}
+      .pm-card .sub{font-size:11.5px;color:var(--ink2);line-height:1.35}
+      .ctx-switch{margin-top:9px;width:100%;font:inherit;font-size:12.5px;font-weight:700;padding:7px 9px;border-radius:8px;border:1px solid var(--line2);background:var(--panel);color:var(--ink);text-align:left;cursor:pointer}
+      .ctx-switch small{display:block;font-weight:500;color:var(--ink3);font-size:11px}
+      .rail a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;color:var(--ink2);text-decoration:none;font-weight:600;font-size:13.5px;min-height:36px}
+      .rail a.on{background:var(--gray-soft);color:var(--ink)}
+      .rail a .cnt{margin-left:auto;background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px}
+      .rail a .cnt.gray{background:var(--ink3)}
+      .rail .foot{margin-top:auto;font-size:11.5px;color:var(--ink3);padding:8px 10px 2px;border-top:1px solid var(--line)}
+
+      /* After content primitives */
+      .h-big{font-size:20px;font-weight:800;margin:0 0 4px;line-height:1.35}
+      .h-sub{color:var(--ink2);margin:0 0 16px;font-size:13.5px}
+      .h-sec{font-size:12px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);margin:20px 0 8px}
+      .h-sec:first-child{margin-top:0}
+      .stat-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+      .stat{flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+      .stat .num{font-size:24px;font-weight:800;line-height:1.1}
+      .stat .lab{font-size:12px;color:var(--ink2);font-weight:600}
+      .stat.warn{border-color:var(--amber);background:var(--amber-soft)}
+      .stat.bad{border-color:var(--red);background:var(--red-soft)}
+      .rowitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;background:var(--panel);flex-wrap:wrap}
+      .rowitem .grow{flex:1;min-width:180px}
+      .rowitem .t{font-weight:700;line-height:1.4}
+      .rowitem .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+      .ptag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;padding:2px 9px;border-radius:999px;background:var(--gray-soft);color:var(--ink);white-space:nowrap}
+      .ptag i{width:8px;height:8px;border-radius:50%;display:block;flex:none}
+      .badge{display:inline-flex;align-items:center;font-size:11.5px;font-weight:800;padding:2px 9px;border-radius:999px;white-space:nowrap}
+      .b-run{background:var(--accent-soft);color:var(--accent-ink)}
+      .b-wait{background:var(--amber-soft);color:var(--amber)}
+      .b-block{background:var(--red-soft);color:var(--red)}
+      .b-done{background:var(--gray-soft);color:var(--ink2)}
+      .b-queue{background:var(--blue-soft);color:var(--blue)}
+      .btn{font:inherit;font-size:12.8px;font-weight:700;border-radius:8px;border:1px solid var(--line2);background:var(--panel);color:var(--ink);padding:7px 13px;cursor:pointer;min-height:36px}
+      .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+      .btn.amber{background:var(--amber);border-color:var(--amber);color:#fff}
+      .btn.danger{background:var(--red);border-color:var(--red);color:#fff}
+      .btn.ghost{border-color:transparent;color:var(--ink2)}
+      .btnrow{display:flex;gap:8px;flex-wrap:wrap}
+      .rel{color:var(--ink3);font-size:12px}
+      .bar{height:8px;border-radius:99px;background:var(--gray-soft);overflow:hidden}
+      .bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
+      .bar i.amb{background:var(--amber)} .bar i.red{background:var(--red)} .bar i.blu{background:var(--blue)}
+      .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+      .chip{font-size:12.5px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink2);border-radius:999px;padding:6px 13px;cursor:pointer;min-height:36px}
+      .chip.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+      .projgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      @media (max-width:720px){.projgrid{grid-template-columns:1fr}}
+      .projrow{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;flex-wrap:wrap}
+      .projrow .nm{font-weight:800}
+      .projrow .meta{margin-left:auto;font-size:12.5px;color:var(--ink2);text-align:right}
+      .idle{color:var(--ink3)}
+      .cols{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+      .cols.c4{grid-template-columns:repeat(4,1fr)}
+      @media (max-width:900px){.cols{grid-template-columns:repeat(2,1fr)}.cols.c4{grid-template-columns:repeat(2,1fr)}}
+      @media (max-width:520px){.cols{grid-template-columns:1fr}}
+      .col{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--panel2)}
+      .col h4{margin:0 0 8px;font-size:12.5px;display:flex;justify-content:space-between}
+      .col h4 .n{background:var(--ink);color:var(--panel);border-radius:999px;font-size:11px;padding:0 7px}
+      .mini{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:8px 9px;margin-bottom:8px;font-size:12.3px}
+      .mini .t{font-weight:700;line-height:1.4}
+      .mini .d{color:var(--ink2);font-size:11.8px}
+      .mini.stuck{border-color:var(--red)}
+      .mini.mine{border-color:var(--amber);background:var(--amber-soft)}
+
+      /* chat */
+      .chat{display:flex;flex-direction:column;gap:12px}
+      .msg{max-width:88%;border-radius:14px;padding:11px 14px;line-height:1.55}
+      .msg .meta{font-size:11.5px;font-weight:800;margin-bottom:3px}
+      .msg.pm{background:var(--gray-soft);border-bottom-left-radius:4px;align-self:flex-start}
+      .msg.me{background:var(--accent);color:#fff;border-bottom-right-radius:4px;align-self:flex-end}
+      .msg.me .meta{color:#cdeee8}
+      .msg .route{display:inline-block;margin-top:7px;font-size:11.8px;font-weight:700;background:var(--panel);border:1px solid var(--line2);border-radius:999px;padding:3px 10px;color:var(--ink)}
+      .composer{border:1px solid var(--line2);border-radius:12px;padding:10px 12px;margin-top:16px;background:var(--panel)}
+      .composer .scope{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:9px;font-size:12.5px;color:var(--ink2)}
+      .composer textarea{width:100%;border:0;resize:none;font:inherit;font-size:14px;background:transparent;color:var(--ink);min-height:44px;outline:none}
+      .composer .send{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+
+      /* timeline */
+      .tl{position:relative;padding-left:22px}
+      .tl::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;background:var(--line)}
+      .tl-item{position:relative;padding:0 0 14px}
+      .tl-item::before{content:"";position:absolute;left:-21px;top:5px;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--panel)}
+      .tl-item.dec::before{background:var(--amber)} .tl-item.err::before{background:var(--red)} .tl-item.done::before{background:var(--ink3)}
+      .tl-item .when{font-size:12px;color:var(--ink3);font-weight:700}
+      .tl-item .what{font-weight:600}
+
+      /* settings */
+      .set-group{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+      .set-group h4{margin:0 0 4px;font-size:14.5px}
+      .set-group .d{font-size:12.8px;color:var(--ink2);margin:0 0 10px}
+      .set-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+      .set-row:first-of-type{border-top:none}
+      .set-row .grow{flex:1;min-width:200px}
+      .set-row .t{font-weight:700;font-size:13.5px}
+      .set-row .d2{font-size:12.3px;color:var(--ink2)}
+      .switch{width:46px;height:26px;border-radius:99px;background:var(--accent);position:relative;flex:none}
+      .switch::after{content:"";position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;background:#fff}
+      .switch.off{background:var(--line2)} .switch.off::after{right:auto;left:3px}
+      .use{margin-top:5px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
+      .use .bar{width:110px;flex:none}
+      .use .pct{font-weight:700;color:var(--ink)}
+      .use.off{color:var(--ink3)}
+
+      /* status bar mock */
+      .statusbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line2);border-radius:10px;padding:10px 16px;background:var(--panel);box-shadow:var(--shadow);font-size:13.5px}
+      .statusbar .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:none}
+      .statusbar .sep{width:1px;height:18px;background:var(--line2)}
+      .statusbar .r{margin-left:auto;color:var(--ink3);font-size:12.5px}
+      .statusbar b.you{color:var(--amber)}
+
+      /* ---------- Before style ---------- */
+      .view-b .mock{background:#eceff2;border-color:#b9bfc7;color:#24282e}
+      @media (prefers-color-scheme: dark){.view-b .mock{background:#22252b;border-color:#3a3f47;color:#cfd4da}}
+      .view-b .mock-head{background:#dde1e6;border-bottom-color:#b9bfc7}
+      @media (prefers-color-scheme: dark){.view-b .mock-head{background:#2a2e35;border-bottom-color:#3a3f47}}
+      .view-b .mock-title{color:#5a616b;font-family:var(--mono);font-size:12px}
+      .view-b .content{padding:12px 14px;font-size:12.3px}
+      .b-kpi{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+      .b-kpi .k{border:1px solid #b9bfc7;background:#f4f6f8;border-radius:4px;padding:6px 10px;font-family:var(--mono);font-size:11.5px}
+      @media (prefers-color-scheme: dark){.b-kpi .k{background:#262a30;border-color:#3a3f47}}
+      .b-warn{font-family:var(--mono);font-size:11.5px;color:#9a6a00;background:#fdf3d7;border:1px solid #e3cf8f;border-radius:4px;padding:6px 9px;margin-bottom:6px}
+      @media (prefers-color-scheme: dark){.b-warn{background:#3a3115;color:#e8c96a;border-color:#6b5c22}}
+      .b-card{border:1px solid #b9bfc7;background:#f7f8f9;border-radius:4px;padding:8px 10px;margin-bottom:7px;font-family:var(--mono);font-size:11.6px;line-height:1.6;word-break:break-word}
+      @media (prefers-color-scheme: dark){.b-card{background:#262a30;border-color:#3a3f47}}
+      .b-card .hd{font-weight:700;font-family:var(--sans);font-size:12.3px}
+      .b-tabs{display:flex;gap:2px;margin-bottom:10px;flex-wrap:wrap}
+      .b-tabs span{font-size:11.5px;font-weight:700;padding:5px 10px;border:1px solid #b9bfc7;border-bottom:none;border-radius:4px 4px 0 0;background:#dde1e6;color:#4a5058}
+      .b-tabs span.on{background:#f7f8f9;color:#24282e}
+      @media (prefers-color-scheme: dark){.b-tabs span{background:#2a2e35}.b-tabs span.on{background:#262a30;color:#e8eaee}}
+      .b-err{font-family:var(--mono);font-size:11.6px;color:#8f1d16;background:#fbe9e7;border:1px solid #e0a49e;border-radius:4px;padding:8px 10px;line-height:1.6;word-break:break-word}
+      @media (prefers-color-scheme: dark){.b-err{background:#3d1f1c;color:#f0a49c;border-color:#6e352e}}
+      .b-bar{font-family:var(--mono);font-size:11.8px;border:1px solid #b9bfc7;background:#dde1e6;border-radius:4px;padding:8px 12px;color:#33383f;word-break:break-word}
+      @media (prefers-color-scheme: dark){.b-bar{background:#2a2e35;color:#cfd4da;border-color:#3a3f47}}
+      .b-note{font-size:12px;color:#6a7280;font-family:var(--mono)}
+      .b-ro{border:1px dashed #aab1ba;border-radius:4px;padding:9px 11px;font-size:12.3px;color:#5a616b;background:#eef0f2}
+      @media (prefers-color-scheme: dark){.b-ro{background:#22252b;color:#9aa3ae}}
+
+      /* ---------- phone (mobile variant) ---------- */
+      .mobile-variant{margin-top:26px}
+      .mobile-variant>h3{font-size:15.5px;margin:0 0 4px;display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+      .mobile-variant>h3 .en{font-size:11.5px;color:var(--accent-ink);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+      .mobile-note{color:var(--ink2);font-size:13.8px;max-width:52em;margin:0 0 12px}
+      .phone{width:390px;max-width:100%;background:var(--panel);border:1px solid var(--line2);border-radius:26px;box-shadow:var(--shadow);overflow:hidden;font-size:13.5px;position:relative}
+      .phone-status{display:flex;align-items:center;gap:7px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel2);font-size:12.3px;color:var(--ink2)}
+      .phone-status .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+      .phone-status b{color:var(--ink)}
+      .phone-status b.you{color:var(--amber)}
+      .phone-status .r{margin-left:auto;font-size:11.5px;color:var(--ink3);flex:none}
+      .phone-body{padding:14px 14px 12px}
+      .phone-body .stat-row{flex-direction:column}
+      .phone-body .stat{min-width:0}
+      .phone-body .msg{max-width:94%}
+      .phone-nav{display:flex;border-top:1px solid var(--line);background:var(--panel)}
+      .phone-nav a{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:9px 2px 10px;color:var(--ink3);text-decoration:none;font-size:11px;font-weight:700;position:relative}
+      .phone-nav a.on{color:var(--accent-ink)}
+      .phone-nav a .cnt{position:absolute;top:5px;right:calc(50% - 19px);background:var(--amber);color:#fff;font-size:10px;font-weight:800;border-radius:999px;padding:0 5px;line-height:16px}
+      .phone-nav a .cnt.gray{background:var(--ink3)}
+      .opt{display:block;width:100%;text-align:left;font:inherit;font-size:13.8px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink);border-radius:10px;padding:13px 14px;min-height:48px;cursor:pointer;margin-top:8px}
+      .opt small{display:block;font-weight:500;color:var(--ink2);font-size:12.3px;margin-top:2px}
+      .opt.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+      .opt.primary small{color:#cdeee8}
+      .opt.amber{background:var(--amber);border-color:var(--amber);color:#fff}
+      .opt.danger{background:var(--red);border-color:var(--red);color:#fff}
+      .dcard{border:1px solid var(--line);border-radius:12px;padding:13px 14px;margin-bottom:12px;background:var(--panel)}
+      .dcard .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+      .dcard .t{font-weight:800;line-height:1.45;font-size:14.3px}
+      .dcard .d{font-size:13px;color:var(--ink2);line-height:1.55}
+
+      footer.doc{margin-top:70px;border-top:1px solid var(--line);padding-top:20px;color:var(--ink2);font-size:13.8px}
+      footer.doc h3{color:var(--ink);font-size:16px;margin:0 0 8px}
+    
+      /* ---------- interactive mock additions ---------- */
+      .screen-pane{display:none}
+      .screen-pane.on{display:block}
+      .set-pane{display:none}
+      .set-pane.on{display:block}
+      .app-status{position:sticky;bottom:14px;z-index:30;margin-top:14px}
+      [data-nav]{cursor:pointer}
+      .projrow:hover{border-color:var(--line2)}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="doc">
+        <p class="doc-kicker">gwt GUI Redesign — Interactive Mock</p>
+        <h1>対話型モック — 触って画面遷移を確認する版</h1>
+        <p class="lead">静的モック（mock-full-refresh.html）の <strong>After 案だけ</strong>を、アプリのように画面切り替えできる形に再構成したものです。左レールの項目で画面が切り替わり、<strong>Home のプロジェクト行 → Project</strong>、<strong>Issues の「Open issue」→ Issue 詳細</strong>、<strong>Settings の4タブ</strong>の導線が実際に動きます。それ以外のボタンは見た目のみです。内容・数値・用語（TASK／Tool・Agent の2分化、利用量は既定表示、Board は Project 面内、オーナー決定 Q1〜Q7）は静的モックと同一です。</p>
+      </header>
+
+      <div class="mock" id="app" style="margin-top:26px">
+        <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — <span id="appTitle">Home</span></span></div>
+        <div class="mock-body">
+          <div class="rail"><div class="pm-card"><div class="who"><span class="pm-ava">PM</span><div><div class="nm">Your PM</div><div class="sub">One PM for this device · watching 7 projects</div></div></div><button class="ctx-switch" type="button">Context: All projects<small>Focus on one project — the PM stays the same</small></button></div><a href="#" data-nav="home" class="on">Home</a><a href="#" data-nav="ask" class="">Ask</a><a href="#" data-nav="progress" class="">Progress</a><a href="#" data-nav="tasks" class="">Tasks</a><a href="#" data-nav="issues" class="">Issues</a><a href="#" data-nav="decide" class="">Decide<span class="cnt">5</span></a><a href="#" data-nav="log" class="">Log</a><a href="#" data-nav="works" class="">Works</a><a href="#" data-nav="agents" class="">Agents</a><a href="#" data-nav="notifications" class="">Notifications<span class="cnt gray">9</span></a><a href="#" data-nav="project" class="">Project</a><a href="#" data-nav="settings" class="">Settings</a><div class="foot">Ask once in Ask — work itself stays inside each project.</div></div>
+          <div class="content" id="appContent">
+          <div class="screen-pane on" data-screen="home">
+              <p class="h-big">Good afternoon. Here's where everything stands.</p>
+              <p class="h-sub">Wednesday, Nov 11 · Updated just now · Your PM is watching all 7 projects on this device.</p>
+              <div class="stat-row">
+                <div class="stat"><div class="num">9</div><div class="lab">Running now, across 7 projects</div></div>
+                <div class="stat warn"><div class="num">5</div><div class="lab">Waiting for your decision</div></div>
+                <div class="stat bad"><div class="num">3</div><div class="lab">Blocked and needing help</div></div>
+                <div class="stat"><div class="num">12</div><div class="lab">Finished today</div></div>
+              </div>
+              <p class="h-sec">Needs your decision first</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">gwt, llmlb and KeibaDB have changes that aren't committed or pushed yet.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn amber" type="button">Review</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Plan ready: “Home &amp; Decide screens” (#7007)</div><div class="d">Approve it and implementation restarts.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">A task has run 3 h 40 m with no progress</div><div class="d">Stop it, or let it keep running?</div></div><span class="badge b-wait">Waiting for you</span><button class="btn" type="button">Open</button></div>
+              <p class="rel">See all 5 in <b>Decide</b> →</p>
+              <p class="h-sec">Blocked</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Checks are failing on a change (#7047)</div><div class="d">4 checks failing for 2 h. A fix is being prepared; nothing needed from you yet.</div></div><span class="badge b-block">Blocked</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import can't read the source file (#121)</div><div class="d">The file format changed. Your call is waiting in Decide.</div></div><span class="badge b-block">Blocked</span></div>
+              <p class="rel">+ 1 more blocked: event-magazine (publishing) — see Progress</p>
+<div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><span class="badge b-wait">Update</span><div class="grow"><div class="t">gwt update ready — version 9.162.0</div><div class="d">Applying restarts gwt. Your running work is drained first — agents are stopped safely and their sessions are kept — and the update is applied after the restart.</div></div><div class="btnrow"><button class="btn amber" type="button">Restart &amp; apply</button><button class="btn ghost" type="button">Later</button></div></div>
+              <p class="h-sec">Projects</p>
+              <div class="projgrid">
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="meta">Policy: Running · 4 running · 1 blocked · 9 waiting to start</span></div>
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="meta">Policy: Running · 2 running · 3 waiting to start</span></div>
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="meta">Policy: Running · 1 running · 1 blocked · 2 waiting</span></div>
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="meta">Policy: Running · 1 running · 1 waiting to start</span></div>
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="meta">Policy: Running · 1 running · 1 blocked · 2 waiting</span></div>
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="meta idle">Policy: Waiting · Idle · 1 waiting to start</span></div>
+                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="meta idle">Policy: Stopped · Idle · nothing waiting</span><button class="btn" type="button">Open project</button></div>
+<p class="h-sec">Open a project</p>
+<div class="rowitem"><div class="grow"><div class="t">Open, clone, or close a project</div><div class="d">Recently opened: gwt · llmlb · KeibaDB. “Open project” on a row above enters that project&rsquo;s own screen — its issues, works, agents, board and settings in one place. Closing a project waits for its agents to shut down first.</div></div><div class="btnrow"><button class="btn" type="button">Open…</button><button class="btn" type="button">Clone from GitHub</button></div></div>
+              </div>
+                      </div>
+          <div class="screen-pane" data-screen="ask">
+              <p class="h-big">Ask your PM</p>
+              <p class="h-sub">One PM for this whole device. Ask once — the PM routes the work to the right project and reports back here.</p>
+<p class="rel" style="margin:-8px 0 14px">Looking for something specific instead? <b>Search</b> finds it across issues, discussions, docs, specs, files, reports and memory — a different door from asking your PM.</p>
+              <div class="chat">
+                <div class="msg me"><div class="meta">You · just now</div>Before this machine gets wiped, make sure no unsaved work is left in any project.</div>
+                <div class="msg pm"><div class="meta">Your PM</div>Checked all 7 projects. I found unsaved work in <b>gwt</b> (2 tasks), <b>llmlb</b> (1) and <b>KeibaDB</b> (1). The other 4 projects are clean. Shall I commit and push everything?
+                  <div class="btnrow" style="margin-top:9px"><button class="btn primary" type="button">Commit &amp; push everything</button><button class="btn" type="button">Show me each one</button></div>
+                  <span class="route">Scope: All projects</span></div>
+                <div class="msg me"><div class="meta">You</div>Also — the retry change for the API timeouts. Pick that up next, please.</div>
+                <div class="msg pm"><div class="meta">Your PM</div>Done — filed as a task in <b>llmlb</b>: “Retry backoff for upstream timeouts” (#212), and it's already running. I'll report here when it finishes.
+                  <br><span class="route">Routed to: llmlb — from the topic of your message · tap to change</span></div>
+              </div>
+              <div class="composer">
+                <div class="scope"><span>To: <b>Your PM</b></span><button class="chip on" type="button">Scope: All projects ▾</button><span>or focus:</span>
+                  <button class="chip" type="button">gwt</button><button class="chip" type="button">llmlb</button><button class="chip" type="button">KeibaDB</button><button class="chip" type="button">More…</button></div>
+                <textarea placeholder="Ask for anything, across any project…"> </textarea>
+                <div class="send"><span class="rel">If you don't pick a project, the PM suggests one from what you write — and shows you the choice.</span><button class="btn primary" type="button">Send</button></div>
+              </div>
+                      </div>
+          <div class="screen-pane" data-screen="progress">
+              <p class="h-big">Progress</p>
+              <p class="h-sub">How tasks are flowing across all 7 projects, right now.</p>
+              <div class="cols">
+                <div class="col"><h4>Waiting to start <span class="n">18</span></h4>
+                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Waiting 6 days — oldest in this column</div></div>
+                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">Request log search (#219)</div><div class="d">Waiting 2 h</div></div>
+                  <div class="mini"><div class="d">+ 16 more</div></div>
+                </div>
+                <div class="col"><h4>In progress <span class="n">9</span></h4>
+                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Shared state model (#7048)</div><div class="d">Running 42 min</div></div>
+                  <div class="mini"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">Race result import (#130)</div><div class="d">Running 47 min</div></div>
+                  <div class="mini"><div class="d">+ 7 more</div></div>
+                </div>
+                <div class="col"><h4>Blocked <span class="n">3</span></h4>
+                  <div class="mini stuck"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">Daily import (#121)</div><div class="d">Source format changed · blocked 48 min</div></div>
+                  <div class="mini stuck"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Checks failing (#7047)</div><div class="d">Blocked 2 h</div></div>
+                  <div class="mini"><div class="d">+ 1 more</div></div>
+                </div>
+                <div class="col"><h4>Waiting for you <span class="n">5</span></h4>
+                  <div class="mini mine"><span class="ptag"><i style="background:#1b1e24"></i>All</span><div class="t">Unsaved work in 3 projects</div><div class="d">Waiting 26 min</div></div>
+                  <div class="mini mine"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Plan ready (#7007)</div><div class="d">Waiting 1 h</div></div>
+                  <div class="mini"><div class="d">+ 3 more in Decide</div></div>
+                </div>
+                <div class="col"><h4>Done today <span class="n">12</span></h4>
+                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Settings sections (#7039)</div><div class="d">Finished 2 min ago</div></div>
+                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">Health check endpoint (#205)</div><div class="d">Finished 8 min ago</div></div>
+                  <div class="mini"><div class="d">+ 10 more in Log</div></div>
+                </div>
+              </div>
+              <p class="h-sec">By project</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="bar"><i style="width:31%"></i></div><div class="d">Policy: Running · 4 running · 1 blocked · 2 waiting for you · 9 waiting to start · 5 finished today</div></div><button class="btn" type="button">Open project</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="bar"><i style="width:22%"></i></div><div class="d">Policy: Running · 2 running · 1 waiting for you · 3 waiting to start · 3 finished today</div></div><button class="btn" type="button">Open project</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="bar"><i style="width:14%"></i></div><div class="d">Policy: Running · 1 running · 1 blocked · 2 waiting to start · 2 finished today</div></div><button class="btn" type="button">Open project</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="bar"><i style="width:11%" class="red"></i></div><div class="d">Policy: Running · 1 running · 1 blocked · 1 waiting for you · 2 waiting to start · 1 finished today</div></div><button class="btn" type="button">Open project</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="bar"><i style="width:8%"></i></div><div class="d">Policy: Running · 1 running · 1 waiting for you · 1 waiting to start · 1 finished today</div></div><button class="btn" type="button">Open project</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="d idle">Policy: Waiting · Idle · 1 waiting to start · nothing finished today</div></div><button class="btn" type="button">Open project</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d idle">Policy: Stopped · Idle · nothing waiting</div></div><button class="btn" type="button">Open project</button></div>
+                      </div>
+          <div class="screen-pane" data-screen="tasks">
+              <p class="h-big">Tasks</p>
+              <p class="h-sub">Every task on this device, across all projects. Filter to focus the PM's context on one project.</p>
+              <div class="chips">
+                <button class="chip on" type="button">All projects</button>
+                <button class="chip" type="button">gwt</button>
+                <button class="chip" type="button">llmlb</button>
+                <button class="chip" type="button">event-magazine</button>
+                <button class="chip" type="button">unity-cli</button>
+                <button class="chip" type="button">155-Demi</button>
+                <button class="chip" type="button">KeibaDB</button>
+                <button class="chip" type="button">160-Idina</button>
+                <button class="chip" type="button">Status: All ▾</button>
+              </div>
+              <p class="h-sec">Waiting for your decision · 5</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">Commit &amp; push, or review each project first.</div></div><span class="badge b-wait">Waiting for you</span><span class="rel">26 min</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Plan ready: “Home &amp; Decide screens” (#7007)</div><div class="d">Approve to restart implementation.</div></div><span class="badge b-wait">Waiting for you</span><span class="rel">1 h</span></div>
+              <p class="rel">+ 3 more waiting — all of them are in Decide</p>
+              <p class="h-sec">In progress · 9</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Shared state model for the new screens (#7048)</div><div class="d">Codex · started 12:04 · last activity 2 min ago</div></div><span class="badge b-run">Running</span><span class="rel">42 min</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Home &amp; Decide screens (#7007)</div><div class="d">Claude Code · started 11:34 · last activity just now</div></div><span class="badge b-run">Running</span><span class="rel">1 h 12 min</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Race result import — new data format (#130)</div><div class="d">Claude Code · started 11:59 · last activity 5 min ago</div></div><span class="badge b-run">Running</span><span class="rel">47 min</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Token usage panel (#208)</div><div class="d">Claude Code · started 12:13 · last activity 1 min ago</div></div><span class="badge b-run">Running</span><span class="rel">33 min</span></div>
+              <p class="h-sec">Blocked · 3</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Checks failing on a change (#7047)</div><div class="d">4 checks failing. A fix is being prepared automatically.</div></div><span class="badge b-block">Blocked</span><span class="rel">2 h</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Publishing is blocked — deploy key expired (#88)</div><div class="d">Needs a new key from you; steps are in Decide.</div></div><span class="badge b-block">Blocked</span><span class="rel">59 min</span></div>
+              <p class="h-sec">Waiting to start · 18</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Waiting 6 days — the PM suggests starting this next on gwt.</div></div><span class="badge b-queue">Waiting</span><button class="btn" type="button">Start now</button><button class="btn ghost" type="button">Move up</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="t">Character select screen polish (#31)</div><div class="d">Waiting 2 days. This project's only task.</div></div><span class="badge b-queue">Waiting</span><button class="btn" type="button">Start now</button><button class="btn ghost" type="button">Move up</button></div>
+                      </div>
+          <div class="screen-pane" data-screen="issues">
+              <p class="h-big">Issues</p>
+              <p class="h-sub">Every issue in every project — 221 open in total. When your PM picks one up, it also appears in Tasks as work in motion.</p>
+              <div class="chips">
+                <button class="chip on" type="button">All projects</button>
+                <button class="chip" type="button">gwt · 132</button>
+                <button class="chip" type="button">llmlb · 24</button>
+                <button class="chip" type="button">event-magazine · 31</button>
+                <button class="chip" type="button">unity-cli · 9</button>
+                <button class="chip" type="button">155-Demi · 6</button>
+                <button class="chip" type="button">KeibaDB · 14</button>
+                <button class="chip" type="button">160-Idina · 5</button>
+                <button class="chip" type="button">State: Open ▾</button>
+              </div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Bug · reported 6 days ago · already picked up — waiting to start in Tasks</div></div><span class="badge b-queue">In Tasks</span><button class="btn" type="button" data-nav="issue">Open issue</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import fails on the new source format (#121)</div><div class="d">Bug · reported yesterday · picked up — blocked, and waiting for your decision</div></div><span class="badge b-block">In Tasks · blocked</span><button class="btn" type="button" data-nav="issue">Open issue</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Support streaming responses (#230)</div><div class="d">Feature request · reported 3 days ago · not picked up yet — your PM suggests taking it next week</div></div><span class="badge b-done">Not started</span><button class="btn primary" type="button">Make it a task</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Dark mode for article pages (#102)</div><div class="d">Feature request · reported last week · not picked up yet</div></div><span class="badge b-done">Not started</span><button class="btn primary" type="button">Make it a task</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="t">Fix the typo on the about page (#7)</div><div class="d">Closed 2 days ago — kept here as part of the record</div></div><span class="badge b-done">Closed</span><button class="btn" type="button" data-nav="issue">Open issue</button></div>
+                      </div>
+          <div class="screen-pane" data-screen="decide">
+              <p class="h-big">Decide</p>
+              <p class="h-sub">5 things are waiting for your decision, across all projects. Your PM won't proceed on these until you choose — everything else keeps moving.</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work in 3 projects — save it all?</div><div class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren't committed or pushed. If this device is wiped first, that work is lost.</div></div><span class="rel">waiting 26 min</span><div class="btnrow"><button class="btn amber" type="button">Commit &amp; push all</button><button class="btn" type="button">Review each project</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Approve the plan for “Home &amp; Decide screens” (#7007)?</div><div class="d">The design is done and the groundwork it waited on has landed. Approving restarts implementation right away.</div></div><span class="rel">waiting 1 h</span><div class="btnrow"><button class="btn primary" type="button">Approve &amp; start</button><button class="btn" type="button">Request changes</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Restart a shared service now, or tonight?</div><div class="d">“Retry backoff” (#212) needs a service restart to take effect. Restarting now interrupts one running task for about a minute.</div></div><span class="rel">waiting 18 min</span><div class="btnrow"><button class="btn primary" type="button">Restart now</button><button class="btn" type="button">Schedule for tonight</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">Stop a task that stopped progressing?</div><div class="d">“Reconnect after sleep” (#41) has run 3 h 40 m with no activity for the last hour. Stopping is safe — its changes so far are kept.</div></div><span class="rel">waiting 12 min</span><div class="btnrow"><button class="btn danger" type="button">Stop task</button><button class="btn" type="button">Let it run</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">The import file format changed — update the mapping?</div><div class="d">Daily import (#121) is paused. Updating the mapping takes about 20 min of agent time; pausing keeps results stale until tomorrow.</div></div><span class="rel">waiting 48 min</span><div class="btnrow"><button class="btn primary" type="button">Update the mapping</button><button class="btn" type="button">Pause imports</button></div></div>
+              <p class="rel">When this list is empty, your PM is running everything on its own.</p>
+                      </div>
+          <div class="screen-pane" data-screen="log">
+              <p class="h-big">Log</p>
+              <p class="h-sub">What was decided and what finished — one timeline for the whole device. Times are shown in your timezone; hover any entry for the exact time.</p>
+              <div class="tl">
+                <div class="tl-item done"><div class="when">2 min ago · 12:44</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">Task finished — “Settings: per-project sections” (#7039), merged.</span></div>
+                <div class="tl-item"><div class="when">9 min ago · 12:37</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">Task started — “Photo upload size limit” (#96).</span></div>
+                <div class="tl-item"><div class="when">15 min ago · 12:31</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">Task started — “Status bar in plain words” (#7044).</span></div>
+                <div class="tl-item"><div class="when">18 min ago · 12:28</div><span class="ptag"><i style="background:#2563eb"></i>llmlb</span> <span class="what">Task started — “Retry backoff for upstream timeouts” (#212), routed from your request in Ask.</span></div>
+                <div class="tl-item dec"><div class="when">34 min ago · 12:12</div><span class="badge b-wait">Your decision</span> <span class="what">You set this week's priority: gwt's React migration (#6943) before new features.</span></div>
+                <div class="tl-item err"><div class="when">48 min ago · 11:58</div><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> <span class="what">Import blocked — the source file format changed (#121). Waiting in Decide.</span></div>
+                <div class="tl-item err"><div class="when">59 min ago · 11:47</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">Publishing blocked — the deploy key expired (#88).</span></div>
+                <div class="tl-item dec"><div class="when">1 h ago · 11:20</div><span class="badge b-done">PM report</span> <span class="what">Late-morning report posted: progress on all 7 projects, 3 items flagged for your decision.</span></div>
+                <div class="tl-item"><div class="when">3 h 40 min ago · 09:06</div><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> <span class="what">Task started — “Reconnect after sleep” (#41). No activity in the last hour; flagged in Decide.</span></div>
+              </div>
+                      </div>
+          <div class="screen-pane" data-screen="works">
+              <p class="h-big">Works</p>
+              <p class="h-sub">9 sessions are working right now, across 5 of the 7 projects. Each session's work stays inside its own project.</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Shared state model for the new screens (#7048)</div><div class="d">Codex · Host · running 42 min · last activity 2 min ago · Changes so far: 6 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Home &amp; Decide screens (#7007)</div><div class="d">Claude Code · running 1 h 12 min · last activity just now · Changes so far: 11 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Race result import — new data format (#130)</div><div class="d">Claude Code · Docker · service agent-dev · running 47 min · last activity 5 min ago · Changes so far: 4 files · Checks: 1 failing, being fixed</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Token usage panel (#208)</div><div class="d">Claude Code · running 33 min · last activity 1 min ago · Changes so far: 3 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">Reconnect after sleep (#41)</div><div class="d">Codex · running 3 h 40 min · <b>no activity for 1 h</b> · Your call is waiting in Decide</div></div><span class="badge b-wait">Running · quiet</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Stop</button></div></div>
+              <p class="rel">+ 4 more sessions (gwt ×2 · llmlb ×1 · event-magazine ×1) — same layout.</p>
+                      </div>
+          <div class="screen-pane" data-screen="agents">
+              <p class="h-big">Agents</p>
+              <p class="h-sub">9 working · 1 available · 1 needs your attention. Agents are registered by name and tool, and are reused across issues. Capacity: 11 of 12 agents enabled (1 resting). Your PM assigns agents to projects. Usage is shown by default.</p>
+              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">H</span><div class="grow"><div class="t">Haruto</div><div class="d">Codex · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> Shared state model (#7048) · running 42 min</div><div class="use"><span class="pct">Weekly 64%</span><span class="bar"><i style="width:64%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">Y</span><div class="grow"><div class="t">Yui</div><div class="d">Claude Code · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> Home &amp; Decide screens (#7007) · running 1 h 12 min</div><div class="use"><span class="pct">Weekly 31%</span><span class="bar"><i style="width:31%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">S</span><div class="grow"><div class="t">Sora</div><div class="d">Claude Code · <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> Race result import (#130) · running 47 min</div><div class="use"><span class="pct">Weekly 31%</span><span class="bar"><i style="width:31%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">R</span><div class="grow"><div class="t">Ren</div><div class="d">Codex · <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> Reconnect after sleep (#41) · running 3 h 40 min · no activity for 1 h</div><div class="use"><span class="pct">Weekly 64%</span><span class="bar"><i style="width:64%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-wait">Working · quiet</span><button class="btn ghost" type="button">Pause</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#475569">A</span><div class="grow"><div class="t">Aoi</div><div class="d">Codex tool · Signed out — this agent can't take work until you sign in to the tool again.</div></div><span class="badge b-block">Needs sign-in</span><button class="btn" type="button">Sign in again</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#475569">M</span><div class="grow"><div class="t">Mio</div><div class="d">Claude Code · Available — your PM will assign the next task that fits.</div></div><span class="badge b-done">Available</span></div>
+              <p class="rel">+ 5 more working agents (gwt ×2 · llmlb ×2 · event-magazine ×1) — same layout. Select an agent to open its detail: rename, rest, reassign it to another issue or switch it to the next issue by hand, and its record (assigned issues · landed · active time · tokens), as today. Usage lines are shown for every agent by default.</p>
+                      </div>
+          <div class="screen-pane" data-screen="project">
+              <p class="h-big">Project: gwt</p>
+              <p class="h-sub">Context fixed to gwt — everything below is this project only. Your PM is the same PM; only its focus is pinned here. <b>Back to all projects</b> returns to the cross-project screens.</p>
+              <div class="stat-row">
+                <div class="stat"><div class="num">4</div><div class="lab">Running in gwt</div></div>
+                <div class="stat bad"><div class="num">1</div><div class="lab">Blocked</div></div>
+                <div class="stat warn"><div class="num">2</div><div class="lab">Waiting for your decision</div></div>
+                <div class="stat"><div class="num">132</div><div class="lab">Open issues in gwt</div></div>
+              </div>
+              <div class="rowitem"><div class="grow"><div class="t">Execution policy — Running</div><div class="d">Saved choice: Continue. This project keeps running, and starts again after a gwt restart. Switch the saved choice to Stop to park the project: no new work starts, running work is left to finish, and the choice is remembered. The state shown here (Running / Waiting / Stopped) is the project&rsquo;s actual state, not just the saved choice.</div></div><div class="btnrow"><button class="btn" type="button">Continue</button><button class="btn ghost" type="button">Stop</button></div></div>
+              <p class="h-sec">This project, in one place</p>
+              <div class="rowitem"><div class="grow"><div class="t">Issues — phase view</div><div class="d">This project&rsquo;s issues as a phase board: Backlog / Queued / Planning / Implementation / Review / Done, with queue actions and the issue detail drawer.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Works &amp; terminals</div><div class="d">Sessions running for gwt, with their terminals. Resume a past session, or start fresh.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Ask — scoped to gwt</div><div class="d">The same PM chat, with the scope pinned to this project. Reports for gwt land here too.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Agents on gwt</div><div class="d">The roster working on this project — the same agents as the cross-project Agents screen, filtered to gwt.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Board — state &amp; conversation, gwt only</div><div class="d">This project&rsquo;s board, in full: the state columns (Waiting for you / Blocked / In progress / Waiting to start, sorted by how long each card has waited) and the conversation log — posts, reply threads, @mentions, history paging, destinations (For you / General / Broadcast) and agent Focus / Resume. Decisions, blocked notes and handoffs shared from other machines via GitHub Discussions (#4833, decided and shipped) also arrive here. Board destinations are per project and shared with the team — projects never mix, and there is no cross-project board.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Agent board — Plan / Active / Blocked / Done</div><div class="d">Agent windows as cards on progress lanes; drag a card to move it, launch an agent into a lane. It opens as its own screen — windows are not placed side by side.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Branches</div><div class="d">Branch list with safe cleanup: protected branches, the current HEAD and branches gwt doesn&rsquo;t manage can&rsquo;t be deleted; remote deletion and forced worktree removal are confirmed step by step.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Search this project</div><div class="d">Semantic search across this project&rsquo;s issues, discussions, docs, specs, files, reports and memory.</div></div><button class="btn" type="button">Search</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Project settings</div><div class="d">Only what differs from the device settings: issue execution (Monitoring / Auto-refill / Allowed labels), this project&rsquo;s PM setup, Hooks, index health, and the execution policy.</div></div><button class="btn" type="button">Open</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Close this project</div><div class="d">Closing waits for the project&rsquo;s agents to shut down; if shutdown stalls, you can retry from here. A one-time move to the bare + worktree layout, when offered, runs from here too.</div></div><button class="btn ghost" type="button">Close…</button></div>
+              <p class="rel">Mission briefing for this project appears at the top of this screen when the PM starts work here.</p>
+                      </div>
+          <div class="screen-pane" data-screen="notifications">
+              <p class="h-big">Notifications</p>
+              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Repeats are folded into one line each.</p>
+              <p class="h-sec">Needs your decision · 5</p>
+              <div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><div class="grow"><div class="t">5 decisions are waiting — newest: unsaved work in 3 projects</div><div class="d">Decisions live in Decide; notifications only point at them.</div></div><button class="btn amber" type="button">Open Decide</button></div>
+              <p class="h-sec">Blocked · 2 new</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import blocked — source format changed (#121)</div><div class="d">48 min ago · also waiting in Decide</div></div><span class="badge b-block">Blocked</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Publishing blocked — deploy key expired (#88)</div><div class="d">59 min ago</div></div><span class="badge b-block">Blocked</span></div>
+              <p class="h-sec">Finished · 4 new since you last looked</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">“Settings: per-project sections” (#7039) finished and merged</div><div class="d">2 min ago · newest of the 4 — everything finished is collected in Log</div></div><span class="badge b-done">Done</span></div>
+              <p class="h-sec">Status updates · grouped</p>
+              <div class="rowitem"><div class="grow"><div class="t">Steering updates on gwt — 14 similar events</div><div class="d">Folded into one line · last one 9 min ago · nothing needs you here</div></div><button class="btn ghost" type="button">Expand</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">Progress notes from running tasks — 73 events</div><div class="d">Folded · details are in Log</div></div><span class="badge b-done">Read</span><button class="btn ghost" type="button">Expand</button></div>
+              <div class="btnrow"><button class="btn" type="button">Mark all as read</button><button class="btn ghost" type="button">Notification settings</button></div>
+                      </div>
+          <div class="screen-pane" data-screen="settings">
+              <p class="h-big">Settings</p>
+              <p class="h-sub">Settings for your PM apply to the whole device. Project settings only override them where a project truly differs.</p>
+<div class="chips" role="group" aria-label="Settings tabs"><button class="chip on" type="button" data-tab="yourpm">Your PM</button><button class="chip" type="button" data-tab="tools">Tools</button><button class="chip" type="button" data-tab="launch">Launch</button><button class="chip" type="button" data-tab="projects">Projects</button></div>
+<p class="rel" style="margin:-6px 0 14px">Tabs, not one long page: pick a tab to switch.</p>
+              <div class="set-pane on" data-pane="yourpm">
+<div class="set-group">
+                <h4>Your PM — this device</h4>
+                <p class="d">One PM watches all 7 projects. These settings shape how it takes requests, routes work and reports back.</p>
+                <div class="set-row"><div class="grow"><div class="t">Route tasks to projects automatically</div><div class="d2">The PM suggests a project from each request in Ask, and always shows you the choice.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Bring decisions to me as they appear</div><div class="d2">Off means decisions are batched into the morning and evening reports instead.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Daily summary</div><div class="d2">Posted to Log and Notifications at 9:00 and 18:00.</div></div><button class="btn" type="button">9:00 / 18:00 ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Quiet hours</div><div class="d2">Only blocked work and decisions interrupt you between 23:00 and 7:00.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">App updates — gwt itself</div><div class="d2">Current version 9.161.0. gwt checks for updates itself; tools have their own update setting, in the Tools tab.</div></div><button class="btn" type="button">Check now</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Apply updates automatically (auto-apply)</div><div class="d2">When an update is ready, running work is drained first — agents are stopped safely — then gwt restarts and applies it. You can cancel an automatic update before it applies.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Release notes &amp; about</div><div class="d2">What changed in each version. Rolling back to an older version asks for confirmation first.</div></div><button class="btn" type="button">Open</button></div>
+              </div>
+<div class="set-group">
+                <h4>Performance &amp; system — this device</h4>
+                <p class="d">How much of this device gwt may use, and small system behaviors. Set once; rarely changed.</p>
+                <div class="set-row"><div class="grow"><div class="t">Resource preset</div><div class="d2">Agent process priority, CPU limit per agent, build parallelism per agent, and isolating agent process trees.</div></div><button class="btn" type="button">Balanced ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Output language</div><div class="d2">Language of reports and other narrative output. The interface itself stays in English.</div></div><button class="btn" type="button">Japanese ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Launch gwt at login</div><div class="d2">Start gwt when you sign in to this device.</div></div><span class="switch off" role="img" aria-label="Off"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Works output lines</div><div class="d2">How many output lines a work session shows (3–10).</div></div><button class="btn" type="button">6 ▾</button></div>
+              </div>
+</div>
+<div class="set-pane" data-pane="tools">
+<div class="set-group">
+                <h4>Supported Tools</h4>
+                <p class="d">The tools your PM can put to work. Each agent is registered with one of these tools. Usage for each tool appears on the Agents screen by default — there is no separate switch.</p>
+                <div class="set-row"><div class="grow"><div class="t">Automatically update tools</div><div class="d2">At the next startup, only tools with a verified update route and a known newer version are updated. Nothing is installed automatically.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <p class="d" style="margin:2px 0 4px">Installs and updates can't run while any agent is working — close the agent windows first, then retry. Update failures leave launching available.</p>
+                <div class="set-row"><div class="grow"><div class="t">Claude Code</div><div class="d2">Installed · version 2.1.322 · latest 2.1.322 — up to date · 5 sessions available</div></div><span class="badge b-done">Ready</span></div>
+                <div class="set-row"><div class="grow"><div class="t">Codex</div><div class="d2">Installed · version 0.58.0 · latest 0.59.0 — an update is available · 1 session needs sign-in (see Agents)</div></div><span class="badge b-wait">Attention</span><button class="btn" type="button">Update</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Grok Build</div><div class="d2">Not installed — installing adds the tool so agents can be registered with it.</div></div><button class="btn primary" type="button">Install</button></div>
+                <div class="set-row"><div class="grow"><div class="t">OpenCode</div><div class="d2">Installed · version 1.1.8 · latest 1.1.8 — up to date</div></div><span class="badge b-done">Ready</span></div>
+              </div>
+<div class="set-group">
+                <h4>Custom Tools &amp; backends</h4>
+                <p class="d">Register your own command-line tools, and override how a built-in tool connects (backend profiles). Each custom tool has its own environment variables.</p>
+                <div class="set-row"><div class="grow"><div class="t">Custom tools</div><div class="d2">External CLI tools you registered yourself — add, edit, or remove. Agents can then be registered with them, like built-in tools.</div></div><button class="btn" type="button">Manage</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Environment variables — per custom tool</div><div class="d2">Add or remove env rows for a custom tool; saved with the tool&rsquo;s definition.</div></div><button class="btn" type="button">Edit</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Tool backends</div><div class="d2">Backend override profiles for Claude Code and Codex — where the tool actually connects.</div></div><button class="btn" type="button">Manage</button></div>
+              </div>
+</div>
+<div class="set-pane" data-pane="launch">
+<div class="set-group">
+                <h4>Launch — how agents start</h4>
+                <p class="d">Launch profiles (candidates), one per agent. Each profile fixes the agent, its tool, model and runtime; starting work uses the profile recorded for that work, and automatic launches use the tier settings. Launching itself happens in the Launch Wizard. Projects can override these profiles as a difference, below.</p>
+                <div class="set-row"><div class="grow"><div class="t">1. Haruto — Codex · gpt-6-sol · reasoning xhigh</div><div class="d2">Runtime: Host · Session mode: Normal · Prefer for: implementation</div></div><button class="btn" type="button">Edit</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Runtime — Haruto</div><div class="d2">Where this agent runs. Choosing Docker enables the Docker service choice and disables the Windows shell.</div></div><button class="btn" type="button">Host ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Docker service — Haruto</div><div class="d2">Only applies when the runtime is Docker.</div></div><button class="btn" type="button">Auto ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Skip permissions — Haruto</div><div class="d2">Skip tool permission prompts for this agent's sessions.</div></div><span class="switch off" role="img" aria-label="Off"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Fast mode — Haruto</div><div class="d2">Prefer faster responses where the tool supports it.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">2. Yui — Claude Code · Auto · reasoning default</div><div class="d2">Runtime: Docker · service agent-dev · Session mode: Normal</div></div><button class="btn" type="button">Edit</button></div>
+                <div class="set-row"><div class="grow"><div class="t">3. Sora — Claude Code · Auto · reasoning default</div><div class="d2">Runtime: Host · Session mode: Normal · Prefer for: data imports</div></div><button class="btn" type="button">Edit</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Manage launch profiles</div><div class="d2">Add a profile, reorder the pool, or remove one — the profiles above are the pool itself, not just examples.</div></div><button class="btn" type="button">Add profile</button></div>
+              </div>
+</div>
+<div class="set-pane" data-pane="projects">
+<div class="set-group">
+                <h4>Projects</h4>
+                <p class="d">Each project inherits the device settings above. Only the differences are listed.</p>
+                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">2 differences: reports go to the team channel · React work has priority this week</div></div><button class="btn" type="button">Open</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d2">1 difference: service restarts need your decision</div></div><button class="btn" type="button">Open</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">1 difference: imports run at 6:00 daily</div></div><button class="btn" type="button">Open</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d2">No differences — using device settings as-is</div></div></div>
+              </div>
+<div class="set-group">
+                <h4>Board sharing — this device</h4>
+                <p class="d">Where board posts go. The conversation itself stays per project (see Project); this only chooses the provider and the connection.</p>
+                <div class="set-row"><div class="grow"><div class="t">Board provider</div><div class="d2">Local (this device only), Slack, or Teams. Switching providers rewires the board hooks. GitHub Discussions is not a provider — it is the device-to-device handoff path for decisions, blocked notes and handoffs.</div></div><button class="btn" type="button">Local ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Slack / Teams connection</div><div class="d2">Client ID and secret, tenant and default channel; sign in or out here. The sign-in (OAuth) redirect URL to register is shown in place.</div></div><button class="btn" type="button">Set up</button></div>
+              </div>
+<div class="set-group">
+                <h4>Per project — running the work</h4>
+                <p class="d">Differences that steer how each project&rsquo;s issues are picked up and run. Shown for gwt; every project has the same set.</p>
+                <div class="set-row"><div class="grow"><div class="t">Monitoring</div><div class="d2">Watch this project&rsquo;s issues and start work on eligible ones. Autonomous runs them without asking first — and needs a GitHub token (GH_TOKEN / GITHUB_TOKEN).</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Auto-refill</div><div class="d2">Keep the queue filled up to the refill limit (currently 3) whenever a slot frees up.</div></div><span class="switch" role="img" aria-label="On"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Allowed labels</div><div class="d2">Only issues with these labels enter the launch queue.</div></div><button class="btn" type="button">Edit labels</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Project Manager for this project</div><div class="d2">The PM&rsquo;s own setup for gwt: agent, model and effort defaults, the autonomous loop (auto start, loop interval, Pause / Resume), and Restart. Profile changes apply after a restart.</div></div><button class="btn" type="button">Open</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Hooks — Hook Center</div><div class="d2">Audit, health, repair and regeneration of this project&rsquo;s hooks, Git hook placement, and trust for gwt-managed Codex hooks.</div></div><button class="btn" type="button">Open</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Project index</div><div class="d2">Index health: status, document count, last repair. Rebuild, rebuild all, or refresh the status here.</div></div><button class="btn" type="button">Rebuild</button></div>
+              </div>
+</div>
+          </div>
+          <div class="screen-pane" data-screen="issue">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="issues">&larr; Back to Issues</button><button class="btn ghost" type="button" data-nav="tasks">See it in Tasks</button></div>
+              <p class="h-big">Memory grows during long sessions</p>
+              <p class="h-sub">Issue #5561 · <b>gwt</b> · Bug · reported 6 days ago · Picked up by your PM — waiting to start in Tasks.</p>
+              <div class="set-group">
+                <h4>Goal</h4>
+                <p class="d">Stop the GUI&rsquo;s memory from growing during long sessions (about 0.85 GB to 2.7 GB over roughly 4 hours) so gwt can stay open all day without a restart.</p>
+                <div class="set-row"><div class="grow"><div class="t">Acceptance</div><div class="d2">Memory stays flat over a 4-hour session with the same workload; the fix is verified on Windows as well as this device.</div></div><span class="badge b-queue">In Tasks</span></div>
+                <div class="set-row"><div class="grow"><div class="t">Phase</div><div class="d2">Queued — waiting to start. The phase board for gwt lives in Project.</div></div><button class="btn" type="button" data-nav="project">Open Project</button></div>
+              </div>
+              <div class="set-group">
+                <h4>Discussion</h4>
+                <div class="set-row"><div class="grow"><div class="t">Your PM</div><div class="d2">Picked this up from the feedback queue. It matches the slowdown you noticed on the Windows machine too, so I&rsquo;ve linked both reports here.</div></div><span class="rel">2 days ago</span></div>
+                <div class="set-row"><div class="grow"><div class="t">You</div><div class="d2">The GUI also stops accepting input after long runs — treat that as the same family.</div></div><span class="rel">2 days ago</span></div>
+              </div>
+              <div class="set-group">
+                <h4>Execution</h4>
+                <div class="set-row"><div class="grow"><div class="t">State</div><div class="d2">Waiting to start — no agent is working on it yet. Starting uses the launch profile recorded for this task.</div></div><span class="badge b-queue">Waiting to start</span></div>
+                <div class="set-row"><div class="grow"><div class="t">Agents &amp; sessions</div><div class="d2">None yet. When work starts, the session appears here and in Works.</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">Blockers</div><div class="d2">None. If one appears, resolving it (Resolve blocker) happens from this screen.</div></div><span class="badge b-done">Clear</span></div>
+              </div>
+              <div class="set-group">
+                <h4>Verification &amp; artifacts</h4>
+                <div class="set-row"><div class="grow"><div class="t">Verification</div><div class="d2">Not run yet — a long-session memory profile will be attached here once the fix lands.</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">Artifacts</div><div class="d2">Nothing produced yet. Pull requests and reports for this issue will be listed here.</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">Obligations</div><div class="d2">No unresolved obligations (reviews, checks or decisions) are attached to this issue.</div></div></div>
+              </div>
+              <div class="set-group">
+                <h4>Lifecycle &amp; context</h4>
+                <div class="set-row"><div class="grow"><div class="t">Lifecycle</div><div class="d2">Reported &rarr; picked up by your PM &rarr; waiting to start. Recovery actions, if a session is ever lost, also live here.</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">Progress summary</div><div class="d2">Your PM will keep a short running summary here as work moves — the same words that appear in Log.</div></div></div>
+              </div>
+          </div>
+          </div>
+        </div>
+      </div>
+      <div class="app-status">
+        <div class="statusbar">
+            <span class="dot"></span>
+            <span><b>Your PM</b> is watching all 7 projects</span>
+            <span class="sep"></span><span><b>9</b> running</span>
+            <span class="sep"></span><span><b>3</b> blocked</span>
+            <span class="sep"></span><span><b class="you">5 waiting for your decision</b></span>
+            <span class="r">Updated just now</span>
+          </div>
+      </div>
+
+      <footer class="doc">
+        <h3>このモックについて</h3>
+        <p>表示しているのは刷新後の姿（After）のみで、Before は含みません。画面構成・情報設計・言葉づかいの正は静的モック（mock-full-refresh.html）と Issue #7007 のオーナー決定です。ステータスバーは全画面共通で、画面を切り替えても下部に残ります。</p>
+      </footer>
+    </div>
+
+    <script>
+      // Interactive mock: rail navigation switches the visible screen.
+      (function () {
+        var titles = {
+          home: "Home", ask: "Ask", progress: "Progress", tasks: "Tasks",
+          issues: "Issues", issue: "Issue #5561", decide: "Decide", log: "Log",
+          works: "Works", agents: "Agents", project: "Project \u2014 gwt",
+          notifications: "Notifications", settings: "Settings"
+        };
+        function show(name) {
+          document.querySelectorAll(".screen-pane").forEach(function (p) {
+            p.classList.toggle("on", p.getAttribute("data-screen") === name);
+          });
+          var railName = name === "issue" ? "issues" : name;
+          document.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
+            a.classList.toggle("on", a.getAttribute("data-nav") === railName);
+          });
+          var t = document.getElementById("appTitle");
+          if (t) t.textContent = titles[name] || name;
+        }
+        document.querySelectorAll("[data-nav]").forEach(function (el) {
+          el.addEventListener("click", function (ev) {
+            ev.preventDefault();
+            show(el.getAttribute("data-nav"));
+          });
+          el.addEventListener("keydown", function (ev) {
+            if (ev.key === "Enter" && el.getAttribute("role") === "button") {
+              ev.preventDefault();
+              show(el.getAttribute("data-nav"));
+            }
+          });
+        });
+        // Settings tabs (Your PM / Tools / Launch / Projects).
+        document.querySelectorAll("[data-tab]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            var name = b.getAttribute("data-tab");
+            document.querySelectorAll("[data-tab]").forEach(function (x) {
+              x.classList.toggle("on", x === b);
+            });
+            document.querySelectorAll(".set-pane").forEach(function (p) {
+              p.classList.toggle("on", p.getAttribute("data-pane") === name);
+            });
+          });
+        });
+        show("home");
+      })();
+    </script>
+
+  </body>
+</html>
