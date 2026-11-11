@@ -13858,6 +13858,13 @@ mod tests {
             );
         }
         assert_eq!(
+            status
+                .as_object_mut()
+                .unwrap()
+                .remove("caller_host_identity"),
+            Some(serde_json::json!(crate::process::current_host_identity()))
+        );
+        assert_eq!(
             status,
             serde_json::json!({
                 // Issue #4413 AC-1/AC-3: this fallback is the rebuilt
