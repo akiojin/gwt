@@ -1696,7 +1696,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "execution.repair" => {
             let reason = required_string(params, "reason")?;
-            let command = match optional_string(params, "session_id")? {
+            let command = match lookup(params, "session_id")
+                .map(|_| required_string(params, "session_id"))
+                .transpose()?
+            {
                 Some(session_id) => crate::cli::execution_state::ExecutionCommand::RepairSession {
                     session_id,
                     reason,
@@ -8751,6 +8754,15 @@ mod tests {
             err("execution.repair", json!({})),
             CliParseError::MissingFlag("reason")
         ));
+        for session_id in ["", "  "] {
+            assert!(matches!(
+                err(
+                    "execution.repair",
+                    json!({"reason": "repair target", "session_id": session_id})
+                ),
+                CliParseError::MissingFlag("session_id")
+            ));
+        }
         assert!(matches!(
             ok("execution.reopen", json!({"reason": "blocker resolved"})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen { .. })

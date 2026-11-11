@@ -16308,6 +16308,114 @@ fn retired_layout_transaction_refuses_before_markers_receipts_or_events() {
 }
 
 #[test]
+fn external_recovery_snapshot_checks_payload_and_preserves_committed_receipts() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(home.path());
+    let repo = home.path().join("repo");
+    init_test_git_repo(&repo);
+    let current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let projection = WorkspaceProjection::default_for_project(&repo);
+    save_workspace_projection(&repo, &projection).unwrap();
+    let mut event = WorkEvent::new(WorkEventKind::Resume, &projection.id, Utc::now());
+    event.owner = Some("Issue #5012".into());
+    event.agent_session_id = Some("repair-target".into());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        worktree_path: Some(repo.clone()),
+        branch: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    for (operation_id, committed) in [
+        ("cancel-before-repair", false),
+        ("commit-before-crash", true),
+    ] {
+        transact_workspace_state_with_commit(
+            &repo,
+            operation_id,
+            |_, _, _| Ok(((), vec![event.clone()])),
+            || Err(GwtError::Other("lost external response".into())),
+        )
+        .unwrap_err();
+        let marker = pending_workspace_state_transaction_path(&current);
+        let before = fs::read(&marker).unwrap();
+        let transaction: PendingWorkspaceStateTransaction =
+            serde_json::from_slice(&before).unwrap();
+        let coordinator =
+            pending_workspace_state_transaction_coordinator_path(&transaction).unwrap();
+        if !committed {
+            // Only the coordinator may survive a partial marker publication.
+            for path in pending_workspace_state_transaction_paths(&transaction) {
+                if path != coordinator {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
+        let recovery = inspect_workspace_state_external_commit_recovery(&repo)
+            .unwrap()
+            .unwrap();
+        if !committed {
+            assert!(!marker.exists(), "inspection must not recreate markers");
+            assert_eq!(fs::read(&coordinator).unwrap(), before);
+            write_workspace_state_transaction_markers(&transaction, false).unwrap();
+        }
+        assert_eq!(recovery.operation_id, operation_id);
+        assert_eq!(recovery.owner, "Issue #5012");
+        assert_eq!(recovery.session_id, "repair-target");
+        assert_eq!(recovery.work_id, projection.id);
+        assert_eq!(recovery.resolution, None);
+        let mut changed = recovery.clone();
+        changed.transaction_payload_hash = "different payload".into();
+        assert!(resolve_workspace_state_external_commit_recovery(&changed).is_err());
+        changed = recovery.clone();
+        changed.owner = "Issue #5013".into();
+        assert!(resolve_workspace_state_external_commit_recovery(&changed).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), before);
+        assert!(!external_workspace_commit_receipt_path(&current, &works, operation_id).exists());
+        let expected = if committed {
+            // Commit became durable before the Prepared marker was promoted.
+            persist_external_workspace_commit_receipt(
+                &current,
+                &works,
+                operation_id,
+                &transaction,
+                ExternalWorkspaceCommitResolution::Committed,
+            )
+            .unwrap();
+            assert!(resolve_workspace_state_external_commit_recovery(&recovery).is_err());
+            inspect_workspace_state_external_commit_recovery(&repo)
+                .unwrap()
+                .unwrap()
+        } else {
+            recovery
+        };
+        let resolution = if committed {
+            ExternalWorkspaceCommitResolution::Committed
+        } else {
+            ExternalWorkspaceCommitResolution::Rejected
+        };
+        assert_eq!(expected.resolution, committed.then_some(resolution));
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&expected).unwrap(),
+            resolution
+        );
+        assert!(!marker.exists());
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&expected).unwrap(),
+            resolution
+        );
+        let mut wrong_receipt = expected.clone();
+        wrong_receipt.transaction_id = "different transaction".into();
+        assert!(resolve_workspace_state_external_commit_recovery(&wrong_receipt).is_err());
+        assert!(inspect_workspace_state_external_commit_recovery(&repo)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
 fn guarded_external_recovery_rejects_foreign_owner_without_mutation() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().unwrap();
