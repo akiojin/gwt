@@ -339,3 +339,34 @@ gwt-git lib 425 件と `merged_branch_prune_test` 14 件が成功。
   `gwt.process.summary` に出ない。コマンドラインが空の git 16 本も
   記録経路が同じと見られ、caller は特定できていない。この slice では
   変更しない。
+
+## 2026-11-11: Reviewing gate の毎 scan readback（サクラ、次スライス）
+
+### 観測（installed GUI PID 34596、14:32〜14:42 JST の 10 分）
+
+`gwt.process.summary` の gh 起動は E:\gwt 139 本、E:\unity-cli 116 本で、
+AC-2（1 プロジェクト 10 分で 20 本以下）を満たしていない。すべて
+`issue_monitor_scan` span 内。上位は Reviewing 中の PR 1 本あたり scan ごとに
+4 本ずつ出る gate readback で、unity-cli PR #556 は
+`branches/main/protection` / `pr view --json statusCheckRollup` /
+`--json headRefOid` / `--json state,mergeable,mergeStateStatus` が各 26 本、
+gwt PR #7047 も同じ 4 本が各 19〜21 本だった。
+
+### 修正（`crates/gwt/src/issue_monitor_worker.rs` / `crates/gwt-git/src/pr_status.rs`）
+
+1. rollup・head・mergeability を `gh pr view --json
+   statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus` の 1 本で読む。
+2. branch protection を既存の in-process read cache（timer scan の read max
+   age 内だけ有効、失敗はキャッシュしない）で再利用する。
+3. gate が「必須 CI 実行中」（WaitForCi）と判定した PR は、timer scan では
+   60 秒間 gate readback を読み直さない。手動 scan は従来どおり毎回読む。
+   Deliver / Remediate は常に新しい readback で判定する。
+
+PR 1 本が 10 分 Reviewing に留まる場合、gh は約 104 本から約 11 本になる見込み。
+
+### 範囲外 / 未測定
+
+- E:\gwt の `gh api graphql issue timelines`（24 本）と `gh api issues`
+  （20 本）は Reviewing gate とは別経路で、この slice では変えていない。
+  そのため gwt プロジェクトでは修正後も AC-2 の 20 本に届かない見込み。
+- AC-4 / AC-5 は実 fleet で測定する。
