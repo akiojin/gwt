@@ -15264,6 +15264,7 @@ impl AppRuntime {
                 id,
                 incarnation,
                 error,
+                explicit_stop,
                 final_screen,
             } => {
                 let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
@@ -15309,6 +15310,19 @@ impl AppRuntime {
                 runtime.exit_confirmed = true;
                 runtime.status = status;
                 runtime.detail = detail.clone();
+                if explicit_stop {
+                    if let Some(address) = self.window_lookup.get(&id).cloned() {
+                        if let Some(tab) = self.tab_mut(&address.tab_id) {
+                            if tab
+                                .workspace
+                                .window(&address.raw_id)
+                                .is_some_and(crate::runtime_support::window_is_agent_pane)
+                            {
+                                tab.workspace.set_persist(&address.raw_id, false);
+                            }
+                        }
+                    }
+                }
                 self.active_agent_sessions.remove(&id);
                 let mut events = Vec::new();
                 if let Some(snapshot) = final_snapshot {
@@ -15316,6 +15330,11 @@ impl AppRuntime {
                     events.push(snapshot);
                 }
                 events.extend(self.apply_owner_status_projection(&id, status, detail));
+                if explicit_stop {
+                    // Status alone cannot update the catalog's snapshot
+                    // eligibility after this pane leaves the live census.
+                    events.push(self.workspace_state_broadcast(context));
+                }
                 events
             }
             OwnerEvent::LaunchProgress {

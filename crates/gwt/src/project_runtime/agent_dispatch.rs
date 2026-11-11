@@ -3394,6 +3394,14 @@ pub(crate) struct OwnedWindowRecordCleanup {
 }
 impl OwnedWindowRecordCleanup {
     pub(crate) fn finish(&self) -> Result<(), String> {
+        self.finish_with_retention(false)
+    }
+
+    pub(crate) fn retain_stopped(&self) -> Result<(), String> {
+        self.finish_with_retention(true)
+    }
+
+    fn finish_with_retention(&self, retain: bool) -> Result<(), String> {
         #[cfg(any(test, feature = "test-gh-guard"))]
         if let Some(session_id) = self.expected_session_id.as_deref() {
             super::agent_frontend::run_owner_agent_cleanup_test_hook(&self.root, session_id);
@@ -3410,7 +3418,15 @@ impl OwnedWindowRecordCleanup {
         {
             return Err("window Session changed before exact row cleanup".into());
         }
-        registry.close_window(raw);
+        if retain {
+            let agent = registry.window(raw).is_some_and(window_is_agent_pane);
+            registry.set_status(raw, WindowProcessStatus::Stopped);
+            if agent {
+                registry.set_persist(raw, false);
+            }
+        } else {
+            registry.close_window(raw);
+        }
         // Persist even if an earlier failed sync already removed the in-memory
         // row. Success ACK is only possible after this durable barrier.
         crate::persistence::save_workspace_state_durable(
