@@ -18081,7 +18081,7 @@ impl IssueMonitorState {
     }
 
     /// Issue #4117: keep the review ledger in step with the canvas. A review
-    /// window observed alive for an Issue still awaiting its verdict is adopted
+    /// window observed for an Issue still awaiting its verdict is adopted
     /// (the daemon restarted and forgot the dispatch) or bound to its ledger
     /// entry; an entry whose window left this tab's canvas, or that never
     /// appeared within [`REVIEW_WINDOW_SPAWN_GRACE_SECS`], is dropped so it
@@ -18092,7 +18092,19 @@ impl IssueMonitorState {
         project_tabs: &BTreeSet<String>,
     ) {
         let now = snapshot.observed_at.as_str();
-        for observed in &snapshot.windows {
+        // Bind live reviews first: an older dead pane must not claim the
+        // reservation and make the current live pane look like a duplicate.
+        for observed in snapshot
+            .windows
+            .iter()
+            .filter(|window| idle_window_is_alive(window.status))
+            .chain(
+                snapshot
+                    .windows
+                    .iter()
+                    .filter(|window| !idle_window_is_alive(window.status)),
+            )
+        {
             if !observed.review_dispatch
                 || !issue_monitor_qualified_window_id(&observed.window_id)
                     .is_some_and(|(tab, _)| project_tabs.contains(tab))
@@ -18111,7 +18123,7 @@ impl IssueMonitorState {
             }
             match self.review_windows.get_mut(&issue_number) {
                 Some(window) => {
-                    if window.window_id.is_none() && idle_window_is_alive(observed.status) {
+                    if window.window_id.is_none() {
                         window.window_id = Some(observed.window_id.clone());
                         tracing::info!(
                             issue = issue_number,
@@ -18159,9 +18171,6 @@ impl IssueMonitorState {
                         }
                         continue;
                     }
-                    if !idle_window_is_alive(observed.status) {
-                        continue;
-                    }
                     let Some(pr_number) = record.pr_number else {
                         continue;
                     };
@@ -18204,7 +18213,7 @@ impl IssueMonitorState {
                                 Some(observed) => (
                                     false,
                                     Some(format!(
-                                        "review window {window_id} exited without a verdict ({:?})",
+                                        "review window launch failure: {window_id} exited without a verdict ({:?})",
                                         observed.status
                                     )),
                                 ),
@@ -21854,6 +21863,54 @@ impl IssueMonitorState {
                 (owner != issue_number && issue_monitor_window_ids_match(bound, window_id))
                     .then_some(owner)
             })
+    }
+
+    /// Handle review termination without spending the implementation's attempt
+    /// budget. A duplicate/late review notification is still handled here.
+    pub(crate) fn record_review_window_failed_at(
+        &mut self,
+        window_id: &str,
+        message: &str,
+        now: &str,
+    ) -> bool {
+        // Keep the implementation-only lookup used by launch source fencing.
+        if self.launched_window_issue(window_id).is_some() {
+            return false;
+        }
+        let issue_number = self
+            .review_windows
+            .iter()
+            .find_map(|(issue, window)| {
+                window.window_id.as_deref().and_then(|bound| {
+                    issue_monitor_window_ids_match(bound, window_id).then_some(*issue)
+                })
+            })
+            .or_else(|| {
+                self.monitor_canvas_windows()
+                    .find(|window| {
+                        window.review_dispatch
+                            && issue_monitor_window_ids_match(&window.window_id, window_id)
+                    })
+                    .and_then(|window| window.issue_number)
+            });
+        let Some(issue_number) = issue_number else {
+            return false;
+        };
+        if !self
+            .idle_pane_closes_requested
+            .iter()
+            .any(|closed| issue_monitor_window_ids_match(closed, window_id))
+        {
+            self.record_review_failure(
+                issue_number,
+                format!(
+                    "review window launch failure: {}",
+                    review_failure_message(message.to_string())
+                ),
+                now,
+            );
+        }
+        true
     }
 
     /// Reverse-lookup the Issue associated with a launched agent `window_id`.
@@ -56162,6 +56219,84 @@ mod tests {
                 .autonomous_record(41)
                 .and_then(|record| record.reviewed_sha.clone()),
             Some("sha-410-v2".to_string())
+        );
+    }
+
+    #[test]
+    fn issue_4923_live_review_wins_over_an_older_dead_pane() {
+        for dispatched in [false, true] {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(3);
+            if dispatched {
+                monitor
+                    .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+                    .unwrap();
+                monitor.take_pending_review_dispatches();
+            } else {
+                monitor.begin_review(41, 410, "sha-410");
+            }
+            monitor.record_window_snapshot(idle_snapshot(
+                "2026-09-07T04:00:01Z",
+                vec![
+                    idle_observation("tab-1::review-old", Some(41), WindowState::Error, true),
+                    idle_observation(
+                        "tab-1::review-current",
+                        Some(41),
+                        WindowState::Running,
+                        true,
+                    ),
+                ],
+            ));
+            assert!(monitor.record_review_window_failed_at(
+                "tab-1::review-old",
+                "Process exited with status 1",
+                "2026-09-07T04:00:02Z",
+            ));
+            assert_eq!(
+                monitor.review_windows()[0].window_id.as_deref(),
+                Some("tab-1::review-current")
+            );
+            assert!(review_attempts_of(&monitor, 41).is_none());
+            assert!(monitor.inbox_item(41).unwrap().error_message.is_none());
+            assert!(monitor
+                .take_pending_idle_pane_closes()
+                .iter()
+                .all(|close| close.window_id != "tab-1::review-current"));
+        }
+    }
+
+    #[test]
+    fn issue_4923_first_dead_review_snapshot_reports_launch_failure_without_grace() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+            .expect("dispatch admitted");
+        monitor.take_pending_review_dispatches();
+        let snapshot = idle_snapshot(
+            "2026-09-07T04:00:01Z",
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Error, true),
+            ],
+        );
+        monitor.record_window_snapshot(snapshot.clone());
+        let error = monitor
+            .inbox_item(41)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .unwrap();
+        assert!(error.contains("launch failure"), "{error}");
+        assert!(!error.contains("PTY handoff complete") && !error.contains("never appeared"));
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(review_attempts_of(&monitor, 41).unwrap().count, 1);
+        assert_eq!(monitor.attempt_count(41), 0);
+        monitor.record_window_snapshot(snapshot);
+        assert_eq!(review_attempts_of(&monitor, 41).unwrap().count, 1);
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
         );
     }
 
