@@ -4202,7 +4202,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4264,6 +4264,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onSend: text => {
+            const request = requestPmChatSend(windowData.id, text);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
+            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
+            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
+          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -5195,7 +5202,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             runtimeHealthModel.update(() => event.snapshot || {});
             break;
           case "pm_reports":
-          case "pm_conversation": {
+          case "pm_conversation":
+          case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }

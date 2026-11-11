@@ -6003,14 +6003,24 @@ button.workspace-board-ref:focus-visible {
 .pm-chat button:disabled { cursor: default; color: var(--color-text-disabled); }
 .pm-chat button:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; }
-.pm-chat__chat { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; }
-.pm-chat__conversation { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); }
+.pm-chat__chat { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; overflow-wrap: anywhere; }
+.pm-chat__conversation { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; gap: var(--space-2); padding: var(--space-3); }
+.pm-chat__composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--color-border); background: var(--color-surface); }
+.pm-chat__draft { flex: 1; min-width: 0; min-height: 2.5rem; max-height: 12rem; resize: vertical; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); color: var(--color-text); font: inherit; }
+.pm-chat__draft:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 1px; }
+.pm-chat__composer-status { flex-basis: 100%; margin: var(--space-1) 0 0; color: var(--color-text-muted); }
+/* Kept rendered when empty so the live region announces the next status. */
+.pm-chat__composer-status:empty { margin: 0; }
 .pm-chat__bubble { max-width: min(80%, 48rem); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface-elevated); }
 .pm-chat__bubble--user { align-self: flex-end; border-color: var(--color-focus-ring); border-end-end-radius: var(--radius-sm); }
 .pm-chat__bubble--assistant { align-self: flex-start; border-inline-start: 2px solid var(--color-role-pm); border-end-start-radius: var(--radius-sm); }
 .pm-chat__bubble .pm-chat__text > :first-child { margin-top: 0; }
 .pm-chat__bubble .pm-chat__text > :last-child { margin-bottom: 0; }
 .pm-chat__bubble pre, .pm-chat__bubble table { max-width: 100%; overflow-x: auto; }
+.pm-chat__collapsed { display: flex; flex-direction: column; align-self: stretch; gap: var(--space-2); }
+.pm-chat__collapsed-summary { align-self: flex-start; cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); color: var(--color-text-muted); }
+.pm-chat__collapsed-summary:hover { color: var(--color-text); }
+.pm-chat__collapsed-summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__tasks { flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; padding-bottom: var(--space-3); }
 .pm-chat__task-list { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
 .pm-chat__task { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
@@ -6019,6 +6029,26 @@ button.workspace-board-ref:focus-visible {
 .pm-chat__task--child { margin-inline-start: var(--space-3); border-inline-start: 2px solid var(--color-border-strong); }
 .pm-chat__task-meta { color: var(--color-text-muted); font-size: var(--type-xs); }
 .pm-chat__task-review { color: var(--color-state-needs-input); }
+.task-home { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
+.task-home__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.task-home__header h1 { margin: 0; font-size: var(--type-xl); }
+.task-home__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+.task-home__hero { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.task-home__hero h2 { margin: 0; font-size: var(--type-lg); }
+.task-home__hero p { margin: var(--space-1) 0 0; }
+.task-home__hero button { margin-top: var(--space-2); }
+.task-home__primary { border-color: var(--color-focus-ring); }
+.task-home__counts { display: flex; gap: var(--space-4); }
+.task-home__counts strong { display: block; font-size: var(--type-xl); }
+.task-home__section { margin: 0; font-size: var(--type-md); }
+.task-home__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.task-home__card h3 { margin: 0; font-size: var(--type-sm); }
+.task-home__card p { margin: var(--space-1) 0 0; }
+.task-home__card-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.task-home__badge { color: var(--color-text-muted); font-size: var(--type-xs); }
+.task-home__badge--attention { color: var(--color-state-needs-input); }
+.task-home__actions { margin-top: var(--space-2); }
+.task-home__stale { color: var(--color-state-needs-input); }
 .pm-chat__current { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border-strong); background: var(--color-surface-elevated); overflow-wrap: anywhere; }
 .pm-chat__current-summary { display: block; list-style: none; cursor: pointer; border-radius: var(--radius-sm); }
 .pm-chat__current-summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }

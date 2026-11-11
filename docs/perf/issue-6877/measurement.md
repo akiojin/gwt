@@ -276,3 +276,97 @@ AC-2 の20回/10分、AC-4 の6 agent CPU、AC-5 の5分 / 60分比較は
 User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
+
+## 2026-11-11: branch merge verdict の lineage スラッシング（サクラ）
+
+### 観測（installed GUI PID 34596、v9.159 系、再起動後約 30 分）
+
+- `~/.gwt/logs/gwt.log.2026-11-11` の `gwt.process.summary` を 12:45〜12:55
+  の 10 分で集計すると、GUI が起動した git/gh は 1,429 本。上位は
+  `rev-parse --verify --quiet origin/develop` 398、`merge-base --is-ancestor`
+  252、`rev-parse --verify --quiet work/issue-N` 214、
+  `rev-parse work/issue-N^{commit} origin/develop^{commit}` 196、
+  `git cherry` 17（AC-3 の 10 回/10 分を超過）。
+- この並びは branch list hydrate（`build_cleanup_targets` →
+  `detect_cleanable_target_with_remote_names` → `is_branch_merged_into`）の
+  ブランチ 1 本ごとの手順と一致する。1 回の hydrate が約 130 本の
+  ローカルブランチを 1〜3 秒/本で処理し、10 分間途切れず続いていた。
+- 古いブランチの `merge-base --is-ancestor` は 1 回 0.4〜1.5 秒、
+  `git cherry` は約 2 秒。
+- `branch-merge-verdicts.json` の 51da5cd（未マージ）の lineage は
+  `origin/develop` 現 tip と `origin/main` の tip 2 つ（8b46369 / 46b11ca）。
+  ログでは develop 判定のたびに main tip の lineage を `merge-base` で
+  順に試し、全て不一致のあと `git cherry` を全量で再実行していた。
+
+### 根因
+
+`is_merged_cached` は base が進んだとき、祖先にあたる lineage を
+**取り外して**新しい base へ付け替えていた。release 後の `origin/main` は
+古い `origin/develop` tip を含むため、main 判定が develop の lineage を
+消費する。次の develop 判定は使える lineage が無く `git cherry` を
+全量実行し、main 判定がまたそれを消費する。キャッシュがあっても、
+未マージのブランチは毎回 base ごとに cherry を払っていた。さらに
+`is_branch_merged_into_existing_refs` は cache を見る前に毎回
+`merge-base --is-ancestor <branch> <base>` を起動していた。
+
+### 修正（`crates/gwt-git/src/merge_verdict_cache.rs` / `branch.rs`）
+
+1. 進めた元の lineage は残し、新しい base の lineage を先頭に足す
+   （1 tip あたり最大 4 本は既存どおり）。
+2. lineage の祖先判定（base tip 同士）はプロセス内でメモ化する。commit の
+   祖先関係は不変で、1 回の hydrate の全ブランチが同じ base の組を問う。
+   エラーはメモ化しない。
+3. ブランチ自身の `--is-ancestor` は lineage が無い tip だけで実行する。
+   base が進んだ範囲の `rev-list --no-merges` にはマージコミットで入った
+   ブランチ自身のコミットも含まれるので、patch id の照合で検出できる。
+
+RED: 新規テスト
+`is_branch_merged_into_keeps_one_lineage_per_base_across_releases` が
+修正前に失敗した（release 後、tip の lineage が main 2 つだけ）。GREEN 後は
+develop / main の lineage が両方残り、変化が無い組の再判定は ref 確認 2 本と
+`rev-parse` 1 本の計 3 spawn だけになる（修正前は `merge-base` を含め 4 本）。
+gwt-git lib 425 件と `merged_branch_prune_test` 14 件が成功。
+
+### 範囲外 / 未測定
+
+- 実 fleet の AC-2（gh ≤20/10 分）、AC-4（6 agent で 5 秒 CPU ≤100%）、
+  AC-5（5 分 / 60 分の差 ≤20pt）は、この修正を含む実行ファイルで
+  PM が測定する。単体テストの結果を fleet の達成証拠にはしない。
+- 同じ 20 秒採取で、GUI 直下に `git status --porcelain=v1
+  --untracked-files=all --ignored=traditional -- .gwt/work/events.jsonl
+  .gwt/work/events` が 9 本あった（`work_event_dirty_paths`、Work event
+  settlement の判定）。これは `hidden_command` 経由で
+  `gwt.process.summary` に出ない。コマンドラインが空の git 16 本も
+  記録経路が同じと見られ、caller は特定できていない。この slice では
+  変更しない。
+
+## 2026-11-11: Reviewing gate の毎 scan readback（サクラ、次スライス）
+
+### 観測（installed GUI PID 34596、14:32〜14:42 JST の 10 分）
+
+`gwt.process.summary` の gh 起動は E:\gwt 139 本、E:\unity-cli 116 本で、
+AC-2（1 プロジェクト 10 分で 20 本以下）を満たしていない。すべて
+`issue_monitor_scan` span 内。上位は Reviewing 中の PR 1 本あたり scan ごとに
+4 本ずつ出る gate readback で、unity-cli PR #556 は
+`branches/main/protection` / `pr view --json statusCheckRollup` /
+`--json headRefOid` / `--json state,mergeable,mergeStateStatus` が各 26 本、
+gwt PR #7047 も同じ 4 本が各 19〜21 本だった。
+
+### 修正（`crates/gwt/src/issue_monitor_worker.rs` / `crates/gwt-git/src/pr_status.rs`）
+
+1. rollup・head・mergeability を `gh pr view --json
+   statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus` の 1 本で読む。
+2. branch protection を既存の in-process read cache（timer scan の read max
+   age 内だけ有効、失敗はキャッシュしない）で再利用する。
+3. gate が「必須 CI 実行中」（WaitForCi）と判定した PR は、timer scan では
+   60 秒間 gate readback を読み直さない。手動 scan は従来どおり毎回読む。
+   Deliver / Remediate は常に新しい readback で判定する。
+
+PR 1 本が 10 分 Reviewing に留まる場合、gh は約 104 本から約 11 本になる見込み。
+
+### 範囲外 / 未測定
+
+- E:\gwt の `gh api graphql issue timelines`（24 本）と `gh api issues`
+  （20 本）は Reviewing gate とは別経路で、この slice では変えていない。
+  そのため gwt プロジェクトでは修正後も AC-2 の 20 本に届かない見込み。
+- AC-4 / AC-5 は実 fleet で測定する。

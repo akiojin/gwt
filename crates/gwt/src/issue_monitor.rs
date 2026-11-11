@@ -9963,12 +9963,15 @@ impl IssueMonitorState {
             .iter_mut()
             .find(|item| item.issue.number == issue_number)
         {
-            item.error_message = Some(message);
+            item.error_message = Some(message.clone());
         }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
         }
+        // A resident daemon unions in-flight state during rebase. Persist the
+        // release so it cannot resurrect this reservation from an older scan.
+        self.fence_relaunch_preserving_attempts(issue_number, &message, now, false);
     }
 
     /// SPEC #3200 T-043/FR-029: whether `issue_number` may relaunch now. `true`
@@ -19286,24 +19289,67 @@ impl IssueMonitorState {
     }
 
     pub fn adopt_terminal_queue(&mut self, terminal: &str, now: &str) -> usize {
-        let Some(orphan) = self.terminal_queues.remove(terminal) else {
+        let host = crate::process::current_hostname();
+        if terminal == host {
+            return 0;
+        }
+        let Some(orphan) = self.terminal_queues.get(terminal) else {
             return 0;
         };
-        let host = crate::process::current_hostname();
+        let prefs = self.prefs();
+        let movable: BTreeSet<_> = orphan
+            .entries
+            .iter()
+            .filter(|entry| {
+                !prefs.scheduled_issue_in_flight(entry.number)
+                    && !prefs.scheduled_issue_has_pending_claim(entry.number)
+            })
+            .map(|entry| entry.number)
+            .collect();
+        let releases_schedule = self
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .any(|entry| entry.host_id == terminal && movable.contains(&entry.issue_number));
+        let Some(revision) = self
+            .agent_issue_schedule
+            .revision
+            .checked_add(u64::from(releases_schedule))
+        else {
+            return 0;
+        };
+        if let Some(excluded) = self.terminal_queue_exclusions.get_mut(&host) {
+            excluded.retain(|number| !movable.contains(number));
+        }
+        let mut orphan = self
+            .terminal_queues
+            .remove(terminal)
+            .expect("source queue exists");
         let queue = self.terminal_queues.entry(host).or_default();
         let mut adopted = 0;
-        for entry in orphan.entries {
+        orphan.entries.retain(|entry| {
+            if !movable.contains(&entry.number) {
+                return true;
+            }
             if !queue
                 .entries
                 .iter()
                 .any(|existing| existing.number == entry.number)
             {
                 self.terminal_queue_retirements.remove(&entry.number);
-                queue.entries.push(entry);
+                queue.entries.push(entry.clone());
                 adopted += 1;
             }
+            false
+        });
+        queue.last_seen_at = Some(now.into());
+        if !orphan.entries.is_empty() {
+            self.terminal_queues.insert(terminal.into(), orphan);
         }
-        queue.last_seen_at = Some(now.to_string());
+        self.agent_issue_schedule
+            .reservations
+            .retain(|entry| entry.host_id != terminal || !movable.contains(&entry.issue_number));
+        self.agent_issue_schedule.revision = revision;
         adopted
     }
 
@@ -26441,7 +26487,21 @@ impl IssueMonitorState {
             );
             return;
         }
-        if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
+        // Issue #4131: launch ACK can leave an Idle record. The exact bound
+        // implementation's exit still owns an autonomous retry; its stored
+        // phase must not strand it after releasing the slot. Keep unbound
+        // failures and non-opted-in Issues on their existing paths.
+        let bound_idle_implementation = bound_window_failure
+            && self.active_launches.contains(&issue_number)
+            && self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::Idle)
+            && self
+                .inbox_item(issue_number)
+                .is_some_and(|item| self.is_autonomous_two_stage_candidate(&item.issue));
+        if self.autonomous_mode
+            && (self.is_autonomous_in_flight(issue_number) || bound_idle_implementation)
+        {
             // Issue #4161 AC-6: the retry ladder keeps retrying past its own
             // attempt cap, so a launch that is refused deterministically —
             // every attempt failing with the identical message — is retried on
@@ -49151,6 +49211,48 @@ mod tests {
     }
 
     #[test]
+    fn adopting_renamed_host_queue_releases_schedule_but_preserves_in_flight_work() {
+        let now = "2026-11-11T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let host = crate::process::current_hostname();
+        monitor.terminal_queue_push(&[7, 8], "operator", now);
+        let queue = monitor.terminal_queues.remove(&host).unwrap();
+        monitor.terminal_queues.insert("old-host".into(), queue);
+        for number in [7, 8] {
+            monitor
+                .agent_issue_schedule
+                .reservations
+                .push(AgentIssueReservation {
+                    host_id: "old-host".into(),
+                    agent_member_id: "member".into(),
+                    issue_number: number,
+                    reason: AgentScheduleReason::QueueOrder,
+                });
+        }
+        monitor.pending_launch_deliveries.push_back(
+            serde_json::from_value(serde_json::json!({
+                "agent_member_id":"member", "delivery_id":"delivery-8", "issue_number":8,
+                "branch_name":"work/issue-8", "linked_issue_kind":"issue",
+                "claim_id":"claim-8", "created_at":now, "materialized_window_id":"tab::pane"
+            }))
+            .unwrap(),
+        );
+        monitor
+            .terminal_queue_exclusions
+            .insert(host.clone(), BTreeSet::from([7, 8, 99]));
+        assert_eq!(monitor.adopt_terminal_queue("old-host", now), 1);
+        assert_eq!(
+            monitor.terminal_queue_exclusions[&host],
+            BTreeSet::from([8, 99])
+        );
+        assert_eq!(monitor.terminal_queues["old-host"].entries[0].number, 8);
+        assert_eq!(monitor.terminal_queues[&host].entries[0].number, 7);
+        assert_eq!(monitor.agent_issue_schedule.reservations.len(), 1);
+        assert_eq!(monitor.agent_issue_schedule.reservations[0].issue_number, 8);
+        assert_eq!(monitor.agent_issue_schedule.revision, 1);
+    }
+
+    #[test]
     fn adopting_orphan_queue_merges_without_duplicate_issue_numbers() {
         let now = "2026-09-10T00:02:00Z";
         let host = crate::process::current_hostname();
@@ -53257,6 +53359,47 @@ mod tests {
         let mut monitor = launched_cohort(bindings);
         monitor.set_autonomous_mode(true);
         monitor
+    }
+
+    #[test]
+    fn issue_4131_bound_idle_implementation_exit_retries_after_reload() {
+        let monitor = autonomous_launched_cohort(&[(4131, "tab-1::implementation")]);
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.record_candidate(auto_issue(
+            4131,
+            "## Acceptance Criteria\n- [ ] AC-1: resume\n",
+        ));
+        assert_eq!(
+            monitor.autonomous_record(4131).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+
+        monitor.record_agent_window_issue_failed_classified_at(
+            4131,
+            "tab-1::implementation",
+            "Process exited with status 1",
+            IssueMonitorFailureClass::Agent,
+            "2026-11-10T16:15:25Z",
+        );
+
+        assert_eq!(
+            monitor.inbox_item(4131).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.queued_issue_numbers().contains(&4131));
+        assert!(monitor.active_issue_numbers().is_empty());
+        assert_eq!(monitor.attempt_count(4131), 1);
+        assert_eq!(
+            monitor
+                .autonomous_record(4131)
+                .unwrap()
+                .retry_not_before
+                .as_deref(),
+            Some("2026-11-10T16:16:25Z")
+        );
+        assert!(monitor.prefs().failed_issues.is_empty());
     }
 
     fn idle_kind_of(monitor: &IssueMonitorState, window_id: &str) -> Option<IssueMonitorIdleKind> {

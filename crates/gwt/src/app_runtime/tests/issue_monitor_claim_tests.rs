@@ -249,6 +249,61 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
     );
 }
 
+#[test]
+fn issue_6996_cached_finalizer_timeout_does_not_repeat_error_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let request = super::super::DeferredIssueMonitorLaunch {
+        project_root: repo,
+        issue_number: 6996,
+        linked_issue_kind: LinkedIssueKind::Issue,
+        delivery_id: Some("finalizer-timeout-delivery".into()),
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    };
+    let message = "workspace finalizer fresh-launch-6996 timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline";
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context.clone(),
+                request.clone(),
+                message.into(),
+                None,
+            )
+            .len(),
+        1
+    );
+    for replay in 0..5 {
+        assert!(
+            runtime
+                .schedule_issue_monitor_launch_failure(
+                    context.clone(),
+                    request.clone(),
+                    message.replace("120000ms", &format!("{}ms", 120000 + replay * 5000)),
+                    None,
+                )
+                .is_empty(),
+            "cached timeout keeps recovery state without another error toast"
+        );
+    }
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context,
+                request,
+                message.replace("fresh-launch-6996", "fresh-launch-next"),
+                None,
+            )
+            .len(),
+        1,
+        "a different finalizer still reports its own timeout"
+    );
+}
+
 fn commit_issue_monitor_preparations(
     runtime: &mut AppRuntime,
     queued: &BlockingTestTaskQueue,

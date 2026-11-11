@@ -730,6 +730,16 @@ the requested `numbers` from every terminal queue saved in this machine's projec
 store and preserves their manual auto-refill exclusions. Omit the option to affect
 only this host. It does not change another machine's independent project store.
 
+On macOS, CLI and Monitor use `scutil --get LocalHostName` for the host ID,
+falling back to `whoami::hostname` when unavailable; other platforms use
+`whoami::hostname`. The ID is cached once per process, so restart gwt after
+renaming the machine. `issue.monitor.status` includes `caller_host_identity`
+with the ID, its source, and the reason when the network hostname differs.
+To recover a retired host's queued work, call `issue.monitor.queue.adopt` with
+`{"terminal":"old-host"}`. It moves pending entries to this host and releases
+their old schedule reservations for replanning; work already claiming, launching,
+or running stays with its existing owner. Other host queues are left alone.
+
 Active cards have an agent process observed on this terminal. The Active badge
 counts agents, including PM, and separately shows distinct Issue and PM counts;
 two agents on one Issue produce one card. `Active —` means runtime observation
@@ -2114,8 +2124,12 @@ available from the same toolbar.
 The PM window's **Chat** view shows the PM conversation as chat bubbles: your
 messages on the right and PM replies on the left, with PM Markdown (headings,
 lists, tables, and code) formatted. It reads the PM session's own conversation
-record and omits tool calls, hook notes, and automatic prompts. It is read-only
-in this release; use **Execution log** to talk with PM.
+record and omits tool calls, hook notes, and automatic prompts. When PM sends
+several messages in one turn, only the latest stays open; the earlier ones fold
+into an **N earlier messages** line you can expand. Type a message in
+the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
+line). Your text stays in the box until delivery is confirmed, and the reason is
+shown if it could not be sent. Use **Execution log** to attach images.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
