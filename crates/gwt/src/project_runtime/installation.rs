@@ -4074,3 +4074,173 @@ pub fn issue_monitor_delivery_marker_result(
         _ => Ok(committed),
     }
 }
+
+#[cfg(test)]
+mod owner_admission_tests {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    type PrefsUpdate = fn(&mut crate::IssueMonitorPrefs);
+
+    struct PrefsChurn {
+        path: PathBuf,
+        update: Arc<std::sync::Mutex<Option<PrefsUpdate>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PrefsChurn {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "gwt.launch.timing" {
+                return;
+            }
+            #[derive(Default)]
+            struct CapacityPhase(bool);
+            impl tracing::field::Visit for CapacityPhase {
+                fn record_debug(
+                    &mut self,
+                    _field: &tracing::field::Field,
+                    _value: &dyn std::fmt::Debug,
+                ) {
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0 |= field.name() == "phase" && value == "monitor_shared_capacity";
+                }
+            }
+            let mut phase = CapacityPhase::default();
+            event.record(&mut phase);
+            if phase.0 {
+                let update = self.update.lock().unwrap().take();
+                if let Some(update) = update {
+                    crate::try_mutate_issue_monitor_prefs(&self.path, |prefs| {
+                        update(prefs);
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    fn admit_after_prefs_update(
+        update: PrefsUpdate,
+    ) -> Result<PreparedOwnerAgentAdmission, String> {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let cache = crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap();
+        gwt_github::Cache::new(cache)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(7016),
+                author_login: None,
+                title: "Owner admission".into(),
+                body: String::new(),
+                labels: vec!["bug".into()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt(now.clone()),
+                comments: Vec::new(),
+            })
+            .unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(
+                    serde_json::from_value(serde_json::json!({"agent_id":"codex"})).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let update = Arc::new(std::sync::Mutex::new(Some(update)));
+        let subscriber = tracing_subscriber::registry().with(PrefsChurn {
+            path,
+            update: update.clone(),
+        });
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&repo)
+            .branch("work/issue-7016")
+            .linked_issue_number(7016)
+            .build();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            prepare_owner_agent_admission(
+                OwnerAgentAdmissionInput {
+                    project_root: &repo,
+                    sessions_dir: &gwt_core::paths::gwt_sessions_dir(),
+                    issue_link_cache_dir: &gwt_core::paths::gwt_cache_dir(),
+                    window_id: "tab::agent",
+                    materializer_id: "gui",
+                    host_project_roots: std::slice::from_ref(&repo),
+                    snapshot: crate::IssueMonitorWindowSnapshot {
+                        project_tab_id: "tab".into(),
+                        observed_at: now,
+                        windows: Vec::new(),
+                    },
+                    snapshot_tabs: std::collections::BTreeSet::from(["tab".into()]),
+                    known_names: &HashSet::new(),
+                    metadata: OwnerLaunchMetadata {
+                        launch_feedback_context: Some(LaunchFeedbackContext {
+                            client_id: "fixture".into(),
+                            title: "Issues".into(),
+                            issue_monitor_issue_number: Some(7016),
+                            issue_monitor_delivery_id: None,
+                            issue_monitor_project_root: Some(repo.clone()),
+                            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
+                        }),
+                        ..Default::default()
+                    },
+                    is_continue_work: false,
+                    restore_source: None,
+                },
+                &mut config,
+            )
+        });
+        assert!(update.lock().unwrap().is_none(), "prefs churn was injected");
+        result
+    }
+
+    #[test]
+    fn issue_7016_owner_admission_revalidates_same_decision_prefs_churn() {
+        let result = admit_after_prefs_update(|prefs| prefs.priority_order = vec![7]);
+        assert!(result.is_ok(), "owner admission failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn issue_7016_owner_admission_preserves_strict_fences_after_prefs_churn() {
+        let result = admit_after_prefs_update(|prefs| {
+            prefs.update_drain = Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: chrono::Utc::now().to_rfc3339(),
+                reason: crate::IssueMonitorUpdateDrainReason::Manual,
+                automatic: None,
+                blocking: Vec::new(),
+            });
+        });
+        assert!(result.is_err_and(|error| error == ISSUE_MONITOR_SPAWN_ADMISSION_STALE));
+    }
+}
