@@ -500,6 +500,11 @@ pub enum PmRequestTaskResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
+    /// Explicitly confirmed recovery of the authenticated project owner.
+    RestartWedgedOwner {
+        confirmed: bool,
+        recovery_id: String,
+    },
     RefreshOrphanDaemons,
     ReapOrphanDaemon {
         observation_token: String,
@@ -1690,10 +1695,13 @@ pub enum ProjectOwnerHealthState {
     Connecting,
     Healthy,
     Degraded,
+    Wedged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectOwnerHealthView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_id: Option<String>,
     pub project_key: String,
     pub state: ProjectOwnerHealthState,
     pub detail: Option<String>,

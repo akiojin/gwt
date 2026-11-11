@@ -974,6 +974,105 @@ static NEXT_OWNER_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::
 const OWNER_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 const OWNER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+const HEALTH_TIMEOUT: &str = "Project health request timed out";
+
+#[derive(Default)]
+struct OwnerWedgeTracker {
+    identity: Option<(u32, u64)>,
+    timeouts: u32,
+}
+
+impl OwnerWedgeTracker {
+    fn observe(&mut self, identity: Option<(u32, u64)>, timeout: bool) -> bool {
+        if !timeout || identity.is_none() || self.identity != identity {
+            self.timeouts = 0;
+        }
+        self.identity = identity;
+        if timeout && identity.is_some() {
+            self.timeouts += 1;
+        }
+        self.timeouts >= 3
+    }
+}
+
+#[derive(Clone)]
+struct WedgedOwner {
+    recovery_id: String,
+    endpoint: DaemonEndpoint,
+    target: crate::owner_recovery::OwnerRecoveryTarget,
+    diagnostics: Arc<std::sync::OnceLock<Result<std::path::PathBuf, String>>>,
+}
+
+fn wedged_owners() -> &'static std::sync::Mutex<std::collections::HashMap<String, WedgedOwner>> {
+    static OWNERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, WedgedOwner>>,
+    > = std::sync::OnceLock::new();
+    OWNERS.get_or_init(Default::default)
+}
+
+fn clear_wedged_observation(project_key: &str, recovery_id: &str) {
+    let mut owners = wedged_owners().lock().unwrap_or_else(|e| e.into_inner());
+    if owners
+        .get(project_key)
+        .is_some_and(|owner| owner.recovery_id == recovery_id)
+    {
+        owners.remove(project_key);
+    }
+}
+
+/// Called only from a confirmed GUI action on a blocking host worker.
+/// No PID or credentials from the browser grant authority to signal a process.
+pub fn restart_wedged_owner(
+    project_key: &str,
+    confirmed: bool,
+    recovery_id: &str,
+) -> Result<(), String> {
+    if !confirmed {
+        return Err("Daemon restart requires explicit confirmation".into());
+    }
+    let captured = wedged_owners()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(project_key)
+        .cloned()
+        .ok_or("This owner is no longer wedged")?;
+    if captured.recovery_id != recovery_id {
+        return Err("Owner changed; restart was cancelled".into());
+    }
+    let result = captured
+        .diagnostics
+        .get_or_init(|| crate::owner_recovery::collect(&captured.target, project_key));
+    let diagnostics = match result {
+        Ok(path) => path,
+        Err(error) => {
+            clear_wedged_observation(project_key, &captured.recovery_id);
+            return Err(error.clone());
+        }
+    };
+    // A healthy reply supersedes the confirmation. A generic connection failure
+    // is not evidence of the same wedge and cannot authorize a signal either.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let client = crate::project_runtime::client::ProjectRuntimeClient::new(&captured.endpoint)?;
+    match runtime.block_on(inspect_project_owner(&client, &captured.endpoint)) {
+        Err(error) if error == HEALTH_TIMEOUT => {}
+        _ => return Err("Owner recovered or changed; restart was cancelled".into()),
+    }
+    // Consume this exact observation once. A later recovered/new owner must
+    // not inherit the old action, even if its PID happens to be reused.
+    let mut owners = wedged_owners().lock().map_err(|e| e.to_string())?;
+    if owners.get(project_key).is_none_or(|current| {
+        current.target != captured.target || current.recovery_id != captured.recovery_id
+    }) {
+        return Err("Owner recovered or changed; restart was cancelled".into());
+    }
+    owners.remove(project_key);
+    drop(owners);
+    crate::owner_recovery::terminate(&captured.target, diagnostics)
+}
+
 impl DaemonSubscriber {
     /// Observe one project's private execution owner without acquiring a Monitor role.
     pub fn spawn_project_owner_with_resolver<R, H, E>(
@@ -1001,16 +1100,18 @@ impl DaemonSubscriber {
         let on_event: Arc<OwnerEventCallback> = Arc::new(on_event);
         let join_handle = thread::Builder::new().name("gwt-project-owner-subscriber".into()).spawn(move || {
             use crate::protocol::{ProjectOwnerHealthState as State, ProjectOwnerHealthView};
-            let publish = |id, identity, state, detail| on_health(id, identity, ProjectOwnerHealthView { project_key: project_key.clone(), state, detail });
+            let publish = |id, identity, state, detail| on_health(id, identity, ProjectOwnerHealthView { recovery_id: if state == State::Wedged { wedged_owners().lock().ok().and_then(|owners| owners.get(&project_key).map(|owner| owner.recovery_id.clone())) } else { None }, project_key: project_key.clone(), state, detail });
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(runtime) => runtime,
                 Err(error) => { publish(0, None, State::Degraded, Some(error.to_string())); return; }
             };
             let mut backoff = RETRY_BACKOFF_MIN;
             let mut first = true;
+            let mut wedge = OwnerWedgeTracker::default();
             while !stop.load(Ordering::SeqCst) {
                 let connection_id = NEXT_OWNER_CONNECTION.fetch_add(1, Ordering::SeqCst);
                 if first { publish(connection_id, None, State::Connecting, None); first = false; }
+                let mut observed_endpoint = None;
                 let result = runtime.block_on(async {
                     let cancelled = stop_notify.notified();
                     tokio::pin!(cancelled);
@@ -1019,11 +1120,14 @@ impl DaemonSubscriber {
                     let endpoint = resolver()?;
                     if stop.load(Ordering::SeqCst) { return Ok(()); }
                     if endpoint.scope.repo_hash != project_key { return Err("Project owner discovery returned another project".into()); }
+                    observed_endpoint = Some(endpoint.clone());
                     let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
                     let session = async {
                         let identity = inspect_project_owner(&client, &endpoint).await?;
                         let stream = tokio::time::timeout(OWNER_REQUEST_TIMEOUT, client.gui_events()).await.map_err(|_| "Project event connection timed out".to_string())??;
                         futures_util::pin_mut!(stream);
+                        wedged_owners().lock().unwrap_or_else(|e| e.into_inner()).remove(&project_key);
+                        wedge.observe(None, false);
                         publish(connection_id, Some(identity.clone()), State::Healthy, None);
                         let mut interval = tokio::time::interval(OWNER_HEALTH_INTERVAL);
                         interval.tick().await;
@@ -1037,6 +1141,7 @@ impl DaemonSubscriber {
                                 },
                                 _ = interval.tick() => {
                                     let current = inspect_project_owner(&client, &endpoint).await?;
+                                    wedge.observe(None, false);
                                     if current != identity { return Err("Project execution owner identity changed".into()); }
                                 }
                             }
@@ -1045,7 +1150,37 @@ impl DaemonSubscriber {
                     tokio::select! { biased; _ = cancelled => Ok(()), result = session => result }
                 });
                 if stop.load(Ordering::SeqCst) { break; }
-                if let Err(error) = result { publish(connection_id, None, State::Degraded, Some(error)); }
+                if let Err(error) = result {
+                    let target = observed_endpoint.as_ref().and_then(|endpoint| crate::owner_recovery::OwnerRecoveryTarget::capture_endpoint(endpoint).ok());
+                    let identity = target.as_ref().map(|target| (target.pid, target.started_at));
+                    let wedged = wedge.observe(identity, error == HEALTH_TIMEOUT);
+                    if wedged {
+                        let endpoint = observed_endpoint.expect("a live owner was observed");
+                        let target = target.expect("a live identity was captured");
+                        let mut owners = wedged_owners().lock().unwrap_or_else(|e| e.into_inner());
+                        let is_new = !owners.contains_key(&project_key);
+                        let captured = owners.entry(project_key.clone()).or_insert_with(|| WedgedOwner {
+                            recovery_id: uuid::Uuid::new_v4().to_string(), endpoint, target, diagnostics: Arc::new(std::sync::OnceLock::new()),
+                        }).clone();
+                        drop(owners);
+                        let diagnostics = captured.diagnostics.clone();
+                        let diagnostic_project = project_key.clone();
+                        if is_new {
+                        let _ = thread::Builder::new().name("gwt-owner-diagnostics".into()).spawn(move || {
+                            let result = diagnostics.get_or_init(|| crate::owner_recovery::collect(&captured.target, &diagnostic_project));
+                            if result.is_err() { clear_wedged_observation(&diagnostic_project, &captured.recovery_id); }
+                            match result {
+                                Ok(path) => tracing::warn!(target: "gwt.terminal.delivery", path = %path.display(), "wedged owner diagnostics saved"),
+                                Err(error) => tracing::warn!(target: "gwt.terminal.delivery", %error, "wedged owner diagnostics failed"),
+                            }
+                        });
+                        }
+                        publish(connection_id, None, State::Wedged, Some("Owner Health timed out three consecutive times. Diagnostics are being saved. Restart requires confirmation and stops this daemon's agents.".into()));
+                    } else {
+                        wedged_owners().lock().unwrap_or_else(|e| e.into_inner()).remove(&project_key);
+                        publish(connection_id, None, State::Degraded, Some(error));
+                    }
+                }
                 runtime.block_on(async {
                     let cancelled = stop_notify.notified();
                     tokio::pin!(cancelled);
@@ -1073,7 +1208,7 @@ pub(crate) async fn inspect_project_owner(
         client.command(crate::project_runtime::events::OwnerCommand::Health),
     )
     .await
-    .map_err(|_| "Project health request timed out".to_string())??;
+    .map_err(|_| HEALTH_TIMEOUT.to_string())??;
     validate_project_owner_health(value, endpoint)
 }
 
@@ -1107,4 +1242,79 @@ pub(crate) fn validate_project_owner_health(
         return Err("Project execution owner is draining".into());
     }
     Ok(health.identity)
+}
+
+#[cfg(test)]
+mod wedge_tests {
+    use super::*;
+
+    #[test]
+    fn restart_without_confirmation_is_refused() {
+        assert!(restart_wedged_owner("missing-project", false, "stale")
+            .unwrap_err()
+            .contains("confirmation"));
+    }
+
+    #[test]
+    fn stale_confirmation_cannot_restart_a_new_wedge() {
+        let key = format!("test-wedge-{}", uuid::Uuid::new_v4());
+        let root = tempfile::tempdir().unwrap();
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            root.path(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            "unused".into(),
+            "private".into(),
+            "test".into(),
+        );
+        wedged_owners().lock().unwrap().insert(
+            key.clone(),
+            WedgedOwner {
+                recovery_id: "new-observation".into(),
+                endpoint,
+                target: crate::owner_recovery::OwnerRecoveryTarget::capture(std::process::id())
+                    .unwrap(),
+                diagnostics: Arc::new(std::sync::OnceLock::new()),
+            },
+        );
+        let result = restart_wedged_owner(&key, true, "old-observation");
+        assert!(result.unwrap_err().contains("changed"));
+        assert!(
+            wedged_owners()
+                .lock()
+                .unwrap()
+                .remove(&key)
+                .unwrap()
+                .diagnostics
+                .get()
+                .is_none(),
+            "stale action cannot even begin diagnostics"
+        );
+    }
+
+    #[test]
+    fn three_health_timeouts_for_same_live_owner_detect_wedge_and_reset() {
+        let mut tracker = OwnerWedgeTracker::default();
+        assert!(!tracker.observe(Some((42, 123)), true));
+        assert!(!tracker.observe(Some((42, 123)), true));
+        assert!(tracker.observe(Some((42, 123)), true));
+        assert!(
+            !tracker.observe(Some((42, 124)), true),
+            "PID reuse resets the streak"
+        );
+        assert!(
+            !tracker.observe(Some((42, 124)), false),
+            "other failures are degraded"
+        );
+        assert!(!tracker.observe(Some((42, 124)), true));
+        assert!(
+            !tracker.observe(None, true),
+            "an absent process is not wedged"
+        );
+        assert!(!tracker.observe(Some((42, 124)), true));
+    }
 }

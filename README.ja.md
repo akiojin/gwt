@@ -565,6 +565,14 @@ daemon を強制終了しません。明示的な JSON `daemon.start` は停止�
 既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
 endpoint を確認できます。
 
+owner のヘルスチェックが連続してタイムアウトすると、通常の接続障害とは区別して
+**Wedged** と表示します。GWT はスタックサンプル（macOS）、直近の terminal-delivery
+警告、CPU の観測値を `~/.gwt/logs/owner-recovery/<pid>-<id>/` へ自動保存します。
+Project のステータス欄にある **Restart daemon…** から内容を確認して再起動できます。
+診断保存後に SIGTERM を送り、猶予期間内に終了しなければ SIGKILL を送ります。
+同じ daemon が所有する全 agent（他プロジェクトの agent を含む）が停止し、未保存の
+ターミナル作業を失う可能性があります。確認なしで daemon を強制終了することはありません。
+
 Hub の **終了待ちプロジェクト** には既知のプロジェクトの daemon 状態を表示します。
 **再確認** で更新し、**終了を再試行** で失敗した終了処理を再試行できます。対象は
 認証済みで終了処理中の GUI 管理 daemon に限り、GUI が接続していないことを確認します。
