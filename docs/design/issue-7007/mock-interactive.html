@@ -113,6 +113,22 @@
       .chat-head .nm{font-weight:800;font-size:15px;line-height:1.3}
       .chat-head .sub{font-size:12px;color:var(--ink2)}
       .msg .btnrow{margin-top:9px}
+      .start-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(330px,1fr);gap:26px;align-items:start}
+      @media (max-width:920px){.start-grid{grid-template-columns:1fr}}
+      .field-col{min-width:0}
+      .pblock{border:1px solid var(--line);border-radius:12px;padding:11px 13px 6px;margin-bottom:10px;background:var(--panel)}
+      .pblock .phead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+      .pblock .phead .rel{margin-left:auto}
+      .wline{display:flex;gap:9px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line)}
+      .wline .grow{flex:1;min-width:0}
+      .wline .t{font-weight:700;font-size:13px;line-height:1.4}
+      .wline .d{font-size:12px;color:var(--ink2);line-height:1.45}
+      .wline .bar{margin-top:5px}
+      .wcard{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:9px 11px;margin-top:9px}
+      .wcard:hover{border-color:var(--accent)}
+      .wcard .grow{flex:1;min-width:0}
+      .wcard .t{font-weight:700;font-size:13px;line-height:1.4;color:var(--ink)}
+      .wcard .d{font-size:12px;color:var(--ink2);line-height:1.45}
       .pm-face{position:relative;width:36px;height:36px;border-radius:50%;flex:none;background:radial-gradient(circle at 36% 42%,var(--panel) 0 2.5px,transparent 3.4px),radial-gradient(circle at 64% 42%,var(--panel) 0 2.5px,transparent 3.4px),var(--accent)}
       .pm-face::after{content:"";position:absolute;left:50%;top:53%;width:34%;height:17%;transform:translateX(-50%);border:2px solid var(--panel);border-top:0;border-radius:0 0 999px 999px}
       .pm-face.sm{width:26px;height:26px}
@@ -360,7 +376,7 @@
   <div class="wrap">
     <header class="doc">
       <h1>gwt 全画面刷新モック — 対話型</h1>
-      <p class="lead">刷新案を、現行アプリと同じ骨格で触れる形に組み直したモックです。各画面は<strong>独立したページ</strong>で、それぞれ固有の URL を持ちます。起点は<strong>開始画面（URL: /）</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開くと PM が様子を話しかけ、返事を書けば仕事が進みます（現行 Hub の項目の再現ではなく、体験から設計しました）。プロジェクトの一覧は脇に小さく残します。プロジェクトを開くと、そのプロジェクト専用のページ（URL: /p/&lt;hash&gt;）へ移ります——標準では<strong>新しいブラウザタブ</strong>で開き、複数プロジェクトを並べて見るのはブラウザタブの役割です（アプリの中に横断の入れ物は作りません）。開始画面の会話は端末全体を見る PM とのもので（独立した PM のページは作りません）、プロジェクト固有の相談は各プロジェクトページの「相談」で行います。判断は会話の中で提示され、その場で選ぶか、<strong>各プロジェクトのページの「判断」で完結</strong>させます。アプリ全体の設定は、開始画面から開く設定ページに置きます。1画面＝1文脈、主役は1つ、を原則に要素を絞っています（2026-11-12、実際に触った本人のフィードバック、「タブ＝ブラウザのタブ」の訂正、PM 要約ブロックの決定を受けて改修。モックの文言は内容を評価できるよう日本語にしています）。</p>
+      <p class="lead">刷新案を、現行アプリと同じ骨格で触れる形に組み直したモックです。各画面は<strong>独立したページ</strong>で、それぞれ固有の URL を持ちます。起点は<strong>開始画面（URL: /）</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開くと PM が様子を話しかけ、返事を書けば仕事が進みます（現行 Hub の項目の再現ではなく、体験から設計しました）。会話の隣には、各プロジェクトの「今」を実データの粒度で並べます（進行中の作業・担当者・状態・進み具合、止まっている作業と理由、判断待ち、直近の完了）。プロジェクトを開くと、そのプロジェクト専用のページ（URL: /p/&lt;hash&gt;）へ移ります——標準では<strong>新しいブラウザタブ</strong>で開き、複数プロジェクトを並べて見るのはブラウザタブの役割です（アプリの中に横断の入れ物は作りません）。開始画面の会話は端末全体を見る PM とのもので（独立した PM のページは作りません）、プロジェクト固有の相談は各プロジェクトページの「相談」で行います。判断は会話の中で提示され、その場で選ぶか、<strong>各プロジェクトのページの「判断」で完結</strong>させます。アプリ全体の設定は、開始画面から開く設定ページに置きます。1画面＝1文脈、主役は1つ、を原則に要素を絞っています（2026-11-12、実際に触った本人のフィードバック、「タブ＝ブラウザのタブ」の訂正、PM 要約ブロックの決定を受けて改修。モックの文言は内容を評価できるよう日本語にしています）。</p>
     </header>
     <div class="mock" id="app">
       <div class="mock-head">
@@ -371,74 +387,201 @@
 
         <div class="pagegroup on" data-page="start">
           <div class="start-wrap">
-            <div class="chat-head">
-              <span class="pm-face"><span class="dot wait"></span></span>
-              <div>
-                <div class="nm">ツムギ</div>
-                <div class="sub">あなたの PM · 判断待ち 5件</div>
+            <div class="start-grid">
+              <div class="chat-col">
+                <div class="chat-head">
+                  <span class="pm-face"><span class="dot wait"></span></span>
+                  <div>
+                    <div class="nm">ツムギ</div>
+                    <div class="sub">あなたの PM · 判断待ち 5件</div>
+                  </div>
+                </div>
+                <div class="chat" id="startChat">
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の間に、gwt の共有状態モデル（#7048）が終わってレビュー待ちになりました。実装は Haruto です。KeibaDB は、Sora が夜の分まで取り込みを完了しています。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-works"><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">gwt · Haruto · Codex</div></div><span class="badge b-wait">レビュー待ち</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>いま 9件の作業が進んでいます。gwt では Yui がホームと判断の画面（#7007）を1時間12分続けていて、KeibaDB では Sora がレース結果の取り込み（#130）の途中です。止まっているのは 3件 — gwt の #7047 はチェック4件の失敗、KeibaDB の毎日の取り込み（#121）は形式の変更、unity-cli は3日動きがありません。メモリの課題（#5561）は待ち行列の先頭です。まだ読まれていない報告が 9件あります。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-board"><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">gwt · Haruto · チェック4件が失敗して停止中</div></div><span class="badge b-block">止まっている</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。対応表を直せば取り込みはそのまま続けられ、止めれば安全に止まります。
+                    <div class="wcard" data-openpage="keibadb" data-openscreen="k-decide"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">KeibaDB · 48分待ち · 対応表の判断待ち</div></div><span class="badge b-block">要対応</span></div>
+                    <div class="btnrow"><button class="btn primary" type="button" data-say="対応表を直して、取り込みを続けて" data-reply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直す</button><button class="btn" type="button" data-say="取り込みを止めて" data-reply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断が 2件あります。「ホームと判断の画面」（#7007）の計画の承認と、保存されていない変更の扱いです。ほかのプロジェクトにも 2件あります。
+                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>プロジェクトの中身の相談は、そのプロジェクトのページの「相談」が早いです。たとえばメモリの課題（#5561）の詳しい話は、gwt の相談で聞いてください。
+                    <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-ask">gwt の相談へ</button></div></div>
+                </div>
+                <div class="composer">
+                  <textarea id="startInput" placeholder="ツムギに話しかける…"></textarea>
+                  <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
+                </div>
               </div>
-            </div>
-            <div class="chat" id="startChat">
-              <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の間に、gwt の #7048（共有状態モデル）が終わってレビュー待ちになりました。KeibaDB の取り込みは、夜の分まで完了しています。</div>
-              <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>いま 9件の作業が進んでいます。gwt ではメモリの課題（#5561）の調査が続いていて、unity-cli はしばらく動きがありません。止まっている作業は 3件、まだ読まれていない報告が 9件あります。</div>
-              <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。対応表を直せば取り込みはそのまま続けられ、止めれば安全に止まります。
-                <div class="btnrow"><button class="btn primary" type="button" data-say="対応表を直して、取り込みを続けて" data-reply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直す</button><button class="btn" type="button" data-say="取り込みを止めて" data-reply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div></div>
-              <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断が 2件あります。「ホームと判断の画面」（#7007）の計画の承認と、保存されていない変更の扱いです。ほかのプロジェクトにも 2件あります。
-                <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button></div></div>
-              <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>プロジェクトの中身の相談は、そのプロジェクトのページの「相談」が早いです。たとえばメモリの課題（#5561）の詳しい話は、gwt の相談で聞いてください。
-                <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-ask">gwt の相談へ</button></div></div>
-            </div>
-            <div class="composer">
-              <textarea id="startInput" placeholder="ツムギに話しかける…"></textarea>
-              <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
-            </div>
-            <div class="notice" id="startNotice" hidden><b class="dyn-proj-name">vr-cabin-exposure</b> を開きました。 <a class="plink" data-openpage="vr">新しいタブで開く</a></div>
-            <p class="h-sec">プロジェクト</p>
-            <div>
-              <div class="lrow" id="startVrRow" hidden>
-                <a class="plink" data-openpage="vr"><span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span></a>
-                <span class="badge b-run">作業中</span>
+              <div class="field-col">
+                <div class="notice" id="startNotice" hidden><b class="dyn-proj-name">vr-cabin-exposure</b> を開きました。 <a class="plink" data-openpage="vr">新しいタブで開く</a></div>
+                <p class="h-sec">プロジェクトの今</p>
+                <div class="pblock" id="startVrRow" hidden>
+                  <div class="phead">
+                    <a class="plink" data-openpage="vr"><span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span></a>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                    <span class="badge b-run">作業中</span>
+                    <span class="badge b-wait">判断待ち 2件</span>
+                    <span class="rel">未解決132件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">新しい画面の共有状態モデル（#7048）</div>
+                      <div class="d">Haruto · Codex · 実装が入ってレビュー待ち</div>
+                    </div>
+                    <span class="badge b-wait">レビュー待ち</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">刷新のホームと判断の画面（#7007）</div>
+                      <div class="d">Yui · Claude Code · 1時間12分実行中 · 進み具合 55%</div>
+                      <div class="bar"><i style="width:55%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">状態モデルの変更でチェックが失敗（#7047）</div>
+                      <div class="d">Haruto · チェック4件が失敗して停止中</div>
+                    </div>
+                    <span class="badge b-block">止まっている</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">メモリの課題（#5561）</div>
+                      <div class="d">待ち行列の先頭 · 次に始まります</div>
+                    </div>
+                    <span class="badge b-queue">開始待ち</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">設定のセクションを1つの PR で出す（#7039）</div>
+                      <div class="d">昨夜完了 · PR が入りました</div>
+                    </div>
+                    <span class="badge b-done">完了</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                    <span class="badge b-wait">判断待ち 1件</span>
+                    <span class="rel">未解決14件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">レース結果の取り込み — 2026-11-11（#130）</div>
+                      <div class="d">Sora · Claude Code · 25分実行中 · 24レース中18件</div>
+                      <div class="bar"><i style="width:75%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div>
+                      <div class="d">対応表の判断待ち · 48分</div>
+                    </div>
+                    <span class="badge b-block">要対応</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">夜の取り込み（2026-11-11 分）</div>
+                      <div class="d">Sora · 取り込みが完了しています</div>
+                    </div>
+                    <span class="badge b-done">完了</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">新しい JRA-VAN の出力形式に対応する（#98）</div>
+                      <div class="d">拾われて開始待ち</div>
+                    </div>
+                    <span class="badge b-queue">開始待ち</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#2563eb"></i>llmlb</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">応答時間の定期計測</div>
+                      <div class="d">直近24時間 · 異常なし</div>
+                    </div>
+                    <span class="badge b-run">計測中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">昨夜の負荷テスト</div>
+                      <div class="d">完了 · 結果は想定内でした</div>
+                    </div>
+                    <span class="badge b-done">完了</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#c2410c"></i>event-magazine</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">公開前チェック（11月特集）</div>
+                      <div class="d">確認 20件中12件</div>
+                      <div class="bar"><i style="width:60%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">動いているセッションはありません · 最後の活動は3日前</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#a16207"></i>155-Demi</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">新しい課題はありません · 最後の作業は先週完了しました</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#475569"></i>160-Idina</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">新しい課題はありません</div>
+                    </div>
+                  </div>
+                </div>
+                <p class="h-sec">新しく始める</p>
+                <div class="btnrow">
+                  <button class="btn" type="button">フォルダを開く…</button>
+                  <button class="btn" type="button" data-clone-open>GitHub から取り込む…</button>
+                </div>
+                <div class="lrow" style="margin-top:16px">
+                  <div class="grow">
+                    <div class="t">アプリ全体の設定</div>
+                  </div>
+                  <button class="btn ghost" type="button" data-openpage="settings">設定を開く</button>
+                </div>
               </div>
-              <div class="lrow">
-                <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
-                <span class="badge b-run">作業中</span>
-                <span class="badge b-wait">判断待ち 2件</span>
-              </div>
-              <div class="lrow">
-                <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
-                <span class="badge b-wait">判断待ち</span>
-              </div>
-              <div class="lrow">
-                <span class="ptag"><i style="background:#2563eb"></i>llmlb</span>
-                <span class="badge b-run">作業中</span>
-              </div>
-              <div class="lrow">
-                <span class="ptag"><i style="background:#c2410c"></i>event-magazine</span>
-                <span class="badge b-run">作業中</span>
-              </div>
-              <div class="lrow">
-                <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
-                <span class="badge b-run">作業中</span>
-              </div>
-              <div class="lrow">
-                <span class="ptag"><i style="background:#a16207"></i>155-Demi</span>
-                <span class="badge b-done">止まっています</span>
-              </div>
-              <div class="lrow">
-                <span class="ptag"><i style="background:#475569"></i>160-Idina</span>
-                <span class="badge b-done">止まっています</span>
-              </div>
-            </div>
-            <p class="h-sec">新しく始める</p>
-            <div class="btnrow">
-              <button class="btn" type="button">フォルダを開く…</button>
-              <button class="btn" type="button" data-clone-open>GitHub から取り込む…</button>
-            </div>
-            <div class="lrow" style="margin-top:16px">
-              <div class="grow">
-                <div class="t">アプリ全体の設定</div>
-              </div>
-              <button class="btn ghost" type="button" data-openpage="settings">設定を開く</button>
             </div>
           </div>
         </div>
@@ -1226,7 +1369,7 @@
       </div>
     </div>
     <footer class="doc">
-      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面は体験から設計した（2026-11-12 オーナー方針「コードから再現する必要はない。今回の刷新は体験重視」）。さらに同日のオーナー承認で、開始画面の役割自体を作り替えた：プロジェクトのランチャーではなく、端末 PM との会話の場所とする。開くと PM（アバター＋名前）が様子を話しかけ、直近の変化と進んでいる作業を会話で伝え、判断待ちは会話の中で、選ぶと何が起きると一緒に提示する（その場で選べる。腰を据えて決める場合は各プロジェクトの判断面へ進む）。状態の要約は別ブロックにせず、PM の発言に溶かす。プロジェクトの一覧は脇に小さく残し（状態は人の言葉：作業中／判断待ち／止まっています）、選ぶとそのプロジェクトのページが開く。フォルダを開く／GitHub から取り込む導線も脇に置く。現行再現のために入れていた項目のうち、フォルダのパスの入力欄・終了待ちのプロジェクト・行ごとの実行ポリシー状態行・開いている／最近の二分は落とした。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。端末全体を見る PM との会話は開始画面に置き、PM の状態（何を見ていて、作業が進んでいるか）・判断待ち・報告の未読は、要約ブロックとして別に置かず PM の発言に溶かす。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示のうち端末全体の話は開始画面の会話で、プロジェクト固有の話はプロジェクトページの「相談」で行い、開始画面の会話でプロジェクト固有の話題が出たら PM がそのプロジェクトのページへ誘導する。報告の一覧ページも廃止し、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：開始画面の会話と各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。PM の顔（2026-11-12 オーナー提案「PM にはアバター機能はあった方が良いかも。Muse のような」）：PM にはアバターと名前（モックでは「ツムギ」という仮名）を持たせ、開始画面の会話・相談での発言・判断の提示者では、一貫して「アバター＋名前」で出す。状態（見ている／判断待ち／止まっている）は、アバターの小さな印と一言だけで控えめに伝える。アバターと名前は、設定「あなたの PM」で変えられる想定で置いた。画面の中に説明文は置かない（2026-11-12 オーナー指摘「説明のページみたい」を受けた作法）：画面に残すのは、ボタンのラベル、状態を伝える一言、PM の発言、空状態の短い案内だけとし、設計の意図・前提・決定の記録はこのノートに集約する。設定は2層で、プロジェクトページの設定（そのプロジェクトの差分）が、端末全体の設定より優先される。</p>
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面は体験から設計した（2026-11-12 オーナー方針「コードから再現する必要はない。今回の刷新は体験重視」）。さらに同日のオーナー承認で、開始画面の役割自体を作り替えた：プロジェクトのランチャーではなく、端末 PM との会話の場所とする。開くと PM（アバター＋名前）が様子を話しかけ、直近の変化と進んでいる作業を会話で伝え、判断待ちは会話の中で、選ぶと何が起きると一緒に提示する（その場で選べる。腰を据えて決める場合は各プロジェクトの判断面へ進む）。状態の要約は別ブロックにせず、PM の発言に溶かす。プロジェクトの「今」は会話の隣に置く：プロジェクトごとに、進行中の作業（名前・担当者・状態・進み具合）、止まっている作業と理由、判断待ち、直近で完了した作業を実データの粒度で並べ、選ぶとそのプロジェクトのページが開く（2026-11-12 オーナーの追加フィードバック「会話はアリ。でもプロジェクトの内容が分からなさ過ぎる」「単なるチャットアプリに見えてしまう」「シンプルすぎる」を受けた再調整。密度を上げるのは説明文ではなく現場の実物で、PM の発言にも実名の作業・Issue 番号・担当者・状態と、押せる作業カードを埋め込む）。フォルダを開く／GitHub から取り込む導線も脇に置く。現行再現のために入れていた項目のうち、フォルダのパスの入力欄・終了待ちのプロジェクト・行ごとの実行ポリシー状態行・開いている／最近の二分は落とした。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。端末全体を見る PM との会話は開始画面に置き、PM の状態（何を見ていて、作業が進んでいるか）・判断待ち・報告の未読は、要約ブロックとして別に置かず PM の発言に溶かす。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示のうち端末全体の話は開始画面の会話で、プロジェクト固有の話はプロジェクトページの「相談」で行い、開始画面の会話でプロジェクト固有の話題が出たら PM がそのプロジェクトのページへ誘導する。報告の一覧ページも廃止し、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：開始画面の会話と各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。PM の顔（2026-11-12 オーナー提案「PM にはアバター機能はあった方が良いかも。Muse のような」）：PM にはアバターと名前（モックでは「ツムギ」という仮名）を持たせ、開始画面の会話・相談での発言・判断の提示者では、一貫して「アバター＋名前」で出す。状態（見ている／判断待ち／止まっている）は、アバターの小さな印と一言だけで控えめに伝える。アバターと名前は、設定「あなたの PM」で変えられる想定で置いた。画面の中に説明文は置かない（2026-11-12 オーナー指摘「説明のページみたい」を受けた作法）：画面に残すのは、ボタンのラベル、状態を伝える一言、PM の発言、空状態の短い案内だけとし、設計の意図・前提・決定の記録はこのノートに集約する。設定は2層で、プロジェクトページの設定（そのプロジェクトの差分）が、端末全体の設定より優先される。</p>
     </footer>
   </div>
 
