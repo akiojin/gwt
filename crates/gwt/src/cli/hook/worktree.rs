@@ -30,6 +30,15 @@ pub fn detect_worktree_root() -> PathBuf {
     }
 }
 
+/// Navigation boundary for `block-cd-command`.
+///
+/// Matches [`detect_worktree_root`] except in a resident PM session, where
+/// `cd` may reach the whole `pm/` directory so the PM can read its runtime
+/// skill references (Issue #6989). Mutating policies keep using the worktree.
+pub fn detect_cd_boundary() -> PathBuf {
+    crate::pm_registry::pm_session_dir_for_cwd(&fallback_cwd()).unwrap_or_else(detect_worktree_root)
+}
+
 fn fallback_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

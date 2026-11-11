@@ -921,6 +921,24 @@ pub fn pm_worktree_for_runtime_dir(runtime: &Path) -> Option<PathBuf> {
     Some(worktree)
 }
 
+/// The resident PM's `pm/` directory when `cwd` is the canonical PM worktree,
+/// its runtime directory, or anything beneath either (Issue #6989).
+///
+/// The PM's canonical references live under the runtime sibling of its
+/// worktree, so navigation policy that only knew the worktree blocked the PM's
+/// own startup reads. Every PM cwd resolves to the same answer, so the
+/// boundary no longer depends on which of the two directories launched it.
+pub fn pm_session_dir_for_cwd(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors().find_map(|dir| {
+        let worktree = if is_canonical_pm_worktree(dir) {
+            dir.to_path_buf()
+        } else {
+            pm_worktree_for_runtime_dir(dir)?
+        };
+        worktree.parent().map(Path::to_path_buf)
+    })
+}
+
 /// Project-state directory for PM-authored scratch notes.
 pub fn pm_scratch_dir_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-scratch")
@@ -6477,6 +6495,41 @@ mod tests {
         assert_eq!(
             pm_worktree_for_runtime_dir(&canonical_runtime),
             Some(dunce::canonicalize(&worktree).unwrap())
+        );
+    }
+
+    #[test]
+    fn pm_session_dir_is_the_same_from_every_pm_cwd() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        fs::create_dir_all(&worktree).unwrap();
+        let runtime = ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+        let references = runtime.join(".claude/skills/gwt-pm/references");
+        fs::create_dir_all(&references).unwrap();
+        let pm_dir = worktree.parent().unwrap().to_path_buf();
+        for cwd in [
+            worktree.clone(),
+            worktree.join("src"),
+            runtime.clone(),
+            references.clone(),
+        ] {
+            assert_eq!(
+                pm_session_dir_for_cwd(&cwd),
+                Some(pm_dir.clone()),
+                "cwd {}",
+                cwd.display()
+            );
+        }
+        assert_eq!(pm_session_dir_for_cwd(&pm_dir), None);
+        assert_eq!(pm_session_dir_for_cwd(home.path()), None);
+        let ordinary = home.path().join("repo/pm/worktree");
+        fs::create_dir_all(ordinary.parent().unwrap().join("runtime")).unwrap();
+        fs::create_dir_all(&ordinary).unwrap();
+        assert_eq!(pm_session_dir_for_cwd(&ordinary), None);
+        assert_eq!(
+            pm_session_dir_for_cwd(&ordinary.parent().unwrap().join("runtime")),
+            None
         );
     }
 
