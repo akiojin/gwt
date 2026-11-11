@@ -390,6 +390,20 @@ test("FR-026: Running as は稼働中エージェントを名乗る", () => {
   );
 });
 
+test("Issue #7030: PM Codex speed is restored and Claude has no Ultrafast option", () => {
+  const { document, sent, panel } = fixture();
+  panel.applyStatus({ ...RUNNING_STATUS, configured_agent_id: "codex", configured_codex_speed: "ultrafast" });
+  const speed = document.querySelector('[data-role="pm-speed-select"]');
+  assert.ok(speed);
+  assert.equal(speed.value, "ultrafast");
+  assert.deepEqual([...speed.querySelectorAll("option")].map(option => option.value), ["", "off", "fast", "ultrafast"]);
+  chooseAgent(document, speed, "fast");
+  assert.equal(sent.at(-1).codex_speed, "fast");
+  panel.applyStatus({ ...RUNNING_STATUS, configured_fast_mode: true });
+  assert.deepEqual([...speed.querySelectorAll("option")].map(option => option.value), ["", "off", "fast"]);
+  assert.equal(speed.value, "fast");
+});
+
 test("FR-026: agent select は pm_status の選択肢から作られ set_pm_launch_profile を送る", () => {
   const { document, sent, panel } = fixture();
   panel.applyStatus(RUNNING_STATUS);
@@ -775,6 +789,12 @@ test("FR-026: Restart は confirm を通ったときだけ restart_pm_agent を�
   accepted.panel.applyStatus(RUNNING_STATUS);
   required(accepted.document, '[data-role="pm-restart"]').click();
   assert.deepEqual(accepted.sent.at(-1), { kind: "restart_pm_agent" });
+});
+
+test("Issue #7030: inherited PM model and effort do not create a false Pending chip", () => {
+  const { document, panel } = fixture();
+  panel.applyStatus({ ...RUNNING_STATUS, running_model: "gpt-6-astra", running_reasoning: "high" });
+  assert.equal(document.querySelector('[data-role="pm-pending-chip"]').hidden, true);
 });
 
 test("FR-026: Pending チップは configured != running のときだけ出る", () => {

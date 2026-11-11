@@ -500,6 +500,11 @@ pub enum PmRequestTaskResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
+    /// Explicitly confirmed recovery of the authenticated project owner.
+    RestartWedgedOwner {
+        confirmed: bool,
+        recovery_id: String,
+    },
     RefreshOrphanDaemons,
     ReapOrphanDaemon {
         observation_token: String,
@@ -583,6 +588,10 @@ pub enum FrontendEvent {
         model: Option<String>,
         #[serde(default)]
         reasoning: Option<String>,
+        #[serde(default)]
+        codex_speed: Option<gwt_agent::CodexSpeed>,
+        #[serde(default)]
+        fast_mode: Option<bool>,
     },
     /// SPEC-3431 FR-026: stop the live PM and bring it back on the configured
     /// profile. Starts a NEW conversation — a history cannot cross agents.
@@ -1686,10 +1695,13 @@ pub enum ProjectOwnerHealthState {
     Connecting,
     Healthy,
     Degraded,
+    Wedged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectOwnerHealthView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_id: Option<String>,
     pub project_key: String,
     pub state: ProjectOwnerHealthState,
     pub detail: Option<String>,
@@ -2651,6 +2663,10 @@ pub enum BackendEvent {
         configured_agent_id: String,
         configured_model: Option<String>,
         configured_reasoning: Option<String>,
+        #[serde(default)]
+        configured_codex_speed: Option<gwt_agent::CodexSpeed>,
+        #[serde(default)]
+        configured_fast_mode: Option<bool>,
         running_agent_id: Option<String>,
         running_model: Option<String>,
         running_reasoning: Option<String>,
@@ -4699,6 +4715,8 @@ mod tests {
             configured_agent_id: "claude".to_string(),
             configured_model: None,
             configured_reasoning: None,
+            configured_codex_speed: None,
+            configured_fast_mode: None,
             running_agent_id: None,
             running_model: None,
             running_reasoning: None,

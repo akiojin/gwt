@@ -124,9 +124,13 @@ identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
 The embedded frontend requires an operation ID for cleanup requests. Reload older
-open tabs after upgrading. Launch Wizard always skips permission prompts and
-launches with Fast mode off; it reads older saved choices without rewriting them.
-Issues profiles and direct Session resume keep their existing preferences.
+open tabs after upgrading. Launch Wizard always skips permission prompts.
+Agent Settings save model, reasoning and speed defaults for launches: Codex offers
+Off / Fast / Ultrafast, and Claude Code offers its own Fast toggle. Monitor and PM
+profiles can select speed as well. Legacy Codex Fast booleans retain effective Off;
+only an explicit speed selection enables Fast or Ultrafast. Ultrafast requires a
+supported model and eligible plan/workspace; Codex displays a warning when an
+unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
 ## Requirements
 
@@ -597,6 +601,15 @@ runtime while admitted work is unfinished. Closing one GUI does not kill a share
 An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.
+
+Repeated owner health timeouts show **Wedged**, distinct from an ordinary
+connection failure. GWT automatically saves stack samples (on macOS), recent
+terminal-delivery warnings, and CPU observations under
+`~/.gwt/logs/owner-recovery/<pid>-<id>/`. Choose **Restart daemon…** in the
+Project status strip to review and confirm recovery: diagnostics are saved
+before SIGTERM, with SIGKILL after a grace period if needed. Restarting stops
+all agents hosted by that daemon, including agents in other projects; unsaved
+terminal work may be lost. GWT never kills a wedged daemon without confirmation.
 
 The Hub's **終了待ちプロジェクト** section observes daemons for known projects.
 Choose **再確認** to refresh their status. **終了を再試行** retries an exact failed

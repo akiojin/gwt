@@ -5289,6 +5289,12 @@ pub fn validate_monitor_profiles_set(
             }
             Some(agent_id) => agent_id.command().to_ascii_lowercase(),
         };
+        if provider != "codex" && profile.codex_speed != gwt_agent::CodexSpeed::Off {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "codex_speed is only supported for Codex launch profiles",
+            ));
+        }
         let identity = crate::issue_monitor::launch_profile_identity(profile);
         if !providers.insert(identity) {
             return Err(io::Error::new(
@@ -15667,6 +15673,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -16062,6 +16069,21 @@ command = "my-agent-cli"
         let error = validate_monitor_profiles_set(&[duplicate.clone(), duplicate], None)
             .expect_err("duplicate custom candidate must be rejected");
         assert!(error.to_string().contains("duplicate launch candidate"));
+    }
+
+    #[test]
+    fn monitor_profiles_validate_codex_speed_without_affecting_claude_fast_mode() {
+        let mut profile = pool_profile("codex", &[]);
+        profile.codex_speed = gwt_agent::CodexSpeed::Ultrafast;
+        validate_monitor_profiles_set(&[profile.clone()], None).unwrap();
+        profile.agent_id = "claude".to_string();
+        let error = validate_monitor_profiles_set(&[profile.clone()], None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("codex_speed is only supported for Codex"));
+        profile.codex_speed = gwt_agent::CodexSpeed::Off;
+        profile.fast_mode = true;
+        validate_monitor_profiles_set(&[profile], None).unwrap();
     }
 
     /// Issue #4079 AC-3/AC-4/AC-5: reordering the pool with `{agent_id}`-only
@@ -20347,6 +20369,7 @@ command = "my-agent-cli"
                     session_mode: Default::default(),
                     skip_permissions: true,
                     fast_mode: false,
+                    codex_speed: gwt_agent::CodexSpeed::Off,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),

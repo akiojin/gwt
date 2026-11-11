@@ -1,163 +1,164 @@
-/**
- * SPEC-1921 Phase L2 — fixed Launch Wizard permissions and Fast mode.
- *
- * Use browser-check's checkout backend and fresh HOME, with Claude and Codex
- * installed. Before starting the backend, seed CHECK_HOME/.gwt/sessions/
- * launch-wizard-l2-{claude,codex}.toml with skip_permissions=false and
- * fast_mode=true and model="opus" / "gpt-6-astra", using the fixture
- * project's worktree and branch. Set
- * GWT_PLAYWRIGHT_CHECK_HOME to that HOME. The tests only read these Sessions
- * and stop at launch confirmation without starting an agent process.
- */
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+/** Issue #7030: explicit speed selection with real backend state, without starting paid inference. */
 import { expect, test, type Page } from "@playwright/test";
 import {
-  acquireLiveGwtBackendLock,
-  clearLiveLaunchWizard,
-  gotoLiveGwt,
-  openLiveLaunchWizardForBranch,
-  openLiveGwtProject,
-  sendLiveGwtEvent,
+  acquireLiveGwtBackendLock, clearLiveLaunchWizard, gotoLiveGwt,
+  openLiveGwtProject, sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
-const CHECK_HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
 
-test.describe.serial("Launch Wizard fixed permissions and Fast mode (live backend)", () => {
-  test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
-  test.setTimeout(120_000);
-
-  let releaseBackendLock: (() => Promise<void>) | undefined;
-  let cleanupLaunchFixture: (() => Promise<void>) | undefined;
+test.describe.serial("Codex and Claude speed settings (live backend)", () => {
+  test.skip(!BASE, "requires an isolated checkout backend");
+  test.setTimeout(180_000);
+  let release: (() => Promise<void>) | undefined;
   let errors: string[];
 
   test.beforeEach(async ({ page }, testInfo) => {
-    cleanupLaunchFixture = undefined;
     errors = [];
-    page.on("pageerror", (error) => errors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") errors.push(message.text());
-    });
-    releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    release = await acquireLiveGwtBackendLock(BASE, testInfo);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     const theme = testInfo.project.use.colorScheme === "light" ? "light" : "dark";
     await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
   });
-
-  test.afterEach(async ({ page }) => {
-    if (!releaseBackendLock) return;
-    const cleanup = cleanupLaunchFixture;
-    cleanupLaunchFixture = undefined;
-    try {
-      try {
-        await clearLiveLaunchWizard(page);
-      } finally {
-        await cleanup?.();
-      }
-    } finally {
-      await releaseBackendLock();
-      releaseBackendLock = undefined;
+  test.afterEach(async ({ page }, testInfo) => {
+    if (testInfo.status !== testInfo.expectedStatus) {
+      await testInfo.attach("speed-settings-failure", {
+        body: JSON.stringify({ url: page.url(), wizard: await latestWizardView(page),
+          body: await page.locator("body").innerText() }, null, 2),
+        contentType: "application/json",
+      });
+      await testInfo.attach("speed-settings-failure-screen", { body: await page.screenshot(), contentType: "image/png" });
     }
-    expect(errors, "console and page errors across the live flow").toEqual([]);
+    try { await clearLiveLaunchWizard(page); }
+    finally { await release?.(); release = undefined; }
+    expect(errors, "console and page errors").toEqual([]);
   });
 
-  for (const [agentId, displayName, savedModel] of [
-    ["claude", "Claude Code", "opus"],
-    ["codex", "Codex", "gpt-6-astra"],
-  ]) {
-    test(`${displayName} fixes saved permissions and Fast mode through runtime resolution and reload`, async ({ page }, testInfo) => {
-      expect(CHECK_HOME, "Set GWT_PLAYWRIGHT_CHECK_HOME to the seeded isolated HOME").not.toBe("");
-      const seedPath = join(CHECK_HOME, ".gwt", "sessions", `launch-wizard-l2-${agentId}.toml`);
-      const seed = await readFile(seedPath, "utf8");
-      expect(seed).toMatch(/^skip_permissions\s*=\s*false\s*$/m);
-      expect(seed).toMatch(/^(?:fast_mode|codex_fast_mode)\s*=\s*true\s*$/m);
-      cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
-      await expect(page.locator("#wizard-modal")).toBeVisible({ timeout: 30_000 });
-      await chooseConfigureAndStart(page);
-      await selectWizardAgent(page, agentId);
-      // A non-default model proves the backend actually restored the saved
-      // profile, rather than merely launching with unrelated fixed defaults.
-      await expect.poll(async () => (await latestWizardView(page))?.selected_model, {
-        timeout: 30_000,
-      }).toBe(savedModel);
-      await expectFixedLaunchSettings(page, agentId);
+  test("Launch Wizard exposes Codex speed and keeps Claude controls separate", async ({ page }) => {
+    await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: process.env.GWT_PLAYWRIGHT_BRANCH_NAME ?? "develop" });
+    await page.locator("#wizard-modal").getByRole("button", { name: /^Configure and start/ }).click({ timeout: 30_000 });
+    await expect(page.locator("#wizard-modal").getByLabel("Agent", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await selectWizardAgent(page, "codex");
+    const modal = page.locator("#wizard-modal");
+    const speed = modal.getByRole("radiogroup", { name: "Speed", exact: true });
+    await expect(speed).toBeVisible();
+    for (const value of ["off", "fast", "ultrafast"]) {
+      await speed.locator(`[data-value="${value}"]`).click();
+      await blurActiveElement(page);
+      await expect.poll(() => latestWizardView(page)).toMatchObject({ codex_speed: value });
+      await expect(speed.locator(`[data-value="${value}"]`)).toHaveAttribute("aria-checked", "true");
+    }
+    await expect(modal).toContainText("Pro $500");
+    await expect(modal).toContainText("Codex warns and omits unsupported tiers");
+    await expect(modal.getByLabel("Use Claude Code Fast mode", { exact: true })).toHaveCount(0);
+    await selectWizardAgent(page, "claude");
+    await expect(speed).toHaveCount(0);
+    await expect(modal.getByText("Ultrafast", { exact: true })).toHaveCount(0);
+    const fast = modal.getByLabel("Use Claude Code Fast mode", { exact: true });
+    await expect(fast).toBeVisible();
+    await fast.check();
+    await expect.poll(() => latestWizardView(page)).toMatchObject({ fast_mode: true });
+    await selectWizardAgent(page, "codex");
+    await expect(speed).toBeVisible();
+    await expect(modal.getByLabel("Skip permission prompts", { exact: true })).toHaveCount(0);
+  });
 
-      // Older clients can still send the saved choices. Wait for each real
-      // backend response so the existing fixed View cannot satisfy the check.
-      for (const action of [
-        { kind: "set_skip_permissions", enabled: false },
-        { kind: "set_fast_mode", enabled: true },
-        { kind: "set_codex_fast_mode", enabled: true },
-      ]) {
-        const cursor = await page.evaluate(() => Number((window as any).__gwtPlaywrightMessageSequence) || 0);
-        await sendLiveGwtEvent(page, { kind: "launch_wizard_action", action, bounds: null });
-        await page.waitForFunction((cursor) =>
-          ((window as any).__gwtPlaywrightMessages || []).some((entry: any) =>
-            entry.sequence > cursor && entry.payload?.kind === "launch_wizard_state" && entry.payload.wizard
-          ), cursor, { timeout: 30_000 });
-        await expectFixedLaunchSettings(page, agentId);
-      }
-
-      const submit = page.locator("#wizard-submit-button");
-      await expect(submit).toHaveText("Continue");
-      await submit.click();
-      await expect.poll(() => latestWizardView(page), { timeout: 30_000 }).toMatchObject({
-        runtime_context_resolved: true,
-        show_runtime_confirmation: true,
-        show_confirm: false,
-      });
-      await expect(submit).toHaveText("Continue");
-      await expectFixedLaunchSettings(page, agentId);
-      await submit.click();
-      await expect.poll(async () => (await latestWizardView(page))?.show_confirm, {
-        timeout: 30_000,
-      }).toBe(true);
-      await expectFixedLaunchSettings(page, agentId);
-      await expect(submit).toHaveText(/^(Launch|Create and launch)$/, { timeout: 30_000 });
-
-      // A stale frontend View must never recreate choices, even when it
-      // advertises both the current and the legacy Fast mode field names.
-      const current = await latestWizardView(page);
-      await page.evaluate((wizard) => {
-        window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
-          detail: {
-            kind: "launch_wizard_state",
-            wizard: {
-              ...wizard,
-              show_manual_setup: true,
-              show_confirm: false,
-              show_runtime_confirmation: false,
-              show_skip_permissions: true,
-              skip_permissions: false,
-              show_fast_mode: true,
-              fast_mode: true,
-              show_codex_fast_mode: true,
-              codex_fast_mode: true,
-            },
-          },
-        }));
-      }, current);
-      await expectLaunchChoicesAbsent(page);
-      await page.reload();
-      await expect(page.locator("#wizard-modal")).toBeVisible({ timeout: 30_000 });
-      // gotoLiveGwt reinstalls capture on reload; this is a fresh backend View,
-      // rather than the page-local legacy payload injected above.
-      await expectFixedLaunchSettings(page, agentId);
-      const theme = testInfo.project.use.colorScheme === "light" ? "light" : "dark";
-      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      expect(await readFile(seedPath, "utf8"), "saved legacy preferences remain unchanged").toBe(seed);
-      await testInfo.attach(`launch-wizard-l2-${agentId}-${theme}`, {
-        body: await page.locator("#wizard-modal").screenshot(),
-        contentType: "image/png",
-      });
+  test("Agent Settings saves Codex Ultrafast with model and reasoning and restores after reload", async ({ page }) => {
+    await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 703001,
+      profiles: [{ agent_id: "codex", model: "gpt-6-astra", reasoning: "high", codex_speed: "off" }] });
+    const seeded = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .find(({ payload }: any) => ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
+        && payload.request_id === 703001)?.payload).then(handle => handle.jsonValue());
+    expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
+    await sendLiveGwtEvent(page, { kind: "issue_monitor_configure_profile" });
+    const modal = page.locator("#wizard-modal");
+    await expect(modal).toHaveClass(/open/, { timeout: 30_000 });
+    const speed = modal.getByRole("radiogroup", { name: "Speed", exact: true });
+    await speed.locator('[data-value="ultrafast"]').click();
+    await blurActiveElement(page);
+    await expect.poll(() => latestWizardView(page)).toMatchObject({
+      selected_model: "gpt-6-astra", selected_reasoning: "high", codex_speed: "ultrafast",
     });
-  }
+    const submit = page.locator("#wizard-submit-button");
+    await submit.click();
+    await expect.poll(() => latestWizardView(page)).toMatchObject({ show_runtime_confirmation: true });
+    await submit.click();
+    await expect.poll(() => latestWizardView(page)).toMatchObject({ show_confirm: true });
+    await expect(submit).toHaveText(/Save/);
+    await submit.click();
+    await expect(modal).not.toHaveClass(/open/, { timeout: 30_000 });
+    await page.reload();
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles", request_id: 703002 });
+    const saved = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .filter(({ payload }: any) => payload.kind === "issue_monitor_profiles").at(-1)?.payload.profiles)
+      .then(handle => handle.jsonValue());
+    expect(saved[0]).toMatchObject({ agent_id: "codex", model: "gpt-6-astra", reasoning: "high", codex_speed: "ultrafast" });
+    await sendLiveGwtEvent(page, { kind: "issue_monitor_configure_profile" });
+    await expect(modal).toHaveClass(/open/, { timeout: 30_000 });
+    await expect(speed.locator('[data-value="ultrafast"]')).toHaveAttribute("aria-checked", "true");
+    await clearLiveLaunchWizard(page);
+    await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: process.env.GWT_PLAYWRIGHT_BRANCH_NAME ?? "develop" });
+    await page.locator("#wizard-modal").getByRole("button", { name: /^Configure and start/ }).click({ timeout: 30_000 });
+    await expect(page.locator("#wizard-modal").getByLabel("Agent", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await selectWizardAgent(page, "codex");
+    await expect.poll(() => latestWizardView(page)).toMatchObject({
+      selected_agent_id: "codex", selected_model: "gpt-6-astra",
+      selected_reasoning: "high", codex_speed: "ultrafast",
+    });
+    await expect(speed.locator('[data-value="ultrafast"]')).toHaveAttribute("aria-checked", "true");
+  });
+
+  test("PM settings save and restore explicit Codex speed without starting PM", async ({ page }) => {
+    await sendLiveGwtEvent(page, {
+      kind: "set_pm_launch_profile", agent_id: "codex", model: "gpt-6-astra",
+      reasoning: "high", codex_speed: "off",
+    });
+    await expect.poll(() => latestPmStatus(page)).toMatchObject({
+      configured_agent_id: "codex", configured_codex_speed: "off", is_running: false,
+    });
+    const openSettings = async () => {
+      await page.locator(".pm-launcher-shell").hover();
+      await page.locator("#op-pm-settings-button").click();
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toBeVisible();
+    };
+    await openSettings();
+    const panel = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="project-manager"]');
+    const speed = panel.locator('[data-role="pm-speed-select"]');
+    await expect(speed).toBeVisible();
+    await expect(speed.locator("option")).toHaveText(["Agent Settings default", "Off", "Fast", "Ultrafast"]);
+    for (const value of ["fast", "off", "ultrafast"]) {
+      await speed.selectOption(value);
+      await expect.poll(() => latestPmStatus(page)).toMatchObject({
+        configured_agent_id: "codex", configured_model: "gpt-6-astra",
+        configured_reasoning: "high", configured_codex_speed: value, is_running: false,
+      });
+      await expect(speed).toHaveValue(value);
+    }
+    await page.reload();
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await openSettings();
+    await expect(speed).toHaveValue("ultrafast");
+    await expect.poll(() => latestPmStatus(page)).toMatchObject({
+      configured_agent_id: "codex", configured_model: "gpt-6-astra",
+      configured_reasoning: "high", configured_codex_speed: "ultrafast", is_running: false,
+    });
+    // Selecting Claude must never offer the Codex-only tier.
+    await panel.locator('[data-role="pm-agent-select"]').selectOption("claude");
+    await expect(speed.locator('option[value="ultrafast"]')).toHaveCount(0);
+    await expect(speed.locator("option")).toHaveText(["Agent Settings default", "Off", "Fast"]);
+  });
 });
+
+async function latestPmStatus(page: Page) {
+  return page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+    .filter(({ payload }: any) => payload.kind === "pm_status").at(-1)?.payload);
+}
 
 async function latestWizardView(page: Page) {
   return page.evaluate(() => {
@@ -165,50 +166,6 @@ async function latestWizardView(page: Page) {
     return [...messages].reverse().find((entry: any) =>
       entry.payload?.kind === "launch_wizard_state" && entry.payload.wizard
     )?.payload.wizard;
-  });
-}
-
-async function expectLaunchChoicesAbsent(page: Page): Promise<void> {
-  const wizard = page.locator("#wizard-modal");
-  await expect(wizard.getByText("Launch settings", { exact: true })).toHaveCount(0);
-  await expect(wizard.getByLabel("Skip permission prompts", { exact: true })).toHaveCount(0);
-  await expect(wizard.getByLabel("Use the agent's Fast mode", { exact: true })).toHaveCount(0);
-  await expect(wizard.locator(".wizard-progress-label").filter({
-    hasText: /^(Launch settings|Skip Permissions|Fast mode)$/i,
-  })).toHaveCount(0);
-}
-
-async function expectFixedLaunchSettings(page: Page, agentId: string): Promise<void> {
-  await expect.poll(() => latestWizardView(page), { timeout: 30_000 }).toMatchObject({
-    selected_agent_id: agentId,
-    skip_permissions: true,
-    fast_mode: false,
-    show_skip_permissions: false,
-    show_fast_mode: false,
-  });
-  await expectLaunchChoicesAbsent(page);
-  await expect(fastModeSummaryValue(page)).toHaveText("off");
-  await expect(page.locator("#wizard-summary .wizard-summary-item", {
-    has: page.locator(".wizard-summary-label", { hasText: /^Permissions$/ }),
-  }).locator(".wizard-summary-value")).toHaveText("skip");
-}
-
-async function keepLaunchWizardModalVisible(page: Page): Promise<void> {
-  await page.addStyleTag({
-    content: `
-      #wizard-modal[aria-hidden="false"] {
-        display: flex !important;
-        pointer-events: auto !important;
-      }
-      #wizard-modal.open {
-        display: flex !important;
-        pointer-events: auto !important;
-      }
-      #wizard-modal[aria-hidden="true"] {
-        display: none !important;
-        pointer-events: none !important;
-      }
-    `,
   });
 }
 
@@ -232,26 +189,6 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   await option.click();
   await expect(option).toHaveAttribute("aria-checked", "true");
   await blurActiveElement(page);
-}
-
-function fastModeSummaryValue(page: Page) {
-  return page
-    .locator("#wizard-summary .wizard-summary-item", { hasText: "Fast mode" })
-    .locator(".wizard-summary-value");
-}
-
-async function chooseConfigureAndStart(page: Page): Promise<void> {
-  const wizard = page.locator("#wizard-modal");
-  const agentSelect = wizard.getByLabel("Agent", { exact: true });
-  if (await agentSelect.isVisible().catch(() => false)) {
-    return;
-  }
-
-  const configure = wizard.getByRole("button", { name: /^Configure and start/ });
-  await configure.waitFor({ state: "visible", timeout: 0 });
-  await expect(configure).toBeEnabled();
-  await configure.click();
-  await expect(agentSelect).toBeVisible({ timeout: 10_000 });
 }
 
 async function blurActiveElement(page: Page): Promise<void> {
