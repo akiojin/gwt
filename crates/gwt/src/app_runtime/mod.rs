@@ -10712,17 +10712,36 @@ impl AppRuntime {
             return Vec::new();
         }
         let (panes, worktrees) = self.capture_update_quiescence_inputs();
+        let sessions_dir = self.sessions_dir.clone();
+        let restoring_session_ids = self.restoring_session_ids();
         let proxy = self.proxy.clone();
         self.update_drain_scan_in_flight = true;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 gwt_core::operation_deadline::now() + std::time::Duration::from_secs(2),
             );
-            let observations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                contexts
-                    .into_iter()
-                    .filter_map(|context| {
-                        let drain = Self::read_project_auto_update_drain(&context);
+            let observations =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let drains: Vec<_> = contexts
+                        .into_iter()
+                        .map(|context| {
+                            let drain = Self::read_project_auto_update_drain(&context);
+                            (context, drain)
+                        })
+                        .collect();
+                    // Update recovery cannot depend on enabled Issues scans. Use
+                    // the same exact holder/runtime revalidation on this worker,
+                    // retaining admitted restores until their launch completes.
+                    if drains.iter().any(|(_, drain)| drain.is_some()) {
+                        startup::reap_defunct_active_generations(
+                            &sessions_dir,
+                            &worktrees,
+                            &[],
+                            &restoring_session_ids,
+                            startup::GenerationReaperFailureLog::Debug,
+                        );
+                    }
+                    drains.into_iter().filter_map(|(context, drain)| {
                         let monitor = gwt::IssueMonitorState::with_prefs(
                             gwt::IssueMonitorConfig::default(),
                             drain
@@ -10748,11 +10767,11 @@ impl AppRuntime {
                         })
                     })
                     .collect()
-            }))
-            .unwrap_or_else(|_| {
-                tracing::warn!("update drain observer panicked; automatic apply deferred");
-                Vec::new()
-            });
+                }))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("update drain observer panicked; automatic apply deferred");
+                    Vec::new()
+                });
             proxy.send(UserEvent::UpdateDrainObserved { now, observations });
         });
         if let Err(error) = spawn {
