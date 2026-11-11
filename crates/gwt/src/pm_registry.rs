@@ -491,6 +491,13 @@ pub enum PmDeliveryReceiptStatus {
     Lost,
 }
 
+/// Native Grok turn correlation captured before the prompt can still be blocked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrokPmPromptIdentity {
+    pub native_session_id: String,
+    pub prompt_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmDeliveryReceipt {
     pub operation_id: String,
@@ -500,6 +507,9 @@ pub struct PmDeliveryReceipt {
     pub target_window_id: String,
     pub target_session_id: String,
     pub body_sha256: String,
+    /// Grok pre-turn correlation, not itself evidence that the turn was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_prompt: Option<GrokPmPromptIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -645,7 +655,16 @@ fn validated_pm_delivery_operation<'a>(
         ));
     }
     let mut latest = PmDeliveryReceiptStatus::Prepared;
+    let mut latest_grok_prompt = None;
     for receipt in &operation {
+        if receipt.grok_prompt.as_ref().is_some_and(|identity| {
+            identity.native_session_id.trim().is_empty() || identity.prompt_id.trim().is_empty()
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Grok PM correlation has an empty identity",
+            ));
+        }
         if receipt.principal_session_id != prepared.principal_session_id
             || receipt.target_window_id != prepared.target_window_id
             || receipt.target_session_id != prepared.target_session_id
@@ -674,6 +693,20 @@ fn validated_pm_delivery_operation<'a>(
                 PmDeliveryReceiptStatus::Lost,
             ) => true,
             (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => true,
+            // A late/replaced Grok pre-turn observation changes correlation
+            // only; it cannot turn an unconfirmed delivery into success.
+            (previous, current)
+                if previous == current
+                    && matches!(
+                        current,
+                        PmDeliveryReceiptStatus::Ambiguous
+                            | PmDeliveryReceiptStatus::Unconfirmed
+                            | PmDeliveryReceiptStatus::Lost
+                    )
+                    && latest_grok_prompt != receipt.grok_prompt.as_ref() =>
+            {
+                true
+            }
             _ => false,
         };
         if !transition_is_valid {
@@ -683,6 +716,7 @@ fn validated_pm_delivery_operation<'a>(
             ));
         }
         latest = receipt.status;
+        latest_grok_prompt = receipt.grok_prompt.as_ref();
     }
     Ok(operation)
 }
@@ -705,6 +739,7 @@ pub fn prepare_pm_delivery_receipt(
     prepared: &PmDeliveryReceipt,
 ) -> io::Result<PmDeliveryPrepareOutcome> {
     if prepared.status != PmDeliveryReceiptStatus::Prepared
+        || prepared.grok_prompt.is_some()
         || uuid::Uuid::parse_str(&prepared.operation_id)
             .ok()
             .is_none_or(|operation_id| {
@@ -761,69 +796,220 @@ pub fn finish_pm_delivery_receipt(
         ));
     }
     with_pm_prefs_lock(path, || {
-        let receipts = load_pm_delivery_receipts_unlocked(path)?;
-        let operation = validated_pm_delivery_operation(&receipts, operation_id)?;
-        let Some(prepared) = operation.first().copied() else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "PM delivery Prepared receipt is missing",
-            ));
-        };
-        if prepared.target_session_id != target_session_id || prepared.body_sha256 != body_sha256 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "PM delivery acknowledgement does not match its Prepared receipt",
-            ));
-        }
-        if let Some(existing) = operation
-            .iter()
-            .rev()
-            .copied()
-            .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
-        {
-            match (existing.status, status) {
-                (existing, requested) if existing == requested => return Ok(existing),
-                (
-                    PmDeliveryReceiptStatus::Lost,
-                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
-                ) => return Ok(PmDeliveryReceiptStatus::Lost),
-                (
-                    PmDeliveryReceiptStatus::Verified,
-                    PmDeliveryReceiptStatus::Ambiguous
-                    | PmDeliveryReceiptStatus::Unconfirmed
-                    | PmDeliveryReceiptStatus::Lost,
-                ) => return Ok(PmDeliveryReceiptStatus::Verified),
-                (
-                    PmDeliveryReceiptStatus::Ambiguous
-                    | PmDeliveryReceiptStatus::Unconfirmed
-                    | PmDeliveryReceiptStatus::Lost,
-                    PmDeliveryReceiptStatus::Verified,
-                ) => {}
-                (
-                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
-                    PmDeliveryReceiptStatus::Lost,
-                ) => {}
-                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "PM delivery already has a different terminal receipt",
-                    ))
-                }
+        finish_pm_delivery_receipt_unlocked(
+            path,
+            operation_id,
+            target_session_id,
+            body_sha256,
+            status,
+            reason,
+        )
+    })
+}
+
+fn finish_pm_delivery_receipt_unlocked(
+    path: &Path,
+    operation_id: &str,
+    target_session_id: &str,
+    body_sha256: &str,
+    status: PmDeliveryReceiptStatus,
+    reason: Option<&str>,
+) -> io::Result<PmDeliveryReceiptStatus> {
+    let receipts = load_pm_delivery_receipts_unlocked(path)?;
+    let operation = validated_pm_delivery_operation(&receipts, operation_id)?;
+    let Some(prepared) = operation.first().copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "PM delivery Prepared receipt is missing",
+        ));
+    };
+    if prepared.target_session_id != target_session_id || prepared.body_sha256 != body_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "PM delivery acknowledgement does not match its Prepared receipt",
+        ));
+    }
+    if let Some(existing) = operation
+        .iter()
+        .rev()
+        .copied()
+        .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
+    {
+        match (existing.status, status) {
+            (existing, requested) if existing == requested => return Ok(existing),
+            (
+                PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+            ) => return Ok(PmDeliveryReceiptStatus::Lost),
+            (
+                PmDeliveryReceiptStatus::Verified,
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+            ) => return Ok(PmDeliveryReceiptStatus::Verified),
+            (
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Verified,
+            ) => {}
+            (
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                PmDeliveryReceiptStatus::Lost,
+            ) => {}
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "PM delivery already has a different terminal receipt",
+                ))
             }
         }
-        let terminal = PmDeliveryReceipt {
-            operation_id: operation_id.to_string(),
-            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            status,
-            principal_session_id: prepared.principal_session_id.clone(),
-            target_window_id: prepared.target_window_id.clone(),
-            target_session_id: prepared.target_session_id.clone(),
-            body_sha256: prepared.body_sha256.clone(),
-            reason: reason.map(str::to_string),
+    }
+    let terminal = PmDeliveryReceipt {
+        operation_id: operation_id.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        status,
+        principal_session_id: prepared.principal_session_id.clone(),
+        target_window_id: prepared.target_window_id.clone(),
+        target_session_id: prepared.target_session_id.clone(),
+        body_sha256: prepared.body_sha256.clone(),
+        grok_prompt: operation
+            .last()
+            .and_then(|receipt| receipt.grok_prompt.clone()),
+        reason: reason.map(str::to_string),
+    };
+    append_pm_delivery_receipt_unlocked(path, &terminal)?;
+    Ok(status)
+}
+
+/// Record Grok's pre-acceptance prompt identity in the existing delivery ledger.
+/// Replacing a queued prompt clears its previous PM correlation.
+pub fn observe_grok_pm_delivery_prompt(
+    path: &Path,
+    target_session_id: &str,
+    identity: Option<&GrokPmPromptIdentity>,
+    prompt: &str,
+) -> io::Result<()> {
+    if identity.is_some_and(|identity| {
+        identity.native_session_id.trim().is_empty() || identity.prompt_id.trim().is_empty()
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Grok PM correlation requires native session and prompt identities",
+        ));
+    }
+    let protected = identity.and_then(|_| parse_protected_pm_delivery_prompt(prompt));
+    with_pm_prefs_lock(path, || {
+        let mut receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let operations = receipts
+            .iter()
+            .filter(|receipt| receipt.target_session_id == target_session_id)
+            .map(|receipt| receipt.operation_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for operation_id in operations {
+            let operation = validated_pm_delivery_operation(&receipts, &operation_id)?;
+            let Some(latest) = operation.last() else {
+                continue;
+            };
+            if matches!(
+                latest.status,
+                PmDeliveryReceiptStatus::Verified | PmDeliveryReceiptStatus::Refused
+            ) {
+                continue;
+            }
+            let Some(observed) = latest.grok_prompt.as_ref() else {
+                continue;
+            };
+            if identity.is_none_or(|identity| identity == observed)
+                && protected
+                    .as_ref()
+                    .is_none_or(|(id, hash)| id != &operation_id || hash != &latest.body_sha256)
+            {
+                let mut cleared = (*latest).clone();
+                cleared.grok_prompt = None;
+                cleared.recorded_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                append_pm_delivery_receipt_unlocked(path, &cleared)?;
+                receipts.push(cleared);
+            }
+        }
+        let (Some(identity), Some((operation_id, body_sha256))) = (identity, protected) else {
+            return Ok(());
         };
-        append_pm_delivery_receipt_unlocked(path, &terminal)?;
-        Ok(status)
+        let operation = validated_pm_delivery_operation(&receipts, &operation_id)?;
+        let latest = operation.last().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Grok PM observation has no Prepared receipt",
+            )
+        })?;
+        if latest.target_session_id != target_session_id || latest.body_sha256 != body_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Grok PM observation does not match its target and body",
+            ));
+        }
+        if matches!(
+            latest.status,
+            PmDeliveryReceiptStatus::Verified | PmDeliveryReceiptStatus::Refused
+        ) || latest.grok_prompt.as_ref() == Some(identity)
+        {
+            return Ok(());
+        }
+        let mut observed = (*latest).clone();
+        observed.grok_prompt = Some(identity.clone());
+        observed.recorded_at =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        append_pm_delivery_receipt_unlocked(path, &observed)
+    })
+}
+
+/// Verify only the exact Grok turn that progressed beyond all prompt hooks.
+pub fn acknowledge_grok_pm_delivery_prompt(
+    path: &Path,
+    target_session_id: &str,
+    identity: &GrokPmPromptIdentity,
+) -> io::Result<()> {
+    with_pm_prefs_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let operations = receipts
+            .iter()
+            .filter(|receipt| receipt.target_session_id == target_session_id)
+            .map(|receipt| receipt.operation_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut candidate = None;
+        for operation_id in operations {
+            let operation = validated_pm_delivery_operation(&receipts, &operation_id)?;
+            let Some(latest) = operation.last() else {
+                continue;
+            };
+            if latest.grok_prompt.as_ref() == Some(identity)
+                && !matches!(
+                    latest.status,
+                    PmDeliveryReceiptStatus::Verified | PmDeliveryReceiptStatus::Refused
+                )
+            {
+                if candidate.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Grok prompt matches multiple PM operations",
+                    ));
+                }
+                candidate = Some((operation_id, latest.body_sha256.clone()));
+            }
+        }
+        if let Some((operation_id, body_sha256)) = candidate {
+            finish_pm_delivery_receipt_unlocked(
+                path,
+                &operation_id,
+                target_session_id,
+                &body_sha256,
+                PmDeliveryReceiptStatus::Verified,
+                None,
+            )?;
+        }
+        Ok(())
     })
 }
 
@@ -8522,6 +8708,7 @@ mod tests {
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
         let body = "report exact status";
         let prepared = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.to_string(),
             recorded_at: "2026-08-13T00:00:00Z".to_string(),
             status: PmDeliveryReceiptStatus::Prepared,
@@ -8575,6 +8762,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("receipts.jsonl");
         let prepared = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: "72fc3cd4-ad49-43e3-bf3d-d79135763897".into(),
             recorded_at: "2026-10-22T00:00:00Z".into(),
             status: PmDeliveryReceiptStatus::Prepared,
@@ -8629,6 +8817,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("pm-delivery-receipts.jsonl");
         let receipt = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a4".to_string(),
             recorded_at: "2026-08-13T00:00:00Z".to_string(),
             status: PmDeliveryReceiptStatus::Prepared,
@@ -8656,6 +8845,7 @@ mod tests {
         let path = dir.path().join("pm-delivery-receipts.jsonl");
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a5";
         let prepared = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.to_string(),
             recorded_at: "2026-08-13T00:00:00Z".to_string(),
             status: PmDeliveryReceiptStatus::Prepared,
