@@ -581,17 +581,10 @@ test.describe("Provider usage status summary", () => {
         await expectClaudeModels(page, "95%", "70%");
         await assertUsageLayout(page);
         await page.evaluate(() => {
-          const notice = document.createElement("div");
-          notice.className = "workspace-state-notice";
-          notice.setAttribute("role", "alert");
-          const message = document.createElement("span");
-          message.textContent = "Workspace persistence is unavailable. Reload to retry.";
-          const reload = document.createElement("button");
-          reload.textContent = "Reload";
-          notice.append(message, reload);
-          document.getElementById("app")!.appendChild(notice);
+          (window as any).__emitWorkspaceStateNotice({ kind: "load_error",
+            path: "/fixture/current.json", message: "Workspace persistence is unavailable. Retry to reload." });
         });
-        await expect(page.locator("#app > .workspace-state-notice")).toBeVisible();
+        await expect(page.locator("#app > .react-island > .workspace-state-notice")).toBeVisible();
         await expectClaudeModels(page, "95%", "70%");
         await assertUsageLayout(page);
         await strip.focus();
@@ -612,7 +605,8 @@ test.describe("Provider usage status summary", () => {
           expect(screenshot.readUInt32BE(16), "200% PNG width in physical pixels").toBe(1440);
           expect(screenshot.readUInt32BE(20), "200% PNG height in physical pixels").toBe(900);
         }
-        await page.locator("#app > .workspace-state-notice").evaluate((notice: HTMLElement) => notice.remove());
+        await page.evaluate(() => (window as any).__emitWorkspaceStateNotice(null));
+        await expect(page.locator(".workspace-state-notice")).toHaveCount(0);
         accounts[1].windows[0].used_percent = 20;
         expect(pageErrors).toEqual([]);
       } finally {
@@ -1038,6 +1032,9 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         sessions,
         consumption: [],
       });
+    };
+    (window as any).__emitWorkspaceStateNotice = (notice: unknown) => {
+      socketRef?.emit({ kind: "workspace_state_notice", notice });
     };
 
     Object.defineProperty(window, "WebSocket", {
