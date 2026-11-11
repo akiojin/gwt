@@ -7266,19 +7266,39 @@ mod tests {
                 before,
                 ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
             );
-            let (first, retry) = std::thread::scope(|scope| {
-                let one = scope.spawn(|| {
-                    apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
+            let (first, contention) = std::thread::scope(|scope| {
+                let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let first_request = request.clone();
+                let session_id = &session.id;
+                let one = scope.spawn(move || {
+                    crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                        acquired_tx.send(()).unwrap();
+                        let _ = release_rx.recv();
+                    });
+                    apply_authenticated_workspace_reopen(repo, session_id, first_request)
                 });
-                let two = scope.spawn(|| {
-                    apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
-                });
-                (
-                    one.join().unwrap().expect("first concurrent reopen"),
-                    two.join().unwrap().expect("second concurrent reopen"),
-                )
+                acquired_rx.recv().unwrap();
+                let contention =
+                    apply_authenticated_workspace_reopen(repo, &session.id, request.clone());
+                // Release and join before asserting; the bounded lease may refuse a peer.
+                release_tx.send(()).unwrap();
+                (one.join().unwrap(), contention)
             });
-            assert_ne!(first.already_applied, retry.already_applied);
+            let first = first.expect("first concurrent reopen");
+            let error = contention.expect_err("the held writer must refuse its contender");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+            );
+            assert_eq!(
+                error.diagnostic_reason.as_deref(),
+                Some("reopen_authority_lease_unavailable")
+            );
+            let retry = apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
+                .expect("retry after the concurrent writer settles");
+            assert!(!first.already_applied);
+            assert!(retry.already_applied);
             assert_eq!(first.reopen_event_id, retry.reopen_event_id);
             assert!(
                 apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
