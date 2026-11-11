@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { markdownContent, renderUiContent } from '../ui-content.js';
 
 test('views render model-typed content without selecting Markdown or injecting a renderer', () => {
-  for (const [file, bindings] of [['pm-chat.js', 1], ['board-logs-surface.js', 1], ['knowledge-kanban-surface.js', 3], ['release-notes-window.js', 1]]) {
+  for (const [file, bindings] of [['pm-chat.js', 2], ['board-logs-surface.js', 1], ['knowledge-kanban-surface.js', 3], ['release-notes-window.js', 1]]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
     assert.doesNotMatch(source, /markdownContent|createKnowledgeMarkdownBody/, file);
     assert.equal([...source.matchAll(/renderUiContent\(document, \w+\.content\b/g)].length, bindings,
@@ -28,4 +28,17 @@ test('the model type selects the shared renderer and preserves sanitized markdow
   assert.equal(fallback.textContent, '<script>literal</script>');
   assert.ok(fallback.classList.contains('is-plaintext'));
   assert.throws(() => renderUiContent(document, {type:'unregistered',body:'answer'}), /Unsupported UI content/);
+});
+
+
+test('repository label chips validate external color and keep names as text', async () => {
+  const ui = await import('../ui-content.js');
+  assert.equal(typeof ui.createRepositoryLabelChip, 'function');
+  const { document } = parseHTML('<html></html>');
+  const chip = ui.createRepositoryLabelChip(document, '<bug>', 'D73A4A');
+  assert.equal(chip.textContent, '<bug>');
+  assert.equal(chip.title, '<bug>');
+  assert.equal(chip.style.getPropertyValue('--github-label-color'), '#D73A4A');
+  assert.equal(chip.querySelector('bug'), null);
+  assert.equal(ui.createRepositoryLabelChip(document, 'bad', 'red;display:none').getAttribute('style'), null);
 });

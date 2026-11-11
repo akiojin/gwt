@@ -31,7 +31,7 @@ test("Issue #4224 reauthentication needs human attention while quota remains que
           const event = JSON.parse(data);
           // The real checkout serves and creates the Issue window. Its existing
           // display seam supplies only these two diagnostic Inbox projections;
-          // Rust tests own live-screen classification and Monitor transitions.
+          // Rust tests own live-screen classification and Issues transitions.
           if (event.kind === "list_issue_monitor") return;
           if (event.kind === "load_knowledge_bridge" && event.knowledge_kind === "issue") {
             (window as any).__providerAuthFixtureLoad = event;

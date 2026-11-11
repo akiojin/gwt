@@ -1,4 +1,4 @@
-//! Issue #3970 AC-1: the Issue Monitor retires a `work/issue-*` remote branch
+//! Issue #3970 AC-1: Issues retires a `work/issue-*` remote branch
 //! as soon as it confirms the delivery, and records the outcome in one line.
 
 use std::collections::{BTreeMap, HashMap};

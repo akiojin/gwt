@@ -320,7 +320,7 @@ git push origin develop
 > 🚨 **Release PR（`develop -> main`）の本文に closing keyword（`Closes` / `Fixes` /
 > `Resolves` + `#N`）を書いてはならない（Issue #3545）。** `main` は default branch なので、
 > 本文の closing keyword は merge 時に受け入れ条件が未消化の Issue まで閉じてしまう。
-> Issue の決着は work ブランチが `develop` に merge された時点で Issue Monitor が
+> Issue の決着は work ブランチが `develop` に merge された時点で Issues が
 > 受け入れ基準を確認して行う（Issue #3917）。Release PR は Issue を **参照するだけ**。
 
 固定 snapshot の内容を調べる場合は、その SHA を対象にリリース範囲を決定：
@@ -418,7 +418,7 @@ closing keyword を無害化する。
 
 **重要**: 本文を手で編集して `Closes #<番号>` 等の closing keyword を追加しない。
 **重要**: Issue の close は Release PR の役割ではない。未 close の Issue が残っていれば、
-develop merge 時の Issue Monitor settlement コメント（`merge 済み・未達 AC あり` 等）を確認する。
+develop merge 時の Issues settlement コメント（`merge 済み・未達 AC あり` 等）を確認する。
 
 ### 11. Delivered Issue へのコメント追記
 

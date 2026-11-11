@@ -12,13 +12,20 @@
 // open keep working: the `work` preset still resolves to the Work surface.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+
+test("the status strip uses the Issues label and navigation name", () => {
+  const html = readFileSync(resolve(here, "../index.html"), "utf8");
+  assert.match(html, /aria-label="Open Issues: Off"/);
+  assert.match(html, /op-status-strip__label">ISSUES<\/span>/);
+});
 
 function presetRoleLabels() {
   const start = appSource.indexOf("function presetRoleLabel(");
@@ -38,7 +45,7 @@ test("the three Issue-family presets carry distinguishable role labels", () => {
   const labels = presetRoleLabels();
 
   assert.equal(labels.issue, "Issue");
-  assert.equal(labels.issue_monitor, "Issue Monitor");
+  assert.equal(labels.issue_monitor, "Issues");
   assert.equal(labels.spec, "SPEC");
 
   const issueFamily = [labels.issue, labels.issue_monitor, labels.spec];
@@ -47,12 +54,32 @@ test("the three Issue-family presets carry distinguishable role labels", () => {
     issueFamily.length,
     "each Issue-family face must be tellable apart from its window title",
   );
+
+  const html = readFileSync(resolve(here, "../index.html"), "utf8");
+  const workLabel = html.match(/data-surface="works"[^>]*>[\s\S]*?op-rail__surface-label">([^<]+)/)?.[1];
+  assert.equal(workLabel, "Works", "the current Work surface retains its own visible label");
+  assert.equal(new Set([labels.issue, labels.issue_monitor, workLabel]).size, 3,
+    "Issue, Issues and the current Work surface remain distinguishable");
 });
 
-// FR-015.
-test("the Work surface is named Work in its role label", () => {
+test("user and agent copy uses the Issues name across shipped surfaces", () => {
+  const root = resolve(realpathSync(here), "../../../..");
+  const oldName = new RegExp(["issue", "monitor"].join("\\s+"), "i");
+  const paths = execFileSync("git", ["ls-files", "-z", "--",
+    "*.rs", "*.md", "*.js", "*.mjs", "*.ts", "*.html", "*.css", "*.py", "*.ps1", "*.yml",
+    ":(exclude).gwt/**"], { cwd: root, encoding: "utf8" })
+    .split("\0")
+    .filter((path) => /\.(?:rs|md|js|mjs|ts|html|css|py|ps1|yml)$/.test(path));
+  const remaining = paths.filter((path) => oldName.test(readFileSync(resolve(root, path), "utf8")));
+  assert.deepEqual(remaining, [], "shipped source, skill and documentation copy must use Issues");
+});
+
+// Work was retired and now restores Issue; it must still be distinct from Issues.
+test("legacy Work windows retain their Issue label after migration", () => {
   const labels = presetRoleLabels();
   assert.equal(labels.work, "Issue", "the legacy wire preset is `work`, so that key must be labelled");
+  assert.equal(labels.workspace, labels.work);
+  assert.notEqual(labels.work, labels.issue_monitor);
   assert.doesNotMatch(
     appSource.slice(
       appSource.indexOf("function presetRoleLabel("),

@@ -197,7 +197,7 @@ impl LaunchWizardState {
                 && self.agent_needs_configuration("opencode"),
             agent_setup: self.agent_setup_view(show_manual_setup),
             // Issue #4079 AC-2: only the app runtime knows the saved candidate
-            // pool, so it fills this in when the wizard is the Issue Monitor
+            // pool, so it fills this in when the wizard is Issues
             // Agent Settings form.
             issue_monitor_pool_impact: None,
             issue_monitor_pool: None,

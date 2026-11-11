@@ -117,7 +117,7 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
 });
 
-test("Status bridge shares canonical Issue state with the Monitor strip", async ({ page }, info) => {
+test("Status bridge shares canonical Issue state with the Issues strip", async ({ page }, info) => {
   await boot(page);
   const other = page.locator("details.issue-other-group");
   await other.locator("summary").click();

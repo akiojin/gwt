@@ -1,0 +1,56 @@
+{
+  "dependencies": [
+    {
+      "filename": "libsha2-438a3075d8d6a1a5.rlib",
+      "sha256": "d160384762ea4017abbe69fc7a2938b70912d2e3f1eb61b62c6d5da77488ffa2"
+    },
+    {
+      "filename": "libhex-4c41991b58aebe06.rlib",
+      "sha256": "dbd281c40b8ca05c2c5d0e7cf2a4048c07dc59a158e7a8c0f6a30147e5dc0e65"
+    },
+    {
+      "filename": "libgwt_core-9ad3baad3f9f905c.rlib",
+      "sha256": "f8026f18580113c726c2a757c2adbbf31f1cb8f6371a8582afe4e9244c88e0b9"
+    }
+  ],
+  "head": "564effe5e6bfca66ff797b1c95d7428141c720c2",
+  "baseline_ref": "564effe5e6bfca66ff797b1c95d7428141c720c2",
+  "probe_sha256": "b68642f33f7d69a9ab9cb829246d5fc70ac3a87d9d059e88e4c8ed1314954ffd",
+  "runs": [
+    {
+      "types_sha256": "5a23872eb0ec034d7b0ffee83e783dc0986a3d1430e77673a66e4db1cae6e6fe",
+      "source_sha256": "4e2048628cfa06835bd836c877da12346eb4ba5e94b536dfe5e21e8397f1c1da",
+      "result": {
+        "groups": 24,
+        "shards": 8000,
+        "sources": 192000,
+        "retained_bytes": 51760016,
+        "peak_bytes": 51760320,
+        "after_drop_bytes": 128,
+        "identity_sha256": "3864751e2a177f0e6a04a760cc5d7c097d5c4d5d3c58ba15b8eaf5b494fc7f4a",
+        "round_trip_equal": true
+      },
+      "executable_sha256": "a419d3c814a8b08294ff7c4a8308dd43eb9c815feb0cc6c41cfffb70ee923dae",
+      "mode": "before"
+    },
+    {
+      "types_sha256": "e392e9ffc9f4fac6adf7032b0473cb43739182c01f6d0682f1b1d6b375c76513",
+      "source_sha256": "12181a754e5c4bea8087e63c8dc369a041e99faf8b904c1c8450a09e9de96393",
+      "result": {
+        "groups": 24,
+        "shards": 8000,
+        "sources": 192000,
+        "retained_bytes": 20782392,
+        "peak_bytes": 20873560,
+        "after_drop_bytes": 128,
+        "identity_sha256": "3864751e2a177f0e6a04a760cc5d7c097d5c4d5d3c58ba15b8eaf5b494fc7f4a",
+        "round_trip_equal": true
+      },
+      "executable_sha256": "af44d4f514c7827e1ddfad8b3a39feb99b95c9e383dc73419699fa109624eeda",
+      "mode": "after"
+    }
+  ],
+  "product": "crates/gwt/src/work_events_ingest.rs",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\r\nbinary: rustc\r\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\r\ncommit-date: 2026-10-13\r\nhost: x86_64-pc-windows-msvc\r\nrelease: 1.99.1\r\nLLVM version: 23.1.1\r\n",
+  "limits": "Same generated metadata only; shared empty content; no discovery/fold/store/GUI; requested allocations exclude allocator/OS overhead."
+}

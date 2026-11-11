@@ -1963,7 +1963,7 @@ body {
   color: var(--color-text-strong);
 }
 
-/* SPEC #3885 Phase 5 (T-032..T-035): the Issue window's Monitor band, the
+/* SPEC #3885 Phase 5 (T-032..T-035): the Issue window's Issues band, the
    "+ New" popover body and the detail pane. Operator tokens and the shared
    `.modal-*` primitive only. */
 .knowledge-monitor-bar {
@@ -5719,7 +5719,7 @@ body {
   color: var(--color-text-strong);
 }
 
-/* Issue 4911 — the Issue Monitor settings form repeats the Agent Settings
+/* Issue 4911 — Issues settings form repeats the Agent Settings
    block once per launch candidate; the open set carries the form.
    (No `#` before the number: the token audits scan this block for hex colors.) */
 .launch-agent-sets {
@@ -6608,3 +6608,12 @@ body.route-body {
   color: var(--color-text-muted);
   font-size: var(--type-sm);
 }
+
+/* GitHub label color is validated external metadata; layout uses Operator tokens. */
+.issue-card-labels { min-width: 0; flex-wrap: nowrap; overflow: hidden; align-items: center; }
+.issue-card-label { min-width: 0; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; border-color: var(--github-label-color, var(--color-border)); background: color-mix(in srgb, var(--github-label-color, var(--color-surface)) 18%, var(--color-surface)); color: var(--color-text); }
+.issue-card-label-overflow { flex: none; font-size: var(--type-xs); color: var(--color-text-muted); }
+.issue-card-provenance { flex: none; }
+.settings-label-options { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); max-height: 18rem; overflow-y: auto; }
+.settings-label-option { display: flex; align-items: center; gap: var(--space-1); max-width: 100%; }
+.settings-label-option .issue-card-label { max-width: 30ch; }

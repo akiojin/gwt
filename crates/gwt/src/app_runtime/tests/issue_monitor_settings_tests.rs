@@ -319,23 +319,26 @@ fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying(
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
-    let tabs = (1..=12)
-        .map(|number| {
-            let mut tab = sample_project_tab_with_window_at(
-                &format!("tab-{number}"),
-                "agent",
-                repo.clone(),
-                WindowPreset::Agent,
-                WindowProcessStatus::Running,
-            );
-            let mut persisted = tab.workspace.persisted().clone();
-            persisted.windows[0].linked_issue_number = Some(5600 + number);
-            tab.workspace = WindowRegistry::from_persisted(persisted);
-            tab
-        })
-        .collect();
-    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+    init_repo_with_initial_commit(&repo);
+    let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut persisted = tab.workspace.persisted().clone();
+    for number in 1..=12 {
+        let mut window = sample_window(
+            &format!("agent-{number}"),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        window.linked_issue_number = Some(5600 + number);
+        window.z_index = number as u32;
+        persisted.windows.push(window);
+    }
+    persisted.next_z_index = 13;
+    tab.workspace = WindowRegistry::from_persisted(persisted);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    for number in 1..=12 {
+        insert_test_pane_runtime(&mut runtime, &format!("tab-1::agent-{number}"));
+    }
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     assert!(runtime
@@ -358,6 +361,10 @@ fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying(
     assert!(events
         .iter()
         .all(|event| matches!(event, UserEvent::Dispatch(_))));
+    drop(events);
+    for number in 1..=12 {
+        close_test_owner_runtime(&mut runtime, &format!("tab-1::agent-{number}"));
+    }
 }
 
 #[test]
@@ -494,10 +501,12 @@ fn app_runtime_update_settings_retains_live_drain_blockers() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
     assert!(
         matches!(runtime.update_settings_event(Some(&repo)), BackendEvent::UpdateSettings { status, .. }
         if status.update_drain.as_ref().unwrap().blocking.iter().any(|blocker| matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })))
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 #[test]
@@ -771,7 +780,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
             ..gwt::IssueMonitorPrefs::default()
         },
     )
-    .expect("seed issue monitor prefs");
+    .expect("seed Issues prefs");
     // The fence's driver-clear write must preserve the profile transaction's inputs.
     let (fenced, _authority_lease) = {
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
@@ -799,7 +808,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings opened" && issue_number.is_none()
+                if message == "Issues settings opened" && issue_number.is_none()
         )
     }));
     let view = events
@@ -811,7 +820,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
             _ => None,
         })
         .expect("launch wizard view");
-    assert_eq!(view.title, "Configure Issue Monitor");
+    assert_eq!(view.title, "Configure Issues");
     assert_eq!(view.linked_issue_number, None);
     assert_eq!(view.primary_action_label, "Continue");
     let save_context = runtime
@@ -850,7 +859,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
     );
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
-        "global issue monitor settings runtime resolution",
+        "global Issues settings runtime resolution",
         &recorded_events,
         |events| {
             events.iter().any(|event| {
@@ -891,7 +900,7 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
             matches!(
                 &event.event,
                 BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                    if message == "Issue Monitor settings saved" && issue_number.is_none()
+                    if message == "Issues settings saved" && issue_number.is_none()
             )
         }),
         "global profile save must commit successfully: {saved_events:#?}"
@@ -903,10 +912,10 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         .is_none());
     assert!(
         runtime.window_details.is_empty(),
-        "saving global Issue Monitor settings must not spawn an agent window"
+        "saving global Issues settings must not spawn an agent window"
     );
 
-    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load issue monitor prefs");
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Issues prefs");
     assert_eq!(prefs.effect_authority_epoch, 1);
     assert!(prefs.last_scan_driver.is_none());
     let profile = prefs.launch_profile.expect("saved launch profile");
@@ -1172,7 +1181,7 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
     assert!(
         saved_events.iter().any(|event| matches!(
             &event.event,
-            BackendEvent::IssueMonitorToast { message, .. } if message == "Issue Monitor settings saved"
+            BackendEvent::IssueMonitorToast { message, .. } if message == "Issues settings saved"
         )),
         "Agent Settings save failed: {saved_events:#?}"
     );
@@ -1386,7 +1395,7 @@ fn app_runtime_issue_monitor_agent_settings_save_refuses_a_pool_changed_elsewher
 
     assert!(!events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorToast { message, .. } if message == "Issue Monitor settings saved"
+        BackendEvent::IssueMonitorToast { message, .. } if message == "Issues settings saved"
     )));
     let view = agent_settings_view(&events);
     assert!(
@@ -1473,7 +1482,7 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
     assert!(!events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::IssueMonitorToast { message, .. }
-            if message == "Issue Monitor settings saved"
+            if message == "Issues settings saved"
     )));
     let wizard = events
         .iter()
@@ -1486,7 +1495,7 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
         .expect("overflow keeps wizard open");
     assert_eq!(
         wizard.error.as_deref(),
-        Some("Failed to save Issue Monitor settings: authority epoch overflow")
+        Some("Failed to save Issues settings: authority epoch overflow")
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert_eq!(persisted.effect_authority_epoch, u64::MAX);
@@ -1536,7 +1545,7 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
         matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings opened" && issue_number.is_none()
+                if message == "Issues settings opened" && issue_number.is_none()
         )
     }));
     assert!(runtime
@@ -1591,7 +1600,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
         ..Default::default()
     };
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
-        .expect("save issue monitor prefs");
+        .expect("save Issues prefs");
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
@@ -1621,7 +1630,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
             .expect("test project state")
             .launch_wizard
             .is_none(),
-        "saved Issue Monitor profile must launch silently"
+        "saved Issues profile must launch silently"
     );
     let agent_window = runtime.tabs[0]
         .workspace
@@ -1640,7 +1649,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
             .pending_launch_feedback_contexts
             .values()
             .any(|context| context.issue_monitor_issue_number == Some(3165)),
-        "saved-profile auto launch errors must be wired back to Issue Monitor"
+        "saved-profile auto launch errors must be wired back to Issues"
     );
 }
 
@@ -1726,7 +1735,7 @@ fn app_runtime_issue_monitor_selected_fixed_tool_waits_when_held() {
         claude_issue_monitor_launch_profile(),
     ]);
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
-        .expect("save issue monitor prefs");
+        .expect("save Issues prefs");
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
@@ -2053,7 +2062,7 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
         events.iter().any(|event| matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, .. }
-                if message == "Issue Monitor settings saved"
+                if message == "Issues settings saved"
         )),
         "profile save must commit successfully: {events:?}"
     );
@@ -2151,7 +2160,7 @@ fn app_runtime_issue_monitor_profile_save_compensates_unowned_unsupported_delive
             events.iter().any(|event| matches!(
                 &event.event,
                 BackendEvent::IssueMonitorToast { message, .. }
-                    if message == "Issue Monitor settings saved"
+                    if message == "Issues settings saved"
             )),
             "{events:?}"
         );
@@ -2231,7 +2240,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
             .expect("launch wizard")
             .wizard
             .initial_prompt,
-        "$gwt-execute #3165\n\nThis prompt was generated by Issue Monitor. It is not a statement, approval, or visual confirmation by a human user."
+        "$gwt-execute #3165\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user."
     );
 }
 
@@ -2311,7 +2320,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
         ..gwt::IssueMonitorPrefs::default()
     };
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
-        .expect("save issue monitor prefs");
+        .expect("save Issues prefs");
 
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -2328,7 +2337,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
         matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor launch prepared" && *issue_number == Some(3165)
+                if message == "Issues launch prepared" && *issue_number == Some(3165)
         )
     }));
     assert!(
@@ -2337,7 +2346,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
             .expect("test project state")
             .launch_wizard
             .is_some(),
-        "manual Issue Monitor launch should not be capped by max_active_agents"
+        "manual Issues launch should not be capped by max_active_agents"
     );
 }
 
@@ -2379,7 +2388,7 @@ fn app_runtime_issue_monitor_requeue_releases_a_dead_hold_without_launching() {
             ..gwt::IssueMonitorPrefs::default()
         },
     )
-    .expect("save issue monitor prefs");
+    .expect("save Issues prefs");
 
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -2492,7 +2501,7 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
     resolve_launch_wizard_runtime_confirmation(
         &mut runtime,
         &recorded_events,
-        "issue monitor launch now runtime resolution",
+        "Issues launch now runtime resolution",
     );
     let confirm_events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -2528,7 +2537,7 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
     let launch_events = dispatch_launch_materialization_request(
         &mut runtime,
         &recorded_events,
-        "issue monitor launch now materialization",
+        "Issues launch now materialization",
     );
     assert!(
         launch_events.iter().any(|event| {
@@ -2544,7 +2553,7 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
             .pending_launch_feedback_contexts
             .values()
             .any(|context| context.issue_monitor_issue_number == Some(3165)),
-        "manual Issue Monitor launches must report launch completion/failure back to the row"
+        "manual Issues launches must report launch completion/failure back to the row"
     );
 }
 

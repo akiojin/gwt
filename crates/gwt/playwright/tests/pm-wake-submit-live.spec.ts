@@ -237,7 +237,7 @@ test.describe('Windows real PM wake submission', () => {
             const duringInput = await unstaged();
             expect(duringInput.receipts, 'an input-held periodic tick is not prepared').toHaveLength(0);
             expect(duringInput.composer).toContain(draft);
-            expect(duringInput.composer).not.toMatch(/Scheduled supervision tick|Monitor activity/);
+            expect(duringInput.composer).not.toMatch(/Scheduled supervision tick|Issues activity/);
             const clears: number[] = [];
             let afterClear: any;
             let clearScan = 0;
@@ -246,7 +246,7 @@ test.describe('Windows real PM wake submission', () => {
             // provider stabilization or recovery of an injected wake.
             await expect.poll(async () => {
               afterClear = await unstaged();
-              if (afterClear.receipts.length || /Scheduled supervision tick|Monitor activity/.test(afterClear.composer)) return true;
+              if (afterClear.receipts.length || /Scheduled supervision tick|Issues activity/.test(afterClear.composer)) return true;
               clearScan = Date.parse((await json(join(STATE, 'issue-monitor.json'))).last_scan_at ?? '');
               if (clearScan > composingScan && clears.length) return true;
               await input(page, id, '\x15');
@@ -255,7 +255,7 @@ test.describe('Windows real PM wake submission', () => {
             }, { timeout: 60_000, message: 'the next scan remains silent during continued human clear input' }).toBe(true);
             afterClear = await unstaged();
             expect(afterClear.receipts, 'clearing does not catch up the discarded tick').toHaveLength(0);
-            expect(afterClear.composer).not.toMatch(/Scheduled supervision tick|Monitor activity/);
+            expect(afterClear.composer).not.toMatch(/Scheduled supervision tick|Issues activity/);
             expect(afterClear.composer).toContain('Ask Codex');
             const latestClear = clears.findLast(at => at <= clearScan);
             expect(latestClear, 'a real human clear precedes the observed scan').toBeDefined();
@@ -267,7 +267,7 @@ test.describe('Windows real PM wake submission', () => {
             await writeFile(join(HOME, `wake-cadence-${theme}.json`), JSON.stringify(cadence, null, 2));
             await pause(page, true);
           }
-          const initial = diagnostic(`3431-busy-${theme}-${kind}`, `Authorized automated terminal transport test, not a human PM request or supervision cycle. Read the explicitly selected .codex/skills/gwt-pm/references/project-policy.md first. Its diagnostic exception applies to this turn only. Then execute only this PowerShell command: Write-Output ('GWT_DIAG_BIN=' + $env:GWT_BIN_PATH); Write-Output ('GWT_DIAG_SESSION=' + $env:GWT_SESSION_ID); Write-Output ('GWT_DIAG_PROJECT=' + $env:GWT_PROJECT_ROOT); Write-Output ('GWT_DIAG_CWD=' + (Get-Location).Path); Write-Output '${token}_BUSY'; Start-Sleep -Seconds 90; Write-Output '${token}_END'. Poll only that command if needed, wait for it to finish, then reply only ${token}_DONE. During this diagnostic turn, do not run PM setup, read unrelated skills/files/environment, discover tools, plan, delegate, contact GitHub, or invoke gwt. Actual scheduled and Monitor wake turns retain the normal PM contract. Input receipt marker: ${token}_BODY_READY`);
+          const initial = diagnostic(`3431-busy-${theme}-${kind}`, `Authorized automated terminal transport test, not a human PM request or supervision cycle. Read the explicitly selected .codex/skills/gwt-pm/references/project-policy.md first. Its diagnostic exception applies to this turn only. Then execute only this PowerShell command: Write-Output ('GWT_DIAG_BIN=' + $env:GWT_BIN_PATH); Write-Output ('GWT_DIAG_SESSION=' + $env:GWT_SESSION_ID); Write-Output ('GWT_DIAG_PROJECT=' + $env:GWT_PROJECT_ROOT); Write-Output ('GWT_DIAG_CWD=' + (Get-Location).Path); Write-Output '${token}_BUSY'; Start-Sleep -Seconds 90; Write-Output '${token}_END'. Poll only that command if needed, wait for it to finish, then reply only ${token}_DONE. During this diagnostic turn, do not run PM setup, read unrelated skills/files/environment, discover tools, plan, delegate, contact GitHub, or invoke gwt. Actual scheduled and Issues wake turns retain the normal PM contract. Input receipt marker: ${token}_BODY_READY`);
           await input(page, id, `\x1b[200~${initial}\x1b[201~`);
           await expect.poll(async () => pastedBodyVisible(await text(page, id), `${token}_BODY_READY`),
             { timeout: 30_000 }).toBe(true);
@@ -327,7 +327,7 @@ test.describe('Windows real PM wake submission', () => {
             .filter(receipt => !operationIds.has(receipt.operation_id));
           expect(busyReceipts, 'no wake is prepared or submitted while the original command is busy').toHaveLength(0);
           const busyText = await text(page, id);
-          expect(busyText.slice(busyText.lastIndexOf('›')), 'no wake is staged into the composer while busy').not.toMatch(/Scheduled supervision tick|Monitor activity/);
+          expect(busyText.slice(busyText.lastIndexOf('›')), 'no wake is staged into the composer while busy').not.toMatch(/Scheduled supervision tick|Issues activity/);
           // Pause releases the resident Stop chain through its normal public
           // control. It does not submit the wake or type into its composer.
           await pause(page, true);
@@ -371,7 +371,7 @@ test.describe('Windows real PM wake submission', () => {
           const matching = () => nativeRows().then(userMessages)
             .then(messages => messages.filter(message => message.includes(`[gwt-delivery:${verified.operation_id}:`)));
           await expect.poll(matching, { timeout: 30_000 }).toHaveLength(1);
-          expect((await matching())[0]).toContain(kind === 'periodic' ? 'Scheduled supervision tick' : 'Monitor activity');
+          expect((await matching())[0]).toContain(kind === 'periodic' ? 'Scheduled supervision tick' : 'Issues activity');
           const providerTurn = userTurn(await nativeRows(), verified.operation_id);
           expect(providerTurn, 'the provider records the exact accepted prompt turn').toBeTruthy();
           expect(providerTurn).not.toBe(initialTurn);

@@ -2037,6 +2037,7 @@ fn sample_runtime_with_events(
         pending_launch_delivery_acks: HashMap::new(),
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
+        issue_monitor_launch_failure_causes: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
         issue_monitor_launch_attempts: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),
@@ -3353,7 +3354,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
 fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
     LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(issue_number),
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: None,
@@ -4117,6 +4118,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
                 generation,
                 context: Some(context.clone()),
                 current: Arc::new(AtomicBool::new(true)),
+                launch_in_flight: true,
                 operation_id: captured.operation_id.clone(),
                 owner_pane_id: captured.id.clone(),
                 client_cell,
@@ -7647,7 +7649,14 @@ fn owner_monitor_fixture(
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
-    owner_monitor_fixture_with_prefs(temp, issue, delivery, agent_ids, |_| {})
+    owner_monitor_fixture_with_prefs(
+        temp,
+        issue,
+        delivery,
+        agent_ids,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
+    )
 }
 
 fn owner_monitor_fixture_with_prefs(
@@ -7655,12 +7664,18 @@ fn owner_monitor_fixture_with_prefs(
     issue: u64,
     delivery: bool,
     agent_ids: &[&str],
+    control_budget: Duration,
     configure: impl FnOnce(&mut gwt::IssueMonitorPrefs),
 ) -> (
     PathBuf,
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
+    // This shared fixture verifies scan/launch outcomes, not the production
+    // five-second control deadline on the caller thread.
+    let _control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+    );
     assert!(!agent_ids.is_empty());
     let root = temp.join("monitor-project");
     fs::create_dir_all(&root).unwrap();
@@ -7724,7 +7739,10 @@ fn owner_monitor_fixture_with_prefs(
     )
     .unwrap();
     let owner = owner_fixture_block_on(
-        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor_control_budget(
+            &root,
+            control_budget,
+        ),
     )
     .unwrap();
     configure_owner_fixture_start_gate(&owner);
@@ -7739,9 +7757,10 @@ fn owner_monitor_fixture_with_prefs(
             std::process::id(),
         ),
     ) {
-        assert_eq!(
-            error.to_string(),
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+        assert!(
+            matches!(error,
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(message)
+                if message == gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR),
             "the actual initial source scan must be reserved or already running"
         );
     }
@@ -7851,8 +7870,32 @@ fn owner_monitor_fresh_fixture(
     delivery: bool,
     prepty_failure: bool,
 ) -> OwnerFreshLaunchFixture {
-    let (root, owner, delivery_id) =
-        owner_monitor_fixture(temp, 2359, delivery, &["fixture", "pane-contract-fixture"]);
+    owner_monitor_fresh_fixture_with_control_budget(
+        temp,
+        operation_id,
+        delivery,
+        prepty_failure,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
+    )
+}
+
+fn owner_monitor_fresh_fixture_with_control_budget(
+    temp: &Path,
+    operation_id: &str,
+    delivery: bool,
+    prepty_failure: bool,
+    control_budget: Duration,
+    configure: impl FnOnce(&mut gwt_agent::LaunchConfig),
+) -> OwnerFreshLaunchFixture {
+    let (root, owner, delivery_id) = owner_monitor_fixture_with_prefs(
+        temp,
+        2359,
+        delivery,
+        &["fixture", "pane-contract-fixture"],
+        control_budget,
+        |_| {},
+    );
     let owner = Arc::new(owner);
     let selected = pane_control_tests::control_launch_config(&root, 2359);
     let repo = selected.working_dir.unwrap();
@@ -7886,10 +7929,13 @@ fn owner_monitor_fresh_fixture(
                 .unwrap();
         }
         let mut command = owner_fresh_agent_command(&owner, &repo, choice, None);
-        let gwt::project_runtime::events::OwnerCommand::LaunchAgent { metadata, .. } = &mut command
+        let gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            config, metadata, ..
+        } = &mut command
         else {
             unreachable!()
         };
+        configure(config);
         let mut feedback = issue_monitor_feedback(2359);
         feedback.issue_monitor_delivery_id = delivery_id;
         feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
@@ -11726,7 +11772,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
     }
 }
 
-/// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
+/// Repo with an enabled Issues, a registered PM whose pane is live,
 /// and a second non-PM pane that the wake must never reach.
 pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     let repo = temp.path().join("repo");

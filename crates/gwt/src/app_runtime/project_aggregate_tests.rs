@@ -917,7 +917,15 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     let deadline = runtime
         .next_runtime_output_deadline()
         .expect("existing preview batch");
-    assert!(runtime.flush_runtime_output_batches(deadline).iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text == "owner screen")));
+    let timing = capture_tracing_events(|| {
+        assert!(runtime.flush_runtime_output_batches(deadline).iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text == "owner screen")));
+    });
+    assert!(timing.iter().any(|event| {
+        event.target == "gwt.frontend.timing"
+            && event.fields.get("marker").map(String::as_str)
+                == Some("issue_5379_runtime_output_batch")
+            && event.fields.contains_key("elapsed_ms")
+    }), "authoritative owner batches must remain independently measurable");
     let status = gwt::project_runtime::events::OwnerEvent::Status {
         id: "owner-pane-a".into(),
         incarnation: 7,

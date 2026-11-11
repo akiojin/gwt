@@ -85,7 +85,7 @@ impl ClaimPayload {
 pub fn render_claim_comment(claim: &ClaimComment) -> String {
     let payload =
         serde_json::to_string_pretty(&ClaimPayload::from(claim)).expect("claim payload serializes");
-    format!("{CLAIM_BEGIN}\n```json\n{payload}\n```\n{CLAIM_END}\n\nManaged by gwt Issue Monitor.")
+    format!("{CLAIM_BEGIN}\n```json\n{payload}\n```\n{CLAIM_END}\n\nManaged by gwt Issues.")
 }
 
 pub fn parse_claim_comment(

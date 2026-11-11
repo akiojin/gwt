@@ -1266,7 +1266,7 @@ fn pm_launch_config_exports_project_state_scratch_dir() {
 /// — it subscribes, reconciles, registers Issues, and instructs launches with
 /// no user present. A permission prompt in that loop is a deadlock nobody is
 /// watching, so the PM always launches with permissions skipped. This mirrors
-/// `force_skip_permissions_for_autonomous` on the Issue Monitor's own
+/// `force_skip_permissions_for_autonomous` on Issues' own
 /// unattended launches; it is not a per-project choice, because a PM that can
 /// be configured into a hang is a PM that will eventually hang.
 #[test]
@@ -1980,7 +1980,7 @@ fn pm_crash_records_backoff_and_respawns() {
     let lifecycle_events = owner_fixture_block_on(async {
         let mut events = Vec::new();
         // test-hygiene: allow-wall-clock-deadline actual child exit and owner lifecycle response hang guard
-        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+        let completed = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = source.recv().await.expect("actual owner lifecycle");
                 let done = matches!(&event, gwt::project_runtime::events::OwnerEvent::PmLifecycle { outcome, .. } if outcome.session_id == session_id);
@@ -2126,7 +2126,7 @@ fn pm_crash_with_unreadable_registration_preserves_durable_state() {
     let (exited, health, retained, events) = owner_fixture_block_on(async {
         let mut events = Vec::new();
         // test-hygiene: allow-wall-clock-deadline actual child exit and exact owner status hang guard; no elapsed-time assertion establishes ownership
-        let exited = tokio::time::timeout(Duration::from_secs(15), async {
+        let exited = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = source.recv().await.map_err(|error| error.to_string())?;
                 let done = matches!(&event, OwnerEvent::Status {

@@ -1,4 +1,5 @@
 /** #5379 delivery slice: real PTY output and screen restore, not latency acceptance. */
+import { randomUUID } from "node:crypto";
 import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -114,7 +115,25 @@ async function receipts(): Promise<any[]> {
   }));
 }
 
+// Register the fixed-tool member before using the normal Project Add Agent route.
 async function launch(page: Page, branch: string): Promise<{ id: string; session_id: string }> {
+  const rosterRequest = async (action: unknown, expectedRevision: number | null = null) => {
+    const requestId = randomUUID();
+    await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision, request_id: requestId });
+    const reply = await page.waitForFunction(requestId => {
+      const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.payload.request_id === requestId && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind));
+      return message?.payload || null;
+    }, requestId, { timeout: 30_000 }).then(handle => handle.jsonValue());
+    expect(reply.kind, reply.message ?? "workload roster reply").toBe("agent_roster");
+    expect(reply.roster.error, "workload member preparation").toBeFalsy();
+    return reply.roster;
+  };
+  let roster = await rosterRequest({ kind: "read" });
+  const available = () => roster.members.some((member: any) =>
+    member.agent_id === AGENT && member.enabled && !member.assignment);
+  if (!available()) roster = await rosterRequest({ kind: "add", agent_id: AGENT }, roster.revision);
+  expect(available(), "normally allocated command-tool member").toBe(true);
   const request = async (detail: unknown, requireOpen = false) => {
     const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
     await sendLiveGwtEvent(page, detail);

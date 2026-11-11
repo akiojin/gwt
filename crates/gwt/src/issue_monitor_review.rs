@@ -1,4 +1,4 @@
-//! SPEC #3200 — Issue Monitor Autonomous Mode: independent review agent contract.
+//! SPEC #3200 — Issues Autonomous Mode: independent review agent contract.
 //! Owns the verdict schema and the fresh-session, separate-model review dispatch.
 //!
 //! The verdict parser here is a security boundary (FR-015): the review agent's

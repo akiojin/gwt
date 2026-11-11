@@ -1,6 +1,213 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.159.0] - 2026-11-11
+
+### Bug Fixes
+
+- **ui:** Reconnect agent registration catalogs
+- Issues の案内文と通信契約テストを揃える
+- **update:** 実体のない起動窓が更新 drain を塞ぐ問題を修正する
+- **update:** 再試行の権限と進行中の起動を区別する
+- **monitor:** Include recovery writes in save timing
+- **cache:** Reuse pages for stale background refreshes
+- **issue-monitor:** Continue remaining acceptance after merge
+- **issue-monitor:** Retain measurement waits for completed specs
+- **issue-monitor:** Preserve live acceptance decisions
+- **ui:** Refresh board destination after reconnect
+- **test:** Windows 検証 fixture の実行元と終了処理を修正
+- **test:** Monitor fixture の KnownFolder cache 依存を解消
+- **verify:** Preserve caller authority in daemon workers
+- **launch:** Align durable control commits with worker budgets
+- **launch:** Revalidate owner admission after prefs churn
+- **monitor:** Stop launch storms and retain pm control
+- **monitor:** Keep storm recovery bounded and independent
+- **monitor:** 稼働中メンバーの自動予約を起動可能な他ツールの空きメンバーへ回す
+- **monitor:** 自動予約の CLI 判定を起動と同じ profile 環境で行う
+- **monitor:** 自動予約から CLI 起動可否の事前判定を外す
+
+### Features
+
+- **ui:** 利用者向け表記を Issues に統一する
+- **pm:** PM 会話をチャット形式で表示する Chat ビューを追加する
+- **gui:** React 描画層を導入し workspace-state-notice を最初の React 面にする
+
+### Miscellaneous Tasks
+
+- **work:** Record agent catalog delivery PR
+- **work:** Issues 表記統一の PR を記録する
+- **work:** Record issue 6533 acceptance recovery
+- **work:** Record PR #7010 delivery reference
+- **work:** Record PM chat view verification
+- **work:** Record board recovery delivery PR
+- **work:** Record issue 6405 pull request link
+- **work:** Preserve mobile slice delivery records
+- **work:** Record mobile slice delivery PR
+- **work:** Record issue 6997 delivery PR
+- **work:** Record PR 7036 delivery reference
+- **work:** Work イベントログを記録
+- **work:** Record React foundation delivery handoff
+- **work:** Record React foundation pull request
+- **work:** Reconcile clone search delivery records
+- **work:** Record clone audit delivery PR
+- **work:** Record monitor delivery receipt
+- **work:** Record issue 4804 delivery receipt
+- **work:** Record issue 7027 delivery work events
+
+### Performance
+
+- **index:** Reuse immutable file records between refreshes
+
+### Styling
+
+- **gui:** React バンドル検査テストに rustfmt を適用
+
+### Testing
+
+- **update:** Drain結果テストの制御予算を明示する
+- **update:** Drain 回帰の結果を制御 IPC の遅延から切り離す
+- **issue-monitor:** Align daemon settlement contracts
+- **board:** PM未読プロンプト期限失効テストの時計を固定する
+- **ui:** Show board during reconnect verification
+- **verify:** Use the managed process constructor
+- **launch:** Pin blocked-control fixture budget
+- **gui:** React 通知の実アプリ検証を修正
+
+## [9.158.0] - 2026-11-10
+
+### Bug Fixes
+
+- **issue-monitor:** Retain live launches across merged deliveries
+- **ui:** 再接続時に未完了のリポジトリ検索を回復する
+- **owner:** Retry each failed cleanup independently
+- **issue-monitor:** Fix quota release launch admission
+- **issue-monitor:** Preserve review failure routing
+- **monitor:** Group launch errors across delivery attempts
+- Reject verification runs missing registered plan commands
+- **ui:** ラベル選択一覧のスクロール位置を保持する
+- **ui:** ラベル取得先とカードの更新範囲を固定する
+- **ui:** 再接続時に関連作業検索を回復する
+- **index:** Preserve below-normal CPU class in background mode
+- **restore:** Restore マーク解除済み Session の自動復元を launch_failure にしない
+- **monitor:** Reduce JSON work before durable commit
+
+### Features
+
+- **ui:** GitHubラベルの選択とKanban色表示を追加
+
+### Miscellaneous Tasks
+
+- **work:** PR #6981の配送参照を記録する
+- **work:** Link issue-6934 follow-up pull request
+- **work:** Link issue-6934 error aggregation pull request
+- **work:** PR #6995 の配信参照を記録する
+- **work:** 関連作業検索の配送 PR を記録する
+- **work:** Record Issue 5542 delivery continuation
+- **work:** Record issue 6979 work events
+- **work:** Record issue 5561 delivery continuation
+- **work:** Issue #6991 の Work イベントを記録
+- **work:** Issue #6991 の Work イベントを記録
+- **work:** Record PR #7006 delivery reference
+
+### Performance
+
+- **index:** Publish Issue refreshes as a delta over an immutable base
+- **hook:** Avoid unrelated process metadata in ancestry checks
+- **index:** Lower Windows background refresh I/O priority
+- **memory:** Share pending work source metadata
+
+### Testing
+
+- **monitor:** Readback予算テストの時計を固定する
+- **index:** Assert delta-served content, not semantic rank
+- **daemon:** 起動時の期限失効テストの時計を固定する
+- **ui:** セッション内の監査と検証子プロセスを分離する
+- **ui:** ラベル選択に既存E2Eの期待値を合わせる
+- **ui:** 検索再接続の埋め込み契約を整合する
+- **monitor:** Observe initial census before scan baseline
+- **pm:** Cover native chat record projection
+
+## [9.157.0] - 2026-11-10
+
+### Bug Fixes
+
+- **issue-monitor:** Normalize auto-refill limit when enabling
+- **notifications:** Coalesce recurring monitor failures
+- **notifications:** 診断の集約時も元の表示文を保持する
+- **terminal:** Keep stopped agent scrolling local
+- **hooks:** 転送前の残り時間と実際の失敗を記録する
+- **agents:** Deduplicate model reports across cache recovery
+- **agents:** Validate Codex cache rows and await picker renders
+- **test:** Inherit scoped ack budgets in coverage fixtures
+- **test:** Preserve finite refusal budgets in negative fixtures
+- **runtime:** Close daemon listener before draining owner publishers
+- **index:** Stop unchanged failed background refresh retries
+- **monitor:** Bound incremental PR timeline readback
+- **owner:** Recover exact cleanup without disconnecting live panes
+- **terminal:** Keep scrollback stable during mouse movement
+- **terminal:** Preserve link hover during history review
+- **index:** Ignore legacy cache transport updates
+- **monitor:** Preserve cached reads across routine maintenance
+
+### Documentation
+
+- **perf:** Record issue 5379 final 1800-second latency measurements
+
+### Features
+
+- **pm:** Expose native source IDs for intake lookup
+- **agents:** Follow Codex model cache and report weekly changes
+- **pm:** 質問を選択形式にする共通ガイダンスを追加
+- **pm:** Render numbered report choices and accept four options
+
+### Miscellaneous Tasks
+
+- **work:** Issue #6877 の Work event shard を記録
+- **work:** Record auto-refill pull request
+- **work:** Record auto-refill delivery evidence
+- **work:** Record issue 4735 bounded recheck
+- **work:** Reconcile issue 4735 delivered provider scope
+- **work:** Record mobile shutdown delivery
+- **work:** Issue #4499 の配信済み補修を記帳する
+- **work:** PR #6966 の配送参照を記録する
+- **work:** Record Issue 6909 pull request
+- **work:** Record resumed Issue 6909 delivery
+- **work:** Record PR #6969 delivery reference
+- **work:** Reconcile delivered scrollback acceptance
+- **work:** Preserve scrollback acceptance handoff
+- **work:** Record fetched-base scrollback acceptance audit
+- **work:** Record issue 5379 GUI blocking slice delivery
+- **work:** Record PR #6975 delivery reference
+- **work:** 4択Reportsの配信記録を照合する
+- **work:** Record PR 6976 delivery reference
+
+### Performance
+
+- **monitor:** Reuse cached reads for automatic scan retries
+- **gui:** Encode terminal snapshots on the client sender, not the GUI loop
+
+### Refactor
+
+- **agents:** Simplify model catalog expressions
+
+### Testing
+
+- **issue-monitor:** Align refill explanation with default limit
+- **git:** Freeze the clock in the worktree deadline test
+- **coordination:** Freeze the clock in the board deadline test
+- **monitor:** Scan期限テストを固定時計で決定化する
+- **agents:** Apply browser setup timeout before fixtures
+- **agents:** Avoid stale elements during model screenshots
+- **agents:** Audit model pickers from a managed source
+- **agents:** Use current models in settings save fixtures
+- **monitor:** Freeze durable write deadline test
+- **index:** 期限切れGit情報テストの時計を固定する
+- **daemon:** Require live reads in the routine retry fixture
+- **terminal:** Respect native wheel normalization in Codex fixture
+- **perf:** Restore owner runtime output measurements
+- **perf:** Decode gwtd output as UTF-8 in issue 5379 fixture
+- **e2e:** Register roster member before issue 5379 functional launch
+
 ## [9.156.0] - 2026-11-09
 
 ### Bug Fixes
@@ -1194,7 +1401,7 @@ All notable changes to this project will be documented in this file.
 - **pm:** Reject aborted scans as policy comparison evidence
 - **work:** 分岐した既存event commitの復旧案内を限定する
 - **pm:** WIP 比較の時刻精度を既存契約に揃える
-- **launch:** Keep Codex Issue Monitor launches inside the window budget
+- **launch:** Keep Codex Issues launches inside the window budget
 
 ### Features
 
@@ -2132,7 +2339,7 @@ All notable changes to this project will be documented in this file.
 - **ci:** Preserve same-revision coverage artifacts
 - **work:** Report containerless intake events once
 - **scan:** Reuse unchanged workspace metadata scans
-- **gui:** Prepare Issue Monitor launches off the event loop
+- **gui:** Prepare Issues launches off the event loop
 - **gui:** Defer home fallback and share materialization lock
 - **gui:** Reserve monitor agent names on worker
 
@@ -3070,7 +3277,7 @@ All notable changes to this project will be documented in this file.
 - **pm:** Decouple prompt refresh and scan recovery
 - **pm:** Recover metadata failures and stalled scans
 - **pm:** 非互換 JSON の破損バックアップ作成を抑止する
-- **update:** Move automatic update policy out of issue monitor
+- **update:** Move automatic update policy out of Issues
 - **gui:** Cycle existing agent tabs without reframing
 - **pm:** Compact Reports and use English GUI labels
 - **gui:** Include native consent in English copy checks
@@ -3267,7 +3474,7 @@ All notable changes to this project will be documented in this file.
 - **work:** PM現在状態の受け入れ監査と更新待ちを記録
 - **work:** Record Q&A Reports delivery scope
 - **work:** Record fresh Q&A Reports delivery
-- **work:** Record Issue Monitor pull request delivery
+- **work:** Record Issues pull request delivery
 - **work:** Preserve #5082 successor assignment
 - **work:** Record #5082 fixture delivery state
 - **work:** Record #5082 successor fixture delivery
@@ -4376,7 +4583,7 @@ All notable changes to this project will be documented in this file.
 - **index:** Index 資源診断に runner tree の実測値と broker カウンタを追加
 - **pm:** オーナー操作を依頼する前に PM 自身の権限を確認する規定を追加する
 - **perf:** Restore_drain の内訳と event loop ブロックを perf.startup に記録する
-- **pm:** Let the resident PM turn the Issue Monitor back on
+- **pm:** Let the resident PM turn Issues back on
 - Issueを明示投入キューと4列Kanbanに統一する (#4499)
 - Issue本文と読み取り専用出力の切り替えを維持する
 
@@ -4441,9 +4648,9 @@ All notable changes to this project will be documented in this file.
 - **launch-wizard:** Claudeモデル表示を版数なしにして復元値を正規化
 - **launch-wizard:** Claude モデル行をバージョンレスにする
 - **gui:** Issue ウィンドウを 2 段の操作帯と AC 先頭の詳細ペインに再構成する
-- **pm:** PM 権限の自己記述と Issue Monitor の停止理由を追加する
+- **pm:** PM 権限の自己記述と Issues の停止理由を追加する
 - **gui:** Issue一覧へOtherとWorkspace操作を統合する
-- **gui:** Issue Monitorの候補プール設定を追加
+- **gui:** Issuesの候補プール設定を追加
 - **pm:** Restart で解消しない PM 起動拒否を pm.status に出す
 - **verify:** Verify.run の外部シグナル終了を FAIL と分け lease id を記録する
 
@@ -5747,7 +5954,7 @@ All notable changes to this project will be documented in this file.
 ### Testing
 
 - **verify:** 待機列の譲り合いが循環しないことを検証する
-- **daemon:** Issue Monitor 権限テストの判定を 250ms 予算から切り離す
+- **daemon:** Issues 権限テストの判定を 250ms 予算から切り離す
 - **index:** 空Issueキャッシュの公開前停止を期待値に反映する
 - **execution:** 再起動テストのCodex状態を隔離
 - **index:** Interactive burst の livelock を pin し双方向の非 starvation を固定する
@@ -5943,7 +6150,7 @@ All notable changes to this project will be documented in this file.
 - **test:** Prefs 予算の test override を thread-local にし retry 系 assert を hang guard 化する
 - **gwt-terminal:** PTY テストの読み取り判定から ANSI 制御シーケンスを除去する
 - **test:** 締切依存テストを決定論化する
-- **test:** Issue Monitor のホームをテストごとに隔離する
+- **test:** Issues のホームをテストごとに隔離する
 - **test:** Converge on the foreign heavy scan instead of a fixed 300ms wait
 - **test:** Attribute the sibling heavy scan by binary path, not cwd
 - **app-runtime:** GUI-local prefs persist の deadline 失効を無言で成功扱いしない
@@ -5961,7 +6168,7 @@ All notable changes to this project will be documented in this file.
 - **update:** Resume marker に update_drain を記録し再起動後の bootstrap で hold を解除する
 - **daemon:** Windows の stale daemon retire を hidden_command 経由の taskkill にし disallowed method を避ける
 - **test:** Managed_assets_test の GWT_HOOK_BIN 依存を thread-local seam に置換する
-- **gui:** Issue Monitor の Autonomous トグルを状態スイッチにしサーバー状態のみを表示する
+- **gui:** Issues の Autonomous トグルを状態スイッチにしサーバー状態のみを表示する
 - **issue-monitor:** Completion probe の deadline 超過を fail-closed にし GUI-local scan の契約を統一する
 - **test:** Effect commit / control CAS テストを 250ms prefs budget から隔離して CI flake を止める
 - **issue-monitor:** Generation reclaim の判定源を launch refusal と統一し reclaim loop を停止する
@@ -6472,7 +6679,7 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- **window:** Issue Monitor 自動起動をキャンバス外プレビューにする
+- **window:** Issues 自動起動をキャンバス外プレビューにする
 - **window:** Issue 行に Work 情報と Work 操作を移設し面の命名を揃える
 - **pm:** 常駐報告と周回駆動規範を恒久化する
 - **verify:** Add typed failure quarantine gate
@@ -6920,8 +7127,8 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
-- **test:** Stabilize issue monitor daemon synchronization
-- **test:** Observe issue monitor scan ownership directly
+- **test:** Stabilize Issues daemon synchronization
+- **test:** Observe Issues scan ownership directly
 - **execution:** Recover blocked build aborts
 - **execution:** Harden blocked abort reconciliation
 - **execution:** Bound blocked abort diagnostics
@@ -6929,10 +7136,10 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous Tasks
 
 - Refresh lockfile for v9.79.0
-- Record issue monitor verification
-- Record issue monitor PR handoff
-- Settle issue monitor work handoff
-- **work:** Record issue monitor PR handoff receipt
+- Record Issues verification
+- Record Issues PR handoff
+- Settle Issues work handoff
+- **work:** Record Issues PR handoff receipt
 
 ## [9.79.0] - 2026-08-14
 
@@ -7021,7 +7228,7 @@ All notable changes to this project will be documented in this file.
 
 - **workspace:** Closed owner の滞留 Work を整理する work_prune を追加 (#3448)
 - **workspace:** 孤児化した worktree placeholder の整理と対象プロジェクト指定を work_prune に追加 (#3448)
-- **gui:** Issues ビューと Issue Monitor を単一 Issue サーフェスへ統合する (#3461)
+- **gui:** Issues ビューと Issues を単一 Issue サーフェスへ統合する (#3461)
 
 ### Miscellaneous Tasks
 
@@ -7104,7 +7311,7 @@ All notable changes to this project will be documented in this file.
 
 - **pm:** Stop/failover の IPC 層 failure injection と残 matrix を固定する (SPEC #3431 T-087d/T-080/T-081)
 - **index:** Deadline-reap fake runner の cold-start 競合 flake を根治する
-- **gwt:** HOME 依存の issue monitor テストに env lock を追加して並走 flake を止める
+- **gwt:** HOME 依存の Issues テストに env lock を追加して並走 flake を止める
 
 ## [9.75.0] - 2026-08-09
 
@@ -7139,7 +7346,7 @@ All notable changes to this project will be documented in this file.
 - **pm:** Close/crash 弁別と backoff 付き自動復旧を実装 (SPEC #3431)
 - **pm:** PM worktree のライフサイクル管理を追加 (SPEC #3431)
 - **pm:** Launch_now op と ScanNow control を追加 (SPEC #3431 Phase 3)
-- **pm:** PM 特権による Issue Monitor 非対称境界の適用除外 (SPEC #3431 Phase 4)
+- **pm:** PM 特権による Issues 非対称境界の適用除外 (SPEC #3431 Phase 4)
 - **pm:** PM ウィンドウの識別子と PM 起動イベントを追加 (SPEC #3431 FR-018〜020 backend)
 - **pm:** PM ランチャーと PM ウィンドウ識別の UI を追加 (SPEC #3431 FR-018〜022)
 - **pm:** PM に他エージェントの読み取り専用観測を与える (SPEC #3431 FR-023〜025)
@@ -7435,11 +7642,11 @@ All notable changes to this project will be documented in this file.
 - 検証計画の権限引数を統合
 - PR レビューで判明した実行境界を強化
 - **launch:** Intake worktreeをfreshなorigin baseで実体化しstale skillsを自己修復する (#3374)
-- Harden issue monitor side-effect authority
-- Harden issue monitor claim and control authority
-- Make issue monitor scans deadline integral
-- Harden issue monitor launch delivery transactions
-- Reconcile issue monitor failure deliveries
+- Harden Issues side-effect authority
+- Harden Issues claim and control authority
+- Make Issues scans deadline integral
+- Harden Issues launch delivery transactions
+- Reconcile Issues failure deliveries
 - **issue-monitor:** Linearize durable launch delivery
 - **issue-monitor:** Keep autonomous retry single-path
 - **issue-monitor:** コンテナルートの autonomous loop 正規化を回帰テストで固定する
@@ -7450,7 +7657,7 @@ All notable changes to this project will be documented in this file.
 - **issue-monitor:** Close durable recovery authority gaps
 - **gwt-git:** Windows ローカルパスから repo 名を導出できるようにする
 - **gwt-core:** Windows のファイルロック競合を移植可能に扱う
-- **gwt:** Issue Monitor authority fence の Windows ロック競合を WouldBlock に正規化する
+- **gwt:** Issues authority fence の Windows ロック競合を WouldBlock に正規化する
 - **gwt-core:** Index coordinator の登録ロックを shared に戻す
 - **gwt-core:** Windows で登録ロックと JSONL 修復が失敗する問題を直す
 - **lane:** Resolve session kind from the worktree lane file before env
@@ -7744,12 +7951,12 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - **intake:** Ephemeral detached worktree 基盤を追加 (SPEC-3214 Phase 1)
-- **intake:** Quick issue 登録+即 launch を Issue Monitor に追加 (SPEC-3214 Phase 2)
+- **intake:** Quick issue 登録+即 launch を Issues に追加 (SPEC-3214 Phase 2)
 - **intake:** Palette「Intake session」から ephemeral 起動導線を追加 (SPEC-3214 Phase 3)
 - **work-notes:** Memory/discussions をマシンローカル HOME scratch へ移行 (SPEC-3214 Phase 4)
 - **intake:** Start Work 入口を完全撤去し Open existing branch 独立導線を追加 (SPEC-3214 Phase 5)
 - Clarify intake and execution workflows
-- Refine intake and issue monitor settings
+- Refine intake and Issues settings
 - **cli:** Workflow.bypass operation で WorkflowBypass::Release を配線 (#3267)
 
 ### Miscellaneous Tasks
@@ -7826,7 +8033,7 @@ All notable changes to this project will be documented in this file.
 - Release flow にマージ後監視と完了ゴールを追加
 - **memory:** Release push timeout と post-merge監視の教訓を記録
 - Rustdoc の private intra-doc-link と unclosed HTML tag を解消
-- **readme:** Issue Monitor 節を追加（human-gated + autonomous）(T-107)
+- **readme:** Issues 節を追加（human-gated + autonomous）(T-107)
 - **readme:** 安全モデル段落を1行要約+SPEC リンクに縮約
 - **skills:** Gwt-manage-pr を pr.ready / pr.draft の sanctioned surface に追随
 - Describe the 2-lane Curate/Execute workflow in README (SPEC-3245 Phase 5)
@@ -7877,7 +8084,7 @@ All notable changes to this project will be documented in this file.
 - **cli:** Gwtd に pr.ready / pr.draft を追加し pr.edit を read:org 非依存化
 - **intake:** SPEC-3214 Phase 1 — ephemeral detached intake worktree の基盤
 - **intake:** SPEC-3214 Phase 2a — Quick issue 登録の backend handler
-- **intake:** SPEC-3214 Phase 2b — Issue Monitor に Quick issue 入力欄を追加
+- **intake:** SPEC-3214 Phase 2b — Issues に Quick issue 入力欄を追加
 - **intake:** SPEC-3214 Phase 3 — intake session 起動導線（ephemeral 起動）
 - **intake:** SPEC-3245 Phase 3 — Start Work を撤去し 2 レーン入口へ置換
 - **intake:** Rename Curate entry label to "Intake" (SPEC-3245 Phase 4)
@@ -7906,7 +8113,7 @@ All notable changes to this project will be documented in this file.
 - **work:** Browser-check の sandbox/リモートブラウザ制約を memory に記録
 - **work:** Issue #3201 の memory 記録（pr.edit read:org 解消・pr.ready 新設）を追加
 - **work:** SPEC #3206 PR 作成と conflict-marker lesson の memory を記録
-- **work:** Issue Monitor 多重起動 root-cause lesson を memory に記録
+- **work:** Issues 多重起動 root-cause lesson を memory に記録
 - **ci:** Re-trigger checks (docker.io レジストリ transient flake の再実行)
 - **work:** Quick issue 撤回の設計判断を memory に記録
 - **work:** 2 レーン workflow 再整理 (SPEC-3245) の設計判断を memory に記録
@@ -7940,7 +8147,7 @@ All notable changes to this project will be documented in this file.
 - Restore workspace cleanup readiness
 - Clear stale workspace cleanup cache
 - Prevent launch wizard pending crash
-- Preserve issue monitor origin errors
+- Preserve Issues origin errors
 
 ### Documentation
 
@@ -7978,14 +8185,14 @@ All notable changes to this project will be documented in this file.
 
 - Require SessionStart session id association
 - **hook:** Self-improvement Stop hook を古い gwtd でも graceful degrade させる (#3178)
-- Render issue monitor as canvas window
+- Render Issues as canvas window
 - **test:** Set playwright project root
-- **windows:** Guard issue monitor daemon publish
+- **windows:** Guard Issues daemon publish
 
 ### Features
 
 - Add issue auto-improve monitor
-- Complete issue monitor auto queue
+- Complete Issues auto queue
 
 ### Miscellaneous Tasks
 

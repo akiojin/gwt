@@ -45,7 +45,7 @@ try {
     New-Item -ItemType Directory -Path $projectState -Force | Out-Null
     '{"settings":{"auto_start":false}}' | Set-Content "$projectState/pm.json" -Encoding utf8NoBOM
     '{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"},"launch_usage_threshold_percent":73}' | Set-Content "$projectState/issue-monitor.json" -Encoding utf8NoBOM
-    @{tabs=@(@{id='settings-threshold-5628';title='Issue Monitor';project_root=$checkout;kind='git'});recent_projects=@()} |
+    @{tabs=@(@{id='settings-threshold-5628';title='Issues';project_root=$checkout;kind='git'});recent_projects=@()} |
         ConvertTo-Json -Depth 8 | Set-Content "$checkHome/.gwt/session.json" -Encoding utf8NoBOM
 
     $hook = (Invoke-CheckoutEnvelope 'hook.doctor' @{}).output | ConvertFrom-Json

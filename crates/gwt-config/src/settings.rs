@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
-    num::NonZeroU16,
+    num::{NonZeroU16, NonZeroU64},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -140,6 +140,14 @@ pub struct VerificationConfig {
     pub disk_budget_bytes: Option<u64>,
 }
 
+/// Bounded recovery of the existing project's exact cleanup records.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectOwnerConfig {
+    /// None uses 30 seconds. Zero is invalid.
+    pub reconciliation_timeout_secs: Option<NonZeroU64>,
+}
+
 /// Optional overrides for the built-in performance budgets.
 ///
 /// `None` keeps the normative default owned by the performance domain. This
@@ -270,6 +278,8 @@ pub struct Settings {
     pub build_artifact_gc: crate::BuildArtifactGcConfig,
     /// Canonical verification capacity and disk reservation override.
     pub verification: VerificationConfig,
+    /// Automatic exact cleanup recovery (`[project_owner]`).
+    pub project_owner: ProjectOwnerConfig,
 }
 
 impl Default for Settings {
@@ -299,6 +309,7 @@ impl Default for Settings {
             pr_inventory: PrInventoryConfig::default(),
             build_artifact_gc: crate::BuildArtifactGcConfig::default(),
             verification: VerificationConfig::default(),
+            project_owner: ProjectOwnerConfig::default(),
         }
     }
 }
@@ -606,6 +617,21 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_reconciliation_timeout_is_configurable_and_positive() {
+        let settings: Settings =
+            toml::from_str("[project_owner]\nreconciliation_timeout_secs = 45\n").unwrap();
+        let encoded: toml::Value = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            encoded["project_owner"]["reconciliation_timeout_secs"].as_integer(),
+            Some(45)
+        );
+        assert!(
+            toml::from_str::<Settings>("[project_owner]\nreconciliation_timeout_secs = 0\n")
+                .is_err()
+        );
+    }
 
     #[test]
     fn verification_slots_roundtrip_and_reject_zero() {

@@ -952,7 +952,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
 
 /// SPEC #3200 FR-052: a fresh linked-owner launch is not producing until
 /// SessionStart authenticates, so `spawn_agent_window_with_options` defers
-/// the Issue Monitor completion. The SessionStart finalizer therefore owns the
+/// Issues completion. The SessionStart finalizer therefore owns the
 /// durable delivery ACK — if it emitted the plain "launch succeeded" events the
 /// delivery tuple would stay pending forever and the daemon would redeliver it.
 #[test]
@@ -1078,11 +1078,23 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let prepty = matches!(failure, "direct" | "worker" | "prepty-replay");
-        let fixture = owner_monitor_fresh_fixture(
+        let deferred = matches!(
+            failure,
+            "replay" | "readiness-replay" | "replacement" | "startup-timeout-replay"
+        );
+        // test-hygiene: allow-wall-clock-deadline These negative cases require a finite daemon refusal while the canonical prefs lock is deliberately held.
+        let control_budget = if deferred {
+            Duration::from_secs(5)
+        } else {
+            gwt_core::deadline_budget::HANG_GUARD
+        };
+        let fixture = owner_monitor_fresh_fixture_with_control_budget(
             temp.path(),
             &format!("fresh-monitor-{failure}"),
             true,
             prepty,
+            control_budget,
+            |_| {},
         );
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
         let id = fixture.captured.id.clone();
@@ -1178,10 +1190,6 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             fixture.shutdown();
             continue;
         }
-        let deferred = matches!(
-            failure,
-            "replay" | "readiness-replay" | "replacement" | "startup-timeout-replay"
-        );
         let holder = deferred.then(|| {
             gwt_core::operation_deadline::NamedFileLock::acquire_quiet(
                 &prefs_path.with_extension("lock"),
@@ -1242,7 +1250,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             // test-hygiene: allow-wall-clock-deadline Bounds the exact real owner physical-close result; that receipt determines whether the Monitor commit remains pending.
             let close_error = fixture.executor.block_on(async {
                 // test-hygiene: allow-wall-clock-deadline Bounds an actual owner physical close or canonical failure ACK; the receipt and durable source establish ordering.
-                tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                     loop {
                         if let OwnerEvent::Closed {
                             id: closed,
@@ -1344,7 +1352,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             .as_deref()
             .expect("durable actionable failure");
         if failure.starts_with("startup-timeout") {
-            assert!(reason.starts_with("Issue Monitor startup timed out after "));
+            assert!(reason.starts_with("Issues startup timed out after "));
             assert!(gwt_agent::is_transient_launch_failure(reason));
             assert_eq!(
                 monitor.inbox_item(2359).unwrap().state,
@@ -1767,21 +1775,13 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
 #[cfg(windows)]
 #[test]
 fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_acknowledges() {
+    use base64::Engine;
+
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let fixture =
-        owner_monitor_fresh_fixture(temp.path(), "monitor-powershell-ready", false, false);
-    let probe = fixture
-        .executor
-        .block_on(
-            fixture
-                .owner
-                .probe(&fixture.captured.id, fixture.captured.incarnation),
-        )
-        .unwrap();
     let binary = std::env::current_exe()
         .unwrap()
         .parent()
@@ -1797,6 +1797,51 @@ fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_ackno
     fs::create_dir_all(&spaced_bin).unwrap();
     let hook_bin = spaced_bin.join("gwtd.exe");
     fs::copy(binary, &hook_bin).unwrap();
+    let request = temp.path().join("hook-request.txt");
+    let receipt = temp.path().join("hook-result.txt");
+    // The hook must descend from the actual PTY child, with its captured
+    // launch environment, rather than from this test harness.
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+             while (!(Test-Path -LiteralPath '{request}')) {{ Start-Sleep -Milliseconds 100 }}\n\
+             & $env:COMSPEC /d /s /c ([IO.File]::ReadAllText('{request}'))\n\
+             [IO.File]::WriteAllText('{receipt}.pending', [string]$LASTEXITCODE)\n\
+             [IO.File]::Move('{receipt}.pending', '{receipt}')\n\
+             while ($true) {{ Start-Sleep -Milliseconds 100 }}\n",
+        request = request.display().to_string().replace('\'', "''"),
+        receipt = receipt.display().to_string().replace('\'', "''"),
+    );
+    let script = base64::engine::general_purpose::STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let fixture = owner_monitor_fresh_fixture_with_control_budget(
+        temp.path(),
+        "monitor-powershell-ready",
+        false,
+        false,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |config| {
+            config.command = "powershell".into();
+            config.args = vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-EncodedCommand".into(),
+                script,
+            ];
+            config.env_vars.extend([
+                ("HOME".into(), temp.path().display().to_string()),
+                ("USERPROFILE".into(), temp.path().display().to_string()),
+                (
+                    gwt_agent::GWT_BIN_PATH_ENV.into(),
+                    hook_bin.display().to_string(),
+                ),
+            ]);
+            config.remove_env.push("CODEX_THREAD_ID".into());
+        },
+    );
     gwt_skills::generate_codex_hooks_for_mode(
         &fixture.repo,
         gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
@@ -1807,40 +1852,45 @@ fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_ackno
     let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    let output = probe.with_agent_environment(|| {
-        let mut child = gwt_core::process::hidden_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", command])
-            .current_dir(&fixture.repo)
-            .env(gwt_agent::GWT_BIN_PATH_ENV, &hook_bin)
-            .env(
-                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
-                &fixture.pending.readiness_nonce,
-            )
-            .env_remove("CODEX_THREAD_ID")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(
-                serde_json::json!({
-                    "session_id":"native-monitor-powershell", "cwd":fixture.repo,
-                    "hook_event_name":"SessionStart", "source":"startup"
-                })
-                .to_string()
-                .as_bytes(),
-            )
-            .unwrap();
-        child.wait_with_output().unwrap()
+    let input = temp.path().join("hook-input.json");
+    let stdout = temp.path().join("hook-stdout.txt");
+    let stderr = temp.path().join("hook-stderr.txt");
+    fs::write(
+        &input,
+        serde_json::json!({
+            "session_id":"native-monitor-powershell", "cwd":fixture.repo,
+            "hook_event_name":"SessionStart", "source":"startup"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let pending = request.with_extension("pending");
+    fs::write(
+        &pending,
+        format!(
+            "{command} < \"{}\" > \"{}\" 2> \"{}\"",
+            input.display(),
+            stdout.display(),
+            stderr.display(),
+        ),
+    )
+    .unwrap();
+    fs::rename(pending, &request).unwrap();
+    fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual generated hook exit receipt; success is its exit code, not elapsed time.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !receipt.exists() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("generated startup hook exit receipt")
     });
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        fs::read_to_string(receipt).unwrap().trim(),
+        "0",
         "generated startup hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&fs::read(stderr).unwrap())
     );
     wait_owner_monitor_fresh_ack(&fixture);
     assert_eq!(

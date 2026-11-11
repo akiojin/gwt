@@ -1,5 +1,6 @@
 /** #5379: five real Windows custom Agent PTYs; fixed output, no model calls. */
 import { createReadStream } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -70,6 +71,10 @@ test.describe("Runtime output batching (live backend)", () => {
           .toBeVisible({ timeout: 30_000 });
         await expect(surfacePage.locator('.work-row[data-window-id="' + id + '"] .terminal-text-preview'))
           .toContainText("GWT5379_READY " + index);
+        await surfacePage.locator('.work-row[data-window-id="' + id + '"]')
+          .getByRole("button", { name: "Open terminal", exact: true }).click();
+        await expect(surfacePage.locator('.works-full .works-terminal[data-window-id="' + id + '"] .xterm-rows'))
+          .toBeVisible();
         await expect.poll(() => surfacePage.evaluate(id => String((window as any).__gwtTerminalTestApi?.bufferText?.(id) || ""), id),
           { timeout: 60_000 }).toContain("GWT5379_READY " + index);
         await installOutputProbe(surfacePage, id, index);
@@ -104,16 +109,18 @@ test.describe("Runtime output batching (live backend)", () => {
       expect(new Set(receipts.map(receipt => receipt.pid)).size).toBe(5);
       expect(new Set(receipts.map(receipt => receipt.session)).size).toBe(5);
       for (const observed of wire) {
-        expect(observed.output_frames, "real PTY WebSocket output is observed").toBeGreaterThan(0);
-        expect(observed.output_bytes, "PTY output includes the fixed payload bytes").toBeGreaterThanOrEqual(seconds * 8192);
+        // The owner may coalesce deltas and repair with a semantic snapshot.
+        // Receipts above prove producer bytes; both frame kinds must retain every sequence.
+        expect(observed.output_frames + observed.snapshot_frames, "real PTY WebSocket output is observed").toBeGreaterThan(0);
+        expect(observed.output_bytes + observed.snapshot_bytes, "live PTY deltas or snapshots carry bytes").toBeGreaterThan(0);
         expect(observed.sequences).toEqual(Array.from({ length: seconds }, (_, index) => index + 1));
       }
       timing = await nativeTimings(fixture, startedAt, endedAt);
       expect(timing.samples, "native dispatch instrumentation is active").toBeGreaterThan(0);
-      const output = timing.events.find(event => event.event === "RuntimeOutput");
-      expect(output?.count || 0, "zero RuntimeOutput samples cannot pass").toBeGreaterThan(0);
+      const output = timing.events.filter(event => ["RuntimeOutput", "ProjectOwnerEvent", "ProjectOwnerSnapshot"].includes(event.event));
+      expect(output.reduce((sum, event) => sum + event.count, 0), "zero output dispatch samples cannot pass").toBeGreaterThan(0);
       if (fixture.arm === "after") {
-        expect(output!.max_ms, "RuntimeOutput dispatch stays below 100ms").toBeLessThan(100);
+        expect(Math.max(...output.map(event => event.max_ms)), "output dispatch stays below 100ms").toBeLessThan(100);
         expect(timing.output_batches.count, "screen-derived batch work is measured independently of callback labels").toBeGreaterThan(0);
         expect(timing.output_batches.max_ms, "each GUI output batch stays below 100ms").toBeLessThan(100);
       }
@@ -149,7 +156,7 @@ test.describe("Runtime output batching (live backend)", () => {
         actual_elapsed_ms: startedAt ? Date.parse(endedAt) - Date.parse(startedAt) : 0,
         workload: "5 custom Agent PTYs; 8192 ASCII bytes per second per Agent",
         producer_receipts: receipts, wire, native_dispatch: timing, comparison, browser_errors: errors, dom_snapshot: dom,
-        limitations: "Deterministic custom PTYs, no provider inference/hooks/builds. Native outer RuntimeOutput dispatch remains the event label; batching flushes at the beginning of every native callback and can be attributed to any event label. All event counts and maxima are retained rather than treating RuntimeOutput alone as the flush budget. Native timing uses integer milliseconds truncated. Slow raw rows are retained; minute summaries cover >50ms events and may straddle interval boundaries. Light is a separate 10-second functional check. Preserved binary source identity must be established by the owner separately from the current checkout HEAD.",
+        limitations: "Deterministic custom PTYs, no provider inference/hooks/builds. Producer receipts prove raw payload bytes; semantic snapshots may replace coalesced wire deltas, so every sequence and the final screen are checked across both frame kinds. Output uses RuntimeOutput on the legacy runtime and ProjectOwnerEvent/ProjectOwnerSnapshot on the current owner runtime; these owner callbacks also include other work, all subject to the same 100ms budget. Batching flushes at the beginning of every native callback and is timed independently. All event counts and maxima are retained. Native timing uses integer milliseconds truncated. Slow raw rows are retained; minute summaries cover >50ms events and may straddle interval boundaries. Light is a separate 10-second functional check. Preserved binary source identity must be established by the owner separately from the current checkout HEAD.",
         user_verification_result: "n/a (autonomous)", agent_visual_check: passed ? "pass" : "fail" };
       const body = JSON.stringify(evidence, null, 2) + "\n";
       await writeFile(join(HOME, fixture.arm + "-" + theme + ".json"), body);
@@ -241,10 +248,26 @@ async function nativeTimings(fixture: any, start: string, end: string): Promise<
     max_ms: Math.max(0, ...events.map(event => event.max_ms)), events, slow_rows: slow, summaries, output_batches: batches };
 }
 
-// Existing Project Add Agent entrypoint; the Work legacy preset now canonicalizes to Settings.
+// Register a fixed-tool member before using the normal Project Add Agent route.
 async function launch(page: Page, index: number, branch: string): Promise<{ id: string; session_id: string }> {
-  await sendLiveGwtEvent(page, { kind: "create_window", preset: "work", bounds: { x: 0, y: 0, width: 800, height: 500 } });
-  await expect(page.locator('.workspace-window[data-preset="settings"]').first()).toBeAttached();
+  const agent = AGENT + "-" + index;
+  const rosterRequest = async (action: unknown, expectedRevision: number | null = null) => {
+    const requestId = randomUUID();
+    await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision, request_id: requestId });
+    const reply = await page.waitForFunction(requestId => {
+      const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.payload.request_id === requestId && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind));
+      return message?.payload || null;
+    }, requestId, { timeout: 30_000 }).then(handle => handle.jsonValue());
+    expect(reply.kind, reply.message ?? "workload roster reply").toBe("agent_roster");
+    expect(reply.roster.error, "workload member preparation").toBeFalsy();
+    return reply.roster;
+  };
+  let roster = await rosterRequest({ kind: "read" });
+  const available = () => roster.members.some((member: any) =>
+    member.agent_id === agent && member.enabled && !member.assignment);
+  if (!available()) roster = await rosterRequest({ kind: "add", agent_id: agent }, roster.revision);
+  expect(available(), "normally allocated command-tool member").toBe(true);
   const request = (detail: unknown, requireOpen = false) => page.evaluate(({ detail, requireOpen }) => {
     const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
       .find(socket => socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));

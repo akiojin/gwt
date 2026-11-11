@@ -42,7 +42,7 @@ test("Project settings and normal project saves preserve machine capacity across
       return envelope;
     };
     await gotoLiveGwt(page, base, { enableTestBridge: true });
-    // Opening Issues requests the Monitor snapshot in a fresh workspace.
+    // Opening Issues requests the Issues snapshot in a fresh workspace.
     await page.locator('button[data-surface="issues"]').click();
     const issueHost = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
     await issueHost.getByRole("button", { name: "Issues settings", exact: true }).click();

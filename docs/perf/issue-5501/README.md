@@ -7,7 +7,7 @@ branch / worktree の作成や切替は行っていない。before の再 build 
 
 ## 条件と一次証跡
 
-- 各 sample は fresh HOME、PM 自動起動 off、Issue Monitor off。
+- 各 sample は fresh HOME、PM 自動起動 off、Issues off。
 - checkout の `gwtd` で隔離 daemon を明示起動し、所有 PID と認証済み `probe=ok` を確認した。
 - 実 Shell 8 pane で同じ Node spinner を実行した。20ms 間隔、512 bytes の padding と連番、cursor redraw。
 - `daemon.subscribe(runtime_output)` でも 8 pane 全ての実出力を受信してから CPU sampling を始めた。
