@@ -322,29 +322,61 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
 }
 
 #[cfg(test)]
+pub struct TestDaemonServer {
+    shutdown: Arc<DaemonShutdown>,
+    task: Option<tokio::task::JoinHandle<Result<i32, SpecOpsError>>>,
+    pub(crate) owner: crate::project_runtime::owner::OwnerHandle,
+}
+
+#[cfg(test)]
+impl TestDaemonServer {
+    pub async fn shutdown(mut self) {
+        self.shutdown.request();
+        let task = self.task.take().expect("test daemon server task");
+        task.await
+            .expect("test daemon server task failed")
+            .expect("test daemon shutdown failed");
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDaemonServer {
+    fn drop(&mut self) {
+        self.owner.stop();
+        self.shutdown.request();
+    }
+}
+
+#[cfg(test)]
 pub fn spawn_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,
     hub: BroadcastHub,
-) -> Result<tokio::task::JoinHandle<Result<i32, SpecOpsError>>, SpecOpsError> {
+) -> Result<TestDaemonServer, SpecOpsError> {
     // Bind synchronously so test clients never race a scheduled server task.
     // Pin only this synchronous fixture setup, on Unix and Windows alike.
     let _prefs_budget = pin_prefs_hang_guard();
     let authority_lease = acquire_daemon_startup_lease(&endpoint.scope)?;
     let bound = bind_daemon(&endpoint, &socket_path, &endpoint_path, authority_lease)?;
+    let owner = bound.project_transport.owner.clone();
     let shutdown = Arc::new(DaemonShutdown::new());
     spawn_signal_watcher(Arc::clone(&shutdown));
-    Ok(tokio::spawn(run_bound_server(
+    let task = tokio::spawn(run_bound_server(
         endpoint,
         endpoint_path,
         hub,
-        shutdown,
+        shutdown.clone(),
         crate::IssueMonitorConfig::default(),
         ISSUE_MONITOR_SCAN_TIMEOUT,
         bound,
         IssueMonitorWorkerTestHooks::default(),
-    )))
+    ));
+    Ok(TestDaemonServer {
+        shutdown,
+        task: Some(task),
+        owner,
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -10638,7 +10670,7 @@ mod scan_failure_contract_tests {
     #[test]
     fn settings_failure_does_not_revoke_an_independent_scan_commit() {
         use gwt_core::operation_deadline::{
-            ScopedNamedLockContentionObserver, ScopedOperationClock,
+            self, ScopedNamedLockContentionObserver, ScopedOperationClock,
         };
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
@@ -10687,13 +10719,19 @@ mod scan_failure_contract_tests {
             "test machine settings holder",
         )
         .unwrap();
+        let settings_before = std::fs::read(&machine_path).unwrap();
         let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let settings_deadline = std::rc::Rc::new(std::cell::Cell::new(None));
         let expire_settings_budget = || {
             let expired_clock = expired_clock.clone();
+            let settings_deadline = settings_deadline.clone();
             move || {
-                *expired_clock.borrow_mut() = Some(ScopedOperationClock::set(
-                    now + gwt_core::deadline_budget::HANG_GUARD * 2,
-                ));
+                let deadline = operation_deadline::current().expect("settings operation deadline");
+                settings_deadline.set(Some(deadline));
+                // Drop the old guard first so a later contention cannot reset
+                // the new clock and wait forever under a fixed test clock.
+                expired_clock.borrow_mut().take();
+                *expired_clock.borrow_mut() = Some(ScopedOperationClock::set(deadline));
             }
         };
         let settings_lock_path = machine_path.with_extension("lock");
@@ -10714,12 +10752,21 @@ mod scan_failure_contract_tests {
             .as_str()
             .unwrap()
             .contains("settings lock deadline"));
-        expired_clock.borrow_mut().take();
+        let failed_settings_deadline = settings_deadline
+            .get()
+            .expect("settings lock was contended");
+        // Keep the exhausted settings clock while the independent scan gets
+        // its own prefs deadline. An expired scan still must be rejected.
         let _scan_contention =
             ScopedNamedLockContentionObserver::set(&settings_lock_path, expire_settings_budget());
         let mut scanned = monitor.clone();
         crate::scan_issue_monitor_candidates(&mut scanned, &[], "2026-11-09T00:00:00Z");
         let epoch = monitor.effect_authority_epoch();
+        assert_eq!(
+            operation_deadline::now(),
+            failed_settings_deadline,
+            "settings budget must remain exhausted before scan commit"
+        );
         assert!(super::commit_issue_monitor_scan_if_current(
             project.path(),
             &prefs_path,
@@ -10727,6 +10774,11 @@ mod scan_failure_contract_tests {
             scanned,
             epoch,
         ));
+        assert_eq!(
+            operation_deadline::now(),
+            failed_settings_deadline,
+            "scan commit must preserve the exhausted settings clock"
+        );
         assert_eq!(
             crate::load_issue_monitor_prefs(&prefs_path)
                 .unwrap()
@@ -10738,6 +10790,7 @@ mod scan_failure_contract_tests {
             marker.exists(),
             "scan commit did not write machine settings"
         );
+        assert_eq!(std::fs::read(&machine_path).unwrap(), settings_before);
     }
 
     #[test]
@@ -28011,6 +28064,7 @@ exit 1
         // Phase 7 T-138/FR-047: a sibling that never releases the prefs lock
         // must not hang the daemon control plane indefinitely. No commit
         // receipt means the in-memory control is revoked as well.
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(Duration::from_millis(250));
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
@@ -29610,9 +29664,8 @@ exit 1
         drop(write_half);
         drop(reader);
 
-        // Cancel the server (simulating SIGINT) by aborting.
-        server_handle.abort();
-        let _ = server_handle.await;
+        // Use the same cooperative shutdown as SIGINT.
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]

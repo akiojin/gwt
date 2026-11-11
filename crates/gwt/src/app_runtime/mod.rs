@@ -9682,7 +9682,27 @@ impl AppRuntime {
             idle_kind,
             "closing an idle agent window released by Issues daemon"
         );
-        self.close_window_after_issue_monitor_finalize_events(window_id)
+        // Issue #7035 AC-2: with a native project owner connected, the daemon's
+        // canvas names panes in the owner namespace, not by their GUI alias.
+        let alias = if self.window_lookup.contains_key(window_id) {
+            Some(window_id.to_string())
+        } else {
+            self.runtimes
+                .iter()
+                .find(|(_, runtime)| runtime.owner_pane_id == window_id)
+                .map(|(alias, _)| alias.clone())
+        };
+        let Some(alias) = alias else {
+            tracing::warn!(
+                target: "gwt.pane.teardown",
+                window_id,
+                ?issue_number,
+                idle_kind,
+                "Issues daemon idle close names no window known to this GUI"
+            );
+            return Vec::new();
+        };
+        self.close_window_after_issue_monitor_finalize_events(&alias)
     }
 
     fn issue_monitor_snapshot_events_for(
@@ -10270,6 +10290,23 @@ impl AppRuntime {
                 if !gwt::window_state::uses_agent_hook_state(window.preset) {
                     return None;
                 }
+                // A saved GUI alias is not proof of a physical pane. Failed
+                // launches can leave Starting rows without an owner runtime.
+                // Protect the actual launch interval before its runtime arrives.
+                let live_runtime = self
+                    .runtimes
+                    .get(window_id)
+                    .is_some_and(|runtime| runtime.child_pid.is_some() && !runtime.exit_confirmed);
+                let pending_launch =
+                    self.pending_launch_completions
+                        .get(window_id)
+                        .is_some_and(|pending| {
+                            pending.launch_in_flight
+                                && pending.current.load(std::sync::atomic::Ordering::Acquire)
+                        });
+                if !live_runtime && !pending_launch {
+                    return None;
+                }
                 let resident_pm =
                     self.pm_session_for_root(&tab.project_root)
                         .is_some_and(|pm_session| {
@@ -10282,7 +10319,11 @@ impl AppRuntime {
                         tab.title,
                         window.purpose_title.as_deref().unwrap_or(&window.title)
                     ),
-                    state: self.window_status(window_id).unwrap_or(window.status),
+                    state: if pending_launch {
+                        WindowProcessStatus::Starting
+                    } else {
+                        self.window_status(window_id).unwrap_or(window.status)
+                    },
                     resident_pm,
                 })
             })
@@ -13775,7 +13816,9 @@ impl AppRuntime {
                 && gwt::window_state::uses_agent_hook_state(preset)
                 && !matches!(
                     base,
-                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    WindowProcessStatus::Stopped
+                        | WindowProcessStatus::Error
+                        | WindowProcessStatus::Interrupted
                 )
             {
                 WindowProcessStatus::Waiting
@@ -15737,6 +15780,7 @@ impl AppRuntime {
                 generation,
                 context: Some(context.clone()),
                 current: current.clone(),
+                launch_in_flight: true,
                 operation_id: operation_id.clone(),
                 owner_pane_id: owner_pane_id.clone(),
                 client_cell: client_cell.clone(),
@@ -15988,10 +16032,11 @@ impl AppRuntime {
             });
             return Vec::new();
         }
-        let pending = self
+        let mut pending = self
             .pending_launch_completions
             .remove(&window_id)
             .expect("current exact owner completion");
+        pending.launch_in_flight = false;
         self.pending_auto_resume_sources.remove(&window_id);
         self.inflight_launches.retain(|_, (id, _)| id != &window_id);
         let mut wizard_events = Vec::new();

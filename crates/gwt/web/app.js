@@ -4202,7 +4202,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4263,6 +4263,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
+          onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onSend: text => {
+            const request = requestPmChatSend(windowData.id, text);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
+            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
+            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
+          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -4289,6 +4297,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (windowData.is_pm && view && view.logHost.hidden) {
             const request = requestPmReports(windowData.id, resync);
             if (request) send(request);
+            const conversation = view.controller?.isChatVisible() ? requestPmConversation(windowData.id) : null;
+            if (conversation) send(conversation);
           }
         }
       }
@@ -5191,7 +5201,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "runtime_health":
             runtimeHealthModel.update(() => event.snapshot || {});
             break;
-          case "pm_reports": {
+          case "pm_reports":
+          case "pm_conversation":
+          case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }

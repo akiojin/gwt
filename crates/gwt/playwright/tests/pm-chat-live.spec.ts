@@ -103,6 +103,74 @@ test.describe('PM reports', () => {
     });
   });
 
+  test('T-CHAT-VIEW Chat renders the PM conversation as user-right and PM-left bubbles', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page, undefined, BASE, true);
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      await expect(pane.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+      const chat = pane.getByRole('region', { name: 'PM conversation' });
+      await expect(chat).toBeVisible();
+      // The real host answers for the stopped fixture PM; it has no native record yet.
+      await expect(chat.getByRole('status')).not.toHaveText('Loading PM conversation…', { timeout: 30_000 });
+      const id = await pane.getAttribute('data-id');
+      await page.evaluate(({ id, session }) => {
+        const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+          candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+        socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ kind: 'pm_conversation', id, session_id: session,
+          snapshot: { conversation_id: 'chat-fixture', availability: 'ready', detail: null, messages: [
+            { id: 'u1', role: 'user', text: 'Ship <b>it</b>?' },
+            { id: 'a1', role: 'assistant', text: '# Plan', text_html: '<h1>Plan</h1><ul><li>Verify</li></ul><table><thead><tr><th>Check</th></tr></thead><tbody><tr><td>CI</td></tr></tbody></table><pre><code>cargo test</code></pre>' },
+          ] } }) }));
+      }, { id, session: SESSION });
+      const user = chat.locator('.pm-chat__bubble--user');
+      const assistant = chat.locator('.pm-chat__bubble--assistant');
+      await expect(user).toHaveText('Ship <b>it</b>?');
+      await expect(user.locator('b')).toHaveCount(0);
+      await expect(assistant.getByRole('heading', { name: 'Plan' })).toBeVisible();
+      await expect(assistant.locator('table')).toBeVisible();
+      const userBox = (await user.boundingBox())!, assistantBox = (await assistant.boundingBox())!, chatBox = (await chat.boundingBox())!;
+      expect(userBox.x + userBox.width).toBeGreaterThan(chatBox.x + chatBox.width - 40);
+      expect(assistantBox.x).toBeLessThan(chatBox.x + 40);
+      expect(userBox.y).toBeLessThan(assistantBox.y);
+      expect(await pane.locator('.pm-chat__transcript').textContent()).not.toContain('Ship');
+      // T-CHAT-INPUT: the composer submits through the real host's pane input path.
+      await page.evaluate(() => {
+        const sent: any[] = (window as any).__gwtChatSent = [];
+        for (const socket of (window as any).__gwtPlaywrightSockets as WebSocket[]) {
+          const original = socket.send.bind(socket);
+          socket.send = (data: any) => { const message = JSON.parse(String(data)); if (message.kind === 'pane_send_input') sent.push(message); original(data); };
+        }
+      });
+      const composer = chat.getByRole('form', { name: 'Message PM' });
+      const draft = composer.getByRole('textbox', { name: 'Message to PM' });
+      await expect(composer.getByRole('button', { name: 'Send' })).toBeDisabled();
+      await draft.fill('Plan #3431');
+      await draft.press('Shift+Enter');
+      await draft.pressSequentially('next');
+      await draft.press('Enter');
+      await expect.poll(() => page.evaluate(() => (window as any).__gwtChatSent)).toEqual([
+        { kind: 'pane_send_input', session_id: SESSION, text: 'Plan #3431\nnext\r' }]);
+      // The fixture PM has no live runtime, so the real host refuses and the draft is kept.
+      await expect(composer.locator('.pm-chat__composer-status')).toHaveText(/^Not sent: .+[^.]\. Your message is kept\.$/, { timeout: 30_000 });
+      await expect(draft).toHaveValue('Plan #3431\nnext');
+      await expect(composer.getByRole('button', { name: 'Send' })).toBeEnabled();
+      const composerBox = (await composer.boundingBox())!;
+      expect(composerBox.y + composerBox.height).toBeLessThanOrEqual(chatBox.y + chatBox.height + 1);
+      expect(composerBox.y).toBeGreaterThan(assistantBox.y);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const screenshot = info.outputPath(`chat-view-${theme}.png`);
+      await pane.screenshot({ path: screenshot });
+      await info.attach('PM chat view', { path: screenshot, contentType: 'image/png' });
+      expect(errors).toEqual([]);
+    });
+  });
+
   test('Issue #6235 Execution log preserves scrollback across replacement snapshots and reveal', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];

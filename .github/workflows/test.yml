@@ -1158,6 +1158,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
+      # SPEC #6943 AC-2: the committed React bundle must match a fresh,
+      # lockfile-pinned build of crates/gwt/web-react.
+      - name: Check React bundle freshness and run React tests
+        run: |
+          bash scripts/check-frontend-build.sh
+          node --test crates/gwt/web-react/__tests__/use-store-selector.test.mjs scripts/check-frontend-build.test.mjs
+        timeout-minutes: 5
       - name: Run frontend unit tests
         env:
           GWT_PULL_RENDER_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -1183,7 +1190,9 @@ jobs:
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
             bash scripts/run-visual-tests.sh
-        timeout-minutes: 15
+        # The full serial suite measured 14.7m before image/bootstrap overhead.
+        # Retain all cases and retries with finite execution headroom.
+        timeout-minutes: 25
 
   report-post-merge-failure:
     needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
