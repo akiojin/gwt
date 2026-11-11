@@ -72,6 +72,44 @@ impl<T: Clone> RemoteReadCache<T> {
 
 static LINKED_PR_READS: RemoteReadCache<Vec<crate::cli::LinkedPrSummary>> = RemoteReadCache::new();
 static PR_LIFECYCLE_READS: RemoteReadCache<PrLifecycle> = RemoteReadCache::new();
+static BRANCH_PROTECTION_READS: RemoteReadCache<
+    gwt_git::branch_protection::BranchProtectionStatus,
+> = RemoteReadCache::new();
+/// Reviewing PRs whose gate last routed to "required CI still running".
+static CI_WAIT_HOLDS: RemoteReadCache<()> = RemoteReadCache::new();
+
+/// Issue #6877 AC-2: how long a Reviewing PR whose required CI is still
+/// running waits before a timer-driven scan reads its gate evidence again.
+const ISSUE_MONITOR_CI_WAIT_RECHECK: Duration = Duration::from_secs(60);
+
+/// Base-branch protection for the autonomous gate, cached per repository and
+/// branch within the scan's read max age. Failures are never cached.
+fn fetch_branch_protection_for_monitor(
+    repo_path: &Path,
+    repo_slug: &str,
+    branch: &str,
+) -> gwt_core::Result<gwt_git::branch_protection::BranchProtectionStatus> {
+    cached_remote_read(
+        &BRANCH_PROTECTION_READS,
+        format!("{}|{repo_slug}|{branch}", repo_path.display()),
+        monitor_read_max_age(),
+        Instant::now(),
+        || gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, branch),
+    )
+}
+
+fn ci_wait_hold_key(repo_path: &Path, pr: u64) -> String {
+    format!("{}#{pr}", repo_path.display())
+}
+
+/// True while a timer-driven scan should leave a CI-pending PR unread. Manual
+/// scans have no read max age and always read fresh.
+fn ci_wait_hold_active(repo_path: &Path, pr: u64, now: Instant) -> bool {
+    let max_age = monitor_read_max_age().map(|age| age.min(ISSUE_MONITOR_CI_WAIT_RECHECK));
+    CI_WAIT_HOLDS
+        .get(&ci_wait_hold_key(repo_path, pr), now, max_age)
+        .is_some()
+}
 
 /// Launch discovery spreads cold and deep timelines over scans. Completion
 /// probes below retain their separate, strict full-read contract.
@@ -3363,7 +3401,7 @@ pub fn try_apply_autonomous_eligibility(
     // last successful scan gave it, and the launch stage still runs — inventing
     // a decision from an absent snapshot is the one thing that stays forbidden.
     let protection = match run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
-        gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, &base_branch)
+        fetch_branch_protection_for_monitor(repo_path, repo_slug, &base_branch)
     }) {
         Ok(protection) => protection,
         Err(failure) => {
@@ -3782,25 +3820,25 @@ fn advance_one_autonomous_issue(
             let Some(pr) = record.pr_number else {
                 return Ok(());
             };
+            // Issue #6877 AC-2: a PR whose required CI was still running a
+            // moment ago is not re-read on every timer scan.
+            if ci_wait_hold_active(repo_path, pr, Instant::now()) {
+                return Ok(());
+            }
             let protection =
                 run_budgeted_readback_stage(IssueMonitorScanStage::BranchProtection, || {
-                    gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, base_branch)
+                    fetch_branch_protection_for_monitor(repo_path, repo_slug, base_branch)
                 })?;
-            let rollup =
-                run_budgeted_readback_stage(IssueMonitorScanStage::StatusCheckReadback, || {
-                    gwt_git::pr_status::try_fetch_pr_status_check_rollup(repo_path, pr)
-                })?;
-            let head = run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
-            })?
-            .unwrap_or_default();
             // Issue #4726 AC-1: an auto-merge armed on a conflicting / behind
-            // PR never merges, so the gate reads mergeability too.
-            let mergeability =
-                run_budgeted_readback_stage(IssueMonitorScanStage::MergeabilityReadback, || {
-                    gwt_git::pr_status::try_fetch_pr_merge_readback(repo_path, pr)
-                })?
-                .mergeability;
+            // PR never merges, so the gate reads mergeability too. Issue #6877
+            // AC-2: rollup, head and mergeability come from one `gh` call.
+            let gate_readback =
+                run_budgeted_readback_stage(IssueMonitorScanStage::StatusCheckReadback, || {
+                    gwt_git::pr_status::try_fetch_pr_gate_readback(repo_path, pr)
+                })?;
+            let rollup = gate_readback.status_check_rollup;
+            let head = gate_readback.head_sha.unwrap_or_default();
+            let mergeability = gate_readback.merge.mergeability;
             let body = issues
                 .iter()
                 .find(|issue| issue.number == issue_number)
@@ -3825,6 +3863,9 @@ fn advance_one_autonomous_issue(
             // environment fact about the launch, and Issue #3944 AC-1 reserves
             // the retry counter for the agent's own failures.
             let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
+            if matches!(routed, crate::issue_monitor_gate::GateAction::WaitForCi) {
+                CI_WAIT_HOLDS.insert(ci_wait_hold_key(repo_path, pr), Instant::now(), ());
+            }
             // Issue #5876 T-4a: a transient required CI failure gets one
             // persisted failed-jobs retry before it can create a fix generation.
             // Review/acceptance/head/mergeability failures retain their routing.
@@ -10292,12 +10333,8 @@ exit 0
 case "$*" in
   *repos/owner/repo/branches/develop/protection)
     printf '%s\n' '{"required_status_checks":{"contexts":["Rust"]},"allow_force_pushes":{"enabled":false}}' ;;
-  'pr view 7 --json statusCheckRollup')
-    printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}]}' ;;
-  'pr view 7 --json headRefOid')
-    printf '%s\n' '{"headRefOid":"abc123"}' ;;
-  'pr view 7 --json state,mergeable,mergeStateStatus')
-    printf '%s\n' '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
+  'pr view 7 --json statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus')
+    printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}],"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   'api /repos/owner/repo/actions/runs/90')
     cat "$GWT_TEST_CI_RERUN_FIXTURES/run.json" ;;
   *) printf '%s\n' "unexpected gh call: $*" >&2; exit 1 ;;
@@ -10411,6 +10448,27 @@ esac
 mod remote_read_cache_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn ci_wait_hold_skips_reviewing_rereads_only_in_timer_scans() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let now = Instant::now();
+        CI_WAIT_HOLDS.insert(ci_wait_hold_key(repo, 7), now, ());
+        assert!(
+            !ci_wait_hold_active(repo, 7, now),
+            "manual scans read fresh"
+        );
+        let _timer =
+            gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+        assert!(ci_wait_hold_active(repo, 7, now));
+        assert!(!ci_wait_hold_active(repo, 8, now), "other PRs still read");
+        assert!(!ci_wait_hold_active(
+            repo,
+            7,
+            now + ISSUE_MONITOR_CI_WAIT_RECHECK + Duration::from_secs(1)
+        ));
+    }
 
     #[test]
     fn optional_readback_budget_deferrals_do_not_become_scan_errors() {
