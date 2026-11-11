@@ -4603,50 +4603,59 @@ pub fn heal_missing_generation_publication(
             Err(_) => GenerationPublicationHeal::NotApplicable,
         });
     }
-    with_generation_activation_leases(worktree, owner, |context| {
-        let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
-            return Ok(GenerationPublicationHeal::NoLedger);
-        };
-        if crate::cli::trusted_store::read_from_resolved_dir(
-            &context.worktree_trusted_dir,
-            GENERATION_POINTER_FILE,
-        )?
-        .is_some()
-        {
-            // Another writer published while we waited for the leases.
-            return Ok(match load_generation_ledger_from_context(context) {
-                Ok(Some(_)) => GenerationPublicationHeal::AlreadyPublished,
-                Ok(None) => GenerationPublicationHeal::NoLedger,
-                Err(_) => GenerationPublicationHeal::NotApplicable,
-            });
-        }
-        let current = ledger.current_generation().ok_or_else(|| {
-            invalid_generation_data("execution generation ledger current id is missing")
-        })?;
-        if current.identity.worktree_binding_hash != context.worktree_binding_hash {
-            return Ok(GenerationPublicationHeal::ForeignWorktree);
-        }
-        validate_generation_activation_owner(context, true)?;
-        let projection = ledger.effective_projection_for(current).to_string();
-        write_execution_projection(context, &projection)?;
-        write_generation_pointer(context, &ledger, &projection)?;
-        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
-            invalid_generation_data("generation publication heal lost the owner ledger")
-        })?;
-        if readback != ledger {
-            return Err(invalid_generation_data(
-                "generation publication heal readback does not match the owner ledger",
-            ));
-        }
-        tracing::info!(
-            owner_kind = owner.kind.as_str(),
-            owner_number = owner.number,
-            generation_id = %current.identity.generation_id,
-            worktree = %context.worktree.display(),
-            "republished lost execution generation pointer/projection from the owner ledger"
-        );
-        Ok(GenerationPublicationHeal::Republished)
-    })
+    with_generation_activation_leases(
+        worktree,
+        owner,
+        heal_missing_generation_publication_under_lease,
+    )
+}
+
+fn heal_missing_generation_publication_under_lease(
+    context: &GenerationTransactionContext,
+) -> io::Result<GenerationPublicationHeal> {
+    let owner = context.owner;
+    let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+        return Ok(GenerationPublicationHeal::NoLedger);
+    };
+    if crate::cli::trusted_store::read_from_resolved_dir(
+        &context.worktree_trusted_dir,
+        GENERATION_POINTER_FILE,
+    )?
+    .is_some()
+    {
+        // Another writer published while we waited for the leases.
+        return Ok(match load_generation_ledger_from_context(context) {
+            Ok(Some(_)) => GenerationPublicationHeal::AlreadyPublished,
+            Ok(None) => GenerationPublicationHeal::NoLedger,
+            Err(_) => GenerationPublicationHeal::NotApplicable,
+        });
+    }
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    if current.identity.worktree_binding_hash != context.worktree_binding_hash {
+        return Ok(GenerationPublicationHeal::ForeignWorktree);
+    }
+    validate_generation_activation_owner(context, true)?;
+    let projection = ledger.effective_projection_for(current).to_string();
+    write_execution_projection(context, &projection)?;
+    write_generation_pointer(context, &ledger, &projection)?;
+    let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+        invalid_generation_data("generation publication heal lost the owner ledger")
+    })?;
+    if readback != ledger {
+        return Err(invalid_generation_data(
+            "generation publication heal readback does not match the owner ledger",
+        ));
+    }
+    tracing::info!(
+        owner_kind = owner.kind.as_str(),
+        owner_number = owner.number,
+        generation_id = %current.identity.generation_id,
+        worktree = %context.worktree.display(),
+        "republished lost execution generation pointer/projection from the owner ledger"
+    );
+    Ok(GenerationPublicationHeal::Republished)
 }
 
 pub fn current_generation_identity(
@@ -17055,12 +17064,26 @@ fn recover_audited_repair_workspace_commit(
                     "execution repair Workspace audit has no materialized authority",
                 )
             })?;
+        if ledger.current_generation_id != audit.new_generation_id {
+            return Err(generation_conflict(
+                "execution repair Workspace authority was superseded; inspect execution.status",
+            ));
+        }
         if gwt_core::repo_hash::detect_repo_hash(&recovery.worktree_path)
             != gwt_core::repo_hash::detect_repo_hash(worktree)
         {
             return Err(generation_conflict(
                 "execution repair Workspace target repository changed",
             ));
+        }
+        match heal_missing_generation_publication_under_lease(context)? {
+            GenerationPublicationHeal::AlreadyPublished
+            | GenerationPublicationHeal::Republished => {}
+            _ => {
+                return Err(generation_conflict(
+                    "execution repair Workspace publication changed; inspect execution.status",
+                ));
+            }
         }
         resume_audited_repair_session_binding(
             &target,
@@ -17111,7 +17134,12 @@ fn resume_audited_repair_session_binding(
                     && binding.repo_hash == repo_hash
                     && binding.owner_number == owner.number
                     && binding.owner_kind == owner.kind.as_str()
-                    && binding.identity == identity
+                    && execution_binding_authorizes_lifecycle_descendant(
+                        ledger,
+                        generation,
+                        session_id,
+                        &binding.identity,
+                    )
             }) {
                 return Ok(());
             }
@@ -17164,7 +17192,8 @@ fn pm_repair_workspace_recoveries(
         }
         let root = dunce::canonicalize(root)?;
         let event_root = dunce::canonicalize(&session.worktree_path)?;
-        if gwt_core::repo_hash::detect_repo_hash(&root) != Some(repo.clone())
+        if gwt_core::repo_hash::detect_repo_identity(&root).map(|identity| identity.hash)
+            != Some(repo.clone())
             || gwt_core::repo_hash::detect_repo_hash(&event_root) != Some(repo.clone())
         {
             return Err(generation_conflict(
@@ -22072,6 +22101,17 @@ mod tests {
             .as_deref()
             .is_some_and(|id| id.starts_with("startup-active-reaper-v1:")));
         assert!(!event.reason.trim().is_empty());
+        assert_eq!(fs::read(&session_path).unwrap(), session_bytes);
+        with_generation_activation_leases(worktree.path(), owner, |_| {
+            resume_audited_repair_session_binding(
+                worktree.path(),
+                owner,
+                &ledger,
+                ledger.current_generation().unwrap(),
+                None,
+            )
+        })
+        .expect("an already-published Session binding survives its own lifecycle transition");
         assert_eq!(fs::read(&session_path).unwrap(), session_bytes);
         let authority_after_first = generation_authority_bytes(worktree.path(), owner);
         #[cfg(unix)]
@@ -32642,10 +32682,51 @@ exit 1
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _runtime_env = unset_live_session_env();
             let pm = tempfile::tempdir().unwrap();
-            let target = tempfile::tempdir().unwrap();
-            for path in [pm.path(), target.path()] {
-                crate::cli::trusted_store::init_git_repo_with_origin(path);
+            crate::cli::trusted_store::init_git_repo_with_origin(pm.path());
+            let workspace_home = tempfile::tempdir().unwrap();
+            let bare = workspace_home.path().join("repo.git");
+            let target = tempfile::Builder::new()
+                .prefix("target-")
+                .tempdir_in(workspace_home.path())
+                .unwrap();
+            for args in [
+                vec![
+                    "clone",
+                    "--bare",
+                    pm.path().to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
+                vec![
+                    "-C",
+                    bare.to_str().unwrap(),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.com/t/trusted-store.git",
+                ],
+                vec![
+                    "-C",
+                    bare.to_str().unwrap(),
+                    "worktree",
+                    "add",
+                    "-b",
+                    "repair-target",
+                    target.path().to_str().unwrap(),
+                ],
+            ] {
+                assert!(
+                    gwt_core::process::run_git_logged(&args, Some(workspace_home.path()))
+                        .unwrap()
+                        .status
+                        .success()
+                );
             }
+            assert!(gwt_core::repo_hash::detect_repo_hash(workspace_home.path()).is_none());
+            assert_eq!(
+                gwt_core::repo_hash::detect_repo_identity(workspace_home.path())
+                    .map(|identity| identity.hash),
+                gwt_core::repo_hash::detect_repo_hash(target.path())
+            );
             let owner = generation_owner();
             let mut active = active_record("previous-holder");
             active.owner_number = owner.number;
@@ -32671,7 +32752,9 @@ exit 1
             );
             let sessions = gwt_core::paths::gwt_sessions_dir();
             let session_path = sessions.join(format!("{}.toml", request.initial_session_id));
-            let session = gwt_agent::Session::load(&session_path).unwrap();
+            let mut session = gwt_agent::Session::load(&session_path).unwrap();
+            session.project_state_root = Some(workspace_home.path().to_path_buf());
+            session.save(&sessions).unwrap();
             let session_before = fs::read(&session_path).unwrap();
             let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
                 .unwrap()
@@ -32888,7 +32971,8 @@ exit 1
                     pr_state: None,
                 },
             );
-            gwt_core::workspace_projection::transact_workspace_state_with_commit(
+            gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
+                workspace_home.path(),
                 target.path(),
                 &request.operation_id,
                 |_, _, _| Ok(((), vec![event])),
@@ -32936,6 +33020,16 @@ exit 1
             );
             assert_eq!(fs::read(&session_path).unwrap(), session_before);
             assert_eq!(fs::read(&marker).unwrap(), marker_before);
+            // An earlier crash can leave only the committed owner ledger,
+            // before either worktree publication artifact is installed.
+            for path in [
+                context.worktree_trusted_dir.join("execution-control.json"),
+                context.worktree_trusted_dir.join(GENERATION_POINTER_FILE),
+                state_path(target.path()),
+                generation_pointer_path(target.path()),
+            ] {
+                fs::remove_file(path).unwrap();
+            }
             let mut changed = session.clone();
             changed.status = gwt_agent::AgentStatus::Stopped;
             changed.save(&sessions).unwrap();
