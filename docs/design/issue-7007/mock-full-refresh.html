@@ -287,9 +287,9 @@
   <body>
     <div class="wrap">
       <header class="doc">
-        <p class="doc-kicker">gwt GUI Redesign — Full Mock</p>
+        <p class="doc-kicker">gwt GUI 刷新 — 全画面モック</p>
         <h1>gwt 全画面刷新モック（PM共通版）</h1>
-        <p class="lead">現行 gwt の全画面（PM画面・Issues・Works・Agents・Board・Settings・Notifications・ステータスバー）を、<strong>「端末に1人の共通PM」</strong>を前提に作り直したモックです。各画面で Before（2026-11-10 に Mac 実機 gwt v9.157.0 を巡回して実測した現行の再現）と After（刷新案）を切り替えて見比べられます。モック内の UI 文言はすべて英語、説明文は日本語です。</p>
+        <p class="lead">現行 gwt の全画面（PM画面・Issues・Works・Agents・Board・Settings・Notifications・ステータスバー）を、<strong>「端末に1人の共通PM」</strong>を前提に作り直したモックです。各画面で Before（2026-11-10 に Mac 実機 gwt v9.157.0 を巡回して実測した現行の再現）と After（刷新案）を切り替えて見比べられます。モック内の UI 文言・説明文はすべて日本語です。なお Before 側は現行製品（英語 UI）の再現ですが、内容評価を優先して、本モックでは日本語に置き換えて描いています。</p>
         <p class="lead" style="margin-top:10px"><strong>網羅監査の反映（第3便）：</strong>現行 gwt の全機能と既存 Issue の決定を突き合わせた監査で見つかった抜け（大項目1件＋個別58件）を、この便で各面に戻しました。あわせて、プロジェクト単位の画面（Project 面）を新設し、Settings は4タブ化、利用量は既定表示に変更しています。既存の決定と衝突する点（#7053 AC-2 の Board のプロジェクト単位分離、#7007 FR-001／T-019 の「既存機能を失わせない」）は、該当面の説明に明記して隠していません。未決の論点は各面に「要判断」として残してあります。</p>
         <p class="lead" style="margin-top:10px"><strong>オーナー決定の反映（第4便）：</strong>第3便で「要判断」として残した論点は、オーナー決定（2026-11-12）で全件決まりました——手動 Reassign はメンバー詳細に残す／コマンドパレットは入れない／Kanban は Project 面に置く／Hub は Home に統合する／実行ポリシーは見える形で出す／Issue は画面方式に寄せ窓モデルは持たない／Board は完全にプロジェクト単位にする（横断 Board 面は廃止）。各面の「要判断」表記は決定済みの表現に置き換えてあります。</p>
         <p class="lead" style="margin-top:10px"><strong>モバイルの扱い：</strong>モバイルの受け口は <strong>SPEC #6476</strong> で基盤段階にあり、モバイル最適化の本実装は #6476 側の範囲です。この #7007 モックでは全画面のモバイル版は作らず、核になる3面（<strong>Home／Decide／Ask</strong>）に電話幅（約390px）のバリアントを添えて、レイアウト方針——左レールを下部ナビに置き換える、カードは1カラム縦積み、横スクロールなし——だけを示します。</p>
@@ -321,37 +321,37 @@
       <h2 style="font-size:19px;margin:34px 0 10px">言葉の置き換え（内部用語 → 人の言葉）</h2>
       <table class="vocab">
         <tr><th style="width:34%">Before（現行の表示）</th><th>After（刷新後の表示）</th><th style="width:30%">意図</th></tr>
-        <tr><td class="before">MONITOR Run Q9 A3/6</td><td class="after">Watching all projects</td><td>監視は「見守っている」事実だけ伝える</td></tr>
-        <tr><td class="before">RUN 3 · BLOCK 84（タブタイトル）</td><td class="after">gwt — 9 running · 5 need you</td><td>略号をやめ、読める言葉で</td></tr>
-        <tr><td class="before">2026-11-10T09:37:26.292327+00:00</td><td class="after">9 min ago / Started 12:04</td><td>相対時刻を主、絶対時刻は補助</td></tr>
-        <tr><td class="before">Branch work/issue-5016 · Ahead of develop 75</td><td class="after">Changes: 6 files · checks passing</td><td>作業の実態を人の言葉で</td></tr>
+        <tr><td class="before">モニター実行中 Q9 A3/6</td><td class="after">全プロジェクトを見守り中</td><td>監視は「見守っている」事実だけ伝える</td></tr>
+        <tr><td class="before">実行 3 · ブロック 84（タブタイトル）</td><td class="after">gwt — 実行中 9 · 判断待ち 5</td><td>略号をやめ、読める言葉で</td></tr>
+        <tr><td class="before">2026-11-10T09:37:26.292327+00:00</td><td class="after">9分前 / 12:04 開始</td><td>相対時刻を主、絶対時刻は補助</td></tr>
+        <tr><td class="before">ブランチ work/issue-5016 · develop より 75 先行</td><td class="after">変更： 6ファイル · チェック： 通過</td><td>作業の実態を人の言葉で</td></tr>
         <tr><td class="before">manual-profile-v1:9f2c…（内部ID）</td><td class="after">（表示しない）</td><td>内部 ID は UI に出さない</td></tr>
-        <tr><td class="before">NEEDS HUMAN</td><td class="after">Waiting for your decision</td><td>誰が・何をすべきかまで言う</td></tr>
-        <tr><td class="before">Select issue for queue move</td><td class="after">Move up / Move down（順番の変更）</td><td>操作の名前を操作の内容に合わせる</td></tr>
-        <tr><td class="before">− Rest member</td><td class="after">Pause this agent</td><td>意味の取れない操作名をなくす</td></tr>
+        <tr><td class="before">人間の対応が必要</td><td class="after">あなたの判断待ち</td><td>誰が・何をすべきかまで言う</td></tr>
+        <tr><td class="before">キュー移動する Issue を選択</td><td class="after">上へ / 下へ（順番の変更）</td><td>操作の名前を操作の内容に合わせる</td></tr>
+        <tr><td class="before">− メンバーを休止</td><td class="after">このエージェントを一時停止</td><td>意味の取れない操作名をなくす</td></tr>
         <tr><td class="before">Agent（道具の意味で使われていた）</td><td class="after">Tool（＝ Codex・Claude Code など、仕事をする道具／プロバイダ）</td><td rowspan="2">「エージェント」の2義（道具／担当者）がメンバー名と被って混同を招くため、道具は Tool、担当する実体は Agent に分ける</td></tr>
         <tr><td class="before">Member（メンバー）</td><td class="after">Agent（＝ 名前を持ってタスクを担当する実体。メンバーと PM）</td></tr>
-        <tr><td class="before">Cost unavailable: per-session USD is not supported</td><td class="after">（取れていない指標は出さない）</td><td>測れていない数字で画面を埋めない</td></tr>
-<tr><td class="before">Update available — apply after agents exit</td><td class="after">Update ready — restart to apply (running work is drained first)</td><td>本体の更新も「何が起きて、どう進むか」を人の言葉で</td></tr>
-        <tr><td class="before">Resize failed — owner health: Some(Degraded); owner is not Healthy…</td><td class="after">Couldn't reach the gwt workspace. Retried 10 times. → What you can do: …</td><td>何が起きて、次に何をすればいいかを書く</td></tr>
+        <tr><td class="before">コストは表示できません：セッション単位の USD 集計には対応していません</td><td class="after">（取れていない指標は出さない）</td><td>測れていない数字で画面を埋めない</td></tr>
+<tr><td class="before">更新があります — エージェントが終了したら適用</td><td class="after">更新の準備完了 — 再起動して適用（実行中の作業は先に drain します）</td><td>本体の更新も「何が起きて、どう進むか」を人の言葉で</td></tr>
+        <tr><td class="before">サイズ変更に失敗 — owner health: Some(Degraded); owner is not Healthy…</td><td class="after">gwt のワークスペースに接続できませんでした。10回再試行しました。→ できること： …</td><td>何が起きて、次に何をすればいいかを書く</td></tr>
       </table>
 
-      <nav class="screens" aria-label="Screens">
+      <nav class="screens" aria-label="画面一覧">
         <div class="row">
-          <a href="#home">Home</a>
-          <a href="#ask">Ask / Chat</a>
-          <a href="#progress">Progress</a>
-          <a href="#tasks">Tasks</a>
-          <a href="#issues">Issues</a>
-          <a href="#decide">Decide</a>
-          <a href="#log">Log / Reports</a>
-          <a href="#works">Works</a>
-          <a href="#agents">Agents</a>
-          <a href="#notifications">Notifications</a>
-          <a href="#settings">Settings</a>
-          <a href="#project">Project</a>
-          <a href="#statusbar">Status bar</a>
-          <span class="master"><span>All screens:</span>
+          <a href="#home">ホーム</a>
+          <a href="#ask">相談 / チャット</a>
+          <a href="#progress">進捗</a>
+          <a href="#tasks">タスク</a>
+          <a href="#issues">Issue</a>
+          <a href="#decide">判断</a>
+          <a href="#log">ログ / レポート</a>
+          <a href="#works">作業中</a>
+          <a href="#agents">エージェント</a>
+          <a href="#notifications">通知</a>
+          <a href="#settings">設定</a>
+          <a href="#project">プロジェクト</a>
+          <a href="#statusbar">ステータスバー</a>
+          <span class="master"><span>全画面：</span>
             <span class="seg" style="margin:0">
               <button type="button" data-master="before">Before</button>
               <button type="button" data-master="after" aria-pressed="true">After</button>
@@ -362,7 +362,7 @@
 
       <!-- ================= Home ================= -->
       <section class="screen" id="home" data-mode="after">
-        <h2>Home <span class="en">Home — the whole device, at a glance</span></h2>
+        <h2>ホーム <span class="en">ホーム — 端末全体をひと目で</span></h2>
         <p class="why">現行 gwt には「端末全体の今」を出す画面がなく、起動直後に目に入るのはプロジェクト単体の Works とトークン数・コストでした（<span class="prob">問題1</span>）。After では、共通PMが全プロジェクトを横断した要約を最初に出します。<strong>「今どうなっているか」が最初の1画面で分かる</strong>ことが Home の役割です。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -370,54 +370,54 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-tabs"><span>Chat</span><span>Tasks</span><span>Reports</span><span class="on">Execution log</span></div>
+            <div class="b-tabs"><span>チャット</span><span>タスク</span><span>レポート</span><span class="on">実行ログ</span></div>
             <div class="b-kpi">
-              <span class="k">Fleet tokens/min 1.9M</span><span class="k">Tokens today 48,213,904</span><span class="k">Cost —</span><span class="k">WORK 3</span><span class="k">RUNNING 4 · 3 inline</span>
+              <span class="k">全体トークン/分 1.9M</span><span class="k">今日のトークン 48,213,904</span><span class="k">コスト —</span><span class="k">作業 3</span><span class="k">実行中 4 · インライン 3</span>
             </div>
-            <div class="b-warn">Cost unavailable: per-session USD is not supported</div>
-            <div class="b-warn">Partial: measurements are incomplete</div>
-            <div class="b-card"><span class="hd">Works — project: gwt only</span><br>issue-5016 · manual-profile-v1:9f2c41… · Branch work/issue-5016 · Ahead of develop 75 · Verification —<br>2026-11-10T09:37:26.292327+00:00</div>
-            <div class="b-card">issue-4499 · MONITOR steering requested · 2026-11-10T09:36:58.104551+00:00</div>
-            <p class="b-note">// This window is the gwt project only. llmlb, event-magazine, unity-cli, 155-Demi, KeibaDB and 160-Idina each have their own window — and their own PM. Nothing shows the whole device.</p>
+            <div class="b-warn">コストは表示できません：セッション単位の USD 集計には対応していません</div>
+            <div class="b-warn">一部のみ表示：計測が不完全です</div>
+            <div class="b-card"><span class="hd">作業 — プロジェクト： gwt のみ</span><br>issue-5016 · manual-profile-v1:9f2c41… · ブランチ work/issue-5016 · develop より 75 先行 · 検証 —<br>2026-11-10T09:37:26.292327+00:00</div>
+            <div class="b-card">issue-4499 · モニターの操作要求 · 2026-11-10T09:36:58.104551+00:00</div>
+            <p class="b-note">// このウィンドウは gwt プロジェクトだけのものです。llmlb、event-magazine、unity-cli、155-Demi、KeibaDB、160-Idina にはそれぞれ別のウィンドウがあり、PM も別々です。端末全体を見せる画面はありません。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 9 running · 5 need you</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 実行中 9 · 判断待ち 5</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Home"></div>
+            <div class="rail-slot" data-active="ホーム"></div>
             <div class="content">
-              <p class="h-big">Good afternoon. Here's where everything stands.</p>
-              <p class="h-sub">Wednesday, Nov 11 · Updated just now · Your PM is watching all 7 projects on this device.</p>
+              <p class="h-big">こんにちは。現在の状況はこうなっています。</p>
+              <p class="h-sub">11月11日（水）· たった今更新 · あなたの PM がこの端末の全7プロジェクトを見守っています。</p>
               <div class="stat-row">
-                <div class="stat"><div class="num">9</div><div class="lab">Running now, across 7 projects</div></div>
-                <div class="stat warn"><div class="num">5</div><div class="lab">Waiting for your decision</div></div>
-                <div class="stat bad"><div class="num">3</div><div class="lab">Blocked and needing help</div></div>
-                <div class="stat"><div class="num">12</div><div class="lab">Finished today</div></div>
+                <div class="stat"><div class="num">9</div><div class="lab">実行中（全7プロジェクト）</div></div>
+                <div class="stat warn"><div class="num">5</div><div class="lab">あなたの判断待ち</div></div>
+                <div class="stat bad"><div class="num">3</div><div class="lab">詰まっていて手助けが必要</div></div>
+                <div class="stat"><div class="num">12</div><div class="lab">今日完了</div></div>
               </div>
-              <p class="h-sec">Needs your decision first</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">gwt, llmlb and KeibaDB have changes that aren't committed or pushed yet.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn amber" type="button">Review</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Plan ready: “Home &amp; Decide screens” (#7007)</div><div class="d">Approve it and implementation restarts.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">A task has run 3 h 40 m with no progress</div><div class="d">Stop it, or let it keep running?</div></div><span class="badge b-wait">Waiting for you</span><button class="btn" type="button">Open</button></div>
-              <p class="rel">See all 5 in <b>Decide</b> →</p>
-              <p class="h-sec">Blocked</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Checks are failing on a change (#7047)</div><div class="d">4 checks failing for 2 h. A fix is being prepared; nothing needed from you yet.</div></div><span class="badge b-block">Blocked</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import can't read the source file (#121)</div><div class="d">The file format changed. Your call is waiting in Decide.</div></div><span class="badge b-block">Blocked</span></div>
-              <p class="rel">+ 1 more blocked: event-magazine (publishing) — see Progress</p>
-<div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><span class="badge b-wait">Update</span><div class="grow"><div class="t">gwt update ready — version 9.162.0</div><div class="d">Applying restarts gwt. Your running work is drained first — agents are stopped safely and their sessions are kept — and the update is applied after the restart.</div></div><div class="btnrow"><button class="btn amber" type="button">Restart &amp; apply</button><button class="btn ghost" type="button">Later</button></div></div>
-              <p class="h-sec">Projects</p>
+              <p class="h-sec">まず判断が要るもの</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>全プロジェクト</span><div class="grow"><div class="t">未保存の作業が3プロジェクトにあります</div><div class="d">gwt、llmlb、KeibaDB に、まだコミットもプッシュもされていない変更があります。</div></div><span class="badge b-wait">あなた待ち</span><button class="btn amber" type="button">確認する</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">計画ができました：「ホーム＆判断の画面」（#7007）</div><div class="d">承認すると実装が再開します。</div></div><span class="badge b-wait">あなた待ち</span><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">3時間40分進んでいないタスクがあります</div><div class="d">止めますか、それとも続けさせますか？</div></div><span class="badge b-wait">あなた待ち</span><button class="btn" type="button">開く</button></div>
+              <p class="rel">5件すべてを<b>判断</b>で見る →</p>
+              <p class="h-sec">詰まっているもの</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">ある変更でチェックが失敗しています（#7047）</div><div class="d">チェック4件が2時間失敗し続けています。修正を準備中です。今はあなたの対応は要りません。</div></div><span class="badge b-block">詰まり</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">日次の取り込みが元のファイルを読めません（#121）</div><div class="d">ファイル形式が変わりました。判断は「判断」で待っています。</div></div><span class="badge b-block">詰まり</span></div>
+              <p class="rel">詰まりはあと1件：event-magazine（公開処理）— 進捗で見る</p>
+<div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><span class="badge b-wait">更新</span><div class="grow"><div class="t">gwt の更新準備ができました — バージョン 9.162.0</div><div class="d">適用すると gwt が再起動します。実行中の作業は先に安全に終わらせ（エージェントは安全に止まり、セッションは保持されます）、再起動後に更新が適用されます。</div></div><div class="btnrow"><button class="btn amber" type="button">再起動して適用</button><button class="btn ghost" type="button">あとで</button></div></div>
+              <p class="h-sec">プロジェクト</p>
               <div class="projgrid">
-                <div class="projrow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="meta">Policy: Running · 4 running · 1 blocked · 9 waiting to start</span></div>
-                <div class="projrow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="meta">Policy: Running · 2 running · 3 waiting to start</span></div>
-                <div class="projrow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="meta">Policy: Running · 1 running · 1 blocked · 2 waiting</span></div>
-                <div class="projrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="meta">Policy: Running · 1 running · 1 waiting to start</span></div>
-                <div class="projrow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="meta">Policy: Running · 1 running · 1 blocked · 2 waiting</span></div>
-                <div class="projrow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="meta idle">Policy: Waiting · Idle · 1 waiting to start</span></div>
-                <div class="projrow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="meta idle">Policy: Stopped · Idle · nothing waiting</span><button class="btn" type="button">Open project</button></div>
-<p class="h-sec">Open a project</p>
-<div class="rowitem"><div class="grow"><div class="t">Open, clone, or close a project</div><div class="d">Recently opened: gwt · llmlb · KeibaDB. “Open project” on a row above enters that project&rsquo;s own screen — its issues, works, agents, board and settings in one place. Closing a project waits for its agents to shut down first.</div></div><div class="btnrow"><button class="btn" type="button">Open…</button><button class="btn" type="button">Clone from GitHub</button></div></div>
+                <div class="projrow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="meta">ポリシー： 実行中 · 実行中 4 · 詰まり 1 · 開始待ち 9</span></div>
+                <div class="projrow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="meta">ポリシー： 実行中 · 実行中 2 · 開始待ち 3</span></div>
+                <div class="projrow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="meta">ポリシー： 実行中 · 実行中 1 · 詰まり 1 · 待ち 2</span></div>
+                <div class="projrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="meta">ポリシー： 実行中 · 実行中 1 · 開始待ち 1</span></div>
+                <div class="projrow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="meta">ポリシー： 実行中 · 実行中 1 · 詰まり 1 · 待ち 2</span></div>
+                <div class="projrow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="meta idle">ポリシー： 待機 · 待機中 · 開始待ち 1</span></div>
+                <div class="projrow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="meta idle">ポリシー： 停止 · 待機中 · 待ちなし</span><button class="btn" type="button">プロジェクトを開く</button></div>
+<p class="h-sec">プロジェクトを開く</p>
+<div class="rowitem"><div class="grow"><div class="t">プロジェクトを開く・取り込む・閉じる</div><div class="d">最近開いたもの： gwt · llmlb · KeibaDB。上の行の「プロジェクトを開く」で、そのプロジェクト専用の画面（Issue・作業・エージェント・ボード・設定が1か所に集まった画面）に入ります。プロジェクトを閉じるときは、先にエージェントが終了するのを待ちます。</div></div><div class="btnrow"><button class="btn" type="button">開く…</button><button class="btn" type="button">GitHub から取り込む</button></div></div>
               </div>
             </div>
           </div>
@@ -429,41 +429,41 @@
           <li><strong>タブタイトルも読める言葉に。</strong>「RUN 3 · BLOCK 84」ではなく「9 running · 5 need you」（問題2）。</li>
           <li><strong>プロジェクトは主役ではなく文脈。</strong>横断の要約が主で、プロジェクト別の内訳は下段に添える。</li>
 <li><strong>プロジェクトを開く入口は Home に統合した（監査 A-2／オーナー決定）。</strong>「Open project」でそのプロジェクト専用の画面（新設の Project 面）へ入り、開く／Clone／閉じるの操作もここに置く。プロジェクトを開く入口は Home に統合され、現行 Hub（<span style="font-family:var(--mono)">/</span>）のような独立した入口面は持たない（旧 Y-4 はこの形で決定）。下の「Open a project」節がその入口そのものである。</li>
-<li><strong>プロジェクト行に実行ポリシーの状態も出す（オーナー決定）。</strong>各プロジェクトの実効状態（Policy: Running／Waiting／Stopped）を Projects の行に添え、「どのプロジェクトが動いていて、どれが止まっているか」が Home で分かるようにする。状態の切替（Continue／Stop）自体は Project 面で行う。</li>
+<li><strong>プロジェクト行に実行ポリシーの状態も出す（オーナー決定）。</strong>各プロジェクトの実効状態（ポリシー： 実行中／Waiting／Stopped）を Projects の行に添え、「どのプロジェクトが動いていて、どれが止まっているか」が Home で分かるようにする。状態の切替（Continue／Stop）自体は Project 面で行う。</li>
 <li><strong>gwt 本体の更新も Home に出す。</strong>更新が用意できたら「Update ready — restart to apply」の行を出し、適用時に稼働中の作業が安全に止められてから再起動される（drain される）旨を1行で伝える。更新ポリシー自体は Settings の App updates で変える（監査 B-1）。</li>
         </ul>
 
         <div class="mobile-variant view-a">
-          <h3>Mobile <span class="en">Home on a phone — about 390 px wide</span></h3>
+          <h3>モバイル <span class="en">電話でのホーム — 幅 約390px</span></h3>
           <p class="mobile-note">電話幅では左レールが消え、主要5面への<strong>下部ナビ</strong>に置き換わります。最上部にはステータスバーの要約（実行中・詰まり・判断待ち）が常に出て、要約カードは<strong>1カラム縦積み</strong>で上から順に読めます。判断待ちを先頭に置く順序はデスクトップと同じです。</p>
           <div class="phone">
-            <div class="phone-status"><span class="dot"></span><span><b>Your PM</b> · <b>9</b> running · <b>3</b> blocked · <b class="you">5 waiting for your decision</b></span><span class="r">just now</span></div>
+            <div class="phone-status"><span class="dot"></span><span><b>あなたの PM</b> · <b>9</b> 実行中 · <b>3</b> 詰まり · <b class="you">判断待ち 5</b></span><span class="r">たった今</span></div>
             <div class="phone-body">
-              <p class="h-big">Good afternoon.</p>
-              <p class="h-sub">Wednesday, Nov 11 · Your PM is watching all 7 projects on this device.</p>
+              <p class="h-big">こんにちは。</p>
+              <p class="h-sub">11月11日（水）· あなたの PM がこの端末の全7プロジェクトを見守っています。</p>
               <div class="stat-row">
-                <div class="stat warn"><div class="num">5</div><div class="lab">Waiting for your decision</div></div>
-                <div class="stat"><div class="num">9</div><div class="lab">Running now, across 7 projects</div></div>
-                <div class="stat bad"><div class="num">3</div><div class="lab">Blocked and needing help</div></div>
-                <div class="stat"><div class="num">12</div><div class="lab">Finished today</div></div>
+                <div class="stat warn"><div class="num">5</div><div class="lab">あなたの判断待ち</div></div>
+                <div class="stat"><div class="num">9</div><div class="lab">実行中（全7プロジェクト）</div></div>
+                <div class="stat bad"><div class="num">3</div><div class="lab">詰まっていて手助けが必要</div></div>
+                <div class="stat"><div class="num">12</div><div class="lab">今日完了</div></div>
               </div>
-              <p class="h-sec">Needs your decision first</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">gwt, llmlb and KeibaDB have changes that aren't committed or pushed yet.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn amber" type="button">Review</button></div>
-              <p class="rel">See all 5 in <b>Decide</b> →</p>
-              <p class="h-sec">Blocked</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import can't read the source file (#121)</div><div class="d">The file format changed. Your call is waiting in Decide.</div></div><span class="badge b-block">Blocked</span></div>
-              <p class="rel">+ 2 more blocked — see Progress</p>
-              <p class="h-sec">Projects</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d">4 running · 1 blocked · 9 waiting to start</div></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d">2 running · 3 waiting to start</div></div></div>
-              <p class="rel">+ 5 more projects</p>
+              <p class="h-sec">まず判断が要るもの</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>全プロジェクト</span><div class="grow"><div class="t">未保存の作業が3プロジェクトにあります</div><div class="d">gwt、llmlb、KeibaDB に、まだコミットもプッシュもされていない変更があります。</div></div><span class="badge b-wait">あなた待ち</span><button class="btn amber" type="button">確認する</button></div>
+              <p class="rel">5件すべてを<b>判断</b>で見る →</p>
+              <p class="h-sec">詰まっているもの</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">日次の取り込みが元のファイルを読めません（#121）</div><div class="d">ファイル形式が変わりました。判断は「判断」で待っています。</div></div><span class="badge b-block">詰まり</span></div>
+              <p class="rel">詰まりはあと2件 — 進捗で見る</p>
+              <p class="h-sec">プロジェクト</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d">実行中 4 · 詰まり 1 · 開始待ち 9</div></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d">実行中 2 · 開始待ち 3</div></div></div>
+              <p class="rel">あと5プロジェクト</p>
             </div>
-            <nav class="phone-nav" aria-label="Main">
-              <a href="#" onclick="return false" class="on">Home</a>
-              <a href="#" onclick="return false">Ask</a>
-              <a href="#" onclick="return false">Decide<span class="cnt">5</span></a>
-              <a href="#" onclick="return false">Progress</a>
-              <a href="#" onclick="return false">More<span class="cnt gray">9</span></a>
+            <nav class="phone-nav" aria-label="メイン">
+              <a href="#" onclick="return false" class="on">ホーム</a>
+              <a href="#" onclick="return false">相談</a>
+              <a href="#" onclick="return false">判断<span class="cnt">5</span></a>
+              <a href="#" onclick="return false">進捗</a>
+              <a href="#" onclick="return false">その他<span class="cnt gray">9</span></a>
             </nav>
           </div>
           <ul class="points">
@@ -476,7 +476,7 @@
 
       <!-- ================= Ask / Chat ================= -->
       <section class="screen" id="ask" data-mode="after">
-        <h2>Ask / Chat <span class="en">Ask — one window to your PM</span></h2>
+        <h2>相談 / チャット <span class="en">相談 — PM への窓口はここだけ</span></h2>
         <p class="why">現行の Chat は PM の発言を表示するだけの<strong>読み取り専用ビュー</strong>で、ここから話しかけることはできません。しかも PM がプロジェクトごとに別々にいるため、横断の指示は窓を回って配る必要がありました（<span class="prob">問題11</span>）。After では、<strong>1つの入力窓から全プロジェクトへ頼める</strong>ことが画面の中心になります。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -484,37 +484,37 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-tabs"><span class="on">Chat</span><span>Tasks</span><span>Reports</span><span>Execution log</span></div>
-            <div class="b-card">PM (gwt): Steering applied to issue-4499.<br><span class="b-note">2026-11-10T09:37:26.292327+00:00</span></div>
-            <div class="b-card">PM (gwt): Queue reordered. 3 items moved.<br><span class="b-note">2026-11-10T09:12:03.881204+00:00</span></div>
-            <div class="b-ro">This chat is read-only — it only shows what this project's PM said. There is no input box. To ask for something, use each project's own controls. The PMs of llmlb, KeibaDB and the other projects cannot be reached from here at all.</div>
+            <div class="b-tabs"><span class="on">チャット</span><span>タスク</span><span>レポート</span><span>実行ログ</span></div>
+            <div class="b-card">PM（gwt）： issue-4499 に誘導を適用しました。<br><span class="b-note">2026-11-10T09:37:26.292327+00:00</span></div>
+            <div class="b-card">PM（gwt）： キューの順番を入れ替えました。3件移動。<br><span class="b-note">2026-11-10T09:12:03.881204+00:00</span></div>
+            <div class="b-ro">このチャットは読み取り専用です — このプロジェクトの PM が言ったことだけが表示されます。入力欄はありません。何か頼みたいときは、各プロジェクト専用の操作を使ってください。llmlb や KeibaDB など他のプロジェクトの PM には、ここからは一切届きません。</div>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Ask your PM</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — PM に相談</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Ask"></div>
+            <div class="rail-slot" data-active="相談"></div>
             <div class="content">
-              <p class="h-big">Ask your PM</p>
-              <p class="h-sub">One PM for this whole device. Ask once — the PM routes the work to the right project and reports back here.</p>
-<p class="rel" style="margin:-8px 0 14px">Looking for something specific instead? <b>Search</b> finds it across issues, discussions, docs, specs, files, reports and memory — a different door from asking your PM.</p>
+              <p class="h-big">PM に相談する</p>
+              <p class="h-sub">この端末の PM は1人だけ。1回頼めば、PM が適切なプロジェクトに仕事を回し、結果をここに報告します。</p>
+<p class="rel" style="margin:-8px 0 14px">何か特定のものを探しているなら？ <b>検索</b>なら Issue・議論・ドキュメント・仕様・ファイル・レポート・メモリを横断して見つけられます — PM に相談するとは別の入口です。</p>
               <div class="chat">
-                <div class="msg me"><div class="meta">You · just now</div>Before this machine gets wiped, make sure no unsaved work is left in any project.</div>
-                <div class="msg pm"><div class="meta">Your PM</div>Checked all 7 projects. I found unsaved work in <b>gwt</b> (2 tasks), <b>llmlb</b> (1) and <b>KeibaDB</b> (1). The other 4 projects are clean. Shall I commit and push everything?
-                  <div class="btnrow" style="margin-top:9px"><button class="btn primary" type="button">Commit &amp; push everything</button><button class="btn" type="button">Show me each one</button></div>
-                  <span class="route">Scope: All projects</span></div>
-                <div class="msg me"><div class="meta">You</div>Also — the retry change for the API timeouts. Pick that up next, please.</div>
-                <div class="msg pm"><div class="meta">Your PM</div>Done — filed as a task in <b>llmlb</b>: “Retry backoff for upstream timeouts” (#212), and it's already running. I'll report here when it finishes.
-                  <br><span class="route">Routed to: llmlb — from the topic of your message · tap to change</span></div>
+                <div class="msg me"><div class="meta">あなた · たった今</div>このマシンを初期化する前に、どのプロジェクトにも未保存の作業が残っていないか確認して。</div>
+                <div class="msg pm"><div class="meta">あなたの PM</div>全7プロジェクトを確認しました。未保存の作業が <b>gwt</b>（タスク2件）、<b>llmlb</b>（1件）、<b>KeibaDB</b>（1件）にありました。他の4プロジェクトは問題ありません。すべてコミット＆プッシュしますか？
+                  <div class="btnrow" style="margin-top:9px"><button class="btn primary" type="button">すべてコミット＆プッシュ</button><button class="btn" type="button">1件ずつ見せる</button></div>
+                  <span class="route">範囲： 全プロジェクト</span></div>
+                <div class="msg me"><div class="meta">あなた</div>それと、API タイムアウトのリトライの変更。次にそれを取り上げて。</div>
+                <div class="msg pm"><div class="meta">あなたの PM</div>了解です — <b>llmlb</b> のタスクとして登録しました：「上流タイムアウトのリトライ間隔」（#212）。すでに実行中です。終わったらここに報告します。
+                  <br><span class="route">振り分け先： llmlb — メッセージの内容から判断 · タップで変更</span></div>
               </div>
               <div class="composer">
-                <div class="scope"><span>To: <b>Your PM</b></span><button class="chip on" type="button">Scope: All projects ▾</button><span>or focus:</span>
-                  <button class="chip" type="button">gwt</button><button class="chip" type="button">llmlb</button><button class="chip" type="button">KeibaDB</button><button class="chip" type="button">More…</button></div>
-                <textarea placeholder="Ask for anything, across any project…"> </textarea>
-                <div class="send"><span class="rel">If you don't pick a project, the PM suggests one from what you write — and shows you the choice.</span><button class="btn primary" type="button">Send</button></div>
+                <div class="scope"><span>宛先： <b>あなたの PM</b></span><button class="chip on" type="button">範囲： 全プロジェクト ▾</button><span>絞り込むなら：</span>
+                  <button class="chip" type="button">gwt</button><button class="chip" type="button">llmlb</button><button class="chip" type="button">KeibaDB</button><button class="chip" type="button">その他…</button></div>
+                <textarea placeholder="どのプロジェクトのことでも頼めます…"> </textarea>
+                <div class="send"><span class="rel">プロジェクトを選ばなければ、PM が書いた内容から候補を提案し、その選択を必ず表示します。</span><button class="btn primary" type="button">送信</button></div>
               </div>
             </div>
           </div>
@@ -529,40 +529,40 @@
         </ul>
 
         <div class="mobile-variant view-a">
-          <h3>Mobile <span class="en">Ask on a phone — composer within thumb reach</span></h3>
+          <h3>モバイル <span class="en">電話での相談 — 入力欄は親指の届く範囲に</span></h3>
           <p class="mobile-note">電話幅では会話が縦に流れ、<strong>入力欄は画面の下部に固定</strong>されて親指の届く範囲に常駐します。スコープ切替は入力欄の上のチップに畳み、プロジェクトの選択肢はシートで開きます。送信ボタンは入力欄と同じ行の右端に置きます。</p>
           <div class="phone">
-            <div class="phone-status"><span class="dot"></span><span><b>Your PM</b> · <b>9</b> running · <b>3</b> blocked · <b class="you">5 waiting for your decision</b></span><span class="r">just now</span></div>
+            <div class="phone-status"><span class="dot"></span><span><b>あなたの PM</b> · <b>9</b> 実行中 · <b>3</b> 詰まり · <b class="you">判断待ち 5</b></span><span class="r">たった今</span></div>
             <div class="phone-body">
-              <p class="h-big">Ask your PM</p>
-              <p class="h-sub">One PM for this whole device. Ask once — the PM routes the work and reports back here.</p>
+              <p class="h-big">PM に相談する</p>
+              <p class="h-sub">この端末の PM は1人だけ。1回頼めば、PM が仕事を回し、結果をここに報告します。</p>
               <div class="chat">
-                <div class="msg me"><div class="meta">You · just now</div>Before this machine gets wiped, make sure no unsaved work is left in any project.</div>
-                <div class="msg pm"><div class="meta">Your PM</div>Checked all 7 projects. I found unsaved work in <b>gwt</b> (2 tasks), <b>llmlb</b> (1) and <b>KeibaDB</b> (1). The other 4 projects are clean. Shall I commit and push everything?
-                  <span class="route">Scope: All projects</span></div>
-                <div class="msg me"><div class="meta">You</div>Also — the retry change for the API timeouts. Pick that up next, please.</div>
-                <div class="msg pm"><div class="meta">Your PM</div>Done — filed as a task in <b>llmlb</b>: “Retry backoff for upstream timeouts” (#212), and it's already running. I'll report here when it finishes.
-                  <br><span class="route">Routed to: llmlb · tap to change</span></div>
+                <div class="msg me"><div class="meta">あなた · たった今</div>このマシンを初期化する前に、どのプロジェクトにも未保存の作業が残っていないか確認して。</div>
+                <div class="msg pm"><div class="meta">あなたの PM</div>全7プロジェクトを確認しました。未保存の作業が <b>gwt</b>（タスク2件）、<b>llmlb</b>（1件）、<b>KeibaDB</b>（1件）にありました。他の4プロジェクトは問題ありません。すべてコミット＆プッシュしますか？
+                  <span class="route">範囲： 全プロジェクト</span></div>
+                <div class="msg me"><div class="meta">あなた</div>それと、API タイムアウトのリトライの変更。次にそれを取り上げて。</div>
+                <div class="msg pm"><div class="meta">あなたの PM</div>了解です — <b>llmlb</b> のタスクとして登録しました：「上流タイムアウトのリトライ間隔」（#212）。すでに実行中です。終わったらここに報告します。
+                  <br><span class="route">振り分け先： llmlb · タップで変更</span></div>
               </div>
             </div>
             <div class="composer" style="margin:0;border:0;border-top:1px solid var(--line2);border-radius:0">
-              <div class="scope"><button class="chip on" type="button">Scope: All projects ▾</button><button class="chip" type="button">gwt</button><button class="chip" type="button">More…</button></div>
+              <div class="scope"><button class="chip on" type="button">範囲： 全プロジェクト ▾</button><button class="chip" type="button">gwt</button><button class="chip" type="button">その他…</button></div>
               <div style="display:flex;gap:8px;align-items:flex-end">
-                <textarea placeholder="Ask for anything, across any project…" style="flex:1;min-height:40px"> </textarea>
-                <button class="btn primary" type="button" style="min-height:44px;padding:9px 18px">Send</button>
+                <textarea placeholder="どのプロジェクトのことでも頼めます…" style="flex:1;min-height:40px"> </textarea>
+                <button class="btn primary" type="button" style="min-height:44px;padding:9px 18px">送信</button>
               </div>
             </div>
-            <nav class="phone-nav" aria-label="Main">
-              <a href="#" onclick="return false">Home</a>
-              <a href="#" onclick="return false" class="on">Ask</a>
-              <a href="#" onclick="return false">Decide<span class="cnt">5</span></a>
-              <a href="#" onclick="return false">Progress</a>
-              <a href="#" onclick="return false">More<span class="cnt gray">9</span></a>
+            <nav class="phone-nav" aria-label="メイン">
+              <a href="#" onclick="return false">ホーム</a>
+              <a href="#" onclick="return false" class="on">相談</a>
+              <a href="#" onclick="return false">判断<span class="cnt">5</span></a>
+              <a href="#" onclick="return false">進捗</a>
+              <a href="#" onclick="return false">その他<span class="cnt gray">9</span></a>
             </nav>
           </div>
           <ul class="points">
             <li><strong>入力欄は下部固定。</strong>キーボードを開いても送信が親指の範囲から逃げない。</li>
-            <li><strong>振り分けの見える化はモバイルでも維持。</strong>「Routed to: llmlb · tap to change」を会話の中に残す。</li>
+            <li><strong>振り分けの見える化はモバイルでも維持。</strong>「振り分け先： llmlb · タップで変更」を会話の中に残す。</li>
             <li><strong>スコープはチップに畳む。</strong>全プロジェクト分のチップを並べず、選択はシートで開く。</li>
           </ul>
         </div>
@@ -570,7 +570,7 @@
 
       <!-- ================= Progress ================= -->
       <section class="screen" id="progress" data-mode="after">
-        <h2>Progress <span class="en">Progress — how work flows</span></h2>
+        <h2>進捗 <span class="en">進捗 — 仕事の流れ</span></h2>
         <p class="why">現行では進み具合はプロジェクトごとのキュー表示でしか見られず、端末全体で「どこに滞留しているか」が分かりませんでした。After では、<strong>タスクの流れを状態ごとの列で横断表示</strong>し、その下にプロジェクト別ドリルダウンを置きます。列の件数は Home・Tasks と常に一致します。端末全体の滞留・詰まりを見る役割は、この面と Home が担います（Board はプロジェクト単位になったため、横断の滞留ビューは置きません）。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -578,57 +578,57 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-kpi"><span class="k">Q9</span><span class="k">A3/6</span><span class="k">MONITOR Run</span></div>
-            <div class="b-card"><span class="hd">Queue — gwt (this project only)</span><br>#1 issue-5016 · Select issue for queue move<br>#2 issue-4499 · 2026-11-10T08:58:11.330987+00:00<br>#3 issue-6943 · Select issue for queue move</div>
-            <div class="b-card">Backlog — 368 items · NEEDS HUMAN mixed in</div>
-            <p class="b-note">// No cross-project view exists. To see llmlb's flow you open llmlb's window; the six other projects are invisible here.</p>
+            <div class="b-kpi"><span class="k">Q9</span><span class="k">A3/6</span><span class="k">モニター実行中</span></div>
+            <div class="b-card"><span class="hd">キュー — gwt（このプロジェクトのみ）</span><br>#1 issue-5016 · キュー移動する Issue を選択<br>#2 issue-4499 · 2026-11-10T08:58:11.330987+00:00<br>#3 issue-6943 · キュー移動する Issue を選択</div>
+            <div class="b-card">バックログ — 368件 · 「人間の対応が必要」が混在</div>
+            <p class="b-note">// プロジェクトをまたいだ表示はありません。llmlb の流れを見るには llmlb のウィンドウを開きます。他の6プロジェクトはここからは見えません。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Progress</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 進捗</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Progress"></div>
+            <div class="rail-slot" data-active="進捗"></div>
             <div class="content">
-              <p class="h-big">Progress</p>
-              <p class="h-sub">How tasks are flowing across all 7 projects, right now.</p>
+              <p class="h-big">進捗</p>
+              <p class="h-sub">全7プロジェクトのタスクの流れ（現在）。</p>
               <div class="cols">
-                <div class="col"><h4>Waiting to start <span class="n">18</span></h4>
-                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Waiting 6 days — oldest in this column</div></div>
-                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">Request log search (#219)</div><div class="d">Waiting 2 h</div></div>
-                  <div class="mini"><div class="d">+ 16 more</div></div>
+                <div class="col"><h4>開始待ち <span class="n">18</span></h4>
+                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">長時間セッションでメモリが増え続ける（#5561）</div><div class="d">6日待ち — この列で最古</div></div>
+                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">リクエストログ検索（#219）</div><div class="d">2時間待ち</div></div>
+                  <div class="mini"><div class="d">あと16件</div></div>
                 </div>
-                <div class="col"><h4>In progress <span class="n">9</span></h4>
-                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Shared state model (#7048)</div><div class="d">Running 42 min</div></div>
-                  <div class="mini"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">Race result import (#130)</div><div class="d">Running 47 min</div></div>
-                  <div class="mini"><div class="d">+ 7 more</div></div>
+                <div class="col"><h4>実行中 <span class="n">9</span></h4>
+                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">共有状態モデル（#7048）</div><div class="d">42分実行中</div></div>
+                  <div class="mini"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">レース結果の取り込み（#130）</div><div class="d">47分実行中</div></div>
+                  <div class="mini"><div class="d">あと7件</div></div>
                 </div>
-                <div class="col"><h4>Blocked <span class="n">3</span></h4>
-                  <div class="mini stuck"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">Daily import (#121)</div><div class="d">Source format changed · blocked 48 min</div></div>
-                  <div class="mini stuck"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Checks failing (#7047)</div><div class="d">Blocked 2 h</div></div>
-                  <div class="mini"><div class="d">+ 1 more</div></div>
+                <div class="col"><h4>詰まり <span class="n">3</span></h4>
+                  <div class="mini stuck"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">日次取り込み（#121）</div><div class="d">元の形式が変更 · 48分詰まり</div></div>
+                  <div class="mini stuck"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">チェック失敗（#7047）</div><div class="d">2時間詰まり</div></div>
+                  <div class="mini"><div class="d">あと1件</div></div>
                 </div>
-                <div class="col"><h4>Waiting for you <span class="n">5</span></h4>
-                  <div class="mini mine"><span class="ptag"><i style="background:#1b1e24"></i>All</span><div class="t">Unsaved work in 3 projects</div><div class="d">Waiting 26 min</div></div>
-                  <div class="mini mine"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Plan ready (#7007)</div><div class="d">Waiting 1 h</div></div>
-                  <div class="mini"><div class="d">+ 3 more in Decide</div></div>
+                <div class="col"><h4>あなた待ち <span class="n">5</span></h4>
+                  <div class="mini mine"><span class="ptag"><i style="background:#1b1e24"></i>全部</span><div class="t">3プロジェクトに未保存の作業</div><div class="d">26分待ち</div></div>
+                  <div class="mini mine"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">計画が準備完了（#7007）</div><div class="d">1時間待ち</div></div>
+                  <div class="mini"><div class="d">あと3件（判断にあります）</div></div>
                 </div>
-                <div class="col"><h4>Done today <span class="n">12</span></h4>
-                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Settings sections (#7039)</div><div class="d">Finished 2 min ago</div></div>
-                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">Health check endpoint (#205)</div><div class="d">Finished 8 min ago</div></div>
-                  <div class="mini"><div class="d">+ 10 more in Log</div></div>
+                <div class="col"><h4>今日完了 <span class="n">12</span></h4>
+                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">設定のセクション（#7039）</div><div class="d">2分前に完了</div></div>
+                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">ヘルスチェックのエンドポイント（#205）</div><div class="d">8分前に完了</div></div>
+                  <div class="mini"><div class="d">あと10件（ログにあります）</div></div>
                 </div>
               </div>
-              <p class="h-sec">By project</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="bar"><i style="width:31%"></i></div><div class="d">Policy: Running · 4 running · 1 blocked · 2 waiting for you · 9 waiting to start · 5 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="bar"><i style="width:22%"></i></div><div class="d">Policy: Running · 2 running · 1 waiting for you · 3 waiting to start · 3 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="bar"><i style="width:14%"></i></div><div class="d">Policy: Running · 1 running · 1 blocked · 2 waiting to start · 2 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="bar"><i style="width:11%" class="red"></i></div><div class="d">Policy: Running · 1 running · 1 blocked · 1 waiting for you · 2 waiting to start · 1 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="bar"><i style="width:8%"></i></div><div class="d">Policy: Running · 1 running · 1 waiting for you · 1 waiting to start · 1 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="d idle">Policy: Waiting · Idle · 1 waiting to start · nothing finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d idle">Policy: Stopped · Idle · nothing waiting</div></div><button class="btn" type="button">Open project</button></div>
+              <p class="h-sec">プロジェクト別</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="bar"><i style="width:31%"></i></div><div class="d">ポリシー： 実行中 · 実行中 4 · 詰まり 1 · 判断待ち 2 · 開始待ち 9 · 今日完了 5</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="bar"><i style="width:22%"></i></div><div class="d">ポリシー： 実行中 · 実行中 2 · 判断待ち 1 · 開始待ち 3 · 今日完了 3</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="bar"><i style="width:14%"></i></div><div class="d">ポリシー： 実行中 · 実行中 1 · 詰まり 1 · 開始待ち 2 · 今日完了 2</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="bar"><i style="width:11%" class="red"></i></div><div class="d">ポリシー： 実行中 · 実行中 1 · 詰まり 1 · 判断待ち 1 · 開始待ち 2 · 今日完了 1</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="bar"><i style="width:8%"></i></div><div class="d">ポリシー： 実行中 · 実行中 1 · 判断待ち 1 · 開始待ち 1 · 今日完了 1</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="d idle">ポリシー： 待機 · 待機中 · 開始待ち 1 · 今日の完了なし</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d idle">ポリシー： 停止 · 待機中 · 待ちなし</div></div><button class="btn" type="button">プロジェクトを開く</button></div>
             </div>
           </div>
         </div></div>
@@ -644,7 +644,7 @@
 
       <!-- ================= Tasks ================= -->
       <section class="screen" id="tasks" data-mode="after">
-        <h2>Tasks <span class="en">Tasks — every task, every project</span></h2>
+        <h2>タスク <span class="en">タスク — 全プロジェクトの全タスク</span></h2>
         <p class="why">現行ではタスク（Issue）はプロジェクトごとの Backlog に閉じていて、368件の中に判断が必要なものが通常カードと同じ見た目で混ざっていました（<span class="prob">問題5</span>）。After では<strong>プロジェクトをまたいだ1つの一覧</strong>を既定にし、絞り込みは「文脈の切替」として扱います。並び順は「判断待ち→詰まり→実行中→開始待ち」。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -652,27 +652,27 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-tabs"><span>Chat</span><span class="on">Tasks</span><span>Reports</span><span>Execution log</span></div>
-            <p class="b-note">Backlog — 368 items · project: gwt only · sort: queue order</p>
-            <div class="b-card"><span class="hd">#5016 Shared state model</span><br>manual-profile-v1:9f2c41… · Branch work/issue-5016 · Ahead of develop 75 · Verification —</div>
-            <div class="b-card"><span class="hd">#4499 Issue Monitor steering</span> · NEEDS HUMAN<br>2026-11-10T07:14:52.009812+00:00 · Select issue for queue move</div>
-            <div class="b-card"><span class="hd">#6943 React migration</span><br>LAUNCH NOW · SETTINGS · …</div>
-            <div class="b-card"><span class="hd">#5561 Memory growth</span><br>2026-11-04T23:02:11.551209+00:00</div>
-            <p class="b-note">// The NEEDS HUMAN card looks exactly like every other card. Nothing sorts it to the top, and the other 6 projects' tasks are in other windows.</p>
+            <div class="b-tabs"><span>チャット</span><span class="on">タスク</span><span>レポート</span><span>実行ログ</span></div>
+            <p class="b-note">バックログ — 368件 · プロジェクト： gwt のみ · 並び順： キューの順番</p>
+            <div class="b-card"><span class="hd">#5016 共有状態モデル</span><br>manual-profile-v1:9f2c41… · ブランチ work/issue-5016 · develop より 75 先行 · 検証 —</div>
+            <div class="b-card"><span class="hd">#4499 Issue モニターの誘導</span> · 人間の対応が必要<br>2026-11-10T07:14:52.009812+00:00 · キュー移動する Issue を選択</div>
+            <div class="b-card"><span class="hd">#6943 React 移行</span><br>今すぐ起動 · 設定 · …</div>
+            <div class="b-card"><span class="hd">#5561 メモリ増加</span><br>2026-11-04T23:02:11.551209+00:00</div>
+            <p class="b-note">// 「人間の対応が必要」のカードは他のカードとまったく同じ見た目です。一番上に並ぶこともなく、他の6プロジェクトのタスクは別のウィンドウにあります。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Tasks</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — タスク</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Tasks"></div>
+            <div class="rail-slot" data-active="タスク"></div>
             <div class="content">
-              <p class="h-big">Tasks</p>
-              <p class="h-sub">Every task on this device, across all projects. Filter to focus the PM's context on one project.</p>
+              <p class="h-big">タスク</p>
+              <p class="h-sub">この端末の全タスク（全プロジェクト）。絞り込むと PM の注目先が1プロジェクトに移ります。</p>
               <div class="chips">
-                <button class="chip on" type="button">All projects</button>
+                <button class="chip on" type="button">全プロジェクト</button>
                 <button class="chip" type="button">gwt</button>
                 <button class="chip" type="button">llmlb</button>
                 <button class="chip" type="button">event-magazine</button>
@@ -680,23 +680,23 @@
                 <button class="chip" type="button">155-Demi</button>
                 <button class="chip" type="button">KeibaDB</button>
                 <button class="chip" type="button">160-Idina</button>
-                <button class="chip" type="button">Status: All ▾</button>
+                <button class="chip" type="button">状態： すべて ▾</button>
               </div>
-              <p class="h-sec">Waiting for your decision · 5</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">Commit &amp; push, or review each project first.</div></div><span class="badge b-wait">Waiting for you</span><span class="rel">26 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Plan ready: “Home &amp; Decide screens” (#7007)</div><div class="d">Approve to restart implementation.</div></div><span class="badge b-wait">Waiting for you</span><span class="rel">1 h</span></div>
-              <p class="rel">+ 3 more waiting — all of them are in Decide</p>
-              <p class="h-sec">In progress · 9</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Shared state model for the new screens (#7048)</div><div class="d">Codex · started 12:04 · last activity 2 min ago</div></div><span class="badge b-run">Running</span><span class="rel">42 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Home &amp; Decide screens (#7007)</div><div class="d">Claude Code · started 11:34 · last activity just now</div></div><span class="badge b-run">Running</span><span class="rel">1 h 12 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Race result import — new data format (#130)</div><div class="d">Claude Code · started 11:59 · last activity 5 min ago</div></div><span class="badge b-run">Running</span><span class="rel">47 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Token usage panel (#208)</div><div class="d">Claude Code · started 12:13 · last activity 1 min ago</div></div><span class="badge b-run">Running</span><span class="rel">33 min</span></div>
-              <p class="h-sec">Blocked · 3</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Checks failing on a change (#7047)</div><div class="d">4 checks failing. A fix is being prepared automatically.</div></div><span class="badge b-block">Blocked</span><span class="rel">2 h</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Publishing is blocked — deploy key expired (#88)</div><div class="d">Needs a new key from you; steps are in Decide.</div></div><span class="badge b-block">Blocked</span><span class="rel">59 min</span></div>
-              <p class="h-sec">Waiting to start · 18</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Waiting 6 days — the PM suggests starting this next on gwt.</div></div><span class="badge b-queue">Waiting</span><button class="btn" type="button">Start now</button><button class="btn ghost" type="button">Move up</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="t">Character select screen polish (#31)</div><div class="d">Waiting 2 days. This project's only task.</div></div><span class="badge b-queue">Waiting</span><button class="btn" type="button">Start now</button><button class="btn ghost" type="button">Move up</button></div>
+              <p class="h-sec">あなたの判断待ち · 5</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>全プロジェクト</span><div class="grow"><div class="t">未保存の作業が3プロジェクトにあります</div><div class="d">コミット＆プッシュするか、先にプロジェクトごとに確認してください。</div></div><span class="badge b-wait">あなた待ち</span><span class="rel">26分</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">計画ができました：「ホーム＆判断の画面」（#7007）</div><div class="d">承認すると実装が再開します。</div></div><span class="badge b-wait">あなた待ち</span><span class="rel">1時間</span></div>
+              <p class="rel">あと3件が判断待ち — すべて「判断」にあります</p>
+              <p class="h-sec">実行中 · 9</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">新しい画面のための共有状態モデル（#7048）</div><div class="d">Codex · 12:04 開始 · 最終活動 2分前</div></div><span class="badge b-run">実行中</span><span class="rel">42分</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">ホーム＆判断の画面（#7007）</div><div class="d">Claude Code · 11:34 開始 · 最終活動 たった今</div></div><span class="badge b-run">実行中</span><span class="rel">1時間12分</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">レース結果の取り込み — 新しいデータ形式（#130）</div><div class="d">Claude Code · 11:59 開始 · 最終活動 5分前</div></div><span class="badge b-run">実行中</span><span class="rel">47分</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">トークン使用量パネル（#208）</div><div class="d">Claude Code · 12:13 開始 · 最終活動 1分前</div></div><span class="badge b-run">実行中</span><span class="rel">33分</span></div>
+              <p class="h-sec">詰まり · 3</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">ある変更でチェックが失敗（#7047）</div><div class="d">チェック4件が失敗しています。修正を自動で準備中です。</div></div><span class="badge b-block">詰まり</span><span class="rel">2時間</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">公開が止まっています — デプロイキーの期限切れ（#88）</div><div class="d">新しいキーが必要です。手順は「判断」にあります。</div></div><span class="badge b-block">詰まり</span><span class="rel">59分</span></div>
+              <p class="h-sec">開始待ち · 18</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">長時間セッションでメモリが増え続ける（#5561）</div><div class="d">6日待ち — PM は gwt で次にこれを始めることを提案しています。</div></div><span class="badge b-queue">開始待ち</span><button class="btn" type="button">今すぐ開始</button><button class="btn ghost" type="button">上へ</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="t">キャラクター選択画面の仕上げ（#31）</div><div class="d">2日待ち。このプロジェクトで唯一のタスクです。</div></div><span class="badge b-queue">開始待ち</span><button class="btn" type="button">今すぐ開始</button><button class="btn ghost" type="button">上へ</button></div>
             </div>
           </div>
         </div></div>
@@ -712,7 +712,7 @@
 
       <!-- ================= Issues ================= -->
       <section class="screen" id="issues" data-mode="after">
-        <h2>Issues <span class="en">Issues — the full record, across projects</span></h2>
+        <h2>Issue <span class="en">Issue — 全プロジェクトの記録</span></h2>
         <p class="why">現行 Issues はプロジェクトごとの記録置き場で、内部ラベルや状態コードがそのまま出ており、「まだ記録だけのもの」と「すでに仕事として動いているもの」の区別もつきませんでした。刷新では役割を分けます。<strong>Issues は全プロジェクトの「記録の棚」</strong>（各リポジトリの Issue そのもの）、<strong>Tasks はその中から PM が着手・管理している仕事</strong>。Issues 画面は横断の閲覧・検索と「タスク化」を担います。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -720,25 +720,25 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — Issues</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — Issue</span></div>
           <div class="content">
-            <p class="b-note">Issues — project: gwt only · 368 open · state: OPEN · sort: created</p>
-            <div class="b-card"><span class="hd">#5561 GUI memory growth</span><br>labels: bug, gwt-feedback · assignee: — · milestone: — · 2026-11-04T23:02:11.551209+00:00</div>
-            <div class="b-card"><span class="hd">#4499 Monitor steering loop</span><br>labels: gwt-feedback · state: OPEN · 2026-11-10T07:14:52.009812+00:00</div>
-            <div class="b-card"><span class="hd">#5876 Hostname variance breaks reservations</span><br>labels: bug · state: OPEN · 2026-11-09T15:44:03.221540+00:00</div>
-            <p class="b-note">// Is #5561 already being worked on as a task? Is anything here waiting for a human? The list doesn't say — and llmlb's issues live in llmlb's window.</p>
+            <p class="b-note">Issue — プロジェクト： gwt のみ · オープン 368件 · 状態： OPEN · 並び順： 作成順</p>
+            <div class="b-card"><span class="hd">#5561 GUI のメモリ増加</span><br>ラベル： bug、gwt-feedback · 担当： — · マイルストーン： — · 2026-11-04T23:02:11.551209+00:00</div>
+            <div class="b-card"><span class="hd">#4499 モニター誘導ループ</span><br>ラベル： gwt-feedback · 状態： OPEN · 2026-11-10T07:14:52.009812+00:00</div>
+            <div class="b-card"><span class="hd">#5876 ホスト名のばらつきで予約が壊れる</span><br>ラベル： bug · 状態： OPEN · 2026-11-09T15:44:03.221540+00:00</div>
+            <p class="b-note">// #5561 はもうタスクとして着手されているのか？ ここに人の判断待ちはあるのか？ 一覧には書かれていません — そして llmlb の Issue は llmlb のウィンドウにあります。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Issues</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Issue</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Issues"></div>
+            <div class="rail-slot" data-active="Issue"></div>
             <div class="content">
-              <p class="h-big">Issues</p>
-              <p class="h-sub">Every issue in every project — 221 open in total. When your PM picks one up, it also appears in Tasks as work in motion.</p>
+              <p class="h-big">Issue</p>
+              <p class="h-sub">全プロジェクトの全 Issue — オープン合計221件。PM が取り上げると、タスクにも「進行中の仕事」として出ます。</p>
               <div class="chips">
-                <button class="chip on" type="button">All projects</button>
+                <button class="chip on" type="button">全プロジェクト</button>
                 <button class="chip" type="button">gwt · 132</button>
                 <button class="chip" type="button">llmlb · 24</button>
                 <button class="chip" type="button">event-magazine · 31</button>
@@ -746,13 +746,13 @@
                 <button class="chip" type="button">155-Demi · 6</button>
                 <button class="chip" type="button">KeibaDB · 14</button>
                 <button class="chip" type="button">160-Idina · 5</button>
-                <button class="chip" type="button">State: Open ▾</button>
+                <button class="chip" type="button">状態： オープン ▾</button>
               </div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Bug · reported 6 days ago · already picked up — waiting to start in Tasks</div></div><span class="badge b-queue">In Tasks</span><button class="btn" type="button">Open issue</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import fails on the new source format (#121)</div><div class="d">Bug · reported yesterday · picked up — blocked, and waiting for your decision</div></div><span class="badge b-block">In Tasks · blocked</span><button class="btn" type="button">Open issue</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Support streaming responses (#230)</div><div class="d">Feature request · reported 3 days ago · not picked up yet — your PM suggests taking it next week</div></div><span class="badge b-done">Not started</span><button class="btn primary" type="button">Make it a task</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Dark mode for article pages (#102)</div><div class="d">Feature request · reported last week · not picked up yet</div></div><span class="badge b-done">Not started</span><button class="btn primary" type="button">Make it a task</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="t">Fix the typo on the about page (#7)</div><div class="d">Closed 2 days ago — kept here as part of the record</div></div><span class="badge b-done">Closed</span><button class="btn" type="button">Open issue</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">長時間セッションでメモリが増え続ける（#5561）</div><div class="d">バグ · 6日前に報告 · 着手済み — タスクで開始待ち</div></div><span class="badge b-queue">タスク化済み</span><button class="btn" type="button">Issue を開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">新しい元形式で日次取り込みが失敗（#121）</div><div class="d">バグ · 昨日に報告 · 着手済み — 詰まっていて、あなたの判断待ち</div></div><span class="badge b-block">タスク化済み · 詰まり</span><button class="btn" type="button">Issue を開く</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">ストリーミング応答への対応（#230）</div><div class="d">機能要望 · 3日前に報告 · まだ未着手 — PM は来週取り上げることを提案しています</div></div><span class="badge b-done">未着手</span><button class="btn primary" type="button">タスクにする</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">記事ページのダークモード（#102）</div><div class="d">機能要望 · 先週に報告 · まだ未着手</div></div><span class="badge b-done">未着手</span><button class="btn primary" type="button">タスクにする</button></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="t">概要ページの誤字を直す（#7）</div><div class="d">2日前にクローズ — 記録としてここに残しています</div></div><span class="badge b-done">クローズ済み</span><button class="btn" type="button">Issue を開く</button></div>
             </div>
           </div>
         </div></div>
@@ -770,7 +770,7 @@
 
       <!-- ================= Decide ================= -->
       <section class="screen" id="decide" data-mode="after">
-        <h2>Decide <span class="en">Decide — everything waiting on you</span></h2>
+        <h2>判断 <span class="en">判断 — あなた待ちのすべて</span></h2>
         <p class="why">現行には判断専用の画面が存在せず、承認・優先順位・停止の判断は Backlog や Board の中に通常カードと同じ見た目で埋もれていました（<span class="prob">問題5</span>）。After では<strong>全プロジェクト分の判断待ちを1か所に集約</strong>し、各カードに「何を決めるのか」「選ぶとどうなるか」まで書きます。ここが空になることが、PM が自律的に進められている証拠になります。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -778,29 +778,29 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <p class="b-note">There is no Decisions screen. Things that need you appear as ordinary cards, in each project's own window:</p>
-            <div class="b-card"><span class="hd">#4499 Issue Monitor steering</span> · NEEDS HUMAN · 2026-11-10T07:14:52.009812+00:00</div>
-            <div class="b-card"><span class="hd">#5016 Shared state model</span> · NEEDS HUMAN · manual-profile-v1:9f2c41…</div>
-            <div class="b-card"><span class="hd">Board — filter: Work (default)</span> · “For you” is not a filter. 368 backlog items, same card style for everything.</div>
-            <p class="b-note">// Approvals, priorities and stop/go calls for llmlb, KeibaDB and the rest are scattered across six other windows, each with its own PM.</p>
+            <p class="b-note">判断専用の画面はありません。あなたが必要なものは通常のカードとして、各プロジェクトのウィンドウに出ます：</p>
+            <div class="b-card"><span class="hd">#4499 Issue モニターの誘導</span> · 人間の対応が必要 · 2026-11-10T07:14:52.009812+00:00</div>
+            <div class="b-card"><span class="hd">#5016 共有状態モデル</span> · 人間の対応が必要 · manual-profile-v1:9f2c41…</div>
+            <div class="b-card"><span class="hd">ボード — フィルタ： 作業（既定）</span> · 「あなた宛て」はフィルタにありません。バックログ368件、すべて同じカードの見た目です。</div>
+            <p class="b-note">// llmlb、KeibaDB、その他の承認・優先順位・停止可否の判断は、PM が別々の他の6ウィンドウに散らばっています。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Decide (5)</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 判断（5）</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Decide"></div>
+            <div class="rail-slot" data-active="判断"></div>
             <div class="content">
-              <p class="h-big">Decide</p>
-              <p class="h-sub">5 things are waiting for your decision, across all projects. Your PM won't proceed on these until you choose — everything else keeps moving.</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work in 3 projects — save it all?</div><div class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren't committed or pushed. If this device is wiped first, that work is lost.</div></div><span class="rel">waiting 26 min</span><div class="btnrow"><button class="btn amber" type="button">Commit &amp; push all</button><button class="btn" type="button">Review each project</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Approve the plan for “Home &amp; Decide screens” (#7007)?</div><div class="d">The design is done and the groundwork it waited on has landed. Approving restarts implementation right away.</div></div><span class="rel">waiting 1 h</span><div class="btnrow"><button class="btn primary" type="button">Approve &amp; start</button><button class="btn" type="button">Request changes</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Restart a shared service now, or tonight?</div><div class="d">“Retry backoff” (#212) needs a service restart to take effect. Restarting now interrupts one running task for about a minute.</div></div><span class="rel">waiting 18 min</span><div class="btnrow"><button class="btn primary" type="button">Restart now</button><button class="btn" type="button">Schedule for tonight</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">Stop a task that stopped progressing?</div><div class="d">“Reconnect after sleep” (#41) has run 3 h 40 m with no activity for the last hour. Stopping is safe — its changes so far are kept.</div></div><span class="rel">waiting 12 min</span><div class="btnrow"><button class="btn danger" type="button">Stop task</button><button class="btn" type="button">Let it run</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">The import file format changed — update the mapping?</div><div class="d">Daily import (#121) is paused. Updating the mapping takes about 20 min of agent time; pausing keeps results stale until tomorrow.</div></div><span class="rel">waiting 48 min</span><div class="btnrow"><button class="btn primary" type="button">Update the mapping</button><button class="btn" type="button">Pause imports</button></div></div>
-              <p class="rel">When this list is empty, your PM is running everything on its own.</p>
+              <p class="h-big">判断</p>
+              <p class="h-sub">全プロジェクトで5件があなたの判断を待っています。選ぶまで PM はこれらを進めません — 他のものは動き続けます。</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>全プロジェクト</span><div class="grow"><div class="t">3プロジェクトに未保存の作業 — 全部保存しますか？</div><div class="d">gwt（タスク2件）、llmlb（1件）、KeibaDB（1件）に、コミットもプッシュもされていない変更があります。この端末を先に初期化すると、その作業は失われます。</div></div><span class="rel">26分待ち</span><div class="btnrow"><button class="btn amber" type="button">すべてコミット＆プッシュ</button><button class="btn" type="button">プロジェクトごとに確認</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">「ホーム＆判断の画面」の計画を承認しますか？（#7007）</div><div class="d">設計は完了し、待っていた土台も入りました。承認するとすぐに実装が再開します。</div></div><span class="rel">1時間待ち</span><div class="btnrow"><button class="btn primary" type="button">承認して開始</button><button class="btn" type="button">修正を求める</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">共有サービスを今すぐ再起動しますか、今夜にしますか？</div><div class="d">「リトライ間隔」（#212）を有効にするにはサービスの再起動が必要です。今すぐ再起動すると、実行中のタスク1件が約1分止まります。</div></div><span class="rel">18分待ち</span><div class="btnrow"><button class="btn primary" type="button">今すぐ再起動</button><button class="btn" type="button">今夜に予約</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">進まなくなったタスクを止めますか？</div><div class="d">「スリープ後の再接続」（#41）は3時間40分動き、最後の1時間は活動がありません。止めても安全です — ここまでの変更は保持されます。</div></div><span class="rel">12分待ち</span><div class="btnrow"><button class="btn danger" type="button">タスクを止める</button><button class="btn" type="button">このまま続ける</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">取り込みファイルの形式が変わりました — 対応づけを更新しますか？</div><div class="d">日次取り込み（#121）は止まっています。対応づけの更新にはエージェントの作業が約20分かかります。止めたままにすると結果は明日まで古いままです。</div></div><span class="rel">48分待ち</span><div class="btnrow"><button class="btn primary" type="button">対応づけを更新</button><button class="btn" type="button">取り込みを止める</button></div></div>
+              <p class="rel">この一覧が空のとき、PM はすべて自分で回しています。</p>
             </div>
           </div>
         </div></div>
@@ -812,35 +812,35 @@
           <li><strong>待ち時間を表示。</strong>PM がどれだけ待たされているかが見え、判断の滞留自体も可視化される。</li>
         </ul>
         <div class="mobile-variant view-a">
-          <h3>Mobile <span class="en">Decide on a phone — one decision at a time</span></h3>
+          <h3>モバイル <span class="en">電話での判断 — 1件ずつ</span></h3>
           <p class="mobile-note">モバイルで最も重要な面です。判断カードは<strong>1件ずつ縦に</strong>並び、件名・影響の説明・選択肢が省略なしで全文読めます。選択肢はカード幅いっぱいの大きなボタンにして、親指で押し間違えない大きさにします。残り件数は最上部の要約と下部ナビのバッジで常に見えます。</p>
           <div class="phone">
-            <div class="phone-status"><span class="dot"></span><span><b>Your PM</b> · <b>9</b> running · <b>3</b> blocked · <b class="you">5 waiting for your decision</b></span><span class="r">just now</span></div>
+            <div class="phone-status"><span class="dot"></span><span><b>あなたの PM</b> · <b>9</b> 実行中 · <b>3</b> 詰まり · <b class="you">判断待ち 5</b></span><span class="r">たった今</span></div>
             <div class="phone-body">
-              <p class="h-big">Decide</p>
-              <p class="h-sub">5 things are waiting for your decision. Your PM won't proceed on these until you choose — everything else keeps moving.</p>
+              <p class="h-big">判断</p>
+              <p class="h-sub">5件があなたの判断を待っています。選ぶまで PM はこれらを進めません — 他のものは動き続けます。</p>
               <div class="dcard">
-                <div class="top"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><span class="rel">waiting 26 min</span></div>
-                <div class="t">Unsaved work in 3 projects — save it all?</div>
-                <p class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren't committed or pushed. If this device is wiped first, that work is lost.</p>
-                <button class="opt amber" type="button">Commit &amp; push all</button>
-                <button class="opt" type="button">Review each project<small>Look at each project before deciding.</small></button>
+                <div class="top"><span class="ptag"><i style="background:#1b1e24"></i>全プロジェクト</span><span class="rel">26分待ち</span></div>
+                <div class="t">3プロジェクトに未保存の作業 — 全部保存しますか？</div>
+                <p class="d">gwt（タスク2件）、llmlb（1件）、KeibaDB（1件）に、コミットもプッシュもされていない変更があります。この端末を先に初期化すると、その作業は失われます。</p>
+                <button class="opt amber" type="button">すべてコミット＆プッシュ</button>
+                <button class="opt" type="button">プロジェクトごとに確認<small>決める前に各プロジェクトを確認します。</small></button>
               </div>
               <div class="dcard">
-                <div class="top"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="rel">waiting 48 min</span></div>
-                <div class="t">The import file format changed — update the mapping?</div>
-                <p class="d">Daily import (#121) is paused. Updating the mapping takes about 20 min of agent time; pausing keeps results stale until tomorrow.</p>
-                <button class="opt primary" type="button">Update the mapping</button>
-                <button class="opt" type="button">Pause imports<small>Results stay stale until tomorrow.</small></button>
+                <div class="top"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="rel">48分待ち</span></div>
+                <div class="t">取り込みファイルの形式が変わりました — 対応づけを更新しますか？</div>
+                <p class="d">日次取り込み（#121）は止まっています。対応づけの更新にはエージェントの作業が約20分かかります。止めたままにすると結果は明日まで古いままです。</p>
+                <button class="opt primary" type="button">対応づけを更新</button>
+                <button class="opt" type="button">取り込みを止める<small>結果は明日まで古いままになります。</small></button>
               </div>
-              <p class="rel">3 more below — the oldest is waiting 1 h. When this list is empty, your PM is running everything on its own.</p>
+              <p class="rel">下にあと3件 — 最古のものは1時間待ちです。 この一覧が空のとき、PM はすべて自分で回しています。</p>
             </div>
-            <nav class="phone-nav" aria-label="Main">
-              <a href="#" onclick="return false">Home</a>
-              <a href="#" onclick="return false">Ask</a>
-              <a href="#" onclick="return false" class="on">Decide<span class="cnt">5</span></a>
-              <a href="#" onclick="return false">Progress</a>
-              <a href="#" onclick="return false">More<span class="cnt gray">9</span></a>
+            <nav class="phone-nav" aria-label="メイン">
+              <a href="#" onclick="return false">ホーム</a>
+              <a href="#" onclick="return false">相談</a>
+              <a href="#" onclick="return false" class="on">判断<span class="cnt">5</span></a>
+              <a href="#" onclick="return false">進捗</a>
+              <a href="#" onclick="return false">その他<span class="cnt gray">9</span></a>
             </nav>
           </div>
           <ul class="points">
@@ -853,7 +853,7 @@
 
       <!-- ================= Log / Reports ================= -->
       <section class="screen" id="log" data-mode="after">
-        <h2>Log / Reports <span class="en">Log — what was decided, what finished</span></h2>
+        <h2>ログ / レポート <span class="en">ログ — 決まったこと、終わったこと</span></h2>
         <p class="why">現行の Execution log は内部 operation 名と UTC の ISO 生文字列の羅列で、「何が決まり、何が終わったか」を人が追うための面になっていません（<span class="prob">問題3・4</span>）。After では Reports（判断と報告）と実行記録を<strong>1本の時系列に統合</strong>し、相対時刻と人の言葉で書きます。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -861,34 +861,34 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-tabs"><span>Chat</span><span>Tasks</span><span>Reports</span><span class="on">Execution log</span></div>
+            <div class="b-tabs"><span>チャット</span><span>タスク</span><span>レポート</span><span class="on">実行ログ</span></div>
             <div class="b-card">2026-11-10T09:37:26.292327+00:00 · op=MonitorTick · project=gwt · q=9 · a=3/6</div>
             <div class="b-card">2026-11-10T09:36:58.104551+00:00 · op=SteeringRequested · issue=4499 · profile=manual-profile-v1:9f2c41…</div>
             <div class="b-card">2026-11-10T09:31:02.773410+00:00 · op=WorktreeResize · result=failed · owner health: Some(Degraded)</div>
             <div class="b-card">2026-11-10T09:12:03.881204+00:00 · op=QueueReorder · project=gwt · moved=3</div>
-            <p class="b-note">// Reports live in a separate tab, per project. “What did I decide this morning?” has no single answer anywhere.</p>
+            <p class="b-note">// レポートはプロジェクトごとに別のタブにあります。「今朝、自分は何を決めたか？」に一か所で答える場所はありません。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Log</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — ログ</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Log"></div>
+            <div class="rail-slot" data-active="ログ"></div>
             <div class="content">
-              <p class="h-big">Log</p>
-              <p class="h-sub">What was decided and what finished — one timeline for the whole device. Times are shown in your timezone; hover any entry for the exact time.</p>
+              <p class="h-big">ログ</p>
+              <p class="h-sub">決まったことと終わったこと — 端末全体で1本の時系列。時刻はあなたのタイムゾーンで表示し、項目にホバーすると正確な時刻が出ます。</p>
               <div class="tl">
-                <div class="tl-item done"><div class="when">2 min ago · 12:44</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">Task finished — “Settings: per-project sections” (#7039), merged.</span></div>
-                <div class="tl-item"><div class="when">9 min ago · 12:37</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">Task started — “Photo upload size limit” (#96).</span></div>
-                <div class="tl-item"><div class="when">15 min ago · 12:31</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">Task started — “Status bar in plain words” (#7044).</span></div>
-                <div class="tl-item"><div class="when">18 min ago · 12:28</div><span class="ptag"><i style="background:#2563eb"></i>llmlb</span> <span class="what">Task started — “Retry backoff for upstream timeouts” (#212), routed from your request in Ask.</span></div>
-                <div class="tl-item dec"><div class="when">34 min ago · 12:12</div><span class="badge b-wait">Your decision</span> <span class="what">You set this week's priority: gwt's React migration (#6943) before new features.</span></div>
-                <div class="tl-item err"><div class="when">48 min ago · 11:58</div><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> <span class="what">Import blocked — the source file format changed (#121). Waiting in Decide.</span></div>
-                <div class="tl-item err"><div class="when">59 min ago · 11:47</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">Publishing blocked — the deploy key expired (#88).</span></div>
-                <div class="tl-item dec"><div class="when">1 h ago · 11:20</div><span class="badge b-done">PM report</span> <span class="what">Late-morning report posted: progress on all 7 projects, 3 items flagged for your decision.</span></div>
-                <div class="tl-item"><div class="when">3 h 40 min ago · 09:06</div><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> <span class="what">Task started — “Reconnect after sleep” (#41). No activity in the last hour; flagged in Decide.</span></div>
+                <div class="tl-item done"><div class="when">2分前 · 12:44</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">タスク完了 — 「設定：プロジェクト別のセクション」（#7039）、マージ済み。</span></div>
+                <div class="tl-item"><div class="when">9分前 · 12:37</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">タスク開始 — 「写真アップロードのサイズ上限」（#96）。</span></div>
+                <div class="tl-item"><div class="when">15分前 · 12:31</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">タスク開始 — 「ステータスバーを平易な言葉で」（#7044）。</span></div>
+                <div class="tl-item"><div class="when">18分前 · 12:28</div><span class="ptag"><i style="background:#2563eb"></i>llmlb</span> <span class="what">タスク開始 — 「上流タイムアウトのリトライ間隔」（#212）。「相談」でのあなたの依頼から振り分け。</span></div>
+                <div class="tl-item dec"><div class="when">34分前 · 12:12</div><span class="badge b-wait">あなたの判断</span> <span class="what">今週の優先順位を決めました：新機能より gwt の React 移行（#6943）を先に。</span></div>
+                <div class="tl-item err"><div class="when">48分前 · 11:58</div><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> <span class="what">取り込みが詰まっています — 元ファイルの形式が変わりました（#121）。「判断」で待機中。</span></div>
+                <div class="tl-item err"><div class="when">59分前 · 11:47</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">公開が止まっています — デプロイキーの期限切れ（#88）。</span></div>
+                <div class="tl-item dec"><div class="when">1時間前 · 11:20</div><span class="badge b-done">PM のレポート</span> <span class="what">午前遅めのレポートを投稿：全7プロジェクトの進捗、あなたの判断が要る3件を提示。</span></div>
+                <div class="tl-item"><div class="when">3時間40分前 · 09:06</div><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> <span class="what">タスク開始 — 「スリープ後の再接続」（#41）。最後の1時間は活動なし。「判断」に提示済み。</span></div>
               </div>
             </div>
           </div>
@@ -905,7 +905,7 @@
 
       <!-- ================= Works ================= -->
       <section class="screen" id="works" data-mode="after">
-        <h2>Works <span class="en">Works — what's running right now</span></h2>
+        <h2>作業中 <span class="en">作業中 — いま動いているもの</span></h2>
         <p class="why">現行 Works は1カードに内部ID・ブランチ名・検証状態・コスト注記まで詰め込んだ高密度表示で、上部には取れていない指標の注記が常時出ていました（<span class="prob">問題1・8・10</span>）。After では<strong>プロジェクトラベルつきの「作業中セッション」</strong>として、人が判断に使う情報（何を・どれくらい・最後に動いたのはいつか・変更は健全か）だけを出します。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -913,30 +913,30 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-kpi"><span class="k">Fleet tokens/min 79.1K</span><span class="k">RUNNING 4 · 3 inline</span><span class="k">WORK 3</span></div>
-            <div class="b-warn">Cost unavailable: per-session USD is not supported</div>
-            <div class="b-warn">Partial: measurements are incomplete</div>
-            <div class="b-card"><span class="hd">issue-5016 — manual-profile-v1:9f2c41e8…</span><br>Branch work/issue-5016 · Ahead of develop 75 · Behind 0 · Verification — · Tokens 1,204,551 · Cost unavailable<br>2026-11-10T09:37:26.292327+00:00 · LAUNCH NOW · SETTINGS · …</div>
-            <div class="b-card"><span class="hd">issue-4499 — manual-profile-v1:77ab09c3…</span><br>Branch work/issue-4499 · Ahead of develop 12 · Verification — · Tokens 88,204 · Cost unavailable<br>2026-11-10T09:36:58.104551+00:00 · LAUNCH NOW · SETTINGS · …</div>
-            <p class="b-note">// One card carries IDs, branch state, verification, tokens and cost notes at once — and this is still only the gwt project.</p>
+            <div class="b-kpi"><span class="k">全体トークン/分 79.1K</span><span class="k">実行中 4 · インライン 3</span><span class="k">作業 3</span></div>
+            <div class="b-warn">コストは表示できません：セッション単位の USD 集計には対応していません</div>
+            <div class="b-warn">一部のみ表示：計測が不完全です</div>
+            <div class="b-card"><span class="hd">issue-5016 — manual-profile-v1:9f2c41e8…</span><br>Branch work/issue-5016 · develop より 75 先行 · 遅れ 0 · 検証 — · トークン 1,204,551 · コスト表示不可<br>2026-11-10T09:37:26.292327+00:00 · 今すぐ起動 · 設定 · …</div>
+            <div class="b-card"><span class="hd">issue-4499 — manual-profile-v1:77ab09c3…</span><br>Branch work/issue-4499 · develop より 12 先行 · 検証 — · トークン 88,204 · コスト表示不可<br>2026-11-10T09:36:58.104551+00:00 · 今すぐ起動 · 設定 · …</div>
+            <p class="b-note">// 1枚のカードに ID・ブランチの状態・検証・トークン・コストの注記が全部乗っています — しかもこれでも gwt プロジェクトだけの話です。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Works (9 running)</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 作業中（実行中 9）</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Works"></div>
+            <div class="rail-slot" data-active="作業中"></div>
             <div class="content">
-              <p class="h-big">Works</p>
-              <p class="h-sub">9 sessions are working right now, across 5 of the 7 projects. Each session's work stays inside its own project.</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Shared state model for the new screens (#7048)</div><div class="d">Codex · Host · running 42 min · last activity 2 min ago · Changes so far: 6 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Home &amp; Decide screens (#7007)</div><div class="d">Claude Code · running 1 h 12 min · last activity just now · Changes so far: 11 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Race result import — new data format (#130)</div><div class="d">Claude Code · Docker · service agent-dev · running 47 min · last activity 5 min ago · Changes so far: 4 files · Checks: 1 failing, being fixed</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Token usage panel (#208)</div><div class="d">Claude Code · running 33 min · last activity 1 min ago · Changes so far: 3 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">Reconnect after sleep (#41)</div><div class="d">Codex · running 3 h 40 min · <b>no activity for 1 h</b> · Your call is waiting in Decide</div></div><span class="badge b-wait">Running · quiet</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <p class="rel">+ 4 more sessions (gwt ×2 · llmlb ×1 · event-magazine ×1) — same layout.</p>
+              <p class="h-big">作業中</p>
+              <p class="h-sub">いま9セッションが作業中です（7プロジェクトのうち5つ）。各セッションの作業は自分のプロジェクトの中だけに収まります。</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">新しい画面のための共有状態モデル（#7048）</div><div class="d">Codex · ホスト · 42分実行中 · 最終活動 2分前 · ここまでの変更： 6ファイル · チェック： 通過</div></div><span class="badge b-run">実行中</span><div class="btnrow"><button class="btn" type="button">セッションを開く</button><button class="btn ghost" type="button">一時停止</button><button class="btn ghost" type="button">停止</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">ホーム＆判断の画面（#7007）</div><div class="d">Claude Code · 1時間12分実行中 · 最終活動 たった今 · ここまでの変更： 11ファイル · チェック： 通過</div></div><span class="badge b-run">実行中</span><div class="btnrow"><button class="btn" type="button">セッションを開く</button><button class="btn ghost" type="button">一時停止</button><button class="btn ghost" type="button">停止</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">レース結果の取り込み — 新しいデータ形式（#130）</div><div class="d">Claude Code · Docker · サービス agent-dev · 47分実行中 · 最終活動 5分前 · ここまでの変更： 4ファイル · チェック： 1件失敗、修正中</div></div><span class="badge b-run">実行中</span><div class="btnrow"><button class="btn" type="button">セッションを開く</button><button class="btn ghost" type="button">一時停止</button><button class="btn ghost" type="button">停止</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">トークン使用量パネル（#208）</div><div class="d">Claude Code · 33分実行中 · 最終活動 1分前 · ここまでの変更： 3ファイル · チェック： 通過</div></div><span class="badge b-run">実行中</span><div class="btnrow"><button class="btn" type="button">セッションを開く</button><button class="btn ghost" type="button">一時停止</button><button class="btn ghost" type="button">停止</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">スリープ後の再接続（#41）</div><div class="d">Codex · 3時間40分実行中 · <b>1時間活動なし</b> · あなたの判断が「判断」で待っています</div></div><span class="badge b-wait">実行中 · 静か</span><div class="btnrow"><button class="btn" type="button">セッションを開く</button><button class="btn ghost" type="button">停止</button></div></div>
+              <p class="rel">あと4セッション（gwt ×2 · llmlb ×1 · event-magazine ×1）— 同じ並び。</p>
             </div>
           </div>
         </div></div>
@@ -953,7 +953,7 @@
 
       <!-- ================= Agents ================= -->
       <section class="screen" id="agents" data-mode="after">
-        <h2>Agents <span class="en">Agents — who is doing what, where</span></h2>
+        <h2>エージェント <span class="en">エージェント — 誰が・どこで・何を</span></h2>
         <p class="why">現行 Agents は略号と変動するトークン指標が中心で、「− Rest member」のような意味の取れない操作もありました（<span class="prob">問題7・9</span>）。After では<strong>「どのエージェントが・どのプロジェクトで・何をしているか」</strong>を主語に組み替えます。手が空いているか、サインイン切れなどの手当てが要るかもここで分かります。あわせて<strong>各エージェントの利用量</strong>（週間枠の使用率とリセットまでの目安）も行に併記しますが、利用量は<strong>既定で表示</strong>します（オーナー決定で方針転換：設定でオンにする方式はやめた）。なお<strong>担当者（メンバー）のモデル自体は現行から継承します</strong>——名前＋ツールで登録したメンバーが Issue を跨いで再利用され、休止・名前変更・メンバーごとの実績も現行どおり。刷新で変えるのは、その見せ方だけです。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -961,30 +961,30 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — RUN 3 · BLOCK 84</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 実行 3 · ブロック 84</span></div>
           <div class="content">
-            <div class="b-kpi"><span class="k">Fleet tokens/min 0</span><span class="k">A3/6</span><span class="k">Members 6</span></div>
-            <div class="b-card"><span class="hd">codex-1</span> · A · RUN · 1.9M tok/min (a minute ago: 0) · − Rest member · …</div>
-            <div class="b-card"><span class="hd">claude-2</span> · A · RUN · 79.1K tok/min · − Rest member · …</div>
-            <div class="b-card"><span class="hd">codex-3</span> · IDLE · − Rest member · …</div>
-            <p class="b-note">// Which project is each agent working on? What task? Not shown. Fleet tokens/min changed 0 → 1.9M → 79.1K → 2M within minutes.</p>
+            <div class="b-kpi"><span class="k">全体トークン/分 0</span><span class="k">A3/6</span><span class="k">メンバー 6</span></div>
+            <div class="b-card"><span class="hd">codex-1</span> · A · 実行中 · 1.9M トークン/分（1分前： 0） · − メンバーを休止 · …</div>
+            <div class="b-card"><span class="hd">claude-2</span> · A · 実行中 · 79.1K トークン/分 · − メンバーを休止 · …</div>
+            <div class="b-card"><span class="hd">codex-3</span> · 待機 · − メンバーを休止 · …</div>
+            <p class="b-note">// 各エージェントがどのプロジェクトで働いているのか？ 何のタスクか？ 表示されません。全体トークン/分は数分のうちに 0 → 1.9M → 79.1K → 2M と変わりました。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Agents</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — エージェント</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Agents"></div>
+            <div class="rail-slot" data-active="エージェント"></div>
             <div class="content">
-              <p class="h-big">Agents</p>
-              <p class="h-sub">9 working · 1 available · 1 needs your attention. Agents are registered by name and tool, and are reused across issues. Capacity: 11 of 12 agents enabled (1 resting). Your PM assigns agents to projects. Usage is shown by default.</p>
-              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">H</span><div class="grow"><div class="t">Haruto</div><div class="d">Codex · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> Shared state model (#7048) · running 42 min</div><div class="use"><span class="pct">Weekly 64%</span><span class="bar"><i style="width:64%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">Y</span><div class="grow"><div class="t">Yui</div><div class="d">Claude Code · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> Home &amp; Decide screens (#7007) · running 1 h 12 min</div><div class="use"><span class="pct">Weekly 31%</span><span class="bar"><i style="width:31%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">S</span><div class="grow"><div class="t">Sora</div><div class="d">Claude Code · <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> Race result import (#130) · running 47 min</div><div class="use"><span class="pct">Weekly 31%</span><span class="bar"><i style="width:31%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">R</span><div class="grow"><div class="t">Ren</div><div class="d">Codex · <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> Reconnect after sleep (#41) · running 3 h 40 min · no activity for 1 h</div><div class="use"><span class="pct">Weekly 64%</span><span class="bar"><i style="width:64%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-wait">Working · quiet</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#475569">A</span><div class="grow"><div class="t">Aoi</div><div class="d">Codex tool · Signed out — this agent can't take work until you sign in to the tool again.</div></div><span class="badge b-block">Needs sign-in</span><button class="btn" type="button">Sign in again</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#475569">M</span><div class="grow"><div class="t">Mio</div><div class="d">Claude Code · Available — your PM will assign the next task that fits.</div></div><span class="badge b-done">Available</span></div>
-              <p class="rel">+ 5 more working agents (gwt ×2 · llmlb ×2 · event-magazine ×1) — same layout. Select an agent to open its detail: rename, rest, reassign it to another issue or switch it to the next issue by hand, and its record (assigned issues · landed · active time · tokens), as today. Usage lines are shown for every agent by default.</p>
+              <p class="h-big">エージェント</p>
+              <p class="h-sub">作業中 9 · 対応可能 1 · あなたの確認が要るもの 1。エージェントは名前とツールで登録され、Issue を跨いで再利用されます。稼働上限：12人中11人が有効（1人休止中）。エージェントのプロジェクトへの割り当ては PM が行います。利用量は既定で表示されます。</p>
+              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">H</span><div class="grow"><div class="t">Haruto</div><div class="d">Codex · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> 共有状態モデル（#7048） · 42分実行中</div><div class="use"><span class="pct">週間 64%</span><span class="bar"><i style="width:64%"></i></span><span>金曜 18:00 にリセット · アカウント単位 — 利用量はそのアカウントの全セッションで共有されます</span></div></div><span class="badge b-run">作業中</span><button class="btn ghost" type="button">一時停止</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">Y</span><div class="grow"><div class="t">Yui</div><div class="d">Claude Code · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> ホーム＆判断の画面（#7007） · 1時間12分実行中</div><div class="use"><span class="pct">週間 31%</span><span class="bar"><i style="width:31%"></i></span><span>金曜 18:00 にリセット · アカウント単位 — 利用量はそのアカウントの全セッションで共有されます</span></div></div><span class="badge b-run">作業中</span><button class="btn ghost" type="button">一時停止</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">S</span><div class="grow"><div class="t">Sora</div><div class="d">Claude Code · <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> レース結果の取り込み（#130） · 47分実行中</div><div class="use"><span class="pct">週間 31%</span><span class="bar"><i style="width:31%"></i></span><span>金曜 18:00 にリセット · アカウント単位 — 利用量はそのアカウントの全セッションで共有されます</span></div></div><span class="badge b-run">作業中</span><button class="btn ghost" type="button">一時停止</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">R</span><div class="grow"><div class="t">Ren</div><div class="d">Codex · <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> スリープ後の再接続（#41） · 3時間40分実行中 · 1時間活動なし</div><div class="use"><span class="pct">週間 64%</span><span class="bar"><i style="width:64%"></i></span><span>金曜 18:00 にリセット · アカウント単位 — 利用量はそのアカウントの全セッションで共有されます</span></div></div><span class="badge b-wait">作業中 · 静か</span><button class="btn ghost" type="button">一時停止</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#475569">A</span><div class="grow"><div class="t">Aoi</div><div class="d">Codex ツール · サインアウト済み — ツールにもう一度サインインするまで、このエージェントは仕事を受けられません。</div></div><span class="badge b-block">サインインが必要</span><button class="btn" type="button">もう一度サインイン</button></div>
+              <div class="rowitem"><span class="pm-ava" style="background:#475569">M</span><div class="grow"><div class="t">Mio</div><div class="d">Claude Code · 対応可能 — PM が次に合うタスクを割り当てます。</div></div><span class="badge b-done">対応可能</span></div>
+              <p class="rel">あと5人の作業中エージェント（gwt ×2 · llmlb ×2 · event-magazine ×1）— 同じ並び。エージェントを選ぶと詳細が開きます：名前変更、休止、別の Issue への担当替えや次の Issue への手動切替、そして現行どおりの実績（担当 Issue・着地・稼働時間・トークン）。利用量の行は全エージェントに既定で表示されます。</p>
             </div>
           </div>
         </div></div>
@@ -1005,7 +1005,7 @@
 
       <!-- ================= Notifications ================= -->
       <section class="screen" id="notifications" data-mode="after">
-        <h2>Notifications <span class="en">Notifications — grouped, with decisions separated</span></h2>
+        <h2>通知 <span class="en">通知 — 集約し、判断は分けて</span></h2>
         <p class="why">現行の通知は未読98件、その大半が同一文面の繰り返しで、グループ化も「判断すべきもの」の切り分けもありませんでした（<span class="prob">問題4</span>）。After では<strong>同一内容を集約</strong>し、<strong>判断が要るものを専用グループとして分離</strong>します。通知は「知らせる」ためだけにあり、判断そのものは Decide で行います。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -1013,35 +1013,35 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — Notifications (98 unread)</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 通知（未読 98 件）</span></div>
           <div class="content">
-            <div class="b-card">Issue Monitor #4499 steering requested… · 2026-11-10T09:37:26.292327+00:00</div>
-            <div class="b-card">Issue Monitor #4499 steering requested… · 2026-11-10T09:36:41.009812+00:00</div>
-            <div class="b-card">Issue Monitor #4499 steering requested… · 2026-11-10T09:35:57.551209+00:00</div>
-            <div class="b-card">Issue Monitor #4499 steering requested… · 2026-11-10T09:35:02.118773+00:00</div>
-            <div class="b-card">Issue Monitor #5016 steering requested… · 2026-11-10T09:33:48.902341+00:00</div>
-            <p class="b-note">// × 93 more, mostly the same lines. Which of these need a decision? All of them look identical, so none of them stand out.</p>
+            <div class="b-card">Issue モニター #4499 操作要求… · 2026-11-10T09:37:26.292327+00:00</div>
+            <div class="b-card">Issue モニター #4499 操作要求… · 2026-11-10T09:36:41.009812+00:00</div>
+            <div class="b-card">Issue モニター #4499 操作要求… · 2026-11-10T09:35:57.551209+00:00</div>
+            <div class="b-card">Issue モニター #4499 操作要求… · 2026-11-10T09:35:02.118773+00:00</div>
+            <div class="b-card">Issue モニター #5016 操作要求… · 2026-11-10T09:33:48.902341+00:00</div>
+            <p class="b-note">// 他に93件、ほとんど同じ行です。どれが判断を要するのか？ 全部同じ見た目なので、どれも目立ちません。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Notifications</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 通知</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Notifications"></div>
+            <div class="rail-slot" data-active="通知"></div>
             <div class="content">
-              <p class="h-big">Notifications</p>
-              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Repeats are folded into one line each.</p>
-              <p class="h-sec">Needs your decision · 5</p>
-              <div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><div class="grow"><div class="t">5 decisions are waiting — newest: unsaved work in 3 projects</div><div class="d">Decisions live in Decide; notifications only point at them.</div></div><button class="btn amber" type="button">Open Decide</button></div>
-              <p class="h-sec">Blocked · 2 new</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import blocked — source format changed (#121)</div><div class="d">48 min ago · also waiting in Decide</div></div><span class="badge b-block">Blocked</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Publishing blocked — deploy key expired (#88)</div><div class="d">59 min ago</div></div><span class="badge b-block">Blocked</span></div>
-              <p class="h-sec">Finished · 4 new since you last looked</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">“Settings: per-project sections” (#7039) finished and merged</div><div class="d">2 min ago · newest of the 4 — everything finished is collected in Log</div></div><span class="badge b-done">Done</span></div>
-              <p class="h-sec">Status updates · grouped</p>
-              <div class="rowitem"><div class="grow"><div class="t">Steering updates on gwt — 14 similar events</div><div class="d">Folded into one line · last one 9 min ago · nothing needs you here</div></div><button class="btn ghost" type="button">Expand</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Progress notes from running tasks — 73 events</div><div class="d">Folded · details are in Log</div></div><span class="badge b-done">Read</span><button class="btn ghost" type="button">Expand</button></div>
-              <div class="btnrow"><button class="btn" type="button">Mark all as read</button><button class="btn ghost" type="button">Notification settings</button></div>
+              <p class="h-big">通知</p>
+              <p class="h-sub">未読9件 — 昨日からの98件の出来事を集約。繰り返しは1行に畳んでいます。</p>
+              <p class="h-sec">あなたの判断が必要 · 5</p>
+              <div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><div class="grow"><div class="t">判断待ちが5件 — 最新：3プロジェクトの未保存の作業</div><div class="d">判断は「判断」で行います。通知はそこへの案内だけです。</div></div><button class="btn amber" type="button">判断を開く</button></div>
+              <p class="h-sec">詰まり · 新規2件</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">日次取り込みが停止 — 元の形式が変更（#121）</div><div class="d">48分前 · 「判断」でも待機中</div></div><span class="badge b-block">詰まり</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">公開が停止 — デプロイキーの期限切れ（#88）</div><div class="d">59分前</div></div><span class="badge b-block">詰まり</span></div>
+              <p class="h-sec">完了 · 前回見てから新規4件</p>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">「設定：プロジェクト別のセクション」（#7039）が完了しマージされました</div><div class="d">2分前 · 4件のうち最新 — 完了したものはすべて「ログ」に集まります</div></div><span class="badge b-done">完了</span></div>
+              <p class="h-sec">状態の更新 · 集約</p>
+              <div class="rowitem"><div class="grow"><div class="t">gwt の誘導の更新 — 似た出来事14件</div><div class="d">1行に集約 · 最後は9分前 · ここにあなたの対応は要りません</div></div><button class="btn ghost" type="button">展開</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">実行中タスクからの進捗メモ — 73件</div><div class="d">集約済み · 詳細は「ログ」にあります</div></div><span class="badge b-done">既読</span><button class="btn ghost" type="button">展開</button></div>
+              <div class="btnrow"><button class="btn" type="button">すべて既読にする</button><button class="btn ghost" type="button">通知設定</button></div>
             </div>
           </div>
         </div></div>
@@ -1059,7 +1059,7 @@
 
       <!-- ================= Project ================= -->
       <section class="screen" id="project" data-mode="after">
-        <h2>Project <span class="en">Project — one project, in full</span></h2>
+        <h2>プロジェクト <span class="en">プロジェクト — 1プロジェクトの全部</span></h2>
         <p class="why">監査で見つかった<strong>最大の抜けは「プロジェクト単位の画面そのもの」</strong>でした。現行では Hub から入るプロジェクトページ（<span style="font-family:var(--mono)">/p/&lt;hash&gt;</span>）に、そのプロジェクトの Issues／Works／PM チャット／Agents／Board／Branches／検索／設定が集まっています。刷新の横断面はこの束を置き換えるものではありません。<strong>横断面は「端末全体の要約と判断」、Project 面は「1プロジェクトに文脈を固定した作業空間」</strong>として併設します。入り方も明示します：Home の Projects 行、Progress の「Open project」、各行のプロジェクトタグから入る。PM は共通のままで、文脈だけがこのプロジェクトに固定されます。なお <strong>Board はこの面の中に置きます（オーナー決定）</strong>。Board のリモート共有は #4833 で確定・実装済みの事項です：発端はオーナーの 2026-09-30 の問い、経路は 2026-10-02 のオーナー裁定で GitHub Discussions に確定し、実装・検証まで完了しています（CLOSED）。共有の対象は decision／blocked／handoff のみで、status／claim はローカルに残ります。これはローカルの Board の会話機能を置き換えるものではなく（#4833 で対象外と明記）、リモート共有もプロジェクト単位の Board の中で届きます。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -1067,40 +1067,40 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — project page /p/&lt;hash&gt; (this tab is bound to one project)</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — プロジェクトページ /p/&lt;hash&gt;（このタブは1プロジェクト専用）</span></div>
           <div class="content">
-            <div class="b-tabs"><span>Issues (Kanban)</span><span>Works</span><span>PM chat</span><span>Agents</span><span>Board</span><span>Branches</span><span>Search</span><span>Settings</span></div>
-            <div class="b-card"><span class="hd">Everything for ONE project lives here</span><br>Issues / SPEC / Monitor as a phase kanban · works &amp; terminals · PM chat + reports + execution log · agents roster · board &amp; board log · agent kanban · branches &amp; cleanup · index search · project settings (execution / PM / hooks / index) · close project</div>
-            <p class="b-note">// The cross-project mock had no page like this at all — filtering a list is not the same as a workspace bound to one project.</p>
+            <div class="b-tabs"><span>Issue（カンバン）</span><span>作業</span><span>PM チャット</span><span>エージェント</span><span>ボード</span><span>ブランチ</span><span>検索</span><span>設定</span></div>
+            <div class="b-card"><span class="hd">1プロジェクトのすべてがここにあります</span><br>Issue / SPEC / モニターをフェーズのカンバンで · 作業とターミナル · PM チャット＋レポート＋実行ログ · エージェント名簿 · ボードとボードログ · エージェントのカンバン · ブランチと掃除 · 索引検索 · プロジェクト設定（実行 / PM / フック / 索引）· プロジェクトを閉じる</div>
+            <p class="b-note">// 横断モックにはこういうページ自体がありませんでした — 一覧を絞り込むことと、1プロジェクトに固定された作業場所は別物です。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Project: gwt</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — プロジェクト： gwt</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Project"></div>
+            <div class="rail-slot" data-active="プロジェクト"></div>
             <div class="content">
-              <p class="h-big">Project: gwt</p>
-              <p class="h-sub">Context fixed to gwt — everything below is this project only. Your PM is the same PM; only its focus is pinned here. <b>Back to all projects</b> returns to the cross-project screens.</p>
+              <p class="h-big">プロジェクト： gwt</p>
+              <p class="h-sub">文脈は gwt に固定 — 以下はすべてこのプロジェクトだけの内容です。PM は同じ PM で、注目先がここに固定されているだけです。<b>全プロジェクトに戻る</b>で横断の画面に戻ります。</p>
               <div class="stat-row">
-                <div class="stat"><div class="num">4</div><div class="lab">Running in gwt</div></div>
-                <div class="stat bad"><div class="num">1</div><div class="lab">Blocked</div></div>
-                <div class="stat warn"><div class="num">2</div><div class="lab">Waiting for your decision</div></div>
-                <div class="stat"><div class="num">132</div><div class="lab">Open issues in gwt</div></div>
+                <div class="stat"><div class="num">4</div><div class="lab">gwt で実行中</div></div>
+                <div class="stat bad"><div class="num">1</div><div class="lab">詰まり</div></div>
+                <div class="stat warn"><div class="num">2</div><div class="lab">あなたの判断待ち</div></div>
+                <div class="stat"><div class="num">132</div><div class="lab">gwt のオープン Issue</div></div>
               </div>
-              <div class="rowitem"><div class="grow"><div class="t">Execution policy — Running</div><div class="d">Saved choice: Continue. This project keeps running, and starts again after a gwt restart. Switch the saved choice to Stop to park the project: no new work starts, running work is left to finish, and the choice is remembered. The state shown here (Running / Waiting / Stopped) is the project&rsquo;s actual state, not just the saved choice.</div></div><div class="btnrow"><button class="btn" type="button">Continue</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <p class="h-sec">This project, in one place</p>
-              <div class="rowitem"><div class="grow"><div class="t">Issues — phase view</div><div class="d">This project&rsquo;s issues as a phase board: Backlog / Queued / Planning / Implementation / Review / Done, with queue actions and the issue detail drawer.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Works &amp; terminals</div><div class="d">Sessions running for gwt, with their terminals. Resume a past session, or start fresh.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Ask — scoped to gwt</div><div class="d">The same PM chat, with the scope pinned to this project. Reports for gwt land here too.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Agents on gwt</div><div class="d">The roster working on this project — the same agents as the cross-project Agents screen, filtered to gwt.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Board — state &amp; conversation, gwt only</div><div class="d">This project&rsquo;s board, in full: the state columns (Waiting for you / Blocked / In progress / Waiting to start, sorted by how long each card has waited) and the conversation log — posts, reply threads, @mentions, history paging, destinations (For you / General / Broadcast) and agent Focus / Resume. Decisions, blocked notes and handoffs shared from other machines via GitHub Discussions (#4833, decided and shipped) also arrive here. Board destinations are per project and shared with the team — projects never mix, and there is no cross-project board.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Agent board — Plan / Active / Blocked / Done</div><div class="d">Agent windows as cards on progress lanes; drag a card to move it, launch an agent into a lane. It opens as its own screen — windows are not placed side by side.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Branches</div><div class="d">Branch list with safe cleanup: protected branches, the current HEAD and branches gwt doesn&rsquo;t manage can&rsquo;t be deleted; remote deletion and forced worktree removal are confirmed step by step.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Search this project</div><div class="d">Semantic search across this project&rsquo;s issues, discussions, docs, specs, files, reports and memory.</div></div><button class="btn" type="button">Search</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Project settings</div><div class="d">Only what differs from the device settings: issue execution (Monitoring / Auto-refill / Allowed labels), this project&rsquo;s PM setup, Hooks, index health, and the execution policy.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Close this project</div><div class="d">Closing waits for the project&rsquo;s agents to shut down; if shutdown stalls, you can retry from here. A one-time move to the bare + worktree layout, when offered, runs from here too.</div></div><button class="btn ghost" type="button">Close…</button></div>
-              <p class="rel">Mission briefing for this project appears at the top of this screen when the PM starts work here.</p>
+              <div class="rowitem"><div class="grow"><div class="t">実行ポリシー — 実行中</div><div class="d">保存された選択： 続ける。このプロジェクトは動き続け、gwt の再起動後も再開します。保存された選択を「停止」に切り替えるとプロジェクトを止められます：新しい作業は始まらず、実行中の作業は終わるまで待ち、選択は記憶されます。ここに出る状態（実行中 / 待機 / 停止）は、保存された選択だけではなくプロジェクトの実際の状態です。</div></div><div class="btnrow"><button class="btn" type="button">続ける</button><button class="btn ghost" type="button">停止</button></div></div>
+              <p class="h-sec">このプロジェクトのすべて</p>
+              <div class="rowitem"><div class="grow"><div class="t">Issue — フェーズ表示</div><div class="d">このプロジェクトの Issue をフェーズのボードで： バックログ / キュー待ち / 計画 / 実装 / レビュー / 完了。キューの操作と Issue 詳細ドロワーつき。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">作業とターミナル</div><div class="d">gwt で動いているセッションと、そのターミナル。過去のセッションを再開するか、新しく始められます。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">相談 — gwt に絞った</div><div class="d">同じ PM チャットで、範囲をこのプロジェクトに固定。gwt のレポートもここに届きます。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">gwt のエージェント</div><div class="d">このプロジェクトで働く名簿 — 横断の「エージェント」画面と同じ顔ぶれを gwt で絞ったもの。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">ボード — 状態と会話、gwt のみ</div><div class="d">このプロジェクトのボードの全部： 状態の列（あなた待ち / 詰まり / 実行中 / 開始待ち。各カードがどれだけ待ったかで並び替え）と、会話のログ — 投稿、返信スレッド、@メンション、履歴のページング、宛先（あなた宛て / 全体 / 放送）とエージェントへのフォーカス / 再開。GitHub Discussions 経由で他のマシンから共有された判断・詰まりメモ・引き継ぎ（#4833、決定・出荷済み）もここに届きます。ボードの宛先はプロジェクトごとで、チームと共有されます — プロジェクトが混ざることはなく、プロジェクトをまたいだボードはありません。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">エージェントボード — 計画 / 活動中 / 詰まり / 完了</div><div class="d">エージェントのウィンドウを進捗レーン上のカードとして表示。カードをドラッグして動かしたり、レーンにエージェントを起動したりできます。独立した画面として開きます — ウィンドウを並べて置くことはしません。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">ブランチ</div><div class="d">安全な掃除つきのブランチ一覧： 保護されたブランチ、現在の HEAD、gwt が管理していないブランチは削除できません。リモートの削除とワークツリーの強制除去は、段階ごとに確認します。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">このプロジェクトを検索</div><div class="d">このプロジェクトの Issue・議論・ドキュメント・仕様・ファイル・レポート・メモリを意味で検索。</div></div><button class="btn" type="button">検索</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">プロジェクト設定</div><div class="d">端末の設定と違うところだけ： Issue の実行（監視 / 自動補充 / 許可ラベル）、このプロジェクトの PM の設定、フック、索引の健全性、実行ポリシー。</div></div><button class="btn" type="button">開く</button></div>
+              <div class="rowitem"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d">閉じるときはプロジェクトのエージェントが終了するのを待ちます。終了が止まったら、ここから再試行できます。bare＋ワークツリー構成への一度きりの移行が提示された場合も、ここから実行します。</div></div><button class="btn ghost" type="button">閉じる…</button></div>
+              <p class="rel">このプロジェクトのミッション説明は、PM がここで作業を始めるときにこの画面の先頭に出ます。</p>
             </div>
           </div>
         </div></div>
@@ -1113,14 +1113,14 @@
           <li><strong>リモート共有は確定事項としてこの面で受ける（監査 L-1／#4833）。</strong>他マシンの decision／blocked／handoff を GitHub Discussions 経由で共有する件は、2026-10-02 のオーナー裁定で確定し実装・検証済み（CLOSED）。対象はこの3種のみで、status／claim はローカルに残る。「Discussions へ移行」と言ってもローカルの会話機能が無くなるわけではなく、届いた共有はプロジェクト単位の Board の中で読める。なお Board の保存・共有先そのものは provider（Local／Slack／Teams、Settings で切替）が担い、Discussions は provider の選択肢ではなく、その上に乗る端末間の受け渡し経路である。</li>
           <li><strong>実行ポリシーはこの面で見て切り替える（オーナー決定）。</strong>プロジェクトごとの実行ポリシー（保存された選択 Continue／Stop と実効状態 Running／Waiting／Stopped 等）は、現行ではステータス1行でしか見えなかった。この面の先頭に状態表示と Continue／Stop の切替を置き、Home のプロジェクト行と Progress の「By project」行にも実効状態を添える（旧 Y-5）。</li>
           <li><strong>Kanban の置き場はこの Project 面で確定（オーナー決定）。</strong>Agent Kanban とフェーズ Kanban はこの Project 面に置く（現行の置き場所に最も近い）。横断面には進行ビューを出さない（旧 Y-3）。</li>
-          <li><strong>ウィンドウモデルは持たず、画面方式に寄せる（オーナー決定）。</strong>現行はプロジェクト内の「ウィンドウ」として各面を開き、並べたりスプリットしたりできるモデルだったが、刷新では面を1つずつ画面として開く方式に決めた。根拠は、Works 一覧のプレビューが設定「Works output lines」の既定3行しか見えず、窓を並べて見比べる価値が薄いこと（オーナー談）。Issue も詳細画面として開く（旧 Y-6）。</li>
+          <li><strong>ウィンドウモデルは持たず、画面方式に寄せる（オーナー決定）。</strong>現行はプロジェクト内の「ウィンドウ」として各面を開き、並べたりスプリットしたりできるモデルだったが、刷新では面を1つずつ画面として開く方式に決めた。根拠は、Works 一覧のプレビューが設定「作業の出力行数」の既定3行しか見えず、窓を並べて見比べる価値が薄いこと（オーナー談）。Issue も詳細画面として開く（旧 Y-6）。</li>
           <li><strong>スプリット表示は持たない（監査 A-8）。</strong>窓の並置を持たない画面方式の決定（Q6）と整合させ、2面の並列表示は採用しない。PM チャットも従来どおり単一のまま。</li>
         </ul>
       </section>
 
       <!-- ================= Settings ================= -->
       <section class="screen" id="settings" data-mode="after">
-        <h2>Settings <span class="en">Settings — device first, then per project</span></h2>
+        <h2>設定 <span class="en">設定 — まず端末、次にプロジェクト別</span></h2>
         <p class="why">PM が端末に1人になる以上、設定も<strong>「共通PM（端末）の設定」と「プロジェクト別の設定」の階層</strong>が一目で分かる必要があります。現行は全体設定とプロジェクト設定が混在した平らな一覧でした。After では階層をそのまま画面構造にし、Supported Tools のような既存項目（現行の Supported Agents、自動更新を含む）もこの枠組みに収めます。利用量は<strong>既定で表示</strong>する方針に変えたため（オーナー決定）、表示のオン／オフ設定は持ちません。また、ツールの<strong>インストール／更新の導線は現行からそのまま継承</strong>します——未導入のツールには Install、更新がある導入済みには Update が出て、作業中のエージェントがいる間は実行できません。あわせて、<strong>起動設定（Launch Settings）も現行から継承</strong>します——起動候補（Candidate）ごとのプロファイル（メンバー／Tool／Model／Runtime＝Host・Docker 等）は端末側に置き、プロジェクトの差分で上書きできます。なお Settings は<strong>タブで切り替える</strong>面にします（Your PM／Tools／Launch／Projects の4タブ）。節を縦に積むと長くなって見通しが悪いためで、「端末の既定 → プロジェクトの差分」の2層構造はタブの中でも維持します。モバイルではタブを横スクロールのチップ列にします。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -1128,96 +1128,96 @@
         </div>
 
         <div class="view-b"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — Settings</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title">gwt — 設定</span></div>
           <div class="content">
             <div class="b-card">monitor.interval = 30 · queue.policy = fifo · profile = manual-profile-v1</div>
             <div class="b-card">project: gwt · worktree root = … · branch prefix = work/issue-</div>
-            <div class="b-card">Supported Agents · auto-update = ? · − Rest member default = ?</div>
-            <div class="b-card">project: llmlb · monitor.interval = 30 (set inside llmlb's own window)</div>
-            <p class="b-note">// Global and per-project settings are one flat list — and each project window carries its own copy. Which setting wins is nowhere visible.</p>
+            <div class="b-card">対応エージェント · 自動更新 = ? · − メンバー休止の既定 = ?</div>
+            <div class="b-card">project: llmlb · monitor.interval = 30（llmlb 自身のウィンドウ内で設定）</div>
+            <p class="b-note">// 全体の設定とプロジェクト別の設定が1つの平らな一覧になっていて、各プロジェクトのウィンドウが自分のコピーを持っています。どの設定が効くのかはどこにも見えません。</p>
           </div>
         </div></div>
 
         <div class="view-a"><div class="mock">
-          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — Settings</span></div>
+          <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — 設定</span></div>
           <div class="mock-body">
-            <div class="rail-slot" data-active="Settings"></div>
+            <div class="rail-slot" data-active="設定"></div>
             <div class="content">
-              <p class="h-big">Settings</p>
-              <p class="h-sub">Settings for your PM apply to the whole device. Project settings only override them where a project truly differs.</p>
-<div class="chips" role="group" aria-label="Settings tabs"><button class="chip on" type="button">Your PM</button><button class="chip" type="button">Tools</button><button class="chip" type="button">Launch</button><button class="chip" type="button">Projects</button></div>
-<p class="rel" style="margin:-6px 0 14px">Tabs, not one long page: pick a tab to switch. The mock below shows the Your PM tab selected, then the other tabs in order.</p>
+              <p class="h-big">設定</p>
+              <p class="h-sub">あなたの PM の設定は端末全体に効きます。 プロジェクト設定 本当に違うところだけを上書きします。</p>
+<div class="chips" role="group" aria-label="設定のタブ"><button class="chip on" type="button">あなたの PM</button><button class="chip" type="button">ツール</button><button class="chip" type="button">起動</button><button class="chip" type="button">プロジェクト</button></div>
+<p class="rel" style="margin:-6px 0 14px">1枚の長いページではなくタブで： タブを選んで切り替えます。下のモックは「あなたの PM」タブを選んだ状態から、他のタブを順に示しています。</p>
               <div class="set-group">
-                <h4>Your PM — this device</h4>
-                <p class="d">One PM watches all 7 projects. These settings shape how it takes requests, routes work and reports back.</p>
-                <div class="set-row"><div class="grow"><div class="t">Route tasks to projects automatically</div><div class="d2">The PM suggests a project from each request in Ask, and always shows you the choice.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Bring decisions to me as they appear</div><div class="d2">Off means decisions are batched into the morning and evening reports instead.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Daily summary</div><div class="d2">Posted to Log and Notifications at 9:00 and 18:00.</div></div><button class="btn" type="button">9:00 / 18:00 ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Quiet hours</div><div class="d2">Only blocked work and decisions interrupt you between 23:00 and 7:00.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">App updates — gwt itself</div><div class="d2">Current version 9.161.0. gwt checks for updates itself; tools have their own update setting, in the Tools tab.</div></div><button class="btn" type="button">Check now</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Apply updates automatically (auto-apply)</div><div class="d2">When an update is ready, running work is drained first — agents are stopped safely — then gwt restarts and applies it. You can cancel an automatic update before it applies.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Release notes &amp; about</div><div class="d2">What changed in each version. Rolling back to an older version asks for confirmation first.</div></div><button class="btn" type="button">Open</button></div>
+                <h4>あなたの PM — この端末</h4>
+                <p class="d">1人の PM が全7プロジェクトを見守ります。ここでの設定が、依頼の受け方・仕事の回し方・報告の仕方を決めます。</p>
+                <div class="set-row"><div class="grow"><div class="t">タスクをプロジェクトへ自動で振り分け</div><div class="d2">PM は「相談」の各依頼からプロジェクトを提案し、その選択を必ずあなたに見せます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">判断は出てきた時点で持ってくる</div><div class="d2">オフにすると、判断は朝と夕方のレポートにまとめて出ます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">毎日の要約</div><div class="d2">9:00 と 18:00 に「ログ」と「通知」へ投稿。</div></div><button class="btn" type="button">9:00 / 18:00 ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00 から 7:00 の間は、詰まった作業と判断だけが割り込みます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">アプリの更新 — gwt 本体</div><div class="d2">現在のバージョン 9.161.0。gwt は自分で更新を確認します。ツールの更新設定は「ツール」タブに別にあります。</div></div><button class="btn" type="button">今すぐ確認</button></div>
+                <div class="set-row"><div class="grow"><div class="t">更新を自動で適用（自動適用）</div><div class="d2">更新の準備ができたら、実行中の作業を先に drain（安全に終了）してから、gwt が再起動して適用します。自動更新は適用前に取り消せます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">リリースノートと概要</div><div class="d2">各バージョンで何が変わったか。古いバージョンへ戻すときは先に確認します。</div></div><button class="btn" type="button">開く</button></div>
               </div>
               <div class="set-group">
-                <h4>Supported Tools</h4>
-                <p class="d">The tools your PM can put to work. Each agent is registered with one of these tools. Usage for each tool appears on the Agents screen by default — there is no separate switch.</p>
-                <div class="set-row"><div class="grow"><div class="t">Automatically update tools</div><div class="d2">At the next startup, only tools with a verified update route and a known newer version are updated. Nothing is installed automatically.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <p class="d" style="margin:2px 0 4px">Installs and updates can't run while any agent is working — close the agent windows first, then retry. Update failures leave launching available.</p>
-                <div class="set-row"><div class="grow"><div class="t">Claude Code</div><div class="d2">Installed · version 2.1.322 · latest 2.1.322 — up to date · 5 sessions available</div></div><span class="badge b-done">Ready</span></div>
-                <div class="set-row"><div class="grow"><div class="t">Codex</div><div class="d2">Installed · version 0.58.0 · latest 0.59.0 — an update is available · 1 session needs sign-in (see Agents)</div></div><span class="badge b-wait">Attention</span><button class="btn" type="button">Update</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Grok Build</div><div class="d2">Not installed — installing adds the tool so agents can be registered with it.</div></div><button class="btn primary" type="button">Install</button></div>
-                <div class="set-row"><div class="grow"><div class="t">OpenCode</div><div class="d2">Installed · version 1.1.8 · latest 1.1.8 — up to date</div></div><span class="badge b-done">Ready</span></div>
+                <h4>対応ツール</h4>
+                <p class="d">PM が使えるツール。各エージェントはこれらのツールのいずれかで登録されます。各ツールの利用量は「エージェント」画面に既定で出ます — 別のスイッチはありません。</p>
+                <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新</div><div class="d2">次回起動時に、更新経路が確認できていて新しい版があることが分かっているツールだけが更新されます。自動でインストールされることはありません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <p class="d" style="margin:2px 0 4px">エージェントが作業中はインストールも更新も実行できません — 先にエージェントのウィンドウを閉じてから、もう一度試してください。更新に失敗しても起動は引き続き使えます。</p>
+                <div class="set-row"><div class="grow"><div class="t">Claude Code</div><div class="d2">導入済み · バージョン 2.1.322 · 最新 2.1.322 — 最新です · 5セッション利用可能</div></div><span class="badge b-done">準備完了</span></div>
+                <div class="set-row"><div class="grow"><div class="t">Codex</div><div class="d2">導入済み · バージョン 0.58.0 · 最新 0.59.0 — 更新があります · 1セッションがサインインを必要としています（「エージェント」参照）</div></div><span class="badge b-wait">要確認</span><button class="btn" type="button">更新</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Grok Build</div><div class="d2">未導入 — 導入するとツールが追加され、エージェントをそのツールで登録できるようになります。</div></div><button class="btn primary" type="button">インストール</button></div>
+                <div class="set-row"><div class="grow"><div class="t">OpenCode</div><div class="d2">導入済み · バージョン 1.1.8 · 最新 1.1.8 — 最新です</div></div><span class="badge b-done">準備完了</span></div>
               </div>
               <div class="set-group">
-                <h4>Custom Tools &amp; backends</h4>
-                <p class="d">Register your own command-line tools, and override how a built-in tool connects (backend profiles). Each custom tool has its own environment variables.</p>
-                <div class="set-row"><div class="grow"><div class="t">Custom tools</div><div class="d2">External CLI tools you registered yourself — add, edit, or remove. Agents can then be registered with them, like built-in tools.</div></div><button class="btn" type="button">Manage</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Environment variables — per custom tool</div><div class="d2">Add or remove env rows for a custom tool; saved with the tool&rsquo;s definition.</div></div><button class="btn" type="button">Edit</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Tool backends</div><div class="d2">Backend override profiles for Claude Code and Codex — where the tool actually connects.</div></div><button class="btn" type="button">Manage</button></div>
+                <h4>カスタムツールとバックエンド</h4>
+                <p class="d">自分のコマンドラインツールを登録したり、組み込みツールの接続先を上書き（バックエンドのプロファイル）したりできます。各カスタムツールは独自の環境変数を持ちます。</p>
+                <div class="set-row"><div class="grow"><div class="t">カスタムツール</div><div class="d2">自分で登録した外部 CLI ツール — 追加・編集・削除ができます。組み込みツールと同じように、エージェントをそのツールで登録できます。</div></div><button class="btn" type="button">管理</button></div>
+                <div class="set-row"><div class="grow"><div class="t">環境変数 — カスタムツールごと</div><div class="d2">カスタムツールの環境変数の行を追加・削除。ツールの定義と一緒に保存されます。</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">ツールのバックエンド</div><div class="d2">Claude Code と Codex のバックエンド上書きプロファイル — ツールが実際に接続する先。</div></div><button class="btn" type="button">管理</button></div>
               </div>
               <div class="set-group">
-                <h4>Launch — how agents start</h4>
-                <p class="d">Launch profiles (candidates), one per agent. Each profile fixes the agent, its tool, model and runtime; starting work uses the profile recorded for that work, and automatic launches use the tier settings. Launching itself happens in the Launch Wizard. Projects can override these profiles as a difference, below.</p>
-                <div class="set-row"><div class="grow"><div class="t">1. Haruto — Codex · gpt-6-sol · reasoning xhigh</div><div class="d2">Runtime: Host · Session mode: Normal · Prefer for: implementation</div></div><button class="btn" type="button">Edit</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Runtime — Haruto</div><div class="d2">Where this agent runs. Choosing Docker enables the Docker service choice and disables the Windows shell.</div></div><button class="btn" type="button">Host ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Docker service — Haruto</div><div class="d2">Only applies when the runtime is Docker.</div></div><button class="btn" type="button">Auto ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Skip permissions — Haruto</div><div class="d2">Skip tool permission prompts for this agent's sessions.</div></div><span class="switch off" role="img" aria-label="Off"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Fast mode — Haruto</div><div class="d2">Prefer faster responses where the tool supports it.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">2. Yui — Claude Code · Auto · reasoning default</div><div class="d2">Runtime: Docker · service agent-dev · Session mode: Normal</div></div><button class="btn" type="button">Edit</button></div>
-                <div class="set-row"><div class="grow"><div class="t">3. Sora — Claude Code · Auto · reasoning default</div><div class="d2">Runtime: Host · Session mode: Normal · Prefer for: data imports</div></div><button class="btn" type="button">Edit</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Manage launch profiles</div><div class="d2">Add a profile, reorder the pool, or remove one — the profiles above are the pool itself, not just examples.</div></div><button class="btn" type="button">Add profile</button></div>
+                <h4>起動 — エージェントの始め方</h4>
+                <p class="d">起動プロファイル（候補）をエージェントごとに1つ。各プロファイルはエージェント・ツール・モデル・実行環境を固定します。作業の開始にはその作業に記録されたプロファイルを使い、自動起動は tier の設定に従います。起動そのものは起動ウィザードで行います。プロジェクトは下で、これらのプロファイルを差分として上書きできます。</p>
+                <div class="set-row"><div class="grow"><div class="t">1. Haruto — Codex · gpt-6-sol · 推論 xhigh</div><div class="d2">実行環境： ホスト · セッションモード： 通常 · 向いている作業： 実装</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">実行環境 — Haruto</div><div class="d2">このエージェントが動く場所。Docker を選ぶと Docker サービスの選択が有効になり、Windows シェルは無効になります。</div></div><button class="btn" type="button">ホスト ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Docker サービス — Haruto</div><div class="d2">実行環境が Docker のときだけ効きます。</div></div><button class="btn" type="button">自動 ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">権限確認を省略 — Haruto</div><div class="d2">このエージェントのセッションでは、ツールの権限確認を表示しません。</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">高速モード — Haruto</div><div class="d2">ツールが対応している範囲で、速い応答を優先します。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">2. Yui — Claude Code · 自動 · 推論 既定</div><div class="d2">実行環境： Docker · サービス agent-dev · セッションモード： 通常</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">3. Sora — Claude Code · 自動 · 推論 既定</div><div class="d2">実行環境： ホスト · セッションモード： 通常 · 向いている作業： データ取り込み</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">起動プロファイルを管理</div><div class="d2">プロファイルの追加、プールの並び替え、削除 — 上のプロファイルは例ではなくプールそのものです。</div></div><button class="btn" type="button">プロファイルを追加</button></div>
               </div>
               <div class="set-group">
-                <h4>Projects</h4>
-                <p class="d">Each project inherits the device settings above. Only the differences are listed.</p>
-                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">2 differences: reports go to the team channel · React work has priority this week</div></div><button class="btn" type="button">Open</button></div>
-                <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d2">1 difference: service restarts need your decision</div></div><button class="btn" type="button">Open</button></div>
-                <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">1 difference: imports run at 6:00 daily</div></div><button class="btn" type="button">Open</button></div>
-                <div class="set-row"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d2">No differences — using device settings as-is</div></div></div>
+                <h4>プロジェクト</h4>
+                <p class="d">各プロジェクトは上の端末設定を引き継ぎます。違うところだけを並べています。</p>
+                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">差分2件： レポートはチームのチャンネルへ · 今週は React の作業が優先</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d2">差分1件： サービスの再起動にはあなたの判断が必要</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">差分1件： 取り込みは毎日 6:00 に実行</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d2">差分なし — 端末設定をそのまま使用</div></div></div>
               </div>
               <div class="set-group">
-                <h4>Board sharing — this device</h4>
-                <p class="d">Where board posts go. The conversation itself stays per project (see Project); this only chooses the provider and the connection.</p>
-                <div class="set-row"><div class="grow"><div class="t">Board provider</div><div class="d2">Local (this device only), Slack, or Teams. Switching providers rewires the board hooks. GitHub Discussions is not a provider — it is the device-to-device handoff path for decisions, blocked notes and handoffs.</div></div><button class="btn" type="button">Local ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Slack / Teams connection</div><div class="d2">Client ID and secret, tenant and default channel; sign in or out here. The sign-in (OAuth) redirect URL to register is shown in place.</div></div><button class="btn" type="button">Set up</button></div>
+                <h4>ボードの共有 — この端末</h4>
+                <p class="d">ボードの投稿がどこへ行くか。会話そのものはプロジェクトごとです（「プロジェクト」参照）。ここでは共有先（プロバイダ）と接続だけを選びます。</p>
+                <div class="set-row"><div class="grow"><div class="t">ボードの共有先</div><div class="d2">ローカル（この端末のみ）、Slack、Teams のいずれか。共有先を切り替えるとボードのフックがつなぎ替わります。GitHub Discussions は共有先ではなく、判断・詰まりメモ・引き継ぎを端末間で受け渡す経路です。</div></div><button class="btn" type="button">ローカル ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">クライアント ID とシークレット、テナント、既定のチャンネル。サインインとサインアウトもここで。登録すべきサインイン（OAuth）のリダイレクト URL はその場に表示されます。</div></div><button class="btn" type="button">設定する</button></div>
               </div>
               <div class="set-group">
-                <h4>Per project — running the work</h4>
-                <p class="d">Differences that steer how each project&rsquo;s issues are picked up and run. Shown for gwt; every project has the same set.</p>
-                <div class="set-row"><div class="grow"><div class="t">Monitoring</div><div class="d2">Watch this project&rsquo;s issues and start work on eligible ones. Autonomous runs them without asking first — and needs a GitHub token (GH_TOKEN / GITHUB_TOKEN).</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Auto-refill</div><div class="d2">Keep the queue filled up to the refill limit (currently 3) whenever a slot frees up.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Allowed labels</div><div class="d2">Only issues with these labels enter the launch queue.</div></div><button class="btn" type="button">Edit labels</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Project Manager for this project</div><div class="d2">The PM&rsquo;s own setup for gwt: agent, model and effort defaults, the autonomous loop (auto start, loop interval, Pause / Resume), and Restart. Profile changes apply after a restart.</div></div><button class="btn" type="button">Open</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Hooks — Hook Center</div><div class="d2">Audit, health, repair and regeneration of this project&rsquo;s hooks, Git hook placement, and trust for gwt-managed Codex hooks.</div></div><button class="btn" type="button">Open</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Project index</div><div class="d2">Index health: status, document count, last repair. Rebuild, rebuild all, or refresh the status here.</div></div><button class="btn" type="button">Rebuild</button></div>
+                <h4>プロジェクト別 — 作業の回し方</h4>
+                <p class="d">各プロジェクトの Issue をどう取り上げ、どう実行するかを決める差分。gwt の例で表示。どのプロジェクトにも同じ一式があります。</p>
+                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">このプロジェクトの Issue を見守り、対象になるものから作業を始めます。自律モードでは先に聞かずに実行します — そのためには GitHub トークン（GH_TOKEN / GITHUB_TOKEN）が必要です。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">自動補充</div><div class="d2">空きが出るたび、補充の上限（現在3）までキューを満たし続けます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">これらのラベルが付いた Issue だけが起動キューに入ります。</div></div><button class="btn" type="button">ラベルを編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトのプロジェクトマネージャ</div><div class="d2">gwt に対する PM 自身の設定： エージェント・モデル・労力の既定、自律ループ（自動開始、ループ間隔、一時停止 / 再開）、そして再起動。プロファイルの変更は再起動後に効きます。</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フック — フックセンター</div><div class="d2">このプロジェクトのフックの監査・健全性・修復・再生成、Git フックの配置、gwt が管理する Codex フックへの信頼。</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">プロジェクトの索引</div><div class="d2">索引の健全性： 状態、ドキュメント数、最後の修復。ここで再構築、すべて再構築、状態の更新ができます。</div></div><button class="btn" type="button">再構築</button></div>
               </div>
               <div class="set-group">
-                <h4>Performance &amp; system — this device</h4>
-                <p class="d">How much of this device gwt may use, and small system behaviors. Set once; rarely changed.</p>
-                <div class="set-row"><div class="grow"><div class="t">Resource preset</div><div class="d2">Agent process priority, CPU limit per agent, build parallelism per agent, and isolating agent process trees.</div></div><button class="btn" type="button">Balanced ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Output language</div><div class="d2">Language of reports and other narrative output. The interface itself stays in English.</div></div><button class="btn" type="button">Japanese ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Launch gwt at login</div><div class="d2">Start gwt when you sign in to this device.</div></div><span class="switch off" role="img" aria-label="Off"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Works output lines</div><div class="d2">How many output lines a work session shows (3–10).</div></div><button class="btn" type="button">6 ▾</button></div>
+                <h4>性能とシステム — この端末</h4>
+                <p class="d">この端末を gwt がどれだけ使ってよいかと、小さなシステムの振る舞い。一度設定すれば、めったに変えません。</p>
+                <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">エージェントのプロセス優先度、エージェントごとの CPU 上限、エージェントごとのビルド並列度、エージェントのプロセスツリーの分離。</div></div><button class="btn" type="button">バランス ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">出力の言語</div><div class="d2">レポートなど文章の出力の言語。画面自体は英語のままです。</div></div><button class="btn" type="button">日本語 ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動</div><div class="d2">この端末にサインインしたときに gwt を起動します。</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションが表示する出力の行数（3〜10）。</div></div><button class="btn" type="button">6 ▾</button></div>
               </div>
             </div>
           </div>
@@ -1230,7 +1230,7 @@
           <li><strong>利用量は既定表示にし、「Show usage」は廃止（オーナー決定）。</strong>当初は自分で有効にしたツールだけ出すオプトイン方式だったが、「デフォルトで見れればいい」という判断で、設定ごと無くした。Agents 面には全ツールの利用量が常に出る。</li>
 <li><strong>Settings は4タブに再編。</strong>Your PM（振る舞い・通知・アプリ更新）／Tools（対応ツール・カスタムツール・バックエンド）／Launch（起動プロファイル）／Projects（差分・運用スイッチ）。縦に積むと長くて見通しが悪いという指摘を受けての変更で、2層構造（端末の既定→プロジェクトの差分）は維持する。</li>
 <li><strong>gwt 本体の更新（App updates）も Settings に（監査 B-1）。</strong>現在のバージョン、手動の Check、自動適用（Auto-apply）のオン／オフを Your PM タブに置く。適用は稼働中の作業を drain（安全に止める）してから再起動して行われ、自動更新はキャンセルできる。更新が用意できたこと自体は Home と Notifications にも出る。ツールの自動更新とは別物として区別する。</li>
-<li><strong>落ちていた設定群を各タブに戻した（監査 B-2〜B-17・C-1）。</strong>Board の共有先（provider と Slack／Teams 連携）、Custom Tools と環境変数、Tool backends、プロジェクト差分側の Monitor 主スイッチ群（Monitoring／Autonomous／Auto-refill／Allowed labels）、プロジェクトの PM 自体の設定、Hook Center、プロジェクト Index の健全性、起動プロファイルのプール管理、性能・リソース系と小物（出力言語・ログイン時起動・Works 表示行数）。</li>
+<li><strong>落ちていた設定群を各タブに戻した（監査 B-2〜B-17・C-1）。</strong>Board の共有先（provider と Slack／Teams 連携）、Custom Tools と環境変数、Tool backends、プロジェクト差分側の Monitor 主スイッチ群（Monitoring／Autonomous／Auto-refill／許可するラベル）、プロジェクトの PM 自体の設定、Hook Center、プロジェクト Index の健全性、起動プロファイルのプール管理、性能・リソース系と小物（出力言語・ログイン時起動・Works 表示行数）。</li>
 <li><strong>Usage &amp; Limits の置き場は Tools タブに統合（監査 B-6）。</strong>利用量まわりの設定は独立タブに戻さず、ツール単位の文脈に置く。利用量そのものは Agents 面に既定表示される。</li>
           <li><strong>インストール／更新の導線は現行から継承。</strong>未導入には Install、更新がある導入済みには Update が、状態と導入済み／利用可能バージョンと並んで出る。実行はエージェントが作業中でないときに限られ、自動更新は次回起動時に「検証済みルート＋新版があるもの」だけ——勝手に導入されることはない。</li>
           <li><strong>起動設定（Launch Settings）も現行から継承。</strong>起動候補（Candidate）ごとのプロファイル（メンバー／Tool／Model／Reasoning／Runtime＝Host・Docker／Docker service／Session mode／Skip permissions／Fast mode／Prefer for）を端末側の節に置き、プロジェクト差分で上書きできる。進行中の作業はその作業に記録された起動設定を使い、自動起動は tier 設定に従う。起動そのものは Launch Wizard で行う。</li>
@@ -1240,7 +1240,7 @@
 
       <!-- ================= Status bar ================= -->
       <section class="screen" id="statusbar" data-mode="after">
-        <h2>ステータスバー <span class="en">Status bar — one readable line</span></h2>
+        <h2>ステータスバー <span class="en">ステータスバー — 読める言葉の1行</span></h2>
         <p class="why">画面下部のオペレーターステータスバーは現行、略号と数字だけの暗号でした（<span class="prob">問題2</span>）。After では<strong>読める言葉の1行</strong>にし、どの画面にいても端末全体の状態（実行中・詰まり・判断待ち）が同じ数字で見えるようにします。あわせて、現行では内部用語のまま出ていたエラーの出し方もここで定義します（<span class="prob">問題6</span>）。</p>
         <div class="seg" role="group" aria-label="Before / After">
           <button type="button" data-set="before">Before</button>
@@ -1248,22 +1248,22 @@
         </div>
 
         <div class="view-b">
-          <div class="b-bar">MONITOR Run Q9 A3/6 &nbsp;·&nbsp; WORK 3 &nbsp;·&nbsp; RUNNING 4 · 3 inline &nbsp;·&nbsp; Fleet 1.9M tok/min</div>
-          <div class="b-err" style="margin-top:10px">Resize failed — The project command could not be delivered: owner health: Some(Degraded); owner is not Healthy; owner identity mismatch. Automatic recovery stopped after 10 attempts</div>
+          <div class="b-bar">モニター実行中 Q9 A3/6 &nbsp;·&nbsp; 作業 3 &nbsp;·&nbsp; 実行中 4 · インライン 3 &nbsp;·&nbsp; 全体 1.9M トークン/分</div>
+          <div class="b-err" style="margin-top:10px">サイズ変更に失敗 — プロジェクトのコマンドを配送できませんでした：owner health: Some(Degraded); owner is not Healthy; owner identity mismatch. 自動復旧は10回の試行後に停止しました</div>
         </div>
 
         <div class="view-a">
           <div class="statusbar">
             <span class="dot"></span>
-            <span><b>Your PM</b> is watching all 7 projects</span>
-            <span class="sep"></span><span><b>9</b> running</span>
-            <span class="sep"></span><span><b>3</b> blocked</span>
-            <span class="sep"></span><span><b class="you">5 waiting for your decision</b></span>
-            <span class="r">Updated just now</span>
+            <span><b>あなたの PM</b> が全7プロジェクトを見守り中</span>
+            <span class="sep"></span><span><b>9</b> 実行中</span>
+            <span class="sep"></span><span><b>3</b> 詰まり</span>
+            <span class="sep"></span><span><b class="you">判断待ち 5</b></span>
+            <span class="r">たった今更新</span>
           </div>
           <div class="rowitem" style="margin-top:12px;border-color:var(--red)">
-            <div class="grow"><div class="t">Couldn't reach the gwt workspace</div><div class="d">A command to the gwt project didn't arrive. I retried 10 times and stopped — nothing was changed, and your work is safe. This usually clears on its own; if it keeps happening, restart gwt.</div></div>
-            <div class="btnrow"><button class="btn primary" type="button">Try again</button><button class="btn" type="button">Details</button><button class="btn ghost" type="button">Dismiss</button></div>
+            <div class="grow"><div class="t">gwt のワークスペースに届きませんでした</div><div class="d">gwt プロジェクトへのコマンドが届きませんでした。10回試して止めました — 何も変更されておらず、作業は無事です。通常は自然に直ります。続くようなら gwt を再起動してください。</div></div>
+            <div class="btnrow"><button class="btn primary" type="button">もう一度試す</button><button class="btn" type="button">詳細</button><button class="btn ghost" type="button">閉じる</button></div>
           </div>
         </div>
 
@@ -1290,19 +1290,19 @@
       // the same on every screen — only the focused context changes.
       (function () {
         var items = [
-          ["Home", ""], ["Ask", ""], ["Progress", ""], ["Tasks", ""],
-          ["Issues", ""], ["Decide", "5"], ["Log", ""], ["Works", ""], ["Agents", ""],
-          ["Notifications", "9"], ["Project", ""], ["Settings", ""]
+          ["ホーム", ""], ["相談", ""], ["進捗", ""], ["タスク", ""],
+          ["Issue", ""], ["判断", "5"], ["ログ", ""], ["作業中", ""], ["エージェント", ""],
+          ["通知", "9"], ["プロジェクト", ""], ["設定", ""]
         ];
         document.querySelectorAll(".rail-slot").forEach(function (slot) {
           var active = slot.getAttribute("data-active");
-          var html = '<div class="rail"><div class="pm-card"><div class="who"><span class="pm-ava">PM</span><div><div class="nm">Your PM</div><div class="sub">One PM for this device · watching 7 projects</div></div></div>' +
-            '<button class="ctx-switch" type="button">Context: All projects<small>Focus on one project — the PM stays the same</small></button></div>';
+          var html = '<div class="rail"><div class="pm-card"><div class="who"><span class="pm-ava">PM</span><div><div class="nm">あなたの PM</div><div class="sub">この端末に1人 · 全7プロジェクトを見守り中</div></div></div>' +
+            '<button class="ctx-switch" type="button">対象： 全プロジェクト<small>1プロジェクトに絞っても、PM は同じです</small></button></div>';
           items.forEach(function (it) {
             html += '<a href="#" onclick="return false" class="' + (it[0] === active ? "on" : "") + '">' + it[0] +
-              (it[1] ? '<span class="cnt' + (it[0] === "Notifications" ? " gray" : "") + '">' + it[1] + "</span>" : "") + "</a>";
+              (it[1] ? '<span class="cnt' + (it[0] === "通知" ? " gray" : "") + '">' + it[1] + "</span>" : "") + "</a>";
           });
-          html += '<div class="foot">Ask once in Ask — work itself stays inside each project.</div></div>';
+          html += '<div class="foot">「相談」で1回頼むだけ — 作業そのものは各プロジェクトの中で進みます。</div></div>';
           slot.outerHTML = html;
         });
       })();
