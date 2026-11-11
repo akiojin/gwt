@@ -6017,6 +6017,10 @@ button.workspace-board-ref:focus-visible {
 .pm-chat__bubble .pm-chat__text > :first-child { margin-top: 0; }
 .pm-chat__bubble .pm-chat__text > :last-child { margin-bottom: 0; }
 .pm-chat__bubble pre, .pm-chat__bubble table { max-width: 100%; overflow-x: auto; }
+.pm-chat__collapsed { display: flex; flex-direction: column; align-self: stretch; gap: var(--space-2); }
+.pm-chat__collapsed-summary { align-self: flex-start; cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); color: var(--color-text-muted); }
+.pm-chat__collapsed-summary:hover { color: var(--color-text); }
+.pm-chat__collapsed-summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__tasks { flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; padding-bottom: var(--space-3); }
 .pm-chat__task-list { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
 .pm-chat__task { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
