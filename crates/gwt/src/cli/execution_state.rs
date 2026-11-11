@@ -39,7 +39,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use gwt_core::workspace_projection::{
     ExternalWorkspaceCommitAuthority, ExternalWorkspaceCommitDecision,
-    ExternalWorkspaceCommitResolution,
+    ExternalWorkspaceCommitRecovery, ExternalWorkspaceCommitResolution,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
 const EXECUTION_REPAIR_AUDIT_FILE: &str = "execution-repair-audit.json";
-const PM_SESSION_REPAIR_GUIDANCE: &str = "A registered repository PM can run execution.repair with params.session_id naming the owning Session and params.reason. Valid Session metadata and a readable trusted holder are required; both target and holder runtimes must be absent. After repair, run issue.monitor.stop and issue.monitor.requeue for this owner.";
+const PM_SESSION_REPAIR_GUIDANCE: &str = "A registered repository PM can run execution.repair with params.session_id naming the owning Session and params.reason. Valid Session metadata and a readable trusted holder are required; every owner Session runtime must be absent. Pending Workspace launches are preserved in the repair audit for exact execution.release_prepared retry. After repair/reconciliation, run issue.monitor.stop and issue.monitor.requeue for this owner.";
 #[doc(hidden)]
 pub const BINDING_REPAIR_OUTCOME_FILE: &str = "binding-repair-outcome.json";
 const BINDING_REPAIR_OUTCOME_SCHEMA_VERSION: u32 = 1;
@@ -406,6 +406,8 @@ fn fail_continuation_rebind_if_requested(point: ContinuationRebindFailurePoint) 
 #[cfg(test)]
 std::thread_local! {
     static REPAIR_AUDIT_WRITE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static REPAIR_INTERRUPT_BEFORE_BINDING: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
 
@@ -2852,6 +2854,13 @@ impl QuarantinedExecutionAuthority {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ExecutionRepairBindingTarget {
+    session_id: String,
+    worktree_path: PathBuf,
+    preimage_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ExecutionRepairAudit {
     repair_id: String,
     actor_session_id: String,
@@ -2859,6 +2868,10 @@ struct ExecutionRepairAudit {
     reason: String,
     sources: Vec<ExecutionRepairSource>,
     new_generation_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    workspace_recoveries: Vec<ExternalWorkspaceCommitRecovery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_target: Option<ExecutionRepairBindingTarget>,
     repaired_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     previous_audit_hash: String,
@@ -10503,6 +10516,7 @@ pub fn release_blocking_prepared_transactions(
     // Keep number and integrity validation strict; later leased reloads still
     // validate this exact owner before any transaction is changed.
     let context = GenerationTransactionContext::resolve(worktree, owner)?;
+    let mut known_operation = false;
     let owner = match read_owner_ledger_from_dir(&context.owner_dir)? {
         Some(contents) => {
             let ledger =
@@ -10516,14 +10530,29 @@ pub fn release_blocking_prepared_transactions(
                     ..owner
                 },
             )?;
+            known_operation = operation_id.is_some_and(|id| {
+                ledger
+                    .continuation_attempts
+                    .iter()
+                    .any(|attempt| attempt.request.operation_id == id)
+                    || ledger
+                        .takeover_attempts
+                        .iter()
+                        .any(|attempt| attempt.request.operation_id == id)
+            });
             ledger.owner
         }
         None => owner,
     };
     if let Some(operation_id) = operation_id {
-        if let Some((generation_id, resolution)) =
-            recover_terminal_workspace_commit(worktree, owner, operation_id)?
-        {
+        let recovered = match recover_terminal_workspace_commit(worktree, owner, operation_id)? {
+            Some(recovery) => Some(recovery),
+            None if !known_operation => {
+                recover_audited_repair_workspace_commit(worktree, owner, operation_id)?
+            }
+            None => None,
+        };
+        if let Some((generation_id, resolution)) = recovered {
             return Ok(PreparedTransactionReleaseOutcome {
                 status: "external_commit_resolved",
                 owner_kind: owner.kind,
@@ -16275,6 +16304,7 @@ struct ExecutionRepairPendingCommit {
     quarantined: Vec<QuarantinedExecutionAuthority>,
     audit_dir: PathBuf,
     previous_audit_bytes: Option<Vec<u8>>,
+    workspace_recoveries: Vec<ExternalWorkspaceCommitRecovery>,
 }
 
 fn rollback_pending_execution_repair(
@@ -16400,7 +16430,7 @@ fn repair_corrupt_execution_impl(
     #[cfg(test)]
     inject_repair_owner_activation_race_if_requested(&worktree);
     with_generation_activation_leases(&worktree, owner, |context| {
-        let repair = || {
+        let repair = |workspace_recoveries: Vec<ExternalWorkspaceCommitRecovery>| {
             // Owner discovery happens before the activation leases so the
             // lock target can be selected. Revalidate global authority only
             // after global -> owner -> exact Session are all held; otherwise
@@ -16434,6 +16464,18 @@ fn repair_corrupt_execution_impl(
                 }
                 require_absent_pm_repair_target(session)?;
             }
+            // Capture the exact pre-publication Session before quarantining any
+            // authority. A crash after activation can safely finish this CAS.
+            let binding_target = pm_requester
+                .map(|_| {
+                    let session = expected_session.expect("PM repair has a validated Session");
+                    Ok::<_, io::Error>(ExecutionRepairBindingTarget {
+                        session_id: session.id.clone(),
+                        worktree_path: worktree.clone(),
+                        preimage_hash: sha256_hex(canonical_recovery_session_snapshot(session)?),
+                    })
+                })
+                .transpose()?;
             let audit_dir = repair_audit_dir(context)?;
             let previous_audit_bytes = match fs::read(audit_dir.join(EXECUTION_REPAIR_AUDIT_FILE)) {
                 Ok(bytes) => Some(bytes),
@@ -16647,6 +16689,8 @@ fn repair_corrupt_execution_impl(
                 },
                 sources: audit_sources.clone(),
                 new_generation_id: generation_id.clone(),
+                workspace_recoveries: workspace_recoveries.clone(),
+                binding_target,
                 repaired_at: Utc::now(),
                 previous_audit_hash: audits
                     .last()
@@ -16787,15 +16831,49 @@ fn repair_corrupt_execution_impl(
                 quarantined,
                 audit_dir,
                 previous_audit_bytes,
+                workspace_recoveries,
             })
         };
         let mut pending = match (expected_session, pm_holder.as_deref()) {
             (Some(expected_session), Some(holder_id)) => {
-                // Acquire both Session leases in their canonical sorted order.
-                // A dead candidate is not proof that the current holder is gone.
                 let sessions = gwt_core::paths::gwt_sessions_dir();
-                let _sessions =
-                    gwt_agent::acquire_session_path_leases(&sessions, &[session_id, holder_id])?;
+                let related = pm_repair_owner_sessions(&worktree, owner, &authority_expectation)?;
+                let mut ids = related
+                    .iter()
+                    .map(|session| session.id.as_str())
+                    .collect::<Vec<_>>();
+                ids.extend([session_id, holder_id]);
+                // The projection may lag an owner-wide successor or a concurrent
+                // predecessor. Lease every owner Session, not only its holder.
+                let _sessions = gwt_agent::acquire_session_path_leases(&sessions, &ids)?;
+                let current = pm_repair_owner_sessions(&worktree, owner, &authority_expectation)?;
+                if related
+                    .iter()
+                    .map(|s| &s.id)
+                    .ne(current.iter().map(|s| &s.id))
+                {
+                    return Err(generation_conflict(
+                        "execution PM repair owner Sessions changed; retry execution.status",
+                    ));
+                }
+                for session in &related {
+                    ensure_recovery_session_snapshot_unchanged(
+                        &gwt_agent::inspect_session_path(
+                            &sessions.join(format!("{}.toml", session.id)),
+                        ),
+                        session,
+                    )?;
+                    require_absent_pm_repair_target(session)?;
+                }
+                let inventory = crate::session_inventory::observe_sessions(&worktree, &sessions);
+                if !inventory.uncertainties.is_empty()
+                    || inventory
+                        .sessions
+                        .iter()
+                        .any(|session| ids.contains(&session.session_id.as_str()))
+                {
+                    return Err(generation_conflict("execution PM repair owner runtime inventory is uncertain; inspect execution.status"));
+                }
                 ensure_recovery_session_snapshot_unchanged(
                     &gwt_agent::inspect_session_path(&sessions.join(format!("{session_id}.toml"))),
                     expected_session,
@@ -16812,14 +16890,20 @@ fn repair_corrupt_execution_impl(
                     ));
                 }
                 require_absent_pm_repair_target(holder.session())?;
-                repair()
+                repair(pm_repair_workspace_recoveries(&worktree, owner, &related)?)
             }
             (Some(expected_session), None) => {
-                with_exact_recovery_session_lease(expected_session, repair)
+                with_exact_recovery_session_lease(expected_session, || repair(Vec::new()))
             }
-            (None, _) => repair(),
+            (None, _) => repair(Vec::new()),
         }?;
 
+        #[cfg(test)]
+        if REPAIR_INTERRUPT_BEFORE_BINDING.with(|flag| flag.replace(false)) {
+            return Err(io::Error::other(
+                "injected interruption after activation before Session binding",
+            ));
+        }
         #[cfg(test)]
         inject_repair_binding_session_race_if_requested(session_id);
         #[cfg(test)]
@@ -16862,8 +16946,377 @@ fn repair_corrupt_execution_impl(
                 "execution_repair_binding_warning: fresh authority is valid, but the Session projection was not updated: {error}"
             )),
         }
+        // Binding publication is the last rollback boundary. Workspace
+        // decisions are irreversible; retain fresh authority and its audit on
+        // Busy/IO so exact-operation release can resume after interruption.
+        for recovery in &pending.workspace_recoveries {
+            if let Err(error) = resolve_repair_workspace_recovery(recovery) {
+                pending.outcome.warnings.push(format!(
+                    "execution repair preserved pending Workspace operation {}: {error}; run execution.release_prepared with issue/spec {}, operation_id {}, and a non-empty reason",
+                    recovery.operation_id, owner.number, recovery.operation_id,
+                ));
+            }
+        }
         Ok(pending.outcome)
     })
+}
+
+fn recover_audited_repair_workspace_commit(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+) -> io::Result<Option<(String, ExternalWorkspaceCommitResolution)>> {
+    let caller = GenerationTransactionContext::resolve(worktree, owner)?;
+    let root = caller
+        .worktree_trusted_dir
+        .parent()
+        .ok_or_else(|| generation_conflict("execution repair audit repository is unknown"))?
+        .join("execution-repairs");
+    let Some(ledger) = load_owner_generation_ledger_from_context(&caller)? else {
+        return Ok(None);
+    };
+    let scopes = ledger
+        .generations
+        .iter()
+        .filter(|generation| generation.identity.entrypoint == "execution.repair")
+        .map(|generation| generation.identity.worktree_binding_hash.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut matches = Vec::new();
+    for scope in scopes {
+        for audit in load_repair_audits(&root.join(&scope))? {
+            if audit.owner != owner
+                || !ledger.generations.iter().any(|generation| {
+                    generation.identity.generation_id == audit.new_generation_id
+                        && generation.identity.entrypoint == "execution.repair"
+                        && generation.identity.worktree_binding_hash == scope
+                })
+            {
+                continue;
+            }
+            for recovery in &audit.workspace_recoveries {
+                if recovery.operation_id == operation_id {
+                    matches.push((audit.clone(), scope.clone(), recovery.clone()));
+                }
+            }
+        }
+    }
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    let [(audit, scope, recovery)] = matches.as_slice() else {
+        return Err(generation_conflict(
+            "execution repair Workspace audit is ambiguous; inspect execution.status",
+        ));
+    };
+    let target = if let Some(binding) = &audit.binding_target {
+        dunce::canonicalize(&binding.worktree_path)?
+    } else {
+        // Older audits can validate an already-published binding, but cannot
+        // authorize overwriting Session metadata without its preimage.
+        let candidates = gwt_git::worktree::WorktreeManager::new(worktree)
+            .list()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .into_iter()
+            .filter_map(|entry| dunce::canonicalize(entry.path).ok())
+            .filter(|path| worktree_binding_hash(path) == *scope)
+            .collect::<Vec<_>>();
+        let [target] = candidates.as_slice() else {
+            return Err(generation_conflict(
+                "execution repair target worktree is missing or ambiguous",
+            ));
+        };
+        target.clone()
+    };
+    let target_context = GenerationTransactionContext::resolve(&target, owner)?;
+    if target_context.owner_dir != caller.owner_dir
+        || target_context.worktree_binding_hash != *scope
+    {
+        return Err(generation_conflict(
+            "execution repair audit target repository/worktree changed",
+        ));
+    }
+    // Acquire the actual target's global -> owner lease before its Session.
+    // Recheck materialization after discovery and resume binding publication
+    // before any irreversible Workspace decision.
+    with_generation_activation_leases(&target, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            generation_conflict("execution repair Workspace authority is missing")
+        })?;
+        let generation = ledger
+            .generations
+            .iter()
+            .find(|generation| {
+                generation.identity.generation_id == audit.new_generation_id
+                    && generation.identity.entrypoint == "execution.repair"
+                    && generation.identity.worktree_binding_hash == *scope
+            })
+            .ok_or_else(|| {
+                generation_conflict(
+                    "execution repair Workspace audit has no materialized authority",
+                )
+            })?;
+        if gwt_core::repo_hash::detect_repo_hash(&recovery.worktree_path)
+            != gwt_core::repo_hash::detect_repo_hash(worktree)
+        {
+            return Err(generation_conflict(
+                "execution repair Workspace target repository changed",
+            ));
+        }
+        resume_audited_repair_session_binding(
+            &target,
+            owner,
+            &ledger,
+            generation,
+            audit.binding_target.as_ref(),
+        )?;
+        Ok(Some((
+            audit.new_generation_id.clone(),
+            resolve_repair_workspace_recovery(recovery)?,
+        )))
+    })
+}
+
+fn resume_audited_repair_session_binding(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+    target: Option<&ExecutionRepairBindingTarget>,
+) -> io::Result<()> {
+    let session_id = &generation.identity.initial_session_id;
+    if target.is_some_and(|target| target.session_id != *session_id) {
+        return Err(generation_conflict(
+            "execution repair audit Session target disagrees",
+        ));
+    }
+    let context =
+        crate::agent_project_state::resolve_execution_recovery_context(worktree, session_id)
+            .map_err(io::Error::other)?;
+    if context.session().linked_issue_number != Some(owner.number) {
+        return Err(generation_conflict(
+            "execution repair Session owner changed",
+        ));
+    }
+    let identity = execution_binding_for_generation(ledger, generation);
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)
+        .ok_or_else(|| generation_conflict("execution repair repository is unknown"))?
+        .to_string();
+    update_exact_recovery_session_with_publisher(
+        context.session(),
+        |session| {
+            if session.execution_binding.as_ref().is_some_and(|binding| {
+                binding.schema_version == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+                    && binding.capability_generation > 0
+                    && binding.session_id == *session_id
+                    && binding.repo_hash == repo_hash
+                    && binding.owner_number == owner.number
+                    && binding.owner_kind == owner.kind.as_str()
+                    && binding.identity == identity
+            }) {
+                return Ok(());
+            }
+            let preimage_hash = sha256_hex(canonical_recovery_session_snapshot(session)?);
+            if target.is_none_or(|target| target.preimage_hash != preimage_hash) {
+                return Err(recovery_session_changed_error("Session changed or lacks an audited binding preimage; inspect execution.status"));
+            }
+            if current_execution_binding(worktree, owner)? != Some(identity.clone()) {
+                return Err(generation_conflict(
+                    "repair generation changed before Session binding retry",
+                ));
+            }
+            require_absent_pm_repair_target(session)?;
+            let capability_generation = session
+                .execution_binding
+                .as_ref()
+                .map_or(1, |binding| binding.capability_generation.saturating_add(1));
+            session
+                .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                    schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: session_id.clone(),
+                    repo_hash,
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity,
+                    capability_generation,
+                }))
+                .map_err(io::Error::other)
+        },
+        &mut None,
+    )
+}
+
+fn pm_repair_workspace_recoveries(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    sessions: &[gwt_agent::Session],
+) -> io::Result<Vec<ExternalWorkspaceCommitRecovery>> {
+    let repo = gwt_core::repo_hash::detect_repo_hash(worktree)
+        .ok_or_else(|| generation_conflict("execution PM repair repository is unknown"))?;
+    let mut recoveries = Vec::new();
+    let mut mismatches = std::collections::BTreeSet::new();
+    for session in sessions {
+        let root = session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(&session.worktree_path);
+        if !root.exists() || !session.worktree_path.exists() {
+            continue;
+        }
+        let root = dunce::canonicalize(root)?;
+        let event_root = dunce::canonicalize(&session.worktree_path)?;
+        if gwt_core::repo_hash::detect_repo_hash(&root) != Some(repo.clone())
+            || gwt_core::repo_hash::detect_repo_hash(&event_root) != Some(repo.clone())
+        {
+            return Err(generation_conflict(
+                "execution PM repair Workspace repository is unknown or foreign",
+            ));
+        }
+        let recovery = match gwt_core::workspace_projection::inspect_workspace_state_external_commit_recovery_for_work_event_root(&root, &event_root) {
+            Ok(Some(recovery)) => recovery,
+            Ok(None) => continue,
+            Err(gwt_core::GwtError::ExternalWorkspacePathPairMismatch { operation_id }) => {
+                mismatches.insert((gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root), operation_id));
+                continue;
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        };
+        // The same project root can have several historical Session roots.
+        // Only the launch Session can nominate its legacy reconciliation root.
+        if recovery.project_state_root.is_some() && recovery.session_id != session.id {
+            mismatches.insert((recovery.current_path.clone(), recovery.operation_id.clone()));
+            continue;
+        }
+        let scoped = [
+            format!("Issue #{}", owner.number),
+            format!("SPEC-{}", owner.number),
+        ]
+        .contains(&recovery.owner)
+            && sessions.iter().any(|session| {
+                session.id == recovery.session_id
+                    && session.linked_issue_number == Some(owner.number)
+                    && dunce::canonicalize(&session.worktree_path)
+                        .ok()
+                        .zip(dunce::canonicalize(&recovery.worktree_path).ok())
+                        .is_some_and(|(session, transaction)| session == transaction)
+            });
+        if !scoped {
+            return Err(generation_conflict("execution PM repair found a foreign or unknown pending Workspace launch; inspect execution.status without deleting markers"));
+        }
+        if !recoveries.contains(&recovery) {
+            recoveries.push(recovery);
+        }
+    }
+    if mismatches.iter().any(|(current_path, operation_id)| {
+        !recoveries.iter().any(|recovery| {
+            &recovery.current_path == current_path && &recovery.operation_id == operation_id
+        })
+    }) {
+        return Err(generation_conflict("pending Workspace operation has no validated Session root pair; inspect execution.status without deleting markers"));
+    }
+    Ok(recoveries)
+}
+
+fn resolve_repair_workspace_recovery(
+    recovery: &ExternalWorkspaceCommitRecovery,
+) -> io::Result<ExternalWorkspaceCommitResolution> {
+    let resolution =
+        gwt_core::workspace_projection::resolve_workspace_state_external_commit_recovery(recovery)
+            .map_err(io::Error::other)?;
+    match resolution {
+        ExternalWorkspaceCommitResolution::Committed | ExternalWorkspaceCommitResolution::Rejected => Ok(resolution),
+        ExternalWorkspaceCommitResolution::Busy | ExternalWorkspaceCommitResolution::Missing =>
+            Err(generation_conflict("audited Workspace recovery is busy or missing; retry exact execution.release_prepared")),
+    }
+}
+
+fn pm_repair_owner_sessions(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    expected: &RepairAuthorityExpectation,
+) -> io::Result<Vec<gwt_agent::Session>> {
+    let repo = gwt_core::repo_hash::detect_repo_hash(worktree)
+        .ok_or_else(|| generation_conflict("execution PM repair repository is unknown"))?;
+    let ledger = expected
+        .owner_ledger
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<ExecutionGenerationLedger>(bytes).ok());
+    // A readable ledger misplaced under this owner's path can name another
+    // owner's holders/candidates. They supply additional negative evidence;
+    // their own owner ledger and bindings are never repaired by this action.
+    let owners = [
+        owner.number,
+        ledger
+            .as_ref()
+            .map_or(owner.number, |ledger| ledger.owner.number),
+    ];
+    let mut related = std::collections::BTreeMap::new();
+    // The cached UI loader skips unreadable files. Recovery cannot treat an
+    // unscoped, unreadable Session as proof that no owner holder exists.
+    for entry in fs::read_dir(gwt_core::paths::gwt_sessions_dir())? {
+        let path = entry?.path();
+        if !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+        {
+            continue;
+        }
+        let session = gwt_agent::Session::load(&path)?;
+        gwt_agent::validate_session_id_path_component(&session.id).map_err(io::Error::other)?;
+        if path.file_stem().and_then(|stem| stem.to_str()) != Some(session.id.as_str()) {
+            return Err(generation_conflict(
+                "execution PM repair Session filename/identity mismatch",
+            ));
+        }
+        let same_owner = session
+            .linked_issue_number
+            .is_some_and(|number| owners.contains(&number))
+            || session
+                .execution_binding
+                .as_ref()
+                .is_some_and(|binding| owners.contains(&binding.owner_number));
+        let actual_repo = same_owner
+            .then(|| gwt_core::repo_hash::detect_repo_hash(&session.worktree_path))
+            .flatten();
+        if same_owner
+            && (session.repo_hash.as_deref() == Some(repo.as_str())
+                || actual_repo.as_ref() == Some(&repo))
+        {
+            if actual_repo.as_ref().is_some_and(|actual| actual != &repo)
+                || session.repo_hash.as_deref() != Some(repo.as_str())
+            {
+                return Err(generation_conflict("execution PM repair owner Session repository metadata disagrees; inspect execution.status"));
+            }
+            if related.insert(session.id.clone(), session).is_some() {
+                return Err(generation_conflict(
+                    "execution PM repair Session identity has multiple ledger paths",
+                ));
+            }
+        }
+    }
+    // A readable ledger can supply additional negative evidence even when its
+    // hash is corrupt. Never erase an Active generation whose Session is lost.
+    if let Some(ledger) = ledger {
+        for generation in &ledger.generations {
+            if ledger.effective_status_for(generation) == ExecutionControlStatus::Active {
+                let projection: ExecutionControlRecord = serde_json::from_str(
+                    ledger.effective_projection_for(generation),
+                )
+                .map_err(|error| {
+                    generation_conflict(format!("execution PM repair holder is unknown: {error}"))
+                })?;
+                if !related.contains_key(&projection.primary_session_id) {
+                    return Err(generation_conflict("execution PM repair Active owner holder Session is missing or unscoped; inspect execution.status"));
+                }
+                if related[&projection.primary_session_id].linked_issue_number
+                    != Some(projection.owner_number)
+                {
+                    return Err(generation_conflict("execution PM repair ledger holder owner metadata disagrees; inspect execution.status"));
+                }
+            }
+        }
+    }
+    Ok(related.into_values().collect())
 }
 
 fn require_absent_pm_repair_target(session: &gwt_agent::Session) -> io::Result<()> {
@@ -20615,6 +21068,18 @@ mod tests {
             "a launch may still be between preparing its successor and persisting its Session"
         );
 
+        let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
+        let unrelated_audit = context
+            .worktree_trusted_dir
+            .parent()
+            .unwrap()
+            .join("execution-repairs/unrelated-owner");
+        fs::create_dir_all(&unrelated_audit).unwrap();
+        fs::write(
+            unrelated_audit.join(EXECUTION_REPAIR_AUDIT_FILE),
+            b"{broken unrelated audit",
+        )
+        .unwrap();
         let released = release_blocking_prepared_transactions(
             dir.path(),
             caller_owner,
@@ -32031,6 +32496,143 @@ exit 1
         }
 
         #[test]
+        fn registered_pm_repairs_readable_foreign_owner_ledger_at_the_selected_path() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime_env = unset_live_session_env();
+            let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "path-repair-pm");
+            let pm = tempfile::tempdir().unwrap();
+            let target = tempfile::tempdir().unwrap();
+            let foreign = tempfile::tempdir().unwrap();
+            for path in [pm.path(), target.path(), foreign.path()] {
+                crate::cli::trusted_store::init_git_repo_with_origin(path);
+            }
+            let owner = generation_owner();
+            let foreign_owner = ExecutionOwnerKey {
+                number: owner.number + 1000,
+                ..owner
+            };
+            for (path, key, id) in [
+                (target.path(), owner, "selected-holder"),
+                (foreign.path(), foreign_owner, "foreign-holder"),
+            ] {
+                let mut record = active_record(id);
+                record.owner_number = key.number;
+                save(path, &record).unwrap();
+                ensure_generation_ledger(path, key, LegacyActiveDisposition::Live).unwrap();
+                persist_generation_session_binding(
+                    path,
+                    key,
+                    id,
+                    current_execution_binding(path, key).unwrap().unwrap(),
+                );
+            }
+            let request = successor_request("wrong-path-prepared", "host", "continue-work:resume");
+            prepare_active_continuation_successor(foreign.path(), foreign_owner, &request).unwrap();
+            persist_generation_session_binding(
+                foreign.path(),
+                foreign_owner,
+                &request.initial_session_id,
+                prepared_successor_execution_binding(foreign.path(), foreign_owner, &request)
+                    .unwrap(),
+            );
+            let selected_context =
+                GenerationTransactionContext::resolve(target.path(), owner).unwrap();
+            let foreign_context =
+                GenerationTransactionContext::resolve(foreign.path(), foreign_owner).unwrap();
+            let foreign_path = foreign_context.owner_dir.join(GENERATION_LEDGER_FILE);
+            let foreign_bytes = fs::read(&foreign_path).unwrap();
+            let selected_path = selected_context.owner_dir.join(GENERATION_LEDGER_FILE);
+            fs::write(&selected_path, &foreign_bytes).unwrap();
+            let selected_before = generation_authority_bytes(target.path(), owner);
+            crate::pm_registry::save_pm_prefs(
+                &crate::pm_registry::pm_prefs_path_for_repo_path(pm.path()),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: "path-repair-pm".into(),
+                        agent_id: "codex".into(),
+                        worktree_path: pm.path().display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let invoke = || {
+                run_cmd(
+                    pm.path(),
+                    ExecutionCommand::RepairSession {
+                        session_id: "selected-holder".into(),
+                        reason: "recover the wrong owner path".into(),
+                    },
+                )
+                .unwrap()
+            };
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let candidate = gwt_agent::Session::load(
+                &sessions.join(format!("{}.toml", request.initial_session_id)),
+            )
+            .unwrap();
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+                .unwrap()
+                .unwrap();
+            let runtime = gwt_agent::runtime_state_path(&sessions, &candidate.id);
+            fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+            fs::write(&runtime, b"{unknown foreign candidate").unwrap();
+            assert_eq!(invoke().0, 2);
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                selected_before
+            );
+            let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                &identity,
+                41,
+                started,
+                std::process::id(),
+                started,
+            )
+            .save(&runtime)
+            .unwrap();
+            assert_eq!(invoke().0, 2);
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                selected_before
+            );
+            fs::remove_file(runtime).unwrap();
+            let (code, output) = invoke();
+            assert_eq!(
+                code, 0,
+                "absent foreign holders must permit selected-path recovery: {output}"
+            );
+            assert_eq!(
+                load(target.path()).unwrap().unwrap().owner_number,
+                owner.number
+            );
+            assert_eq!(
+                fs::read(&foreign_path).unwrap(),
+                foreign_bytes,
+                "the real foreign owner's ledger must not change"
+            );
+            let audits = load_repair_audits(&repair_audit_dir(&selected_context).unwrap()).unwrap();
+            let source = audits
+                .last()
+                .unwrap()
+                .sources
+                .iter()
+                .find(|source| source.source_path == selected_path.to_string_lossy())
+                .unwrap();
+            assert_eq!(fs::read(&source.quarantine_path).unwrap(), foreign_bytes);
+        }
+
+        #[test]
         fn registered_pm_repairs_an_absent_fenced_session_from_another_worktree() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -32223,8 +32825,179 @@ exit 1
                 authority_before
             );
             fs::remove_file(holder_runtime).unwrap();
+            // A stale target projection must not hide another owner holder.
+            let peer_worktree = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(peer_worktree.path());
+            persist_generation_session_binding(
+                peer_worktree.path(),
+                owner,
+                "owner-peer",
+                session.execution_binding.as_ref().unwrap().identity.clone(),
+            );
+            let peer = gwt_agent::Session::load(&sessions.join("owner-peer.toml")).unwrap();
+            let peer_runtime = gwt_agent::runtime_state_path(&sessions, &peer.id);
+            fs::write(&peer_runtime, b"{unreadable peer runtime").unwrap();
             let (code, output) = invoke();
-            assert_eq!(code, 0, "{output}");
+            assert_eq!(code, 2, "unknown owner peer must fence repair: {output}");
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            fs::remove_file(&peer_runtime).unwrap();
+            let peer_identity = gwt_agent::SessionExecutionIdentity::from_session(&peer)
+                .unwrap()
+                .unwrap();
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                &peer_identity,
+                41,
+                started,
+                std::process::id(),
+                started,
+            )
+            .save(&peer_runtime)
+            .unwrap();
+            let (code, output) = invoke();
+            assert_eq!(code, 2, "live owner peer must fence repair: {output}");
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            fs::remove_file(peer_runtime).unwrap();
+            // The Workspace marker is separate from Session launch markers.
+            let projection =
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                    target.path(),
+                );
+            let work_id = projection.id.clone();
+            gwt_core::workspace_projection::save_workspace_projection(target.path(), &projection)
+                .unwrap();
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Resume,
+                &work_id,
+                Utc::now(),
+            );
+            event.owner = Some(format!("SPEC-{}", owner.number));
+            event.agent_session_id = Some(session.id.clone());
+            event.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    worktree_path: Some(target.path().to_path_buf()),
+                    branch: None,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            gwt_core::workspace_projection::transact_workspace_state_with_commit(
+                target.path(),
+                &request.operation_id,
+                |_, _, _| Ok(((), vec![event])),
+                || Err(gwt_core::GwtError::Other("lost external response".into())),
+            )
+            .unwrap_err();
+            let current =
+                gwt_core::paths::gwt_workspace_projection_path_for_repo_path(target.path());
+            let marker = current.with_file_name("pending-state-transaction.json");
+            let marker_before = fs::read(&marker).unwrap();
+            set_repair_audit_write_failure();
+            let (code, output) = invoke();
+            assert_eq!(
+                code, 2,
+                "failed audit must preserve pending authority: {output}"
+            );
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            assert_eq!(fs::read(&marker).unwrap(), marker_before);
+            assert_eq!(fs::read(&session_path).unwrap(), session_before);
+            // Simulate interruption after authority commits but before the
+            // external resolver can acquire its exact operation lock.
+            let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(target.path());
+            let operation_lock =
+                gwt_core::workspace_projection::external_workspace_operation_lock_path(
+                    &current,
+                    &works,
+                    &request.operation_id,
+                );
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(operation_lock)
+                .unwrap();
+            fs2::FileExt::lock_exclusive(&held).unwrap();
+            REPAIR_INTERRUPT_BEFORE_BINDING.with(|flag| flag.set(true));
+            let (code, output) = invoke();
+            assert_eq!(
+                code, 2,
+                "interruption must precede binding publication: {output}"
+            );
+            assert_eq!(fs::read(&session_path).unwrap(), session_before);
+            assert_eq!(fs::read(&marker).unwrap(), marker_before);
+            let mut changed = session.clone();
+            changed.status = gwt_agent::AgentStatus::Stopped;
+            changed.save(&sessions).unwrap();
+            let changed_bytes = fs::read(&session_path).unwrap();
+            assert!(release_blocking_prepared_transactions(
+                pm.path(),
+                owner,
+                &sessions,
+                Some(&request.operation_id),
+                "resume repair",
+                Utc::now(),
+            )
+            .is_err());
+            assert_eq!(fs::read(&session_path).unwrap(), changed_bytes);
+            assert_eq!(fs::read(&marker).unwrap(), marker_before);
+            session.save(&sessions).unwrap();
+            assert!(
+                release_blocking_prepared_transactions(
+                    pm.path(),
+                    owner,
+                    &sessions,
+                    Some(&request.operation_id),
+                    "resume repair",
+                    Utc::now(),
+                )
+                .is_err(),
+                "the exact external operation remains locked"
+            );
+            let rebound = gwt_agent::Session::load(&session_path).unwrap();
+            assert_eq!(
+                rebound.execution_binding.as_ref().unwrap().identity,
+                current_execution_binding(target.path(), owner)
+                    .unwrap()
+                    .unwrap()
+            );
+            let rebound_bytes = fs::read(&session_path).unwrap();
+            drop(held);
+            let repaired_authority = generation_authority_bytes(target.path(), owner);
+            for _ in 0..2 {
+                let released = release_blocking_prepared_transactions(
+                    pm.path(),
+                    ExecutionOwnerKey {
+                        kind: ExecutionOwnerKind::Issue,
+                        ..owner
+                    },
+                    &sessions,
+                    Some(&request.operation_id),
+                    "finish audited PM repair",
+                    Utc::now(),
+                )
+                .unwrap();
+                assert_eq!(
+                    released.external_commit_resolution,
+                    Some(ExternalWorkspaceCommitResolution::Rejected)
+                );
+                assert_eq!(
+                    generation_authority_bytes(target.path(), owner),
+                    repaired_authority
+                );
+                assert_eq!(fs::read(&session_path).unwrap(), rebound_bytes);
+            }
+            assert!(!marker.exists());
             let record = load(target.path()).unwrap().unwrap();
             assert_eq!(record.primary_session_id, session.id);
             assert!(
@@ -32234,6 +33007,11 @@ exit 1
             );
             let audits = load_repair_audits(&repair_audit_dir(&context).unwrap()).unwrap();
             let audit = audits.last().unwrap();
+            assert_eq!(audit.workspace_recoveries.len(), 1);
+            assert_eq!(
+                audit.workspace_recoveries[0].operation_id,
+                request.operation_id
+            );
             assert_eq!(audit.actor_session_id, "requesting-pm");
             assert!(audit.reason.contains("requesting-pm"));
             assert!(audit.reason.contains("recover the abandoned candidate"));

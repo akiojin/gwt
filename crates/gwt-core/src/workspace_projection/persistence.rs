@@ -1078,10 +1078,38 @@ pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
     operation_id: &str,
     decision: ExternalWorkspaceCommitDecision,
 ) -> Result<ExternalWorkspaceCommitResolution> {
+    resolve_legacy_external_workspace_commit(
+        project_state_root,
+        work_event_root,
+        operation_id,
+        decision,
+        None,
+    )
+}
+
+fn resolve_legacy_external_workspace_commit(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    expected_recovery: Option<&ExternalWorkspaceCommitRecovery>,
+) -> Result<ExternalWorkspaceCommitResolution> {
     validate_external_workspace_operation_id(operation_id)?;
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
     let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    if let Some(expected) = expected_recovery {
+        if expected.current_path != current_path
+            || expected.work_items_path != legacy_work_items_path
+            || expected.project_state_root.as_deref() != Some(project_state_root)
+            || legacy_work_items_path == work_items_path
+            || !session_bound_paths_match(Some(&expected.worktree_path), Some(work_event_root))?
+        {
+            return Err(GwtError::Other(
+                "external workspace recovery legacy path pair changed".into(),
+            ));
+        }
+    }
     if legacy_work_items_path == work_items_path {
         return resolve_workspace_state_external_commit_at(
             &current_path,
@@ -1098,13 +1126,15 @@ pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
     else {
         return Ok(ExternalWorkspaceCommitResolution::Busy);
     };
-    resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
         &current_path,
         &legacy_work_items_path,
         operation_id,
         decision,
         std::slice::from_ref(&work_items_path),
         Some(&work_items_path),
+        None,
+        expected_recovery,
         |transaction| {
             merge_committed_legacy_worktree_events_locked(
                 &current_path,
@@ -1989,6 +2019,27 @@ pub enum ExternalWorkspaceCommitResolution {
     Rejected,
     Busy,
     Missing,
+}
+
+/// Exact staged launch publication retained by an independent recovery audit.
+/// An undecided snapshot does not itself authorize cancellation: its caller
+/// must first commit the durable authority that supersedes this launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalWorkspaceCommitRecovery {
+    pub operation_id: String,
+    pub transaction_id: String,
+    pub transaction_payload_hash: String,
+    pub current_path: PathBuf,
+    pub work_items_path: PathBuf,
+    /// Canonical fold destination for a validated pre-split path pair.
+    /// Ordinary canonical snapshots retain their original serialized form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_state_root: Option<PathBuf>,
+    pub owner: String,
+    pub session_id: String,
+    pub worktree_path: PathBuf,
+    pub work_id: String,
+    pub resolution: Option<ExternalWorkspaceCommitResolution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5570,6 +5621,7 @@ pub fn resolve_workspace_state_external_commit_for_authority(
         &[],
         None,
         Some(authority),
+        None,
         |_| Ok(()),
     )
 }
@@ -5656,7 +5708,15 @@ pub fn workspace_state_transaction_is_pending_at(
     current_path: &Path,
     work_items_path: &Path,
 ) -> Result<bool> {
-    let base_lock_targets = vec![
+    Ok(pending_workspace_state_transaction_at(current_path, work_items_path, None)?.is_some())
+}
+
+fn pending_workspace_state_transaction_at(
+    current_path: &Path,
+    work_items_path: &Path,
+    legacy_work_items_path: Option<&Path>,
+) -> Result<Option<PendingWorkspaceStateTransaction>> {
+    let mut base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
     ];
@@ -5664,12 +5724,226 @@ pub fn workspace_state_transaction_is_pending_at(
         pending_workspace_state_transaction_path(current_path),
         pending_workspace_state_transaction_path_for_work_items(work_items_path),
     ];
+    if let Some(legacy) = legacy_work_items_path {
+        base_lock_targets.push(legacy.to_path_buf());
+        marker_paths.push(pending_workspace_state_transaction_path_for_work_items(
+            legacy,
+        ));
+    }
     marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
         &base_lock_targets,
     )?);
     marker_paths.sort();
     marker_paths.dedup();
-    Ok(find_pending_workspace_state_transaction(&marker_paths)?.is_some())
+    find_pending_workspace_state_transaction(&marker_paths)
+}
+
+/// Snapshot an exact canonical external launch without creating locks or
+/// recovering its markers. Split-root coordinator copies are validated too.
+pub fn inspect_workspace_state_external_commit_recovery(
+    repo_path: &Path,
+) -> Result<Option<ExternalWorkspaceCommitRecovery>> {
+    inspect_workspace_state_external_commit_recovery_for_work_event_root(repo_path, repo_path)
+}
+
+/// Inspect canonical or pre-split publication paths for a Session's validated
+/// Project State and exact work-event roots, retaining the actual staged pair.
+pub fn inspect_workspace_state_external_commit_recovery_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+) -> Result<Option<ExternalWorkspaceCommitRecovery>> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    ensure_supported_workspace_layout(&current_path)?;
+    ensure_supported_workspace_layout(&work_items_path)?;
+    let Some(transaction) = pending_workspace_state_transaction_at(
+        &current_path,
+        &work_items_path,
+        Some(&legacy_work_items_path),
+    )?
+    else {
+        return Ok(None);
+    };
+    let pair_mismatch = || match transaction.external_commit.as_ref() {
+        Some(external) => GwtError::ExternalWorkspacePathPairMismatch {
+            operation_id: external.operation_id.clone(),
+        },
+        None => GwtError::Other(
+            "external workspace recovery path pair does not match its project".into(),
+        ),
+    };
+    if transaction.current_path != current_path
+        || (transaction.work_items_path != work_items_path
+            && transaction.work_items_path != legacy_work_items_path)
+    {
+        return Err(pair_mismatch());
+    }
+    let mut recovery = external_workspace_commit_recovery(&transaction)?;
+    if transaction.work_items_path != work_items_path {
+        ensure_supported_workspace_layout(&legacy_work_items_path)?;
+        if !session_bound_paths_match(Some(&recovery.worktree_path), Some(work_event_root))? {
+            return Err(pair_mismatch());
+        }
+        recovery.project_state_root = Some(project_state_root.to_path_buf());
+    }
+    Ok(Some(recovery))
+}
+
+fn external_workspace_commit_recovery(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Result<ExternalWorkspaceCommitRecovery> {
+    let invalid =
+        || GwtError::Other("external workspace recovery has ambiguous launch authority".into());
+    let external = transaction.external_commit.as_ref().ok_or_else(invalid)?;
+    let mut launches = transaction
+        .events
+        .iter()
+        .filter(|event| matches!(event.kind, WorkEventKind::Start | WorkEventKind::Resume));
+    let launch = launches.next().ok_or_else(invalid)?;
+    if launches.next().is_some() {
+        return Err(invalid());
+    }
+    let owner = launch
+        .owner
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(invalid)?;
+    let session_id = launch
+        .agent_session_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(invalid)?;
+    let worktree_path = launch
+        .execution_container
+        .as_ref()
+        .and_then(|container| container.worktree_path.as_ref())
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(invalid)?;
+    if launch.work_item_id.trim().is_empty() {
+        return Err(invalid());
+    }
+    for event in &transaction.events {
+        if std::ptr::eq(event, launch) {
+            continue;
+        }
+        if !event.is_successor_supersession()
+            || !session_bound_paths_match(
+                event
+                    .execution_container
+                    .as_ref()
+                    .and_then(|container| container.worktree_path.as_deref()),
+                Some(worktree_path),
+            )?
+        {
+            return Err(invalid());
+        }
+    }
+    let receipt = load_external_workspace_commit_receipt(
+        &transaction.current_path,
+        &transaction.work_items_path,
+        &external.operation_id,
+    )?;
+    if let Some(receipt) = &receipt {
+        validate_external_workspace_receipt_transaction(receipt, transaction)?;
+        if external.phase == ExternalWorkspaceCommitPhase::Committed
+            && receipt.resolution == ExternalWorkspaceCommitResolution::Rejected
+        {
+            return Err(GwtError::Other(
+                "committed external workspace marker has a rejected receipt".into(),
+            ));
+        }
+    }
+    Ok(ExternalWorkspaceCommitRecovery {
+        operation_id: external.operation_id.clone(),
+        transaction_id: transaction
+            .transaction_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(invalid)?,
+        transaction_payload_hash: external_workspace_transaction_payload_hash(transaction)?,
+        current_path: transaction.current_path.clone(),
+        work_items_path: transaction.work_items_path.clone(),
+        project_state_root: None,
+        owner: owner.clone(),
+        session_id: session_id.clone(),
+        worktree_path: worktree_path.clone(),
+        work_id: launch.work_item_id.clone(),
+        resolution: if external.phase == ExternalWorkspaceCommitPhase::Committed {
+            Some(ExternalWorkspaceCommitResolution::Committed)
+        } else {
+            receipt.map(|receipt| receipt.resolution)
+        },
+    })
+}
+
+/// Finish the exact audited publication, preserving every durable terminal
+/// decision. An independently superseded, undecided launch is rejected.
+/// Payload and scope are revalidated under the normal publication locks.
+pub fn resolve_workspace_state_external_commit_recovery(
+    recovery: &ExternalWorkspaceCommitRecovery,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    validate_external_workspace_operation_id(&recovery.operation_id)?;
+    let decision = match recovery.resolution {
+        Some(ExternalWorkspaceCommitResolution::Committed) => {
+            ExternalWorkspaceCommitDecision::Commit
+        }
+        None | Some(ExternalWorkspaceCommitResolution::Rejected) => {
+            ExternalWorkspaceCommitDecision::Reject
+        }
+        Some(
+            ExternalWorkspaceCommitResolution::Busy | ExternalWorkspaceCommitResolution::Missing,
+        ) => {
+            return Err(GwtError::Other(
+                "external workspace recovery requires a terminal decision".into(),
+            ));
+        }
+    };
+    if let Some(project_state_root) = recovery.project_state_root.as_deref() {
+        return resolve_legacy_external_workspace_commit(
+            project_state_root,
+            &recovery.worktree_path,
+            &recovery.operation_id,
+            decision,
+            Some(recovery),
+        );
+    }
+    let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
+        &recovery.current_path,
+        &recovery.work_items_path,
+        &recovery.operation_id,
+    )?
+    else {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    };
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+        &recovery.current_path,
+        &recovery.work_items_path,
+        &recovery.operation_id,
+        decision,
+        &[],
+        None,
+        None,
+        Some(recovery),
+        |_| Ok(()),
+    )
+}
+
+fn validate_external_workspace_recovery_receipt(
+    receipt: &ExternalWorkspaceCommitReceipt,
+    expected: &ExternalWorkspaceCommitRecovery,
+) -> Result<()> {
+    if receipt.operation_id != expected.operation_id
+        || receipt.current_path != expected.current_path
+        || receipt.work_items_path != expected.work_items_path
+        || receipt.transaction_id != expected.transaction_id
+        || receipt.transaction_payload_hash != expected.transaction_payload_hash
+    {
+        return Err(GwtError::Other(
+            "external workspace recovery receipt does not match its audited transaction".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn resolve_workspace_state_external_commit_at(
@@ -5726,6 +6000,7 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
         additional_lock_targets,
         reconciliation_work_items_path,
         None,
+        None,
         on_committed,
     )
 }
@@ -5739,6 +6014,7 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
     additional_lock_targets: &[PathBuf],
     reconciliation_work_items_path: Option<&Path>,
     authority: Option<&ExternalWorkspaceCommitAuthority<'_>>,
+    expected_recovery: Option<&ExternalWorkspaceCommitRecovery>,
     mut on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     ensure_supported_workspace_layout(current_path)?;
@@ -5794,6 +6070,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
                     operation_id,
                 )? {
                     Some(receipt) if receipt.resolution == requested_resolution => {
+                        if let Some(expected) = expected_recovery {
+                            validate_external_workspace_recovery_receipt(&receipt, expected)?;
+                        }
                         if receipt.resolution == ExternalWorkspaceCommitResolution::Committed {
                             on_committed(None)?;
                         }
@@ -5803,6 +6082,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
                         "external workspace operation {operation_id} was already resolved as {:?}",
                         receipt.resolution
                     ))),
+                    None if expected_recovery.is_some() => Err(GwtError::Other(
+                        "external workspace recovery transaction disappeared without a matching receipt".into(),
+                    )),
                     None => Ok(Some(ExternalWorkspaceCommitResolution::Missing)),
                 };
             };
@@ -5842,6 +6124,29 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
             }
             if let Some(authority) = authority {
                 validate_external_workspace_commit_authority(&transaction, authority)?;
+            }
+            if let Some(expected) = expected_recovery {
+                let mut observed = external_workspace_commit_recovery(&transaction)?;
+                if observed
+                    .resolution
+                    .is_some_and(|decision| decision != requested_resolution)
+                    || (expected.resolution.is_some() && observed.resolution.is_none())
+                {
+                    return Err(GwtError::Other(
+                        "external workspace recovery terminal decision changed".into(),
+                    ));
+                }
+                // A prior cancellation may have persisted its Reject receipt
+                // before marker cleanup. The original undecided audit may retry.
+                observed.resolution = expected.resolution;
+                // Legacy routing was validated before taking the operation
+                // lock; the exact marker pair is checked again above.
+                observed.project_state_root = expected.project_state_root.clone();
+                if observed != *expected {
+                    return Err(GwtError::Other(
+                        "external workspace recovery payload or launch authority changed".into(),
+                    ));
+                }
             }
             if decision == ExternalWorkspaceCommitDecision::Commit {
                 let pending_reconciliation = transaction
