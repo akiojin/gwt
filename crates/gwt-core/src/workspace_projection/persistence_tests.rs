@@ -7173,6 +7173,7 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
     unrelated_start.title = Some("Existing canonical Work".to_string());
     let mut unrelated_only = WorkItemsProjection::empty(unrelated_start.updated_at);
     unrelated_only.apply_event(unrelated_start);
+    let mut source_before = unrelated_only.clone();
     let mut predecessor = WorkEvent::new(
         WorkEventKind::Start,
         &predecessor_id,
@@ -7180,13 +7181,13 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
     );
     predecessor.owner = Some("Issue #3412".into());
     predecessor.execution_container = Some(container.clone());
-    unrelated_only.apply_event(predecessor);
-    unrelated_only.apply_event(WorkEvent::new(
+    source_before.apply_event(predecessor);
+    source_before.apply_event(WorkEvent::new(
         WorkEventKind::Done,
         &predecessor_id,
         now - chrono::Duration::seconds(2),
     ));
-    let mut before_launch = unrelated_only.clone();
+    let mut before_launch = source_before;
     let mut occupied = WorkEvent::new(
         WorkEventKind::Backfill,
         &occupied_id,
@@ -7195,7 +7196,7 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
     occupied.owner = Some("Issue #3412".into());
     occupied.execution_container = Some(container.clone());
     before_launch.apply_event(occupied);
-    save_workspace_work_items_projection_to_path(&canonical_path, &before_launch).unwrap();
+    save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only).unwrap();
     save_workspace_work_items_projection_to_path(&legacy_path, &before_launch).unwrap();
     let mut audit = WorkEvent::new(WorkEventKind::Discard, &occupied_id, now);
     audit.id = format!("superseded-{occupied_id}");
@@ -7288,6 +7289,18 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
             .agents
             .iter()
             .any(|agent| agent.session_id == session_id));
+        assert_eq!(
+            current_work_id_for_launch(
+                &canonical,
+                &work_event_root,
+                Some(branch),
+                Some(&work_event_root),
+                Some("Issue #3412"),
+            )
+            .unwrap(),
+            Some(target_work_id.clone()),
+            "partial migration must preserve usable canonical successor selection"
+        );
     };
     assert_converged();
     assert_eq!(

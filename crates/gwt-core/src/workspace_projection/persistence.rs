@@ -1352,6 +1352,12 @@ fn merge_committed_legacy_worktree_events_locked(
                 &event,
                 work_event_root,
             )?;
+            changed |= materialize_legacy_supersession_ancestors(
+                &mut canonical,
+                source,
+                &event,
+                work_event_root,
+            )?;
             if let Some(snapshot) = seed_snapshot {
                 canonical.work_items.push(snapshot);
                 changed = true;
@@ -1703,6 +1709,129 @@ fn validate_legacy_supersession_authority(
     Ok(())
 }
 
+/// Recover only the independently stored terminal prefix needed by this
+/// audit. Existing canonical history remains authoritative and is not replaced.
+fn materialize_legacy_supersession_ancestors(
+    canonical: &mut WorkItemsProjection,
+    source: &WorkItemsProjection,
+    event: &WorkEvent,
+    work_event_root: &Path,
+) -> Result<bool> {
+    let context = "legacy supersession predecessor recovery";
+    let invalid = || {
+        GwtError::Other(format!(
+            "{context} has conflicting source/canonical lineage"
+        ))
+    };
+    let parent = event.related_work_item_id.as_deref().ok_or_else(invalid)?;
+    let container = event.execution_container.as_ref().ok_or_else(invalid)?;
+    let scope = canonical_work_id(
+        work_event_root,
+        container.branch.as_deref(),
+        Some(work_event_root),
+    )
+    .ok_or_else(invalid)?;
+    // Removing the audit's child bounds this existing selector to the prefix;
+    // it does not remove anything from either durable projection.
+    let mut source_prefix = source.clone();
+    source_prefix
+        .work_items
+        .retain(|item| item.id != event.work_item_id);
+    let mut source_edges = BTreeMap::new();
+    let selected = current_canonical_work_item(
+        &source_prefix,
+        work_event_root,
+        &scope,
+        None,
+        Some(&mut source_edges),
+    )?;
+    if !selected.is_some_and(|item| item.id == parent) && !source_edges.contains_key(parent) {
+        return Err(invalid());
+    }
+    validate_legacy_successor_edges(&source_prefix, &source_edges, context)?;
+    let ids = source_edges
+        .keys()
+        .chain(source_edges.values())
+        .map(String::as_str)
+        .chain(std::iter::once(parent))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut merged = canonical.clone();
+    let mut changed = false;
+    for id in ids {
+        let snapshot = unique_legacy_reconciliation_target(&source_prefix, id, context)?
+            .ok_or_else(invalid)?;
+        validate_legacy_reconciliation_snapshot_target(&source_prefix, snapshot, context)?;
+        let existing = unique_legacy_reconciliation_target(canonical, id, context)?;
+        if !snapshot.is_terminal()
+            || existing.is_some_and(|item| {
+                !item.is_terminal()
+                    || !(item.owner == snapshot.owner
+                        || can_upgrade_work_owner(item.owner.as_deref(), snapshot.owner.as_deref())
+                        || can_upgrade_work_owner(snapshot.owner.as_deref(), item.owner.as_deref()))
+            })
+        {
+            return Err(invalid());
+        }
+        for item in [Some(snapshot), existing].into_iter().flatten() {
+            if item
+                .execution_containers
+                .iter()
+                .chain(
+                    item.events
+                        .iter()
+                        .filter_map(|event| event.execution_container.as_ref()),
+                )
+                .chain(
+                    item.duplicate_event_containers
+                        .values()
+                        .flatten()
+                        .filter_map(|provenance| provenance.container()),
+                )
+                .any(|container| {
+                    canonical_work_id(
+                        work_event_root,
+                        container.branch.as_deref(),
+                        container.worktree_path.as_deref(),
+                    )
+                    .as_deref()
+                        != Some(scope.as_str())
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        if existing.is_none() {
+            merged.work_items.push(snapshot.clone());
+            changed = true;
+        }
+    }
+    let mut merged_edges = BTreeMap::new();
+    let selected = current_canonical_work_item(
+        &merged,
+        work_event_root,
+        &scope,
+        None,
+        Some(&mut merged_edges),
+    )?;
+    if !selected.is_some_and(|item| item.id == parent)
+        && !merged_edges.contains_key(parent)
+        && !merged_edges.values().any(|id| id == parent)
+    {
+        return Err(invalid());
+    }
+    if source_edges
+        .iter()
+        .any(|(child, parent)| merged_edges.get(child) != Some(parent))
+    {
+        return Err(invalid());
+    }
+    validate_legacy_successor_edges(&merged, &source_edges, context)?;
+    if changed {
+        *canonical = merged;
+    }
+    Ok(changed)
+}
+
 fn validate_legacy_reconciliation_target_local_authority(
     target: &WorkItem,
     session_id: &str,
@@ -1870,31 +1999,7 @@ fn validate_legacy_reconciliation_authority_uniqueness(
             .is_some_and(|item| item.events.iter().any(WorkEvent::is_successor_supersession))
     });
     let competing = if current.is_some_and(|current| current.id == target_work_id) && audited {
-        for (child, parent) in &ancestry {
-            let child = unique_legacy_reconciliation_target(work_items, child, context)?
-                .ok_or_else(|| GwtError::Other(format!("{context} successor is missing")))?;
-            let parent_item = unique_legacy_reconciliation_target(work_items, parent, context)?
-                .ok_or_else(|| GwtError::Other(format!("{context} predecessor is missing")))?;
-            if !parent_item.is_terminal()
-                || child.related_work_item_ids.iter().any(|id| id != parent)
-                || child
-                    .events
-                    .iter()
-                    .filter_map(|event| event.related_work_item_id.as_deref())
-                    .any(|id| id != parent)
-                || child
-                    .duplicate_event_containers
-                    .values()
-                    .flatten()
-                    .filter_map(|provenance| provenance.event())
-                    .filter_map(|event| event.related_work_item_id.as_deref())
-                    .any(|id| id != parent)
-            {
-                return Err(GwtError::Other(format!(
-                    "{context} successor lineage is contradictory"
-                )));
-            }
-        }
+        validate_legacy_successor_edges(work_items, &ancestry, context)?;
         let mut competing = work_items.clone();
         competing.work_items.retain(|item| {
             !ancestry.values().any(|parent| parent == &item.id)
@@ -1915,6 +2020,39 @@ fn validate_legacy_reconciliation_authority_uniqueness(
         worktree_identity,
         context,
     )
+}
+
+fn validate_legacy_successor_edges(
+    work_items: &WorkItemsProjection,
+    ancestry: &BTreeMap<String, String>,
+    context: &str,
+) -> Result<()> {
+    for (child, parent) in ancestry {
+        let child = unique_legacy_reconciliation_target(work_items, child, context)?
+            .ok_or_else(|| GwtError::Other(format!("{context} successor is missing")))?;
+        let parent_item = unique_legacy_reconciliation_target(work_items, parent, context)?
+            .ok_or_else(|| GwtError::Other(format!("{context} predecessor is missing")))?;
+        if !parent_item.is_terminal()
+            || child.related_work_item_ids.iter().any(|id| id != parent)
+            || child
+                .events
+                .iter()
+                .filter_map(|event| event.related_work_item_id.as_deref())
+                .any(|id| id != parent)
+            || child
+                .duplicate_event_containers
+                .values()
+                .flatten()
+                .filter_map(|provenance| provenance.event())
+                .filter_map(|event| event.related_work_item_id.as_deref())
+                .any(|id| id != parent)
+        {
+            return Err(GwtError::Other(format!(
+                "{context} successor lineage is contradictory"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the split-root paths. Current and WorkItems share the stable project
