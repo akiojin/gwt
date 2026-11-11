@@ -459,6 +459,9 @@ pub struct RuntimeHookEvent {
     /// this field before broadcasting a runtime event to browser clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_readiness_nonce: Option<String>,
+    /// Internal native turn identity. Public browser events omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_prompt_id: Option<String>,
     #[serde(default)]
     pub agent_session_id: Option<String>,
     #[serde(default)]
@@ -1586,6 +1589,10 @@ impl RuntimeHookEvent {
             )
             .ok(),
             agent_session_id,
+            native_prompt_id: hook_event
+                .as_ref()
+                .and_then(RawHookEvent::native_prompt_id)
+                .map(str::to_string),
             project_root,
             branch,
             status,
@@ -2194,6 +2201,7 @@ mod tests {
             source_event: Some(source_event.to_string()),
             gwt_session_id: Some("gwt-session-test".to_string()),
             continuation_readiness_nonce: readiness_nonce.map(str::to_string),
+            native_prompt_id: None,
             agent_session_id: Some("agent-session-test".to_string()),
             project_root: Some("/tmp/project".to_string()),
             branch: Some("work/issue-3480".to_string()),
@@ -2201,6 +2209,45 @@ mod tests {
             tool_name: None,
             message: None,
             occurred_at: "2026-08-15T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn issue_3706_native_turn_stop_keeps_its_prompt_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = Session::new(
+            temp.path(),
+            "work/issue-3706",
+            gwt_agent::AgentId::GrokBuild,
+        );
+        for (source, input, expected) in [
+            (
+                "Stop",
+                r#"{"sessionId":"grok-session","promptId":"grok-turn"}"#,
+                Some("grok-turn"),
+            ),
+            ("Stop", r#"{"sessionId":"grok-session"}"#, None),
+            (
+                "Stop",
+                r#"{"sessionId":"grok-session","promptId":"  "}"#,
+                None,
+            ),
+            (
+                "PreToolUse",
+                r#"{"sessionId":"grok-session","toolName":"read_file"}"#,
+                None,
+            ),
+        ] {
+            let event = RuntimeHookEvent::from_hook(
+                RuntimeHookEventKind::RuntimeState,
+                Some(source),
+                Some("Idle".into()),
+                None,
+                Some(session.clone()),
+                RawHookEvent::read_from_str(input).unwrap(),
+            );
+            let encoded = serde_json::to_value(event).unwrap();
+            assert_eq!(encoded["native_prompt_id"].as_str(), expected, "{source}");
         }
     }
 

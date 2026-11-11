@@ -114,9 +114,9 @@ fn grok_prompt_identity(
     })
 }
 
-/// A matching tool/stop event proves Grok accepted the prompt after its gates.
+/// A matching normal-turn Stop proves Grok accepted the prompt after its gates.
 pub fn handle_grok_delivery_acceptance(worktree: &Path, event: &str, input: &str) {
-    if !matches!(event, "PreToolUse" | "Stop") {
+    if event != "Stop" {
         return;
     }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
@@ -2056,7 +2056,7 @@ mod tests {
         let accepted = serde_json::json!({
             "sessionId": "grok-native-session", "promptId": "unrelated-prompt",
         });
-        handle_grok_delivery_acceptance(&repo, "PreToolUse", &accepted.to_string());
+        handle_grok_delivery_acceptance(&repo, "Stop", &accepted.to_string());
         // Editing the blocked row may reuse its promptId. The new ordinary
         // prompt must clear the old protected body's correlation.
         handle_delivery_acknowledgement(
@@ -2069,7 +2069,7 @@ mod tests {
         );
         handle_grok_delivery_acceptance(
             &repo,
-            "PreToolUse",
+            "Stop",
             &serde_json::json!({
                 "sessionId": "grok-native-session", "promptId": "grok-prompt-1",
             })
@@ -2116,11 +2116,26 @@ mod tests {
                 .status,
             pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
         );
+        // Native PreToolUse and session-end Stop have no promptId. Neither
+        // can acknowledge this exact operation before normal turn completion.
+        let without_prompt = serde_json::json!({
+            "sessionId": "grok-native-session", "toolName": "read_file",
+        })
+        .to_string();
+        handle_grok_delivery_acceptance(&repo, "PreToolUse", &without_prompt);
+        handle_grok_delivery_acceptance(&repo, "Stop", &without_prompt);
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+        );
         let accepted = serde_json::json!({
             "sessionId": "grok-native-session", "promptId": "grok-prompt-2",
         })
         .to_string();
-        handle_grok_delivery_acceptance(&repo, "PreToolUse", &accepted);
+        handle_grok_delivery_acceptance(&repo, "Stop", &accepted);
         handle_grok_delivery_acceptance(&repo, "Stop", &accepted);
         assert_eq!(
             pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
