@@ -1036,6 +1036,13 @@ pub fn blocking_prepared_transactions_for_project(
     let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
         invalid_generation_data(format!("malformed generation ledger: {error}"))
     })?;
+    validate_generation_ledger(
+        &ledger,
+        ExecutionOwnerKey {
+            kind: ledger.owner.kind,
+            number: owner_number,
+        },
+    )?;
     Ok(blocking_prepared_transactions(
         &gwt_core::paths::gwt_sessions_dir(),
         &ledger,
@@ -3271,8 +3278,19 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
             return diagnosis;
         }
     };
-    if let Err(error) = validate_generation_ledger(&ledger, ledger.owner) {
+    if let Err(error) = validate_generation_ledger(
+        &ledger,
+        ExecutionOwnerKey {
+            kind: ledger.owner.kind,
+            number: owner.number,
+        },
+    ) {
         diagnosis.warnings.push(error.to_string());
+        diagnosis.recommended_recovery = "execution.repair".to_string();
+        diagnosis.recommended_recovery_reason = format!(
+            "The owner ledger failed validation: {error}. Inspect execution.status in the owning Session/worktree for audited execution.repair authority; the PM's own Session cannot repair this owner by number."
+        );
+        return diagnosis;
     }
     // An owner is stored by number alone, so the ledger is the authority on
     // whether that number is an Issue or a SPEC. Report what it says instead
@@ -10383,7 +10401,21 @@ const PREPARED_TRANSACTION_RELEASE_GRACE: chrono::Duration = chrono::Duration::m
 
 fn describe_candidate_session(sessions_dir: &Path, session_id: &str) -> String {
     match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
-        gwt_agent::SessionPathState::Present(session) => format!("{:?}", session.status),
+        gwt_agent::SessionPathState::Present(session) => {
+            let runtime = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .ok()
+                .flatten()
+                .and_then(|identity| classify_exact_session_runtime(sessions_dir, &identity).ok());
+            match runtime {
+                Some(ExactSessionRuntimeDisposition::Live) => format!("{:?}", session.status),
+                Some(ExactSessionRuntimeDisposition::Absent) => "runtime_absent".to_string(),
+                Some(ExactSessionRuntimeDisposition::HostDead) => "host_dead".to_string(),
+                Some(ExactSessionRuntimeDisposition::ChildExited) => "child_exited".to_string(),
+                Some(ExactSessionRuntimeDisposition::Terminal(_)) => "terminal".to_string(),
+                Some(ExactSessionRuntimeDisposition::Defunct(_)) => "defunct".to_string(),
+                Some(ExactSessionRuntimeDisposition::Unknown) | None => "unknown".to_string(),
+            }
+        }
         gwt_agent::SessionPathState::Missing => "missing".to_string(),
         gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
     }
@@ -10465,6 +10497,28 @@ pub fn release_blocking_prepared_transactions(
     let operation_id = operation_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    // Storage is keyed by number. Recovery must agree with diagnosis about
+    // the immutable ledger kind, even if the caller's label/cache says Issue.
+    // Keep number and integrity validation strict; later leased reloads still
+    // validate this exact owner before any transaction is changed.
+    let context = GenerationTransactionContext::resolve(worktree, owner)?;
+    let owner = match read_owner_ledger_from_dir(&context.owner_dir)? {
+        Some(contents) => {
+            let ledger =
+                serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
+                    invalid_generation_data(format!("malformed generation ledger: {error}"))
+                })?;
+            validate_generation_ledger(
+                &ledger,
+                ExecutionOwnerKey {
+                    kind: ledger.owner.kind,
+                    ..owner
+                },
+            )?;
+            ledger.owner
+        }
+        None => owner,
+    };
     if let Some(operation_id) = operation_id {
         if let Some((generation_id, resolution)) =
             recover_terminal_workspace_commit(worktree, owner, operation_id)?
@@ -16803,7 +16857,11 @@ fn run_release_prepared(
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
-            out.push_str(&format!("execution: release_prepared refused — {error}\n"));
+            out.push_str(&format!(
+                "execution: release_prepared refused — {error}\n\
+                 Next: inspect execution.status with params {{\"issue\":{}}} for owner-scoped recovery. Validation failures require audited repair in the owning Session/worktree.\n",
+                owner.number,
+            ));
             return Ok(2);
         }
     };
@@ -20266,20 +20324,40 @@ mod tests {
         // The launch got as far as persisting its candidate Session and then
         // never activated the successor — the shape production actually leaves
         // behind, and the one a Session-existence gate would refuse to clear.
-        persist_recovery_session_snapshot(dir.path(), owner, &leaked.initial_session_id);
+        let mut candidate =
+            persist_recovery_session_snapshot(dir.path(), owner, &leaked.initial_session_id);
+        candidate.status = gwt_agent::AgentStatus::Running;
+        candidate.save(&sessions_dir).unwrap();
+        assert_eq!(
+            describe_candidate_session(&sessions_dir, &candidate.id),
+            "unknown",
+            "an unbound durable Running status does not prove a live runtime"
+        );
+        let planned = prepared_successor_execution_binding(dir.path(), owner, &leaked).unwrap();
+        persist_generation_session_binding(dir.path(), owner, &candidate.id, planned);
+        candidate.execution_binding =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", candidate.id)))
+                .unwrap()
+                .execution_binding;
+        candidate.save(&sessions_dir).unwrap();
+        let caller_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            ..owner
+        };
 
-        let fenced = diagnose_owner(dir.path(), owner);
+        let fenced = diagnose_owner(dir.path(), caller_owner);
+        assert_eq!(fenced.owner_kind, owner.kind);
         assert_eq!(fenced.recommended_recovery, "execution.release_prepared");
         assert_eq!(fenced.blocking_prepared_transactions.len(), 1);
         let blocking = &fenced.blocking_prepared_transactions[0];
         assert_eq!(blocking.kind, "successor");
         assert_eq!(blocking.operation_id, leaked.operation_id);
-        assert_ne!(blocking.candidate_session_state, "missing");
+        assert_eq!(blocking.candidate_session_state, "runtime_absent");
 
         let now = Utc::now();
         let held = release_blocking_prepared_transactions(
             dir.path(),
-            owner,
+            caller_owner,
             &sessions_dir,
             None,
             "operator release without naming the operation",
@@ -20297,7 +20375,7 @@ mod tests {
 
         let released = release_blocking_prepared_transactions(
             dir.path(),
-            owner,
+            caller_owner,
             &sessions_dir,
             Some(&leaked.operation_id),
             "the launch that prepared this successor is gone",
@@ -20305,6 +20383,7 @@ mod tests {
         )
         .expect("naming the operation releases it now");
         assert_eq!(released.status, "released");
+        assert_eq!(released.owner_kind, owner.kind);
         assert_eq!(released.released.len(), 1);
         assert!(released.retained.is_empty());
 
@@ -20429,7 +20508,10 @@ mod tests {
                 .exists());
             let result = release_blocking_prepared_transactions(
                 dir.path(),
-                owner,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    ..owner
+                },
                 &sessions_dir,
                 Some(&request.operation_id),
                 "recover the exact abandoned external transaction",
@@ -23135,6 +23217,43 @@ mod tests {
 
         let context = GenerationTransactionContext::resolve(worktree.path(), owner)
             .expect("owner transaction context");
+        let request = successor_request("invalid-ledger-prepared", "host", "continue-work:resume");
+        prepare_active_continuation_successor(worktree.path(), owner, &request).unwrap();
+        let mut ledger = load_owner_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        ledger.content_hash.push_str("-invalid");
+        let invalid_bytes = serde_json::to_vec_pretty(&ledger).unwrap();
+        fs::write(
+            context.owner_dir.join(GENERATION_LEDGER_FILE),
+            &invalid_bytes,
+        )
+        .unwrap();
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.recommended_recovery, "execution.repair");
+        assert!(diagnosis
+            .recommended_recovery_reason
+            .contains("owning Session"));
+        assert!(blocking_prepared_transactions_for_project(worktree.path(), owner.number).is_err());
+        let mut output = String::new();
+        assert_eq!(
+            run_release_prepared(
+                worktree.path(),
+                owner,
+                Some(&request.operation_id),
+                "do not release corrupt authority",
+                Utc::now(),
+                &mut output,
+            )
+            .unwrap(),
+            2
+        );
+        assert!(output.contains("failed integrity validation"), "{output}");
+        assert!(output.contains("execution.status"), "{output}");
+        assert_eq!(
+            fs::read(context.owner_dir.join(GENERATION_LEDGER_FILE)).unwrap(),
+            invalid_bytes
+        );
         fs::write(
             context.owner_dir.join(GENERATION_LEDGER_FILE),
             b"{not-a-ledger",
