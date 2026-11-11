@@ -314,7 +314,8 @@ impl AppRuntime {
                     | OwnerCommand::Resize {
                         id, incarnation, ..
                     }
-                    | OwnerCommand::Close { id, incarnation } => Some((id, incarnation)),
+                    | OwnerCommand::Close { id, incarnation }
+                    | OwnerCommand::Stop { id, incarnation } => Some((id, incarnation)),
                     _ => None,
                 };
                 if let Some((pane, incarnation)) = target.filter(|(pane, incarnation)| {
@@ -489,6 +490,9 @@ impl AppRuntime {
                 "The project execution is unavailable.".into(),
             );
         };
+        if matches!(kind, super::RemoteRuntimeCommandKind::Resize) && runtime.exit_confirmed {
+            return Vec::new();
+        }
         let Some(context) = self
             .window_lookup
             .get(id)
@@ -697,6 +701,14 @@ impl AppRuntime {
                     "Queued input was discarded because the pane owner changed. Retype it.",
                 );
             }
+            return Vec::new();
+        }
+        if matches!(kind, super::RemoteRuntimeCommandKind::Resize)
+            && self
+                .runtimes
+                .get(&id)
+                .is_some_and(|runtime| runtime.exit_confirmed)
+        {
             return Vec::new();
         }
         if let Some(token) = input_command_id {
@@ -1085,19 +1097,9 @@ impl AppRuntime {
 
     #[cfg(test)]
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
-        if let Some(runtime) = self.runtimes.get(window_id) {
-            let command = gwt::project_runtime::events::OwnerCommand::Close {
-                id: runtime.owner_pane_id.clone(),
-                incarnation: runtime.incarnation,
-            };
-            let events = self.queue_remote_runtime_command(
-                window_id,
-                command,
-                super::RemoteRuntimeCommandKind::Stop,
-            );
-            if !events.is_empty() {
-                self.proxy.send(UserEvent::Dispatch(events));
-            }
+        let events = self.stop_window_events(window_id);
+        if !events.is_empty() {
+            self.proxy.send(UserEvent::Dispatch(events));
         }
     }
 

@@ -397,7 +397,7 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
     def test_known_budget_interruption_before_first_batch_can_restart(self):
         db = self.db_root / ISSUE_REPO_HASH / "issues"
         with mock.patch.dict(os.environ, {"GWT_INDEX_REFRESH_RUN_ID": "run-a"}), \
-                mock.patch.object(runner, "_make_chroma_collection_repairing", side_effect=KeyboardInterrupt):
+                mock.patch.object(runner, "_open_issue_pool_for_build", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self._run()
         self.assertFalse((runner._staging_dir_for(db) / runner.CONTINUATION_FILENAME).exists())

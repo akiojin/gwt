@@ -417,6 +417,11 @@ impl DaemonSupervisor {
                 unreachable!("retirement handled above")
             }
             DaemonBootstrapAction::Spawn { .. } => {
+                // Quit can stop admission while discovery is doing filesystem
+                // work. Do not create a new child after that decision.
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Err("daemon supervisor shut down during discovery".into());
+                }
                 if let Some(pid) = started_child_pid {
                     return Ok(DaemonEnsureOutcome::Starting { pid });
                 }
@@ -1034,6 +1039,40 @@ fn spawn_production_daemon(context: &DaemonSpawnContext<'_>) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_during_discovery_prevents_a_pending_spawn() {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            12345,
+            "unused".into(),
+            "quit-discovery-fixture".into(),
+            env!("CARGO_PKG_VERSION").into(),
+        );
+        persist_endpoint(&scope.endpoint_path(home.path()), &endpoint).unwrap();
+        let supervisor = DaemonSupervisor::with_spawner(|_| panic!("Quit must prevent spawn"));
+        let observed = |_: u32| {
+            supervisor.shutdown();
+            false
+        };
+        let result = supervisor.ensure_running_with(
+            project.path(),
+            DaemonEnsureInputs {
+                gwt_home: home.path().into(),
+                is_process_alive: &observed,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| panic!("Quit must not retire an owner"),
+            },
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "daemon supervisor shut down during discovery"
+        );
+    }
 
     #[test]
     fn orphan_observation_rejects_reuse_reopen_replacement_and_unproved_birth() {

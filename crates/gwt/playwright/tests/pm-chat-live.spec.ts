@@ -2,7 +2,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
@@ -14,7 +14,7 @@ const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
 const ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? '';
 const SESSION = 'pm-reports-fixture';
 
-async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepDefaultView = false) {
+async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepTasks = false) {
   await gotoLiveGwt(page, base, { enableTestBridge: true, projectKey });
   // PM registration settles after the first workspace projection in this
   // stopped-PM fixture. Read its current projection before testing views.
@@ -26,7 +26,7 @@ async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepD
   // selects its surface without starting an agent.
   await expect(page.locator('#op-pm-entry')).toHaveAttribute('data-pm-state', 'stopped');
   await page.locator('#op-pm-entry').click();
-  if (!keepDefaultView) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
+  if (!keepTasks) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
 }
 
 async function refreshPmReports(page: Page) {
@@ -103,6 +103,46 @@ test.describe('PM reports', () => {
     });
   });
 
+  test('Issue #6950 saved reports stay visible while the PM current status is unreadable', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      const projects = join(HOME, '.gwt', 'projects');
+      const ledgers = readdirSync(projects).map(hash => join(projects, hash, 'project-state', 'pm-reports.jsonl')).filter(existsSync);
+      expect(ledgers, 'one owned isolated PM report ledger').toHaveLength(1);
+      const history = ledgers[0];
+      const status = join(history, '..', 'pm-status.jsonl');
+      const original = readFileSync(history);
+      const originalStatus = existsSync(status) ? readFileSync(status) : null;
+      const report = (id: string) => JSON.stringify({ id: `${id}-${theme}`, kind: 'qa', question: `Question ${id}`,
+        body: `Answer ${id}`, created_at: '2026-11-09T13:03:00Z' });
+      try {
+        writeFileSync(history, report('before') + '\n');
+        await gotoPmReports(page);
+        const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+        const messages = pane.locator('.pm-chat__message');
+        await expect(messages).toHaveCount(1);
+        writeFileSync(status, 'broken PM status\n');
+        appendFileSync(history, report('saved') + '\n');
+        await refreshPmReports(page);
+        await expect(messages, 'a saved report appears despite the broken current status').toHaveCount(2);
+        await expect(pane.locator('.pm-chat__body')).toContainText('Answer saved');
+        await expect(pane.locator('.pm-chat__body')).toContainText('PM current status could not be loaded');
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        const screenshot = info.outputPath(`reports-current-error-${theme}.png`);
+        await pane.screenshot({ path: screenshot });
+        await info.attach('Reports with unreadable current status', { path: screenshot, contentType: 'image/png' });
+        expect(errors).toEqual([]);
+      } finally {
+        writeFileSync(history, original);
+        if (originalStatus === null) rmSync(status, { force: true }); else writeFileSync(status, originalStatus);
+      }
+    });
+  });
+
   test('T-CHAT-VIEW Chat renders the PM conversation as user-right and PM-left bubbles', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
@@ -112,12 +152,14 @@ test.describe('PM reports', () => {
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await gotoPmReports(page, undefined, BASE, true);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
-      // T-CHAT-DEFAULT: opening the PM window shows Chat without any view click.
+      await expect(pane.getByRole('button', { name: 'Home', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeVisible();
+      // AC-3431-CHAT-1: one action from the default Home opens Chat.
+      await pane.getByRole('button', { name: 'Chat', exact: true }).click();
       await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
-      await expect(pane.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'false');
+      await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeHidden();
       const chat = pane.getByRole('region', { name: 'PM conversation' });
       await expect(chat).toBeVisible();
-      await expect(pane.getByRole('region', { name: 'Request tasks' })).toBeHidden();
       // The real host answers for the stopped fixture PM; it has no native record yet.
       await expect(chat.getByRole('status')).not.toHaveText('Loading PM conversation…', { timeout: 30_000 });
       const id = await pane.getAttribute('data-id');
@@ -1687,7 +1729,6 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await gotoPmReports(page, undefined, target.url, true);
       const chat = page.locator('.pm-chat');
       const tasksView = chat.getByRole('region', { name: 'Request tasks' });
-      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       await expect(chat.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
       await expect(tasksView).toBeVisible();
       await expect(tasksView.locator('.pm-chat__task')).toHaveCount(2);

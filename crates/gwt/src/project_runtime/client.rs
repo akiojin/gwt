@@ -174,15 +174,27 @@ impl ProjectRuntimeClient {
     /// An authenticated Rust GUI connection owns exactly one residency lease.
     pub async fn gui_events(
         &self,
-    ) -> Result<impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>, String>
-    {
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>
+            + futures_util::Sink<
+                tokio_tungstenite::tungstenite::Message,
+                Error = tokio_tungstenite::tungstenite::Error,
+            >,
+        String,
+    > {
         self.events_with_gui_presence(true).await
     }
     async fn events_with_gui_presence(
         &self,
         gui_presence: bool,
-    ) -> Result<impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>, String>
-    {
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>
+            + futures_util::Sink<
+                tokio_tungstenite::tungstenite::Message,
+                Error = tokio_tungstenite::tungstenite::Error,
+            >,
+        String,
+    > {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let endpoint = self.route.lock().await.endpoint.clone();
@@ -204,6 +216,16 @@ impl ProjectRuntimeClient {
                 .map_err(|error: axum::http::header::InvalidHeaderValue| error.to_string())?,
         );
         if gui_presence {
+            // A non-security label groups this GUI process's subscriber and
+            // background leases without relying on a launched Agent Session.
+            static GUI_INSTANCE: OnceLock<String> = OnceLock::new();
+            request.headers_mut().insert(
+                super::presence::GUI_INSTANCE_HEADER,
+                GUI_INSTANCE
+                    .get_or_init(|| uuid::Uuid::new_v4().to_string())
+                    .parse()
+                    .expect("GUI instance UUID header"),
+            );
             request.headers_mut().insert(
                 "x-gwt-gui-presence",
                 "1".parse().expect("static presence header"),

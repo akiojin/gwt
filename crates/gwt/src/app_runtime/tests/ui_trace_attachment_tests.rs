@@ -1720,10 +1720,10 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
             );
             assert_eq!(fs::read(&candidate_path).unwrap(), replacement);
             assert!(pane.pty.tree_exit_confirmed());
-            assert!(durable_launch_recovery_exists(
-                &sessions,
-                &fresh.pending.binding.session_id
-            ));
+            assert!(
+                durable_launch_recovery_exists(&sessions, &fresh.pending.binding.session_id)
+                    .unwrap()
+            );
             assert_eq!(
                 gwt::cli::execution_state::continuation_attempt_for_operation(
                     &fresh.repo,
@@ -1807,7 +1807,8 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
                 assert!(durable_launch_recovery_exists(
                     &sessions,
                     &fresh.pending.binding.session_id
-                ));
+                )
+                .unwrap());
                 assert_eq!(
                     gwt::cli::execution_state::continuation_attempt_for_operation(
                         &fresh.repo,

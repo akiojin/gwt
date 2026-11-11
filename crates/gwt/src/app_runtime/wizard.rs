@@ -997,7 +997,8 @@ fn issue_monitor_codex_config_error(
         .unwrap_or_else(|| request.project_root.clone());
     let mut builder = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&cwd)
-        .fast_mode(profile.fast_mode);
+        .fast_mode(profile.fast_mode)
+        .codex_speed(profile.codex_speed);
     if let Some(model) = &profile.model {
         builder = builder.model(model);
     }
@@ -1469,6 +1470,9 @@ impl IssueMonitorAgentSettingsSets {
         }
         if edited(|a, b| a.fast_mode == b.fast_mode) {
             slot.fast_mode = open.fast_mode;
+        }
+        if edited(|a, b| a.codex_speed == b.codex_speed) {
+            slot.codex_speed = open.codex_speed;
         }
         if runtime_chosen {
             slot.runtime_target = open.runtime_target;
@@ -2048,7 +2052,10 @@ impl AppRuntime {
         if workspace_resume_context.is_none() {
             quick_start_entries.retain(|entry| entry.resume_session_id.is_some());
         }
-        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        let previous_profiles = agent_settings_launch_defaults(
+            project_root,
+            self.launch_wizard_cache.agent_preferences(),
+        );
         let agent_options = self.launch_wizard_cache.agent_options();
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
@@ -2103,7 +2110,10 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: LinkedIssueKind,
     ) -> Result<(), String> {
-        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        let previous_profiles = agent_settings_launch_defaults(
+            project_root,
+            self.launch_wizard_cache.agent_preferences(),
+        );
         self.open_knowledge_launch_wizard_for_base_branch_with_previous_profiles(
             tab_id,
             project_root,
@@ -2689,6 +2699,7 @@ impl AppRuntime {
         if let Some(level) = session.reasoning_level.clone() {
             builder = builder.reasoning_level(level);
         }
+        builder = builder.codex_speed(session.codex_speed());
         if session.fast_mode_enabled() {
             builder = builder.fast_mode(true);
         }
@@ -3114,7 +3125,10 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())?;
         let quick_start_root = project_root.to_path_buf();
         let quick_start_entries = Vec::new();
-        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        let previous_profiles = agent_settings_launch_defaults(
+            project_root,
+            self.launch_wizard_cache.agent_preferences(),
+        );
         let agent_options = self.launch_wizard_cache.agent_options();
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
@@ -4792,11 +4806,17 @@ impl AppRuntime {
         error: String,
         _failed_attempt: Option<gwt::AutonomousHandoffDeliveryAttempt>,
     ) -> Vec<OutboundEvent> {
-        let repeated = self
+        let previous = self
             .issue_monitor_launch_failure_causes
-            .insert(context.project_root.clone(), error.clone())
-            .as_deref()
-            == Some(error.as_str());
+            .insert(context.project_root.clone(), error.clone());
+        let finalizer_timeout =
+            gwt::project_runtime::workspace::workspace_finalizer_timeout_operation_id(&error);
+        let repeated = previous.as_deref() == Some(error.as_str())
+            || finalizer_timeout.is_some_and(|operation_id| {
+                previous.as_deref().and_then(
+                    gwt::project_runtime::workspace::workspace_finalizer_timeout_operation_id,
+                ) == Some(operation_id)
+            });
         if !repeated {
             tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
@@ -4820,6 +4840,9 @@ impl AppRuntime {
                     },
                 );
             }
+        }
+        if repeated && finalizer_timeout.is_some() {
+            return Vec::new();
         }
         vec![OutboundEvent::project(
             context.project_key,
@@ -7943,6 +7966,17 @@ impl AppRuntime {
     }
 }
 
+fn agent_settings_launch_defaults(
+    project_root: &Path,
+    previous: gwt::LaunchWizardPreviousProfiles,
+) -> gwt::LaunchWizardPreviousProfiles {
+    let pool =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+            .map(|prefs| prefs.launch_profile_pool())
+            .unwrap_or_default();
+    previous.with_agent_defaults(pool.into_iter().map(Into::into))
+}
+
 fn resolve_launch_wizard_runtime_context_hydration(
     project_root: &Path,
     branch_name: String,
@@ -7951,7 +7985,8 @@ fn resolve_launch_wizard_runtime_context_hydration(
     let (context_path, resolved_worktree_path) =
         launch_runtime_context_paths(project_root, &branch_name);
     let quick_start_entries = cache.quick_start_entries(&context_path, &branch_name);
-    let previous_profiles = cache.previous_profiles(&context_path);
+    let previous_profiles =
+        agent_settings_launch_defaults(project_root, cache.previous_profiles(&context_path));
     let agent_options = cache.agent_options();
     let (docker_context, docker_service_status) =
         detect_wizard_docker_context_and_status(&context_path);
@@ -8944,6 +8979,7 @@ mod codex_preflight_memo_tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,

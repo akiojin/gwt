@@ -14,7 +14,7 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
     details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
   details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
 
-function fixture({ initialView = 'reports' } = {}) {
+function fixture({ tasksDefault = false } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [], sent = [];
@@ -22,17 +22,17 @@ function fixture({ initialView = 'reports' } = {}) {
   const view = createPmChat({ document, root, sessionId: 'session',
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
-  if (initialView === 'reports') view.showReports();
-  if (initialView === 'tasks') view.showTasks();
+  if (!tasksDefault) view.showReports();
   model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
   let revision = 0;
-  const update = (reports = [], error = null, current = null) => {
+  const update = (reports = [], error = null, current = null, current_error = undefined) => {
     const request = model.requestPmReports('pm');
     const event = { kind: 'pm_reports', id: 'pm', request_id: request.request_id,
       version: { epoch: 'fixture', revision: ++revision }, snapshot: request.version === null,
-      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current };
+      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
+      ...(current_error === undefined ? {} : { current_error }) };
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
@@ -45,29 +45,40 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
 
-test('Chat is the default PM view and a new session returns to it (AC-3431-CHAT-1, T-CHAT-DEFAULT)', () => {
-  const { root, model, view } = fixture({ initialView: 'chat' });
-  const pressed = label => [...root.querySelectorAll('.pm-chat__toolbar button')]
-    .find(button => button.textContent === label).getAttribute('aria-pressed');
-  assert.equal(root.querySelector('.pm-chat__chat').hidden, false);
-  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
-  assert.equal(root.querySelector('.pm-chat__body').hidden, true);
-  assert.equal(pressed('Chat'), 'true');
-  assert.equal(pressed('Tasks'), 'false');
-  assert.equal(view.isChatVisible(), true, 'the default view polls the conversation');
-  view.showReports();
+test('Home opens Chat in one action and rebinds without showing the previous conversation (AC-3431-CHAT-1)', () => {
+  const { root, model, view } = fixture({ tasksDefault: true });
+  assert.equal(view.isChatVisible(), false, 'Home remains the default PM view');
+  const home = root.querySelector('.task-home');
+  assert.ok(home && !home.hidden, 'Home is visible on entry');
+  const chatButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Chat');
+  chatButton.click();
+  assert.equal(view.isChatVisible(), true, 'one toolbar action opens Chat');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'old', role: 'assistant', text: 'Previous session' }]));
+  assert.match(root.querySelector('.pm-chat__chat').textContent, /Previous session/);
   model.bindPmWindowState('pm', 'replacement');
-  assert.equal(view.isChatVisible(), true, 'a rebound PM session opens on Chat');
-  assert.equal(root.querySelector('.pm-chat__body').hidden, true);
+  assert.equal(view.isChatVisible(), false, 'a new session returns to Home');
+  assert.equal(home.hidden, false, 'Home is visible after rebinding');
+  chatButton.click();
+  assert.equal(view.isChatVisible(), true, 'the rebound session keeps one-action Chat access');
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0, 'previous-session bubbles are cleared');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'stale', role: 'assistant', text: 'Stale reply' }]));
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0, 'a delayed old-session reply stays hidden');
+  model.applyPmWindowReceiveEvent({ ...conversation([{ id: 'new', role: 'assistant', text: 'New session' }]),
+    session_id: 'replacement' });
+  assert.deepEqual([...root.querySelectorAll('.pm-chat__bubble')].map(node => node.textContent), ['New session']);
 });
 
-test('Tasks preserves the unfinished filter and stable rows', () => {
-  const { root, update, view, model } = fixture({ initialView: 'tasks' });
+test('Home is the default PM view; Tasks preserves the unfinished filter and stable rows', () => {
+  const { root, update, view, model } = fixture({ tasksDefault: true });
   update([report()], null, { request_tasks: taskOverview([
     trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
       wait_reason: 'Waiting for CI', review_required: true }),
     trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
   ]) });
+  assert.ok(root.querySelector('.task-home'), 'a Home surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true, 'Home is the entry view');
+  view.showTasks();
   const tasks = root.querySelector('.pm-chat__tasks');
   assert.ok(tasks, 'a separate Tasks surface exists');
   assert.equal(tasks.hidden, false);
@@ -100,8 +111,24 @@ test('Tasks preserves the unfinished filter and stable rows', () => {
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
 });
 
+test('A current-card failure keeps the last explanation but never hides newly saved reports (#6950)', () => {
+  const { root, model, update } = fixture();
+  const confirmed = { status: { items: [{ kind: 'waiting', text: 'Watching CI', started_at: '2026-10-13T09:00:00Z' }], next_trigger: 'CI result' }, request_tasks: taskOverview() };
+  update([report('one')], null, confirmed);
+  const before = model.readPmWindowState().windows.pm.current;
+  update([report('one'), report('two')], null, { request_tasks: taskOverview() }, 'PM current status could not be loaded');
+  const state = model.readPmWindowState().windows.pm;
+  assert.deepEqual(state.reports.map(item => item.id), ['one', 'two'], 'saved reports are displayed');
+  assert.equal(state.current, before, 'the last confirmed explanation is kept');
+  assert.equal(root.querySelectorAll('.pm-chat__body [data-report-id]').length, 2);
+  assert.match(root.querySelector('.pm-chat__body').textContent, /PM current status could not be loaded/);
+  update([report('three')], 'Unreadable reports', { request_tasks: taskOverview() });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['one', 'two'],
+    'only a reports failure keeps the last confirmed list');
+});
+
 test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
-  const { root, model, update } = fixture({ initialView: 'tasks' });
+  const { root, model, update } = fixture({ tasksDefault: true });
   update();
   assert.match(root.querySelector('.pm-chat__tasks').textContent, /unavailable/i);
   update([], null, { request_tasks: { ...taskOverview([trackedTask('known')], 7), total: 83 } });
@@ -267,7 +294,7 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   const { root, update, copied } = fixture();
   update([report()]);
   assert.equal(root.querySelector('[role="log"]').getAttribute('aria-label'), 'PM reports');
-  assert.equal(root.querySelector('h1').textContent, 'Update');
+  assert.equal(root.querySelector('.pm-chat__transcript h1').textContent, 'Update');
   assert.equal(root.querySelector('article strong').textContent, 'Ready');
   assert.equal(root.querySelector('li').textContent, 'checked');
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
@@ -726,9 +753,9 @@ const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: '
   snapshot: { conversation_id: 'c', availability: 'ready', detail: null, messages, ...extra } });
 
 test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
-  const { root, model, view, update } = fixture({ initialView: 'tasks' });
+  const { root, model, view, update } = fixture({ tasksDefault: true });
   update([report()]);
-  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'an explicit Tasks choice hides Chat');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Home remains the default view');
   assert.deepEqual(model.requestPmConversation('pm'), { kind: 'load_pm_conversation', id: 'pm' });
   assert.equal(model.requestPmConversation('missing'), null);
   model.applyPmWindowReceiveEvent(conversation([

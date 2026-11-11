@@ -610,7 +610,7 @@ impl IssueMonitorState {
             .iter()
             .find(|entry| entry.issue_number == number && entry.host_id != host)
         {
-            return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.schedule.read on that host before changing its queue", foreign.host_id));
+            return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.queue.list for that terminal; use issue.monitor.queue.adopt with terminal to recover a retired host, then read issue.monitor.schedule.read", foreign.host_id));
         }
         if let Some(reason) = self.agent_switch_intents.values().find_map(|intent| {
             intent.admission_exclusion(Some(number), self.scheduled_agent_member_id(number), false)
@@ -667,6 +667,15 @@ impl IssueMonitorState {
                 )
             })
             .unwrap_or_else(|| "absent".into());
+        // Issue #7027 AC-3: name why the scheduled member itself cannot launch.
+        let own = member
+            .filter(|_| !tool_matches)
+            .and_then(|member| {
+                automatic_member_ineligibility(&self.prefs().launch_profile_pool(), member)
+            })
+            .map(|reason| format!("; scheduled member {id} not eligible: {reason}"))
+            .unwrap_or_default();
+        let current = format!("{current}{own}");
         let excluded = self
             .agent_schedule_ineligible
             .iter()
@@ -1940,6 +1949,24 @@ mod tests {
         assert!(reason.contains(&grok), "{reason}");
         assert!(
             reason.contains("issue.monitor.schedule.reassign"),
+            "{reason}"
+        );
+    }
+
+    /// Issue #7027 AC-3: an Issue reassigned to an idle member outside the
+    /// pool names that member's own reason, not only the other members'.
+    #[test]
+    fn issue_7027_reassigned_member_outside_pool_names_its_own_reason() {
+        let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
+        let grok = roster.members[4].agent_member_id.clone();
+        prefs.agent_issue_schedule.reservations[0].agent_member_id = grok.clone();
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.scheduled_agent_member_id(41), Some(grok.as_str()));
+        let reason = monitor.agent_schedule_launch_exclusion(41).unwrap();
+        assert!(
+            reason.contains(&format!(
+                "scheduled member {grok} not eligible: not_in_launch_profiles"
+            )),
             "{reason}"
         );
     }

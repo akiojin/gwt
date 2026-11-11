@@ -191,7 +191,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
-      subscribeProjectOwnerHealth(document, projectOwnerHealthModel);
+      subscribeProjectOwnerHealth(document, projectOwnerHealthModel, { send, createFocusTrap });
       const runtimeHealthModel = createUiStateStore(null);
       subscribeRuntimeHealth(document, runtimeHealthModel, {
         focusWindow: (windowId) => requestWindowFrame(windowId),
@@ -933,7 +933,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
