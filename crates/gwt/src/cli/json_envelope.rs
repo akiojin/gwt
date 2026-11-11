@@ -104,7 +104,9 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            if super::feedback::safe_intake_required(env.repo_path()) {
+            if !matches!(err, CliParseError::InvalidVerificationMode)
+                && super::feedback::safe_intake_required(env.repo_path())
+            {
                 // A malformed envelope cannot reliably identify its operation.
                 // Never echo serde's caller-controlled keys/values in Auto.
                 let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
@@ -1593,7 +1595,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             let quarantines = verification_quarantine_requests(params)?;
-            let mode = optional_string(params, "mode")?.unwrap_or_else(|| "full".into());
+            let mode = optional_string(params, "mode")
+                .map_err(|_| CliParseError::InvalidVerificationMode)?
+                .unwrap_or_else(|| "full".into());
+            if mode != "full" && mode != "pre-pr" {
+                return Err(CliParseError::InvalidVerificationMode);
+            }
             let acceptance_commands = optional_string_vec(params, "acceptance_commands")?;
             if mode == "pre-pr" {
                 if !derive {
@@ -1608,8 +1615,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     quarantines,
                 })
             } else {
-                if mode != "full" || !acceptance_commands.is_empty() {
-                    return Err(CliParseError::InvalidJson("verify.plan mode must be full or pre-pr; acceptance_commands requires mode pre-pr".into()));
+                if !acceptance_commands.is_empty() {
+                    return Err(CliParseError::InvalidJson(
+                        "acceptance_commands requires mode pre-pr".into(),
+                    ));
                 }
                 if commands.is_empty() && !derive {
                     return Err(CliParseError::MissingFlag("commands"));
@@ -8970,6 +8979,39 @@ mod tests {
             json!({"mode": "pretend-fast", "derive": true}),
         );
         assert!(error.to_string().contains("mode"));
+    }
+
+    #[test]
+    fn verification_plan_invalid_mode_diagnostic_is_safe_and_actionable() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        for autonomous_mode in [false, true] {
+            crate::save_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo.path()),
+                &crate::IssueMonitorPrefs {
+                    autonomous_mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            let input = envelope(
+                "verify.plan",
+                json!({"mode": "private-mode-value", "derive": true}),
+            );
+            assert_eq!(crate::cli::dispatch_json_input(&mut env, "gwtd", &input), 2);
+            let stderr = String::from_utf8_lossy(&env.stderr);
+            assert!(
+                stderr.contains("verify.plan mode must be full or pre-pr"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("private-mode-value"), "{stderr}");
+            assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+        }
     }
 
     #[test]

@@ -5117,6 +5117,7 @@ mod tests {
             live_window_id: live_window_id.map(str::to_string),
             skip_permissions: true,
             codex_fast_mode: true,
+            codex_speed: Default::default(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,

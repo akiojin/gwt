@@ -11459,7 +11459,9 @@ mod tests {
     #[test]
     fn workspace_operation_receipt_refuses_pending_or_changed_work_without_repair() {
         with_strict_target_fixture(|repo, session| {
-            let (session, binding) = bind_session_to_current_execution(repo, session);
+            let (mut session, binding) = bind_session_to_current_execution(repo, session);
+            session.agent_session_id = Some("private-receipt-primary-thread".to_string());
+            save_session_fixture(&session);
             seed_unique_mutation_target(repo, repo, &session, "work-receipt-proof");
             std::fs::write(
                 gwt_core::paths::gwt_workspace_journal_path_for_repo_path(repo),
@@ -11467,20 +11469,27 @@ mod tests {
             )
             .unwrap();
             let id = uuid::Uuid::new_v4().to_string();
+            let request = AgentWorkspaceUpdateRequest {
+                schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session.id.clone(),
+                primary_provider_session_id: session.agent_session_id.clone(),
+                observation: observe_agent_runtime(repo).unwrap(),
+                intent: AgentWorkspaceUpdateIntent {
+                    status_category: Some(WorkspaceStatusCategory::Done),
+                    summary: Some("saved update".to_string()),
+                    ..Default::default()
+                },
+            };
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["primary_provider_session_id"],
+                "private-receipt-primary-thread",
+                "transport must retain the terminal actor claim"
+            );
             apply_bound_authenticated_workspace_update_with_operation_id(
                 repo,
                 &session.id,
                 &binding,
-                AgentWorkspaceUpdateRequest {
-                    schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
-                    claimed_session_id: session.id.clone(),
-                    primary_provider_session_id: session.agent_session_id.clone(),
-                    observation: observe_agent_runtime(repo).unwrap(),
-                    intent: AgentWorkspaceUpdateIntent {
-                        summary: Some("saved update".to_string()),
-                        ..Default::default()
-                    },
-                },
+                request.clone(),
                 Some(&id),
             )
             .unwrap();
@@ -11492,6 +11501,35 @@ mod tests {
             };
             assert_eq!(inspect()["status"], "applied");
             let current = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(repo);
+            let receipt_path = current
+                .with_file_name("workspace-update-receipts")
+                .join(format!("{id}.json"));
+            let original = std::fs::read(&receipt_path).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&original).contains("primary_provider_session_id")
+                    && !String::from_utf8_lossy(&original)
+                        .contains("private-receipt-primary-thread"),
+                "durable receipt must not retain transient provider identity"
+            );
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+            let inspect_expected = |expected: &AgentWorkspaceUpdateRequest| {
+                serde_json::to_value(
+                    crate::workspace_update_receipt::inspect(
+                        repo,
+                        &session.id,
+                        &id,
+                        Some((expected, &identity)),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            };
+            assert_eq!(inspect_expected(&request)["status"], "applied");
+            let mut mismatched = request.clone();
+            mismatched.intent.summary = Some("not the published request".to_string());
+            assert_eq!(inspect_expected(&mismatched)["status"], "unconfirmed");
             let pending = current.with_file_name("pending-state-transaction.json");
             std::fs::write(&pending, b"{interrupted publication").unwrap();
             let before = WorkMutationSnapshot::capture(repo, repo);
@@ -11502,10 +11540,6 @@ mod tests {
                 b"{interrupted publication"
             );
             std::fs::remove_file(pending).unwrap();
-            let receipt_path = current
-                .with_file_name("workspace-update-receipts")
-                .join(format!("{id}.json"));
-            let original = std::fs::read(&receipt_path).unwrap();
             let mut altered: serde_json::Value = serde_json::from_slice(&original).unwrap();
             altered["operation"]["request"]["intent"]["summary"] =
                 serde_json::json!("not the saved event");
@@ -11516,6 +11550,14 @@ mod tests {
                 "request must match the exact source event"
             );
             assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            altered["operation"]["request"]["intent"]["summary"] =
+                serde_json::json!("saved update");
+            altered["operation"]["request"]["primary_provider_session_id"] =
+                serde_json::json!("private-receipt-primary-thread");
+            let legacy = serde_json::to_vec(&altered).unwrap();
+            std::fs::write(&receipt_path, &legacy).unwrap();
+            assert_eq!(inspect_expected(&request)["status"], "applied");
+            assert_eq!(std::fs::read(&receipt_path).unwrap(), legacy);
             std::fs::write(&receipt_path, original).unwrap();
             let mut projection = load_workspace_projection_from_path(&current)
                 .unwrap()
