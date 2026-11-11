@@ -181,7 +181,20 @@ async fn events(
         .get("x-gwt-gui-presence")
         .is_some_and(|value| value == "1")
     {
-        match state.owner.attach_gui().await {
+        let gui_instance = match headers.get(super::presence::GUI_INSTANCE_HEADER) {
+            Some(value) => match value
+                .to_str()
+                .ok()
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            {
+                Some(instance) => instance,
+                None => return StatusCode::BAD_REQUEST.into_response(),
+            },
+            // Older clients supply no grouping evidence. Keep each legacy
+            // connection independent instead of inheriting another GUI's Quit.
+            None => uuid::Uuid::new_v4(),
+        };
+        match state.owner.attach_gui(gui_instance).await {
             Ok(id) => Some(GuiPresenceLease {
                 owner: state.owner.clone(),
                 id,

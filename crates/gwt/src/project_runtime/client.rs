@@ -216,6 +216,16 @@ impl ProjectRuntimeClient {
                 .map_err(|error: axum::http::header::InvalidHeaderValue| error.to_string())?,
         );
         if gui_presence {
+            // A non-security label groups this GUI process's subscriber and
+            // background leases without relying on a launched Agent Session.
+            static GUI_INSTANCE: OnceLock<String> = OnceLock::new();
+            request.headers_mut().insert(
+                super::presence::GUI_INSTANCE_HEADER,
+                GUI_INSTANCE
+                    .get_or_init(|| uuid::Uuid::new_v4().to_string())
+                    .parse()
+                    .expect("GUI instance UUID header"),
+            );
             request.headers_mut().insert(
                 "x-gwt-gui-presence",
                 "1".parse().expect("static presence header"),

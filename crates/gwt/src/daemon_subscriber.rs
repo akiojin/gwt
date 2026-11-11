@@ -876,15 +876,34 @@ mod project_owner_tests {
 
     #[test]
     fn explicit_quit_subscriber_closes_its_managed_owner_lease() {
-        exercise_explicit_quit(false);
+        exercise_explicit_quit(QuitCheckpoint::Connected);
     }
 
     #[test]
     fn explicit_quit_before_project_owner_connection_closes_existing_managed_owner() {
-        exercise_explicit_quit(true);
+        exercise_explicit_quit(QuitCheckpoint::BeforeConnection);
     }
 
-    fn exercise_explicit_quit(before_connection: bool) {
+    #[test]
+    fn explicit_quit_is_not_blocked_by_initial_discovery() {
+        exercise_explicit_quit(QuitCheckpoint::BlockedDiscovery);
+    }
+
+    #[test]
+    fn explicit_quit_retries_an_endpoint_published_during_delivery() {
+        exercise_explicit_quit(QuitCheckpoint::PendingEndpoint);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QuitCheckpoint {
+        Connected,
+        BeforeConnection,
+        BlockedDiscovery,
+        PendingEndpoint,
+    }
+
+    fn exercise_explicit_quit(checkpoint: QuitCheckpoint) {
+        let before_connection = checkpoint != QuitCheckpoint::Connected;
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         // A normal socket disconnect must remain resident even after its grace.
@@ -939,6 +958,7 @@ mod project_owner_tests {
             let (healthy, received) = std::sync::mpsc::channel();
             let (resolving, entered) = std::sync::mpsc::channel();
             let (resume, resumed) = std::sync::mpsc::channel();
+            let release_discovery = resume.clone();
             let resumed = std::sync::Mutex::new(resumed);
             let first = AtomicBool::new(true);
             let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -946,13 +966,16 @@ mod project_owner_tests {
             let subscriber = DaemonSubscriber::spawn_project_owner_with_resolver(
                 endpoint.scope.repo_hash.clone(),
                 move || {
-                    resolved_count.fetch_add(1, Ordering::SeqCst);
+                    let attempt = resolved_count.fetch_add(1, Ordering::SeqCst);
                     if before_connection && first.swap(false, Ordering::SeqCst) {
                         resolving.send(()).unwrap();
                         gwt_core::test_support::recv_event(
                             &resumed.lock().unwrap(),
                             "Quit before owner discovery returns",
                         );
+                    }
+                    if checkpoint == QuitCheckpoint::PendingEndpoint && attempt == 1 {
+                        return Err("pending owner has not published its endpoint yet".into());
                     }
                     Ok(endpoint.clone())
                 },
@@ -963,20 +986,28 @@ mod project_owner_tests {
                 },
                 |_, _, _| {},
             );
-            tokio::task::spawn_blocking(move || {
+            let mut stopping = tokio::task::spawn_blocking(move || {
                 if before_connection {
                     gwt_core::test_support::recv_event(&entered, "owner discovery checkpoint");
                 } else {
                     gwt_core::test_support::recv_event(&received, "authenticated GUI lease");
                 }
                 subscriber.request_quit();
-                if before_connection {
+                if before_connection && checkpoint != QuitCheckpoint::BlockedDiscovery {
                     resume.send(()).unwrap();
                 }
                 subscriber.stop();
-            })
-            .await
-            .unwrap();
+            });
+            // test-hygiene: allow-wall-clock-deadline Exercise bounded Quit while discovery is held by an explicit channel barrier.
+            let stopped = tokio::time::timeout(Duration::from_secs(3), &mut stopping).await;
+            // Always release the exact held worker, including on RED, so no
+            // failed regression can strand a resolver or the fixture cleanup.
+            if checkpoint == QuitCheckpoint::BlockedDiscovery {
+                let _ = release_discovery.send(());
+            }
+            if stopped.is_err() {
+                stopping.await.unwrap();
+            }
             // test-hygiene: allow-wall-clock-deadline Bounds actual Quit delivery; the channel barrier establishes order, not elapsed time.
             let drained = tokio::time::timeout(Duration::from_secs(5), async {
                 while !residency.borrow().exit_started {
@@ -988,11 +1019,18 @@ mod project_owner_tests {
             })
             .await;
             transport.shutdown().await;
+            stopped
+                .expect("Quit must not wait for blocked endpoint discovery")
+                .unwrap();
             drained.expect("explicit Quit must drain without reconnect grace");
             assert_eq!(
                 resolutions.load(Ordering::SeqCst),
-                if before_connection { 2 } else { 1 },
-                "only pre-connection Quit needs one additional existing-endpoint resolution"
+                match checkpoint {
+                    QuitCheckpoint::Connected => 1,
+                    QuitCheckpoint::PendingEndpoint => 3,
+                    _ => 2,
+                },
+                "only existing-endpoint discovery is allowed during Quit"
             );
         });
     }
@@ -1232,6 +1270,7 @@ impl DaemonSubscriber {
         let stop_notify = shutdown.clone();
         let on_health: Arc<OwnerHealthCallback> = Arc::new(on_health);
         let on_event: Arc<OwnerEventCallback> = Arc::new(on_event);
+        let resolver: Arc<EndpointResolver> = Arc::new(resolver);
         let join_handle = thread::Builder::new().name("gwt-project-owner-subscriber".into()).spawn(move || {
             use crate::protocol::{ProjectOwnerHealthState as State, ProjectOwnerHealthView};
             let publish = |id, identity, state, detail| on_health(id, identity, ProjectOwnerHealthView { recovery_id: if state == State::Wedged { wedged_owners().lock().ok().and_then(|owners| owners.get(&project_key).map(|owner| owner.recovery_id.clone())) } else { None }, project_key: project_key.clone(), state, detail });
@@ -1252,7 +1291,15 @@ impl DaemonSubscriber {
                     tokio::pin!(cancelled);
                     cancelled.as_mut().enable();
                     if stop.load(Ordering::SeqCst) { return Ok(()); }
-                    let endpoint = resolver()?;
+                    // Filesystem discovery may block. Keep cancellation on this
+                    // thread so Quit can still reach the bounded fallback.
+                    let discover = resolver.clone();
+                    let resolution = tokio::task::spawn_blocking(move || discover());
+                    let endpoint = tokio::select! {
+                        biased;
+                        _ = cancelled.as_mut() => return Ok(()),
+                        result = resolution => result.map_err(|error| error.to_string())??,
+                    };
                     if stop.load(Ordering::SeqCst) { return Ok(()); }
                     if endpoint.scope.repo_hash != project_key { return Err("Project owner discovery returned another project".into()); }
                     observed_endpoint = Some(endpoint.clone());
@@ -1282,7 +1329,7 @@ impl DaemonSubscriber {
                             }
                         }
                     };
-                    let result = tokio::select! { biased; _ = cancelled => Ok(()), result = session => result };
+                    let result = tokio::select! { biased; _ = cancelled.as_mut() => Ok(()), result = session => result };
                     if quit.load(Ordering::SeqCst) {
                         if let Some(stream) = stream {
                             // The send is bounded independently of health polling and GUI cleanup.
@@ -1339,21 +1386,31 @@ impl DaemonSubscriber {
             if quit.load(Ordering::SeqCst) && !quit_delivered {
                 // Quit may win before the subscriber attaches. Resolve only an
                 // existing owner; never ensure, spawn, scan, or kill a daemon.
+                // A pending ensure may publish during this same bounded budget.
                 let result = runtime.block_on(async {
                     tokio::time::timeout(Duration::from_secs(1), async {
-                        let endpoint = resolver()?;
-                        if endpoint.scope.repo_hash != project_key {
-                            return Err("Project owner discovery returned another project".to_string());
+                        loop {
+                            let discover = resolver.clone();
+                            let resolution = tokio::task::spawn_blocking(move || discover());
+                            if let Ok(endpoint) = resolution.await.map_err(|error| error.to_string())? {
+                                if endpoint.scope.repo_hash != project_key {
+                                    return Err("Project owner discovery returned another project".to_string());
+                                }
+                                let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
+                                inspect_project_owner(&client, &endpoint).await?;
+                                return close_project_owner_for_quit(Box::pin(client.gui_events().await?)).await;
+                            }
+                            tokio::time::sleep(RETRY_BACKOFF_MIN).await;
                         }
-                        let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
-                        inspect_project_owner(&client, &endpoint).await?;
-                        close_project_owner_for_quit(Box::pin(client.gui_events().await?)).await
                     }).await
                 });
                 if !matches!(result, Ok(Ok(()))) {
                     tracing::warn!(?result, "GUI Quit existing-owner fallback was not delivered");
                 }
             }
+            // A cancelled filesystem lookup cannot be forcibly interrupted.
+            // Do not turn runtime Drop into an unbounded join on that worker.
+            runtime.shutdown_background();
         }).expect("project owner subscriber thread spawn");
         Self {
             stop_flag,

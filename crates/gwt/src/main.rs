@@ -2771,6 +2771,13 @@ mod tests {
             .unwrap()
             .1;
         assert!(
+            dispatch.find("app.daemon_supervisor.shutdown()").unwrap()
+                < dispatch
+                    .find("board_daemon_subscribers.request_quit()")
+                    .unwrap(),
+            "Quit must stop daemon creation before its bounded existing-owner notification"
+        );
+        assert!(
             dispatch
                 .find("board_daemon_subscribers.request_quit()")
                 .unwrap()
@@ -10988,6 +10995,7 @@ fn main() -> std::io::Result<()> {
         };
         let app = app.as_mut().expect("startup complete");
         if matches!(&event, Event::UserEvent(UserEvent::QuitApp { .. })) {
+            app.daemon_supervisor.shutdown();
             board_daemon_subscribers.request_quit();
         } else {
             clients.dispatch(app.reconcile_project_view_connections(&clients));
@@ -11037,7 +11045,6 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        app.daemon_supervisor.shutdown();
                         board_daemon_subscribers.shutdown();
                         // Shared owner lifetime follows Rust GUI presence, not parent Child ownership.
                         server.shutdown();
