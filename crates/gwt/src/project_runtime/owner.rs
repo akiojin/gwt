@@ -487,6 +487,11 @@ pub(crate) enum OwnerMessage {
     MonitorNotificationFinished {
         result: Result<(), String>,
     },
+    MonitorFailureFinished {
+        id: String,
+        incarnation: u64,
+        result: Result<Option<u64>, String>,
+    },
     MonitorCommitted {
         id: String,
         incarnation: u64,
@@ -1984,6 +1989,22 @@ impl OwnerState {
                     self.input_jobs -= 1;
                     if let Err(error) = result {
                         tracing::warn!(%error, "owner Monitor notification is unconfirmed");
+                    }
+                }
+                OwnerMessage::MonitorFailureFinished {
+                    id,
+                    incarnation,
+                    result,
+                } => {
+                    self.input_jobs -= 1;
+                    match result {
+                        Ok(Some(issue)) => {
+                            self.retire_retried_monitor_runtime(&id, incarnation, issue);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, window_id = %id, "owner Monitor failure is unconfirmed");
+                        }
                     }
                 }
                 OwnerMessage::MonitorCommitted {
@@ -10770,9 +10791,38 @@ impl OwnerState {
         let sender = self.sender.clone();
         let detail = detail.to_string();
         spawn_owner_worker(move || {
-            let result = launch.failure(&detail, failure.as_ref(), terminal);
-            let _ = sender.send(OwnerMessage::MonitorNotificationFinished { result });
+            let result = if terminal {
+                launch.terminal_failure_retry(&detail, failure.as_ref())
+            } else {
+                launch
+                    .failure(&detail, failure.as_ref(), false)
+                    .map(|()| None)
+            };
+            let _ = sender.send(OwnerMessage::MonitorFailureFinished {
+                id: launch.id,
+                incarnation: launch.incarnation,
+                result,
+            });
         });
+    }
+
+    fn retire_retried_monitor_runtime(&mut self, id: &str, incarnation: u64, issue: u64) {
+        if self.pending.contains_key(id)
+            || self.closing.contains_key(id)
+            || !self.runtimes.get(id).is_some_and(|runtime| {
+                runtime.incarnation == incarnation
+                    && Self::is_failed_monitor_runtime(runtime, issue)
+                    && runtime.pty.try_wait().ok().flatten().is_some()
+            })
+        {
+            return;
+        }
+        let runtime = self
+            .runtimes
+            .remove(id)
+            .expect("exact exited Monitor runtime");
+        let (reply, _) = oneshot::channel();
+        self.start_close(id.into(), runtime, CloseCause::ExplicitClose, reply);
     }
 
     fn next_monitor_deadline(&self) -> Option<std::time::Instant> {
@@ -13729,6 +13779,78 @@ mod tests {
             "shutdown must reap the captured PTY child"
         );
     }
+    #[tokio::test]
+    async fn committed_monitor_retry_removes_only_its_exact_exited_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        let (mut snapshot, pane) = unbound_fixture(root.path());
+        snapshot.linked_issue_number = Some(4131);
+        snapshot.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let current = Arc::new(AtomicBool::new(true));
+        state
+            .install_pane("pane".into(), 1, pane, current.clone())
+            .unwrap();
+        let runtime = state.runtimes.get_mut("pane").unwrap();
+        runtime.pty_status = WindowProcessStatus::Error;
+        runtime.policy.recoverable_error = true;
+        runtime.agent = Some(AgentRuntimeRecord {
+            feedback: Some(super::super::launch_payload::LaunchFeedbackContext {
+                client_id: "fixture".into(),
+                title: "Issues".into(),
+                issue_monitor_issue_number: Some(4131),
+                issue_monitor_delivery_id: None,
+                issue_monitor_project_root: Some(root.path().into()),
+                issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+                issue_monitor_autonomous_handoff: None,
+                issue_monitor_autonomous_submit_started: false,
+                issue_monitor_review_dispatch: false,
+            }),
+            monitor_owner: None,
+            monitor_terminal_failure: None,
+            monitor_answer_inflight: false,
+            binding_repair_inflight: false,
+            monitor_source: None,
+            monitor_commit_inflight: false,
+            monitor_ready: false,
+            monitor_retry_at: None,
+            monitor_startup_at: None,
+            monitor_adopt_claim: false,
+            monitor_ack_replies: Vec::new(),
+            current,
+            active: active_fixture(root.path(), &snapshot),
+            snapshot,
+            capability_token: None,
+            issuer: state.issuer.clone(),
+            pending_fresh: None,
+            pending_continue: None,
+            purpose_title: None,
+            readiness_deadline: None,
+        });
+        state.retire_retried_monitor_runtime("pane", 1, 4131);
+        assert!(
+            state.runtimes.contains_key("pane"),
+            "a live quota/trust pane stays"
+        );
+        assert!(
+            crate::session_finalizer::kill_and_reap(&state.runtimes["pane"].pty, "pane").unwrap()
+        );
+        state.retire_retried_monitor_runtime("pane", 2, 4131);
+        state.retire_retried_monitor_runtime("pane", 1, 4132);
+        assert!(
+            state.runtimes.contains_key("pane"),
+            "replacement or foreign ownership stays"
+        );
+        state.retire_retried_monitor_runtime("pane", 1, 4131);
+        assert!(
+            !state.runtimes.contains_key("pane"),
+            "the retried dead pane must not block admission"
+        );
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        handle.shutdown().await;
+        actor.join().unwrap();
+    }
+
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
         let root = tempfile::tempdir().unwrap();
