@@ -1686,9 +1686,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "execution.repair" => {
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair {
-                reason: required_string(params, "reason")?,
-            })
+            let reason = required_string(params, "reason")?;
+            let command = match optional_string(params, "session_id")? {
+                Some(session_id) => crate::cli::execution_state::ExecutionCommand::RepairSession {
+                    session_id,
+                    reason,
+                },
+                None => crate::cli::execution_state::ExecutionCommand::Repair { reason },
+            };
+            CliCommand::Execution(command)
         }
         "execution.continue" => {
             let operation_id = required_string(params, "operation_id")?;

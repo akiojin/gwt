@@ -73,6 +73,7 @@ const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
 const EXECUTION_REPAIR_AUDIT_FILE: &str = "execution-repair-audit.json";
+const PM_SESSION_REPAIR_GUIDANCE: &str = "A registered repository PM can run execution.repair with params.session_id naming the owning Session and params.reason. Valid Session metadata and a readable trusted holder are required; both target and holder runtimes must be absent. After repair, run issue.monitor.stop and issue.monitor.requeue for this owner.";
 #[doc(hidden)]
 pub const BINDING_REPAIR_OUTCOME_FILE: &str = "binding-repair-outcome.json";
 const BINDING_REPAIR_OUTCOME_SCHEMA_VERSION: u32 = 1;
@@ -3274,7 +3275,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
                 .push(format!("malformed generation ledger: {error}"));
             diagnosis.recommended_recovery = "execution.repair".to_string();
             diagnosis.recommended_recovery_reason =
-                "The owner generation ledger is malformed and needs an audited repair.".to_string();
+                format!("The owner generation ledger is malformed and needs an audited repair. {PM_SESSION_REPAIR_GUIDANCE}");
             return diagnosis;
         }
     };
@@ -3288,7 +3289,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         diagnosis.warnings.push(error.to_string());
         diagnosis.recommended_recovery = "execution.repair".to_string();
         diagnosis.recommended_recovery_reason = format!(
-            "The owner ledger failed validation: {error}. Inspect execution.status in the owning Session/worktree for audited execution.repair authority; the PM's own Session cannot repair this owner by number."
+            "The owner ledger failed validation: {error}. Inspect execution.status in the owning Session/worktree for audited execution.repair authority. {PM_SESSION_REPAIR_GUIDANCE}"
         );
         return diagnosis;
     }
@@ -12919,6 +12920,11 @@ pub enum ExecutionCommand {
     Repair {
         reason: String,
     },
+    /// Registered PM recovery for an absent Session that cannot resume.
+    RepairSession {
+        session_id: String,
+        reason: String,
+    },
     /// Ask the current Host to establish producing authority for this Session.
     Continue {
         operation_id: String,
@@ -16267,8 +16273,15 @@ fn repair_corrupt_execution_with_session_snapshot(
     session_id: &str,
     expected_session: &gwt_agent::Session,
     reason: &str,
+    pm_requester: Option<&str>,
 ) -> io::Result<ExecutionRepairOutcome> {
-    repair_corrupt_execution_impl(worktree, session_id, Some(expected_session), reason)
+    repair_corrupt_execution_impl(
+        worktree,
+        session_id,
+        Some(expected_session),
+        reason,
+        pm_requester,
+    )
 }
 
 #[cfg(test)]
@@ -16277,7 +16290,7 @@ fn repair_corrupt_execution(
     session_id: &str,
     reason: &str,
 ) -> io::Result<ExecutionRepairOutcome> {
-    repair_corrupt_execution_impl(worktree, session_id, None, reason)
+    repair_corrupt_execution_impl(worktree, session_id, None, reason, None)
 }
 
 fn repair_corrupt_execution_impl(
@@ -16285,6 +16298,7 @@ fn repair_corrupt_execution_impl(
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
     reason: &str,
+    pm_requester: Option<&str>,
 ) -> io::Result<ExecutionRepairOutcome> {
     if reason.trim().is_empty() {
         return Err(io::Error::new(
@@ -16308,6 +16322,19 @@ fn repair_corrupt_execution_impl(
     let authority_expectation =
         discover_repair_authority_expectation(&worktree, session_id, &trusted_dir)?;
     let owner = authority_expectation.owner;
+    let pm_holder = if pm_requester.is_some() {
+        let holder = authority_expectation.projection.as_deref()
+            .and_then(|bytes| serde_json::from_slice::<ExecutionControlRecord>(bytes).ok())
+            .map(hydrate_recovery_envelopes)
+            .filter(|record| integrity_ok(record)
+                && record.owner_kind == owner.kind && record.owner_number == owner.number
+                && !record.primary_session_id.trim().is_empty())
+            .ok_or_else(|| invalid_generation_data(
+                "execution PM repair cannot prove the current holder from trusted authority; inspect execution.status in the owning Session/worktree"))?;
+        Some(holder.primary_session_id)
+    } else {
+        None
+    };
     let fallback_session_snapshot = gwt_agent::Session::load(
         &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
     )
@@ -16324,6 +16351,32 @@ fn repair_corrupt_execution_impl(
             // quarantined as though it were the originally observed corrupt
             // authority.
             validate_repair_authority_expectation(context, session_id, &authority_expectation)?;
+            if let Some(requester) = pm_requester {
+                if std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok().as_deref() != Some(requester)
+                    || !crate::cli::pm::caller_is_registered_pm(&worktree)
+                {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "execution PM repair requires the registered requesting PM",
+                    ));
+                }
+                let session = expected_session.expect("PM repair requires a validated Session");
+                if gwt_core::repo_hash::detect_repo_hash(&worktree)
+                    .as_ref()
+                    .map(|hash| hash.as_str())
+                    != session.repo_hash.as_deref()
+                {
+                    return Err(generation_conflict(
+                        "execution PM repair target repository changed after validation",
+                    ));
+                }
+                if session.linked_issue_number != Some(owner.number) {
+                    return Err(generation_conflict(
+                        "execution PM repair target Session does not match the discovered owner",
+                    ));
+                }
+                require_absent_pm_repair_target(session)?;
+            }
             let audit_dir = repair_audit_dir(context)?;
             let previous_audit_bytes = match fs::read(audit_dir.join(EXECUTION_REPAIR_AUDIT_FILE)) {
                 Ok(bytes) => Some(bytes),
@@ -16527,9 +16580,14 @@ fn repair_corrupt_execution_impl(
                 .collect::<Vec<_>>();
             let mut audit = ExecutionRepairAudit {
                 repair_id: repair_id.clone(),
-                actor_session_id: session_id.to_string(),
+                actor_session_id: pm_requester.unwrap_or(session_id).to_string(),
                 owner,
-                reason: reason.to_string(),
+                reason: match pm_requester {
+                    Some(requester) => {
+                        format!("PM {requester} repairing Session {session_id}: {reason}")
+                    }
+                    None => reason.to_string(),
+                },
                 sources: audit_sources.clone(),
                 new_generation_id: generation_id.clone(),
                 repaired_at: Utc::now(),
@@ -16674,9 +16732,35 @@ fn repair_corrupt_execution_impl(
                 previous_audit_bytes,
             })
         };
-        let mut pending = match expected_session {
-            Some(expected_session) => with_exact_recovery_session_lease(expected_session, repair),
-            None => repair(),
+        let mut pending = match (expected_session, pm_holder.as_deref()) {
+            (Some(expected_session), Some(holder_id)) => {
+                // Acquire both Session leases in their canonical sorted order.
+                // A dead candidate is not proof that the current holder is gone.
+                let sessions = gwt_core::paths::gwt_sessions_dir();
+                let _sessions =
+                    gwt_agent::acquire_session_path_leases(&sessions, &[session_id, holder_id])?;
+                ensure_recovery_session_snapshot_unchanged(
+                    &gwt_agent::inspect_session_path(&sessions.join(format!("{session_id}.toml"))),
+                    expected_session,
+                )?;
+                let holder = crate::agent_project_state::resolve_execution_recovery_context(
+                    &worktree, holder_id,
+                )
+                .map_err(io::Error::other)?;
+                if holder.worktree() != worktree
+                    || holder.session().linked_issue_number != Some(owner.number)
+                {
+                    return Err(generation_conflict(
+                        "execution PM repair holder scope mismatch",
+                    ));
+                }
+                require_absent_pm_repair_target(holder.session())?;
+                repair()
+            }
+            (Some(expected_session), None) => {
+                with_exact_recovery_session_lease(expected_session, repair)
+            }
+            (None, _) => repair(),
         }?;
 
         #[cfg(test)]
@@ -16725,11 +16809,106 @@ fn repair_corrupt_execution_impl(
     })
 }
 
+fn require_absent_pm_repair_target(session: &gwt_agent::Session) -> io::Result<()> {
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let absent = match gwt_agent::SessionExecutionIdentity::from_session(session)
+        .map_err(io::Error::other)?
+    {
+        Some(identity) => {
+            if gwt_agent::read_session_active_launch_handshake_under_lease(
+                &sessions_dir,
+                &identity,
+            )?
+            .is_some()
+                || gwt_agent::read_session_manual_handoff_under_lease(&sessions_dir, &identity)?
+                    .is_some()
+            {
+                return Err(io::Error::new(ErrorKind::WouldBlock,
+                    "execution PM repair found an unresolved launch or handoff; inspect execution.status before retrying"));
+            }
+            matches!(
+                classify_exact_session_runtime(&sessions_dir, &identity)?,
+                ExactSessionRuntimeDisposition::Absent
+                    | ExactSessionRuntimeDisposition::HostDead
+                    | ExactSessionRuntimeDisposition::ChildExited
+                    | ExactSessionRuntimeDisposition::Terminal(_)
+                    | ExactSessionRuntimeDisposition::Defunct(_)
+            )
+        }
+        None => {
+            let observed = crate::session_inventory::observe_session(session, &sessions_dir);
+            observed.sessions.is_empty() && observed.uncertainties.is_empty()
+        }
+    };
+    if absent {
+        Ok(())
+    } else {
+        Err(io::Error::new(ErrorKind::WouldBlock,
+            "execution PM repair target runtime is live or unknown; inspect execution.status before retrying"))
+    }
+}
+
+fn run_pm_session_repair(
+    invocation_scope: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    if !crate::cli::pm::caller_is_registered_pm(invocation_scope) {
+        out.push_str("execution: targeted repair refused — requires this repository's registered PM; inspect pm.status\n");
+        return Ok(2);
+    }
+    let requester =
+        std::env::var(gwt_agent::GWT_SESSION_ID_ENV).expect("registered PM has an ambient Session");
+    let context = (|| {
+        gwt_agent::validate_session_id_path_component(session_id).map_err(io::Error::other)?;
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .map_err(io::Error::other)?;
+        let context = crate::agent_project_state::resolve_execution_recovery_context(
+            &session.worktree_path,
+            session_id,
+        )
+        .map_err(io::Error::other)?;
+        let same_repository = gwt_core::repo_hash::detect_repo_hash(invocation_scope)
+            .zip(gwt_core::repo_hash::detect_repo_hash(context.worktree()))
+            .is_some_and(|(caller, target)| caller == target);
+        if !same_repository {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "target Session belongs to another or unresolvable repository",
+            ));
+        }
+        // A sibling PM worktree is not the target's invocation scope. Reuse
+        // the target's validated context only after proving repository scope.
+        Ok(context)
+    })();
+    let context = match context {
+        Ok(context) => context,
+        Err(error) => {
+            out.push_str(&format!("execution: targeted repair refused — {error}; inspect execution.status for the target Session\n"));
+            return Ok(2);
+        }
+    };
+    run_repair_governed(
+        context.worktree(),
+        session_id,
+        context.session(),
+        reason,
+        Some(&requester),
+        out,
+        refusal,
+    )
+}
+
 fn run_repair_governed(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
     reason: &str,
+    pm_requester: Option<&str>,
     out: &mut String,
     refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
@@ -16776,6 +16955,7 @@ fn run_repair_governed(
         session_id,
         expected_session,
         reason,
+        pm_requester,
     ) {
         Ok(outcome) => {
             out.push_str(&serde_json::to_string_pretty(&outcome).map_err(|error| {
@@ -16859,7 +17039,7 @@ fn run_release_prepared(
         Err(error) => {
             out.push_str(&format!(
                 "execution: release_prepared refused — {error}\n\
-                 Next: inspect execution.status with params {{\"issue\":{}}} for owner-scoped recovery. Validation failures require audited repair in the owning Session/worktree.\n",
+                 Next: inspect execution.status with params {{\"issue\":{}}} for owner-scoped recovery. Validation failures require audited repair in the owning Session/worktree. {PM_SESSION_REPAIR_GUIDANCE}\n",
                 owner.number,
             ));
             return Ok(2);
@@ -17261,6 +17441,9 @@ fn run_impl<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let invocation_scope = env.repo_path().to_path_buf();
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if let ExecutionCommand::RepairSession { session_id, reason } = &command {
+        return run_pm_session_repair(&invocation_scope, session_id, reason, out, refusal);
+    }
     if let ExecutionCommand::OwnerStatus { owner } = &command {
         let diagnosis = diagnose_owner(&worktree, *owner);
         out.push_str(&serde_json::to_string_pretty(&diagnosis).map_err(|error| {
@@ -17421,6 +17604,7 @@ fn run_impl<E: CliEnv>(
             &session_id,
             expected_session,
             reason,
+            None,
             out,
             refusal,
         );
@@ -17589,6 +17773,7 @@ fn run_impl<E: CliEnv>(
         | ExecutionCommand::ReleasePrepared { .. }
         | ExecutionCommand::Adopt { .. }
         | ExecutionCommand::Repair { .. }
+        | ExecutionCommand::RepairSession { .. }
         | ExecutionCommand::Continue { .. }
         | ExecutionCommand::Reopen { .. }
         | ExecutionCommand::NoAction { .. }
@@ -31788,6 +31973,224 @@ exit 1
         }
 
         #[test]
+        fn registered_pm_repairs_an_absent_fenced_session_from_another_worktree() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime_env = unset_live_session_env();
+            let pm = tempfile::tempdir().unwrap();
+            let target = tempfile::tempdir().unwrap();
+            for path in [pm.path(), target.path()] {
+                crate::cli::trusted_store::init_git_repo_with_origin(path);
+            }
+            let owner = generation_owner();
+            let mut active = active_record("previous-holder");
+            active.owner_number = owner.number;
+            save(target.path(), &active).unwrap();
+            ensure_generation_ledger(target.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            persist_generation_session_binding(
+                target.path(),
+                owner,
+                "previous-holder",
+                current_execution_binding(target.path(), owner)
+                    .unwrap()
+                    .unwrap(),
+            );
+            let request = successor_request("pm-repair-fence", "host", "continue-work:resume");
+            prepare_active_continuation_successor(target.path(), owner, &request).unwrap();
+            let binding =
+                prepared_successor_execution_binding(target.path(), owner, &request).unwrap();
+            persist_generation_session_binding(
+                target.path(),
+                owner,
+                &request.initial_session_id,
+                binding,
+            );
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let session_path = sessions.join(format!("{}.toml", request.initial_session_id));
+            let session = gwt_agent::Session::load(&session_path).unwrap();
+            let session_before = fs::read(&session_path).unwrap();
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+            let context = GenerationTransactionContext::resolve(target.path(), owner).unwrap();
+            let corrupt_path = context.owner_dir.join(GENERATION_LEDGER_FILE);
+            fs::write(&corrupt_path, b"{corrupt fenced ledger").unwrap();
+            let invoke = || {
+                let command = crate::cli::json_envelope::parse_operation(
+                    "execution.repair",
+                    &serde_json::json!({
+                        "session_id": request.initial_session_id,
+                        "reason": "recover the abandoned candidate"
+                    }),
+                )
+                .unwrap();
+                let CliCommand::Execution(command) = command else {
+                    panic!("execution command")
+                };
+                run_cmd(pm.path(), command).unwrap()
+            };
+            let authority_before = generation_authority_bytes(target.path(), owner);
+            {
+                let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "ordinary-agent");
+                assert_eq!(invoke().0, 2);
+                assert_eq!(
+                    generation_authority_bytes(target.path(), owner),
+                    authority_before
+                );
+            }
+            let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "requesting-pm");
+            crate::pm_registry::save_pm_prefs(
+                &crate::pm_registry::pm_prefs_path_for_repo_path(pm.path()),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: "requesting-pm".into(),
+                        agent_id: "codex".into(),
+                        worktree_path: pm.path().display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut foreign_owner = session.clone();
+            foreign_owner.linked_issue_number = Some(owner.number + 1);
+            foreign_owner.save(&sessions).unwrap();
+            assert_eq!(invoke().0, 2);
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            session.save(&sessions).unwrap();
+            let foreign = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(foreign.path());
+            assert!(gwt_core::process::run_git_logged(
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.com/foreign/project.git"
+                ],
+                Some(foreign.path()),
+            )
+            .unwrap()
+            .status
+            .success());
+            let mut foreign_repository =
+                persist_recovery_session_snapshot(foreign.path(), owner, &session.id);
+            foreign_repository.execution_binding = session.execution_binding.clone();
+            foreign_repository.save(&sessions).unwrap();
+            assert_eq!(invoke().0, 2);
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            session.save(&sessions).unwrap();
+            let runtime_path = gwt_agent::runtime_state_path(&sessions, &session.id);
+            fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+            for live in [false, true] {
+                if live {
+                    let started =
+                        crate::process::host_process_start_time(std::process::id()).unwrap();
+                    gwt_agent::SessionRuntimeState::for_execution_process(
+                        gwt_agent::AgentStatus::Running,
+                        &identity,
+                        41,
+                        started,
+                        std::process::id(),
+                        started,
+                    )
+                    .save(&runtime_path)
+                    .unwrap();
+                } else {
+                    fs::write(&runtime_path, b"{unreadable runtime").unwrap();
+                }
+                assert_eq!(invoke().0, 2);
+                assert_eq!(
+                    generation_authority_bytes(target.path(), owner),
+                    authority_before
+                );
+                assert_eq!(fs::read(&session_path).unwrap(), session_before);
+            }
+            fs::remove_file(runtime_path).unwrap();
+            let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+            let handshake = gwt_agent::with_session_path_lease(&sessions, &session.id, |_| {
+                gwt_agent::begin_session_active_launch_handshake_under_lease(
+                    &sessions,
+                    &identity,
+                    "pm-repair-live-launch",
+                    started,
+                )
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(invoke().0, 2);
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            gwt_agent::with_session_path_lease(&sessions, &session.id, |_| {
+                assert!(
+                    gwt_agent::clear_session_active_launch_handshake_under_lease(
+                        &sessions, &handshake,
+                    )?
+                );
+                Ok(())
+            })
+            .unwrap();
+            let holder = gwt_agent::Session::load(&sessions.join("previous-holder.toml")).unwrap();
+            let holder_identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+                .unwrap()
+                .unwrap();
+            let holder_runtime = gwt_agent::runtime_state_path(&sessions, &holder.id);
+            let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                &holder_identity,
+                41,
+                started,
+                std::process::id(),
+                started,
+            )
+            .save(&holder_runtime)
+            .unwrap();
+            assert_eq!(invoke().0, 2);
+            assert_eq!(
+                generation_authority_bytes(target.path(), owner),
+                authority_before
+            );
+            fs::remove_file(holder_runtime).unwrap();
+            let (code, output) = invoke();
+            assert_eq!(code, 0, "{output}");
+            let record = load(target.path()).unwrap().unwrap();
+            assert_eq!(record.primary_session_id, session.id);
+            assert!(
+                blocking_prepared_transactions_for_project(target.path(), owner.number)
+                    .unwrap()
+                    .is_empty()
+            );
+            let audits = load_repair_audits(&repair_audit_dir(&context).unwrap()).unwrap();
+            let audit = audits.last().unwrap();
+            assert_eq!(audit.actor_session_id, "requesting-pm");
+            assert!(audit.reason.contains("requesting-pm"));
+            assert!(audit.reason.contains("recover the abandoned candidate"));
+            let source = audit
+                .sources
+                .iter()
+                .find(|source| source.source_path == corrupt_path.to_string_lossy())
+                .unwrap();
+            assert_eq!(
+                fs::read(&source.quarantine_path).unwrap(),
+                b"{corrupt fenced ledger"
+            );
+        }
+
+        #[test]
         fn repair_quarantines_corrupt_ecr_or_ledger_and_materializes_fresh_authority() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -31899,6 +32302,7 @@ exit 1
                 "repair-session",
                 &session,
                 "recover mirror pointer partial authority",
+                None,
             )
             .expect("an advertised mirror-partial repair must be executable");
 
@@ -31960,6 +32364,7 @@ exit 1
                 "repair-session",
                 &session,
                 "recover malformed mirror-only execution control",
+                None,
             )
             .expect("mirror-only corruption with an owner hint must be repairable");
 
@@ -32144,6 +32549,7 @@ exit 1
                 "repair-session",
                 &session,
                 "recover sole surviving owner ledger",
+                None,
             )
             .expect("a repair advertised from a valid owner ledger must be executable");
 
