@@ -1,6 +1,78 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.159.0] - 2026-11-11
+
+### Bug Fixes
+
+- **ui:** Reconnect agent registration catalogs
+- Issues の案内文と通信契約テストを揃える
+- **update:** 実体のない起動窓が更新 drain を塞ぐ問題を修正する
+- **update:** 再試行の権限と進行中の起動を区別する
+- **monitor:** Include recovery writes in save timing
+- **cache:** Reuse pages for stale background refreshes
+- **issue-monitor:** Continue remaining acceptance after merge
+- **issue-monitor:** Retain measurement waits for completed specs
+- **issue-monitor:** Preserve live acceptance decisions
+- **ui:** Refresh board destination after reconnect
+- **test:** Windows 検証 fixture の実行元と終了処理を修正
+- **test:** Monitor fixture の KnownFolder cache 依存を解消
+- **verify:** Preserve caller authority in daemon workers
+- **launch:** Align durable control commits with worker budgets
+- **launch:** Revalidate owner admission after prefs churn
+- **monitor:** Stop launch storms and retain pm control
+- **monitor:** Keep storm recovery bounded and independent
+- **monitor:** 稼働中メンバーの自動予約を起動可能な他ツールの空きメンバーへ回す
+- **monitor:** 自動予約の CLI 判定を起動と同じ profile 環境で行う
+- **monitor:** 自動予約から CLI 起動可否の事前判定を外す
+
+### Features
+
+- **ui:** 利用者向け表記を Issues に統一する
+- **pm:** PM 会話をチャット形式で表示する Chat ビューを追加する
+- **gui:** React 描画層を導入し workspace-state-notice を最初の React 面にする
+
+### Miscellaneous Tasks
+
+- **work:** Record agent catalog delivery PR
+- **work:** Issues 表記統一の PR を記録する
+- **work:** Record issue 6533 acceptance recovery
+- **work:** Record PR #7010 delivery reference
+- **work:** Record PM chat view verification
+- **work:** Record board recovery delivery PR
+- **work:** Record issue 6405 pull request link
+- **work:** Preserve mobile slice delivery records
+- **work:** Record mobile slice delivery PR
+- **work:** Record issue 6997 delivery PR
+- **work:** Record PR 7036 delivery reference
+- **work:** Work イベントログを記録
+- **work:** Record React foundation delivery handoff
+- **work:** Record React foundation pull request
+- **work:** Reconcile clone search delivery records
+- **work:** Record clone audit delivery PR
+- **work:** Record monitor delivery receipt
+- **work:** Record issue 4804 delivery receipt
+- **work:** Record issue 7027 delivery work events
+
+### Performance
+
+- **index:** Reuse immutable file records between refreshes
+
+### Styling
+
+- **gui:** React バンドル検査テストに rustfmt を適用
+
+### Testing
+
+- **update:** Drain結果テストの制御予算を明示する
+- **update:** Drain 回帰の結果を制御 IPC の遅延から切り離す
+- **issue-monitor:** Align daemon settlement contracts
+- **board:** PM未読プロンプト期限失効テストの時計を固定する
+- **ui:** Show board during reconnect verification
+- **verify:** Use the managed process constructor
+- **launch:** Pin blocked-control fixture budget
+- **gui:** React 通知の実アプリ検証を修正
+
 ## [9.158.0] - 2026-11-10
 
 ### Bug Fixes
