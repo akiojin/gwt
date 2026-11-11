@@ -2014,9 +2014,11 @@ fn daemon_idle_close_by_owner_pane_id_closes_the_gui_alias() {
         .is_empty());
     assert!(!runtime.window_lookup.contains_key(&window_id));
 
+    // test-hygiene: allow-wall-clock-deadline Bound the wait for a detached PTY child that has no exit notification.
     let deadline = Instant::now() + Duration::from_secs(3);
     while pty.try_wait().expect("probe child").is_none() {
         assert!(
+            // test-hygiene: allow-wall-clock-deadline Report a PTY that the close never reaped promptly.
             Instant::now() < deadline,
             "an owner-namespace idle close must reap the review PTY"
         );
