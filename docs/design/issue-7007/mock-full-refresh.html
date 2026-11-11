@@ -1110,7 +1110,7 @@
           <li><strong>現行プロジェクトページの束をそのまま束ね直す。</strong>Issues（フェーズ Kanban）／Works・ターミナル／PM チャット＋Reports／Agents／Board・board ログ／Agent Kanban／Branches／Index 検索／プロジェクト設定／クローズ／Recovery（Log 側）／Mission Briefing の導入表示まで、現行ページに集まっていたものは落とさない。</li>
           <li><strong>Board は完全にプロジェクト単位にする（オーナー決定）。</strong>#7053 AC-2（プロジェクト単位で分離され混線しない）の決裁どおりであり、第3便で提示した「横断は状態の要約のみ・会話はプロジェクト単位」の併設案は採らない。状態ボード・会話の両方をこの Project 面に置き、横断 Board 面は廃止した。横断側で滞留・詰まりを見る役割は Progress と Home が担う。</li>
           <li><strong>会話の場（board ログ）もこの面に置く（監査 A-3／K-1）。</strong>現行 Board の本体であるエージェント間・PM とエージェントのやり取り（投稿コンポーザー、返信スレッド、メンションとその通知、履歴ページング）、宛先（For you／General／Broadcast）、エージェントへの Focus／Resume、保存先設定（プロジェクト別の board 設定、チーム共有）は、状態ボードと同じこの面に併設する。</li>
-          <li><strong>リモート共有は確定事項としてこの面で受ける（監査 L-1／#4833）。</strong>他マシンの decision／blocked／handoff を GitHub Discussions 経由で共有する件は、2026-10-02 のオーナー裁定で確定し実装・検証済み（CLOSED）。対象はこの3種のみで、status／claim はローカルに残る。「Discussions へ移行」と言ってもローカルの会話機能が無くなるわけではなく、届いた共有はプロジェクト単位の Board の中で読める。</li>
+          <li><strong>リモート共有は確定事項としてこの面で受ける（監査 L-1／#4833）。</strong>他マシンの decision／blocked／handoff を GitHub Discussions 経由で共有する件は、2026-10-02 のオーナー裁定で確定し実装・検証済み（CLOSED）。対象はこの3種のみで、status／claim はローカルに残る。「Discussions へ移行」と言ってもローカルの会話機能が無くなるわけではなく、届いた共有はプロジェクト単位の Board の中で読める。なお Board の保存・共有先そのものは provider（Local／Slack／Teams、Settings で切替）が担い、Discussions は provider の選択肢ではなく、その上に乗る端末間の受け渡し経路である。</li>
           <li><strong>実行ポリシーはこの面で見て切り替える（オーナー決定）。</strong>プロジェクトごとの実行ポリシー（保存された選択 Continue／Stop と実効状態 Running／Waiting／Stopped 等）は、現行ではステータス1行でしか見えなかった。この面の先頭に状態表示と Continue／Stop の切替を置き、Home のプロジェクト行と Progress の「By project」行にも実効状態を添える（旧 Y-5）。</li>
           <li><strong>Kanban の置き場はこの Project 面で確定（オーナー決定）。</strong>Agent Kanban とフェーズ Kanban はこの Project 面に置く（現行の置き場所に最も近い）。横断面には進行ビューを出さない（旧 Y-3）。</li>
           <li><strong>ウィンドウモデルは持たず、画面方式に寄せる（オーナー決定）。</strong>現行はプロジェクト内の「ウィンドウ」として各面を開き、並べたりスプリットしたりできるモデルだったが、刷新では面を1つずつ画面として開く方式に決めた。根拠は、Works 一覧のプレビューが設定「Works output lines」の既定3行しか見えず、窓を並べて見比べる価値が薄いこと（オーナー談）。Issue も詳細画面として開く（旧 Y-6）。</li>
@@ -1198,7 +1198,7 @@
               <div class="set-group">
                 <h4>Board sharing — this device</h4>
                 <p class="d">Where board posts go. The conversation itself stays per project (see Project); this only chooses the provider and the connection.</p>
-                <div class="set-row"><div class="grow"><div class="t">Board provider</div><div class="d2">Local (this device only), Slack, or Teams. Switching providers rewires the board hooks.</div></div><button class="btn" type="button">Local ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Board provider</div><div class="d2">Local (this device only), Slack, or Teams. Switching providers rewires the board hooks. GitHub Discussions is not a provider — it is the device-to-device handoff path for decisions, blocked notes and handoffs.</div></div><button class="btn" type="button">Local ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Slack / Teams connection</div><div class="d2">Client ID and secret, tenant and default channel; sign in or out here. The sign-in (OAuth) redirect URL to register is shown in place.</div></div><button class="btn" type="button">Set up</button></div>
               </div>
               <div class="set-group">
