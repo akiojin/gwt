@@ -2560,6 +2560,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let target = server
             .agent_capability_issuer()
             .issue(project.path(), "session-reopen")

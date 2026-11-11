@@ -3149,12 +3149,6 @@ fn apply_authenticated_work_terminalization_with_binding(
                 revalidation_error_code = Some(error.code);
                 GwtError::Other("primary Work authority changed before commit".to_string())
             })?;
-            if current.execution_binding != primary.execution_binding
-                || current.agent_id != primary.agent_id
-                || current.agent_session_id != primary.agent_session_id
-            {
-                return Err(GwtError::Other("primary binding changed".to_string()));
-            }
             if let Some(binding) = authenticated_binding {
                 validate_bound_work_terminalization_authority(
                     authenticated_project_root,
@@ -3169,6 +3163,12 @@ fn apply_authenticated_work_terminalization_with_binding(
                         "authenticated execution binding revalidation failed".to_string(),
                     )
                 })?;
+            }
+            if current.execution_binding != primary.execution_binding
+                || current.agent_id != primary.agent_id
+                || current.agent_session_id != primary.agent_session_id
+            {
+                return Err(GwtError::Other("primary binding changed".to_string()));
             }
             let refreshed = resolve_authenticated_session_terminal_target(
                 authenticated_project_root,
