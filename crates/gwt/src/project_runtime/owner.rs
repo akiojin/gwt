@@ -685,8 +685,14 @@ pub(crate) enum OwnerMessage {
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
-    GuiAttached(oneshot::Sender<Result<u64, String>>),
-    GuiDetached(u64),
+    GuiAttached {
+        instance: uuid::Uuid,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    GuiDetached {
+        id: u64,
+        quit: bool,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -757,17 +763,20 @@ impl OwnerHandle {
     pub(crate) fn residency(&self) -> tokio::sync::watch::Receiver<ResidencySnapshot> {
         self.residency.clone()
     }
-    pub(crate) async fn attach_gui(&self) -> Result<u64, String> {
+    pub(crate) async fn attach_gui(&self, instance: uuid::Uuid) -> Result<u64, String> {
         let (send, receive) = oneshot::channel();
         self.sender
-            .send(OwnerMessage::GuiAttached(send))
+            .send(OwnerMessage::GuiAttached {
+                instance,
+                reply: send,
+            })
             .map_err(|_| "project owner unavailable".to_string())?;
         receive
             .await
             .map_err(|_| "project owner stopped before GUI attachment".to_string())?
     }
-    pub(crate) fn detach_gui(&self, id: u64) {
-        let _ = self.sender.send(OwnerMessage::GuiDetached(id));
+    pub(crate) fn detach_gui(&self, id: u64, quit: bool) {
+        let _ = self.sender.send(OwnerMessage::GuiDetached { id, quit });
     }
     pub async fn request(&self, request: OwnerRequest) -> OwnerReply {
         let (send, receive) = oneshot::channel();
@@ -1323,8 +1332,8 @@ impl OwnerState {
                 next_project_policy_check = now + std::time::Duration::from_secs(1);
             }
             if !self.stopping
-                && !continue_active
-                && self.gui_presence.expired(std::time::Instant::now())
+                && (self.gui_presence.quit_requested()
+                    || (!continue_active && self.gui_presence.expired(std::time::Instant::now())))
             {
                 self.begin_shutdown(None);
             }
@@ -1751,20 +1760,25 @@ impl OwnerState {
                     let _ = reply.send(result.map(|_| json!({"updated":true})));
                     self.resume_agent_transport();
                 }
-                OwnerMessage::GuiAttached(reply) => {
+                OwnerMessage::GuiAttached { instance, reply } => {
                     if self.stopping {
                         let _ = reply.send(Err("project owner is shutting down".into()));
                     } else {
                         self.next_gui_presence_id += 1;
                         let id = self.next_gui_presence_id;
-                        self.gui_presence.attach(id);
+                        self.gui_presence.attach(id, instance);
                         if reply.send(Ok(id)).is_err() {
                             self.gui_presence.detach(id, std::time::Instant::now());
                         }
                     }
                 }
-                OwnerMessage::GuiDetached(id) => {
-                    self.gui_presence.detach(id, std::time::Instant::now())
+                OwnerMessage::GuiDetached { id, quit } => {
+                    if quit {
+                        self.gui_presence
+                            .detach_for_quit(id, std::time::Instant::now());
+                    } else {
+                        self.gui_presence.detach(id, std::time::Instant::now());
+                    }
                 }
                 OwnerMessage::Request(ref request, _)
                     if self.stopping
@@ -2226,7 +2240,7 @@ impl OwnerState {
     fn begin_shutdown(&mut self, reply: Option<oneshot::Sender<()>>) {
         tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
             gui_presence_count = self.gui_presence.count(), retained_cleanups = self.retirements.len(),
-            reason = if reply.is_some() { "shutdown_requested" } else { "gui_presence_expired" },
+            reason = if reply.is_some() { "shutdown_requested" } else if self.gui_presence.quit_requested() { "gui_quit" } else { "gui_presence_expired" },
             "project owner shutdown started");
         self.stopping = true;
         self.pm_wake_permits.cancel_mobile_for_pane(None);
@@ -13751,7 +13765,7 @@ mod tests {
             state.start_initial_gui_attach_grace();
             run_fixture_owner(state, receiver);
         });
-        let attached = handle.attach_gui().await;
+        let attached = handle.attach_gui(uuid::Uuid::new_v4()).await;
         handle.shutdown().await;
         actor.join().unwrap();
         assert!(

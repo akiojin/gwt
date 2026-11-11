@@ -9,6 +9,7 @@
 import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -292,6 +293,105 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     "GWT_PLAYWRIGHT_EXACT_RELAUNCH=1 is not set; checkout relaunch E2E skipped");
   test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
   test.setTimeout(420_000);
+
+  test("Issue #6946: explicit Quit drains the GUI, managed daemon and live provider", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const alive = (pid: number) => {
+      try { process.kill(pid, 0); return true; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+    };
+    let cleanupDaemon: (() => Promise<void>) | undefined;
+    let failed = false;
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      await liveCodexWindow(page, launch.gwt_session_id!);
+      const key = new URL(page.url()).pathname.split("/")[2];
+      const directory = join(fixture.home, ".gwt/projects", key, "runtime/daemon");
+      const endpoints = await Promise.all((await readdir(directory)).filter(name => name.endsWith(".json"))
+        .map(async name => JSON.parse(await readFile(join(directory, name), "utf8"))));
+      const endpoint = endpoints.find(endpoint => endpoint.scope?.repo_hash === key && endpoint.project_transport_url);
+      expect(endpoint, "fixture's exact managed daemon").toBeTruthy();
+      const ownerHealth = () => fetch(`${endpoint.project_transport_url}/private/project/command`, {
+        method: "POST", headers: { Authorization: `Bearer ${endpoint.auth_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ project_key: key, command: { type: "health" } }), signal: AbortSignal.timeout(5_000),
+      }).then(response => response.json());
+      const health = await ownerHealth();
+      expect(health).toMatchObject({ pid: endpoint.pid, startup_intent: "gui_managed", draining: false });
+      expect(health.gui_presence_count).toBeGreaterThanOrEqual(1);
+      cleanupDaemon = async () => {
+        if (!alive(endpoint.pid)) return;
+        let current;
+        try { current = await ownerHealth(); } catch (error) {
+          if (!alive(endpoint.pid)) return;
+          throw error;
+        }
+        expect(current, "cleanup may signal only this fixture's captured owner").toMatchObject({
+          pid: endpoint.pid, project_key: key, startup_intent: "gui_managed",
+          host_instance_id: health.host_instance_id, host_started_at: health.host_started_at,
+        });
+        try { process.kill(endpoint.pid, "SIGTERM"); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+        await expect.poll(() => alive(endpoint.pid), { timeout: 45_000 }).toBe(false);
+      };
+      await page.locator("#close-project-button").click();
+      const dialog = page.getByRole("dialog", { name: "Close Project?" });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Continue", exact: true }).click();
+      await expect(page.locator("[data-hub]")).toBeVisible({ timeout: 30_000 });
+      // Closing a Project view retains the native GUI subscriber. Kill only
+      // this fixture's GUI to exercise disconnect without the explicit Quit path.
+      await page.goto("about:blank");
+      const disconnectedGui = fixture.ownedPid!;
+      process.kill(disconnectedGui, "SIGKILL");
+      await expect.poll(() => alive(disconnectedGui), { timeout: 15_000 }).toBe(false);
+      await expect.poll(async () => (await ownerHealth()).gui_presence_count, { timeout: 30_000 }).toBe(0);
+      // Exceed the owner's 15-second reconnect grace: unfinished Continue work
+      // must survive ordinary disconnect before explicit Quit is exercised.
+      await delay(16_000);
+      expect(await ownerHealth()).toMatchObject({ pid: endpoint.pid, draining: false, gui_presence_count: 0 });
+      expect(alive(endpoint.pid)).toBe(true);
+      expect(alive(launch.pid)).toBe(true);
+      // restart() also cleans providers; start() replaces only the dead GUI.
+      await gotoLiveGwt(page, await fixture.start(), { enableTestBridge: true });
+      await liveCodexWindow(page, launch.gwt_session_id!);
+      expect((await fixture.launches()).map(entry => entry.pid)).toEqual([launch.pid]);
+      await expect.poll(async () => (await ownerHealth()).gui_presence_count).toBeGreaterThanOrEqual(1);
+      await attachScreenshot(page, info, `quit-live-provider-${theme}`);
+      expect(errors, "console/page errors before shutdown").toEqual([]);
+      const pids = [fixture.ownedPid!, endpoint.pid, launch.pid];
+      // Close the browser before intentional server shutdown so reconnect errors
+      // cannot be confused with frontend failures. SIGTERM uses the QuitApp path.
+      await page.close();
+      process.kill(pids[0], "SIGTERM");
+      for (const pid of pids) {
+        await expect.poll(() => alive(pid),
+          { timeout: 20_000, message: `Quit must reap owned PID ${pid}` }).toBe(false);
+      }
+      await info.attach("quit-processes", { body: JSON.stringify({ pids, exited: true }), contentType: "application/json" });
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      try {
+        try { await fixture.stop(); } finally { await cleanupDaemon?.(); }
+      } catch (error) {
+        await info.attach("quit-cleanup-failure", { body: String(error), contentType: "text/plain" });
+        if (!failed) throw error;
+      }
+    }
+  });
 
   test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
     let starts = 0;

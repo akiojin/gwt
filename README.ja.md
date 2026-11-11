@@ -205,7 +205,9 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
   エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
 - **Open Project…**: Hub を開き、フォルダ選択を直接開始します。
 - **Clone from GitHub…**: Clone Project ダイアログを開いた状態で Hub を表示します。
-- **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
+- **Quit**: tray アイコン、埋込サーバー、GUI 管理のプロジェクト daemon と PTY 子プロセスを
+  停止します。背景で継続中の作業も対象です。他の GUI が接続中の daemon や、独立起動した
+  daemon は動作を維持します。
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
 表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
