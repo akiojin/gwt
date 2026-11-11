@@ -109,6 +109,15 @@
       .pm-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--accent-soft)}
       .pm-card .who{display:flex;align-items:center;gap:9px}
       .pm-ava{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex:none}
+      .pm-face{position:relative;width:36px;height:36px;border-radius:50%;flex:none;background:radial-gradient(circle at 36% 42%,var(--panel) 0 2.5px,transparent 3.4px),radial-gradient(circle at 64% 42%,var(--panel) 0 2.5px,transparent 3.4px),var(--accent)}
+      .pm-face::after{content:"";position:absolute;left:50%;top:53%;width:34%;height:17%;transform:translateX(-50%);border:2px solid var(--panel);border-top:0;border-radius:0 0 999px 999px}
+      .pm-face.sm{width:26px;height:26px}
+      .pm-face .dot{position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--accent);border:2px solid var(--panel)}
+      .pm-face .dot.wait{background:var(--amber)}
+      .pm-face .dot.stop{background:var(--red)}
+      .pm-byline{display:flex;align-items:center;gap:9px;margin:0 0 12px}
+      .pm-byline .who{font-size:13px;color:var(--ink2)}
+      .pm-byline .who b{color:var(--ink);font-size:13.5px}
       .pm-card .nm{font-weight:800;font-size:13.5px;line-height:1.25}
       .pm-card .sub{font-size:11.5px;color:var(--ink2);line-height:1.35}
       .ctx-switch{margin-top:9px;width:100%;font:inherit;font-size:12.5px;font-weight:700;padding:7px 9px;border-radius:8px;border:1px solid var(--line2);background:var(--panel);color:var(--ink);text-align:left;cursor:pointer}
@@ -178,6 +187,7 @@
       .chat{display:flex;flex-direction:column;gap:12px}
       .msg{max-width:88%;border-radius:14px;padding:11px 14px;line-height:1.55}
       .msg .meta{font-size:11.5px;font-weight:800;margin-bottom:3px}
+      .msg .meta{display:flex;align-items:center;gap:7px}
       .msg.pm{background:var(--gray-soft);border-bottom-left-radius:4px;align-self:flex-start}
       .msg.me{background:var(--accent);color:#fff;border-bottom-right-radius:4px;align-self:flex-end}
       .msg.me .meta{color:#cdeee8}
@@ -325,6 +335,7 @@
       .post{padding:11px 2px;border-bottom:1px solid var(--line)}
       .post:last-child{border-bottom:none}
       .post .meta{font-size:11.8px;font-weight:800;color:var(--ink2);margin-bottom:2px}
+      .post .meta{display:flex;align-items:center;gap:7px}
       .post .body{font-size:13.5px;line-height:1.55}
       .post .body .d{color:var(--ink2);font-size:12.8px}
       /* clone modal */
@@ -377,8 +388,11 @@
             </details>
             <div class="set-group" style="margin-top:18px">
               <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
-                <span class="pm-ava">PM</span>
-                <h4 style="margin:0">PM の様子</h4>
+                <span class="pm-face"><span class="dot wait"></span></span>
+                <div>
+                  <h4 style="margin:0">PM の様子 — ツムギ</h4>
+                  <div class="d2">あなたの PM · 作業を見ています（判断待ち 5件）</div>
+                </div>
               </div>
               <p class="d" style="margin:0 0 8px">PM は7つのプロジェクトを見ています。今は9件の作業が進んでいて、止まっているのは3件です。他のことは PM が自分で進めています。</p>
               <p class="d" style="margin:0 0 10px">あなたの<strong>判断待ちが5件</strong>あります。いちばん急ぐのは <b>KeibaDB</b> の取り込み形式の判断です（対応表を直すか、取り込みを止めるか）。判断は、各プロジェクトのページでします。</p>
@@ -464,6 +478,7 @@
                 <div class="set-group">
                   <h4>あなたの PM — この端末</h4>
                   <p class="d">PM は7つのプロジェクトをまとめて見ています。相談の受け方、作業の振り分け方、報告のしかたを設定します。</p>
+                  <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM のアバターと名前</div><div class="d2">いまはこの顔と名前（ツムギ）です。開始画面の様子、相談、判断では、このアバターと名前で出ます。</div></div><button class="btn" type="button">変える</button></div>
                   <div class="set-row"><div class="grow"><div class="t">相談の内容から、担当プロジェクトを自動で決める</div><div class="d2">プロジェクトページの「相談」の内容から PM が候補を出し、必ずあなたに見せてから決めます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                   <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オフにすると、判断は朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                   <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00〜7:00 は、止まった作業と判断だけを知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
@@ -655,6 +670,7 @@
             <div class="screen-pane" data-screen="g-decide">
               <p class="h-big">判断 — gwt</p>
               <p class="h-sub">PM があなたに決めてほしいことです。選ぶまで PM はこの件を進めません。他のことは PM が自分で進めています。</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です</span></div>
               <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">「ホームと判断の画面」（#7007）の計画を承認しますか？</div><div class="d">設計は終わり、待っていた土台も入りました。承認すると、すぐに実装が再開します。</div></div><span class="rel">1時間待ち</span><div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn" type="button">変更を求める</button></div></div>
               <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">保存されていない変更を、保存しますか？</div><div class="d">このプロジェクトには、まだ保存（コミット）も送信（プッシュ）もされていない変更が2件あります。この端末が初期化されると、その作業は失われます。</div></div><span class="rel">26分待ち</span><div class="btnrow"><button class="btn amber" type="button">保存して送信する</button><button class="btn" type="button">あとで</button></div></div>
               <p class="rel">判断待ちは以上です。空になれば、PM はすべて自分で進めています。</p>
@@ -665,7 +681,7 @@
               <p class="h-sub">開始画面と同じ PM です。この端末の PM は1人だけで、プロジェクトごとに別の PM はいません。ここでは gwt のことに集中して聞きます。gwt の報告はここに届き、判断が必要なことは「判断」にも出ます。</p>
               <div class="chat">
                 <div class="msg me"><div class="meta">あなた · たった今</div>メモリの課題（#5561）はどうなってる？</div>
-                <div class="msg pm"><div class="meta">あなたの PM</div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。修正が入ったら、メモリの記録をここに投稿します。
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。修正が入ったら、メモリの記録をここに投稿します。
                   <br><span class="route">範囲：gwt</span></div>
               </div>
               <div class="composer">
@@ -709,7 +725,7 @@
                 <span class="chip on">あなた宛て</span><span class="chip">全体</span><span class="chip">一斉</span>
               </div>
               <div class="post">
-                <div class="meta">あなたの PM · <span class="badge b-run">判断</span> · 12:12</div>
+                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">判断</span> · 12:12</div>
                 <div class="body">判断：設定のセクションは1つの PR で出します（#7039）。</div>
               </div>
               <div class="post">
@@ -933,6 +949,7 @@
             <div class="screen-pane" data-screen="k-decide">
               <p class="h-big">判断 — KeibaDB</p>
               <p class="h-sub">PM があなたに決めてほしいことです。選ぶまで PM はこの件を進めません。他のことは PM が自分で進めています。</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です</span></div>
               <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">取り込みファイルの形式が変わりました。対応表を直しますか？</div><div class="d">毎日の取り込み（#121）は止まっています。対応表を直すと、担当者の作業が約20分かかります。止めたままにすると、結果は明日まで古いままです。</div></div><span class="rel">48分待ち</span><div class="btnrow"><button class="btn primary" type="button">対応表を直す</button><button class="btn" type="button">取り込みを止める</button></div></div>
               <p class="rel">判断待ちは以上です。空になれば、PM はすべて自分で進めています。</p>
             </div>
@@ -942,7 +959,7 @@
               <p class="h-sub">開始画面と同じ PM です。この端末の PM は1人だけで、プロジェクトごとに別の PM はいません。ここでは KeibaDB のことに集中して聞きます。KeibaDB の報告はここに届き、判断が必要なことは「判断」にも出ます。</p>
               <div class="chat">
                 <div class="msg me"><div class="meta">あなた · たった今</div>毎日の取り込みはまだ止まってる？</div>
-                <div class="msg pm"><div class="meta">あなたの PM</div>はい — 形式が変わったので、対応表が「判断」であなた待ちです。選んでもらえれば、取り込みを再開して結果をここに投稿します。
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>はい — 形式が変わったので、対応表が「判断」であなた待ちです。選んでもらえれば、取り込みを再開して結果をここに投稿します。
                   <br><span class="route">範囲：KeibaDB</span></div>
               </div>
               <div class="composer">
@@ -980,7 +997,7 @@
                 <div class="body">#121 で止まっています：毎日の取り込みが停止 — 形式が変わりました。</div>
               </div>
               <div class="post">
-                <div class="meta">あなたの PM · <span class="badge b-run">判断</span> · 11:40</div>
+                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">判断</span> · 11:40</div>
                 <div class="body">判断が「判断」で待っています：取り込みの対応表を直すか、形式が落ち着くまで取り込みを止めるか。</div>
               </div>
               <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ — 投稿はこの端末に残ります。判断・止まった報告・引き継ぎは GitHub Discussions（#4833）で他のマシンにも届きます。</p>
@@ -1115,12 +1132,13 @@
             <div class="screen-pane" data-screen="v-decide">
               <p class="h-big">判断 — <span class="dyn-proj-name">vr-cabin-exposure</span></p>
               <p class="h-sub">判断待ちはありません。このプロジェクトで判断が必要になったら、ここに出ます。</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断は、ここに出ます</span></div>
             </div>
             <div class="screen-pane" data-screen="v-ask">
               <p class="h-big">相談</p>
               <p class="h-sub">開始画面と同じ PM です。この端末の PM は1人だけで、プロジェクトごとに別の PM はいません。ここではこのプロジェクトのことに集中して聞きます。</p>
               <div class="chat">
-                <div class="msg pm"><div class="meta">あなたの PM</div>取り込んで準備ができました。これは Unity のプロトタイプです。まずプロジェクトの構成を開いて、何が既にあるか一覧にするところから始められます。そこから最初のタスクを一緒に選びましょう。
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>取り込んで準備ができました。これは Unity のプロトタイプです。まずプロジェクトの構成を開いて、何が既にあるか一覧にするところから始められます。そこから最初のタスクを一緒に選びましょう。
                   <br><span class="route">範囲：<span class="dyn-proj-name">vr-cabin-exposure</span></span></div>
               </div>
               <div class="composer">
@@ -1265,7 +1283,7 @@
       </div>
     </div>
     <footer class="doc">
-      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、フォルダを開く／GitHub から取り込む／フォルダパスで開く、開いているプロジェクト・最近の一覧と実行ポリシー状態行、終了待ちのプロジェクト）。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。開始画面に PM の要約ブロックを置き、PM の状態（何を見ていて、作業が進んでいるか）と、いちばん急ぐ判断1件と残りの件数、報告の未読件数だけを見せる。開始画面の主役はプロジェクトを開くことで、要約ブロックはそれを邪魔しない大きさにする。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示はプロジェクトページの「相談」に一本化し、横断の相談は廃止した。報告の一覧ページも廃止し、未読件数は要約ブロックで、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：要約ブロックと各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。</p>
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、フォルダを開く／GitHub から取り込む／フォルダパスで開く、開いているプロジェクト・最近の一覧と実行ポリシー状態行、終了待ちのプロジェクト）。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。開始画面に PM の要約ブロックを置き、PM の状態（何を見ていて、作業が進んでいるか）と、いちばん急ぐ判断1件と残りの件数、報告の未読件数だけを見せる。開始画面の主役はプロジェクトを開くことで、要約ブロックはそれを邪魔しない大きさにする。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示はプロジェクトページの「相談」に一本化し、横断の相談は廃止した。報告の一覧ページも廃止し、未読件数は要約ブロックで、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：要約ブロックと各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。PM の顔（2026-11-12 オーナー提案「PM にはアバター機能はあった方が良いかも。Muse のような」）：PM にはアバターと名前（モックでは「ツムギ」という仮名）を持たせ、開始画面の要約ブロック・相談での発言・判断の提示者では、一貫して「アバター＋名前」で出す。状態（見ている／判断待ち／止まっている）は、アバターの小さな印と一言だけで控えめに伝える。アバターと名前は、設定「あなたの PM」で変えられる想定で置いた。</p>
     </footer>
   </div>
 
