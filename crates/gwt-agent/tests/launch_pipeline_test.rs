@@ -224,6 +224,7 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         predecessor_session_id: None,
         skip_permissions: false,
         fast_mode: false,
+        codex_speed: Default::default(),
         codex_fast_mode: false,
         runtime_target: LaunchRuntimeTarget::Host,
         docker_service: None,
