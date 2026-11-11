@@ -140,6 +140,27 @@ export function createToastStack({
    * mounted. The DOM order (title, dismiss, message) matches the shared CSS
    * grid (title | dismiss on row 1, message spanning row 2).
    */
+  // Whole-card activation (jump-to-window / jump-to-project / jump-to-entry):
+  // the item becomes a keyboard-operable button that runs the handler then
+  // dismisses itself — unless the region opted out (history keeps its rows).
+  function enableActivation(item, onActivate) {
+    item.setAttribute("role", "button");
+    item.setAttribute("tabindex", "0");
+    const activate = () => {
+      onActivate();
+      if (dismissOnActivate) {
+        removeItem(item);
+      }
+    };
+    item.addEventListener("click", activate);
+    item.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
+      }
+    });
+  }
+
   function push(notice) {
     if (!list) {
       return null;
@@ -163,25 +184,8 @@ export function createToastStack({
       item.dataset.toastId = String(notice.id);
     }
 
-    // Whole-card activation (jump-to-window / jump-to-project / jump-to-entry):
-    // the item becomes a keyboard-operable button that runs the handler then
-    // dismisses itself — unless the region opted out (history keeps its rows).
     if (typeof notice?.onActivate === "function") {
-      item.setAttribute("role", "button");
-      item.setAttribute("tabindex", "0");
-      const activate = () => {
-        notice.onActivate();
-        if (dismissOnActivate) {
-          removeItem(item);
-        }
-      };
-      item.addEventListener("click", activate);
-      item.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          activate();
-        }
-      });
+      enableActivation(item, notice.onActivate);
     }
 
     const titleEl = document.createElement("div");
@@ -245,6 +249,7 @@ export function createToastStack({
   return Object.freeze({
     mount,
     push,
+    enableActivation,
     dismiss,
     count: () => (list ? list.children.length : 0),
     droppedCount: () => dropped,
