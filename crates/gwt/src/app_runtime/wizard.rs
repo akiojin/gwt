@@ -4792,11 +4792,17 @@ impl AppRuntime {
         error: String,
         _failed_attempt: Option<gwt::AutonomousHandoffDeliveryAttempt>,
     ) -> Vec<OutboundEvent> {
-        let repeated = self
+        let previous = self
             .issue_monitor_launch_failure_causes
-            .insert(context.project_root.clone(), error.clone())
-            .as_deref()
-            == Some(error.as_str());
+            .insert(context.project_root.clone(), error.clone());
+        let finalizer_timeout =
+            gwt::project_runtime::workspace::workspace_finalizer_timeout_operation_id(&error);
+        let repeated = previous.as_deref() == Some(error.as_str())
+            || finalizer_timeout.is_some_and(|operation_id| {
+                previous.as_deref().and_then(
+                    gwt::project_runtime::workspace::workspace_finalizer_timeout_operation_id,
+                ) == Some(operation_id)
+            });
         if !repeated {
             tracing::error!(target: "gwt.launch.timing", issue_number = request.issue_number,
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"), reason = %error,
@@ -4820,6 +4826,9 @@ impl AppRuntime {
                     },
                 );
             }
+        }
+        if repeated && finalizer_timeout.is_some() {
+            return Vec::new();
         }
         vec![OutboundEvent::project(
             context.project_key,
