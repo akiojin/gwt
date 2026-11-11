@@ -991,11 +991,13 @@ pub(super) fn run<E: CliEnv>(
                 env.repo_path(),
             );
         if !legacy_stores.is_empty() {
-            out.push_str(&format!(
-                "warning[split_project_store]: canonical store {} has legacy Work stores: {}. Inspect with workspace.store_consolidate params.dry_run=true before planning recovery.\n",
+            let warning = format!(
+                "canonical store {} has legacy Work stores: {}. Inspect with workspace.store_consolidate params.dry_run=true before planning recovery.",
                 gwt_core::paths::gwt_project_dir_for_repo_path(env.repo_path()).display(),
                 legacy_stores.iter().map(|store| store.display().to_string()).collect::<Vec<_>>().join(", "),
-            ));
+            );
+            crate::cli::operation_warnings::push("split_project_store", warning.as_str());
+            let _ = writeln!(env.stderr(), "warning[split_project_store]: {warning}");
         }
     }
     match cmd {
@@ -9585,6 +9587,76 @@ pub(crate) mod tests {
 
         assert!(error.to_string().contains("terminal"), "{error}");
         assert_eq!(workspace_recovery_state_bytes(&paths), before);
+
+        // AC-3: a legacy-store warning must not hide the outer JSON diagnosis.
+        let session_id = "session-terminal-canonical";
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut session = gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml")))
+            .expect("bound Session");
+        let primary = "private-terminal-canonical-thread";
+        session.agent_session_id = Some(primary.to_string());
+        session.save(&sessions).expect("record primary identity");
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let _native = crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", primary);
+        let mut current = WorkspaceProjection::default_for_project(&project_root);
+        current.id = done.work_item_id.clone();
+        let mut agent = assigned_agent_with_window(session_id, "project::agent-1", &worktree);
+        agent.workspace_id = Some(done.work_item_id.clone());
+        agent.title_summary = Some("Terminal Work diagnosis".to_string());
+        current.agents.push(agent);
+        save_workspace_projection(&project_root, &current).expect("current Session assignment");
+        let legacy =
+            gwt_core::paths::gwt_project_dir(&gwt_core::repo_hash::compute_path_hash(&worktree));
+        std::fs::create_dir_all(legacy.join("project-state")).expect("legacy store");
+        assert!(
+            gwt_core::workspace_projection::store_migration::split_project_store_paths(&worktree)
+                .contains(&legacy)
+        );
+        let expected =
+            diagnose_current_terminal_work(session_id, Some(primary)).expect("terminal diagnosis");
+        assert!(expected.details.as_ref().unwrap().recoverable);
+
+        for operation in ["workspace.ensure", "workspace.update"] {
+            let mut env = TestEnv::new(worktree.clone());
+            env.stdin = serde_json::json!({
+                "schema_version": 1,
+                "operation": operation,
+                "params": {
+                    "agent_session": session_id,
+                    "purpose": "Terminal Work diagnosis",
+                    "current_focus": "Inspect terminal Work"
+                }
+            })
+            .to_string();
+            let code = crate::cli::env::dispatch(&mut env, &["gwtd".to_string()]);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("outer JSON response");
+            assert_eq!(code, 1, "{operation}: {payload}");
+            assert_eq!(
+                payload["error_code"], "terminal_work",
+                "{operation}: {payload}"
+            );
+            assert_eq!(
+                payload["details"],
+                serde_json::to_value(&expected.details).unwrap()
+            );
+            assert_eq!(
+                payload["recovery_operations"],
+                serde_json::json!(["workspace.reopen"])
+            );
+            assert_eq!(payload["warnings"][0]["code"], "split_project_store");
+            assert!(payload["warnings"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("workspace.store_consolidate"));
+            serde_json::from_str::<crate::AgentWorkspaceUpdateError>(
+                payload["output"].as_str().unwrap(),
+            )
+            .expect("warning must stay outside the structured diagnostic");
+            assert!(!String::from_utf8_lossy(&env.stdout).contains(primary));
+            assert!(!String::from_utf8_lossy(&env.stderr).contains(primary));
+        }
     }
 
     #[test]
@@ -11538,6 +11610,7 @@ pub(crate) mod tests {
         std::fs::write(&works, "unreadable legacy projection").expect("legacy projection");
         let mut env = TestEnv::new(repo.clone());
         let mut out = String::new();
+        crate::cli::operation_warnings::take();
 
         let code = run(
             &mut env,
@@ -11550,9 +11623,15 @@ pub(crate) mod tests {
         .expect("normal workspace operation");
 
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("split_project_store"), "{out}");
-        assert!(out.contains(&legacy.display().to_string()), "{out}");
-        assert!(out.contains("workspace.store_consolidate"), "{out}");
+        assert!(!out.contains("split_project_store"), "{out}");
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "split_project_store");
+        assert!(warnings[0].message.contains(&legacy.display().to_string()));
+        assert!(warnings[0].message.contains("workspace.store_consolidate"));
+        let stderr = String::from_utf8(env.stderr).expect("stderr text");
+        assert!(stderr.contains("warning[split_project_store]"), "{stderr}");
+        assert!(stderr.contains(&legacy.display().to_string()), "{stderr}");
         assert_eq!(
             std::fs::read_to_string(&works).unwrap(),
             "unreadable legacy projection",
