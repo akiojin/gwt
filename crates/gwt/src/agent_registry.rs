@@ -31,6 +31,8 @@ pub struct AgentProfileCore {
     pub reasoning: Option<String>,
     pub version: Option<String>,
     pub fast_mode: bool,
+    #[serde(default)]
+    pub codex_speed: gwt_agent::CodexSpeed,
 }
 
 impl AgentProfileCore {
@@ -41,6 +43,7 @@ impl AgentProfileCore {
             reasoning: profile.reasoning.clone(),
             version: profile.version.clone(),
             fast_mode: profile.fast_mode,
+            codex_speed: profile.codex_speed,
         }
     }
 
@@ -50,6 +53,7 @@ impl AgentProfileCore {
         profile.reasoning.clone_from(&self.reasoning);
         profile.version.clone_from(&self.version);
         profile.fast_mode = self.fast_mode;
+        profile.codex_speed = self.codex_speed;
     }
 }
 
@@ -549,6 +553,7 @@ fn ensure_cores(registry: &mut Registry) {
                     reasoning: None,
                     version: None,
                     fast_mode: false,
+                    codex_speed: gwt_agent::CodexSpeed::Off,
                 });
         }
     }
@@ -1037,6 +1042,8 @@ pub(crate) struct PmLaunchDraft<'a> {
     pub agent_id: &'a str,
     pub model: Option<&'a str>,
     pub reasoning: Option<&'a str>,
+    pub codex_speed: gwt_agent::CodexSpeed,
+    pub fast_mode: bool,
 }
 
 /// Trusted canonical NEW only. Captures selection and PM tuning together.
@@ -1088,7 +1095,7 @@ fn reserve_new_pm_member_inner(
                 "Resume the registered PM conversation before starting a new PM",
             ));
         }
-        let profile = prefs.settings.launch_profile_or_default();
+        let profile = prefs.settings.launch_profile_with_agent_defaults(root);
         let revision = crate::pm_registry::pm_profile_revision(prefs);
         let expected_assignment = crate::agent_names::AgentMemberAssignment {
             role: AgentAssignmentRole::Pm,
@@ -1128,6 +1135,15 @@ fn reserve_new_pm_member_inner(
                 || profile.agent_id != draft.agent_id
                 || profile.model.as_deref() != draft.model
                 || profile.reasoning.as_deref() != draft.reasoning
+                || (if profile.agent_id == "codex" {
+                    profile.codex_speed.unwrap_or_default()
+                } else {
+                    gwt_agent::CodexSpeed::Off
+                }) != draft.codex_speed
+                || (profile.fast_mode.unwrap_or(false)
+                    && gwt_agent::resolve_agent_id(&profile.agent_id)
+                        .is_some_and(|agent| agent.supports_fast_mode()))
+                    != draft.fast_mode
             {
                 return Err(invalid(
                     "PM selection or profile changed during preparation; refresh and retry NEW",
@@ -1463,6 +1479,8 @@ pub(crate) fn reserve_resume_pm_member(
                             model: source.model.clone(),
                             reasoning: source.reasoning_level.clone(),
                             version: source.tool_version_selector.clone(),
+                            codex_speed: Some(source.codex_speed()),
+                            fast_mode: Some(source.fast_mode_enabled()),
                         },
                         prior_assignment,
                     });
@@ -1496,6 +1514,8 @@ pub(crate) fn reserve_resume_pm_member(
                     model: source.model.clone(),
                     reasoning: source.reasoning_level.clone(),
                     version: source.tool_version_selector.clone(),
+                    codex_speed: Some(source.codex_speed()),
+                    fast_mode: Some(source.fast_mode_enabled()),
                 },
                 prior_assignment,
             })
@@ -2515,6 +2535,7 @@ fn mirror_json(prefs: &IssueMonitorPrefs, original: Option<&str>) -> io::Result<
         profile.reasoning = None;
         profile.version = None;
         profile.fast_mode = false;
+        profile.codex_speed = gwt_agent::CodexSpeed::Off;
     }
     mirror.set_launch_profile_pool(profiles);
     let mut value = original
@@ -2717,6 +2738,7 @@ pub fn member_profile(
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -4038,7 +4060,31 @@ mod tests {
             agent_id: "claude",
             model: None,
             reasoning: None,
+            codex_speed: gwt_agent::CodexSpeed::Off,
+            fast_mode: false,
         };
+        for stale in [
+            PmLaunchDraft {
+                codex_speed: gwt_agent::CodexSpeed::Fast,
+                ..draft
+            },
+            PmLaunchDraft {
+                fast_mode: true,
+                ..draft
+            },
+        ] {
+            assert!(
+                reserve_new_pm_member_from_draft(
+                    &root,
+                    &sessions,
+                    &worktree,
+                    "stale-speed",
+                    &stale
+                )
+                .is_err(),
+                "PM speed and Fast Mode must be fenced before reserving a member"
+            );
+        }
         let first = reserve_new_pm_member_from_draft(
             &root,
             &sessions,
@@ -4118,6 +4164,61 @@ mod tests {
             )
             .cloned(),
             first.member.assignment
+        );
+        let defaults_root = home.path().join("pm-with-agent-defaults");
+        fs::create_dir_all(&defaults_root).unwrap();
+        crate::try_mutate_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&defaults_root),
+            |prefs| {
+                prefs.set_launch_profile_pool(vec![serde_json::from_value(serde_json::json!({
+                    "agent_id":"codex", "model":"gpt-6-astra", "reasoning":"high", "codex_speed":"ultrafast"
+                })).unwrap()]);
+                Ok(())
+            },
+        ).unwrap();
+        let pm_path = crate::pm_registry::pm_prefs_path_for_repo_path(&defaults_root);
+        let mut prefs = crate::pm_registry::load_pm_prefs(&pm_path).unwrap();
+        prefs.settings.launch_profile = Some(crate::pm_registry::PmLaunchProfile {
+            agent_id: "codex".into(),
+            ..Default::default()
+        });
+        crate::pm_registry::save_pm_prefs(&pm_path, &prefs).unwrap();
+        let revision = crate::pm_registry::pm_profile_revision(&prefs);
+        let configured = SessionMemberSnapshot::load()
+            .unwrap()
+            .configured_pm_member(&gwt_core::paths::project_scope_hash(&defaults_root))
+            .unwrap();
+        let effective = prefs
+            .settings
+            .launch_profile_with_agent_defaults(&defaults_root);
+        assert_eq!(effective.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(
+            effective.codex_speed,
+            Some(gwt_agent::CodexSpeed::Ultrafast)
+        );
+        measured_machine_budget(2);
+        let inherited = reserve_new_pm_member_from_draft(
+            &defaults_root,
+            &sessions,
+            &crate::pm_registry::pm_worktree_path_for_repo_path(&defaults_root),
+            "inherited-defaults",
+            &PmLaunchDraft {
+                member_id: configured
+                    .as_ref()
+                    .map(|member| member.agent_member_id.as_str()),
+                profile_revision: &revision,
+                agent_id: "codex",
+                model: Some("gpt-6-astra"),
+                reasoning: Some("high"),
+                codex_speed: gwt_agent::CodexSpeed::Ultrafast,
+                fast_mode: false,
+            },
+        )
+        .expect("owner admission must resolve the same inherited defaults as its NEW draft");
+        assert_eq!(inherited.profile.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(
+            inherited.profile.codex_speed,
+            Some(gwt_agent::CodexSpeed::Ultrafast)
         );
     }
 
@@ -4233,6 +4334,8 @@ mod tests {
             agent_id: "claude",
             model: None,
             reasoning: None,
+            codex_speed: gwt_agent::CodexSpeed::Off,
+            fast_mode: false,
         };
         let reserve_second = || {
             reserve_new_pm_member_from_draft(
@@ -4343,6 +4446,8 @@ mod tests {
             model: Some("configured-successor-model".into()),
             reasoning: None,
             version: None,
+            codex_speed: None,
+            fast_mode: None,
         });
         crate::pm_registry::save_pm_prefs(&pm_path, &prefs).unwrap();
         let old_bytes = fs::read(sessions.join(format!("{}.toml", source.id))).unwrap();
@@ -4617,6 +4722,7 @@ mod tests {
                 reasoning: None,
                 version: None,
                 fast_mode: false,
+                codex_speed: gwt_agent::CodexSpeed::Off,
             },
         );
         save(&registry).unwrap();
@@ -4753,6 +4859,8 @@ mod tests {
                 model: Some("opusplan".into()),
                 reasoning: None,
                 version: Some("keep-version".into()),
+                codex_speed: None,
+                fast_mode: None,
             })
         })
         .unwrap();
@@ -4769,6 +4877,8 @@ mod tests {
                 model: Some(" opusplan ".into()),
                 reasoning: Some(" high ".into()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             },
         )
         .unwrap();
@@ -5727,6 +5837,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&source_path).unwrap()).unwrap();
         old.as_object_mut().unwrap().remove("agent_roster");
         old["max_active_agents"] = serde_json::json!(5);
+        old["enabled"] = serde_json::json!(true);
         old["max_active_agents_mode"] = serde_json::json!("manual");
         old["max_active_last_change"] = serde_json::json!({
             "changed_at":"2026-10-01T00:00:00Z", "source":"json_operation", "max_active_agents_override":5
@@ -5750,6 +5861,18 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&fs::read(&source_path).unwrap()).unwrap()
                 ["schema_version"],
             2
+        );
+        let before = crate::load_issue_monitor_prefs(&source_path).unwrap();
+        let disabled = crate::issue_monitor::disable_issue_monitor_during_recovery(
+            &source_path,
+            Some(&before.config_token()),
+            || true,
+        )
+        .expect("OFF recovery must commit through the active registry");
+        assert!(!disabled.enabled);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&source_path).unwrap(),
+            disabled
         );
     }
     #[test]
@@ -5798,12 +5921,23 @@ mod tests {
         crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
             let mut profiles = prefs.launch_profile_pool();
             profiles[0].model = Some("new-global-core".into());
+            profiles[0].codex_speed = gwt_agent::CodexSpeed::Ultrafast;
             prefs.set_launch_profile_pool(profiles);
             Ok(())
         })
         .unwrap();
         let latest = crate::load_issue_monitor_prefs(&b_path).unwrap();
         assert_eq!(latest.launch_profile_pool(), observed.launch_profile_pool());
+        let core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(id)
+            .unwrap()
+            .0;
+        assert_eq!(
+            serde_json::to_value(core).unwrap()["codex_speed"],
+            "ultrafast",
+            "Codex speed belongs to the common saved core"
+        );
         assert!(request.resolve(&latest).is_err(),
             "a daemon cannot ACK a new inherited core while the CLI reconstructs its response from the old core");
     }

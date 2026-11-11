@@ -3665,7 +3665,8 @@ fn assert_fresh_execution_preserves_terminal_work(
     assert!(!durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         candidate_session_id
-    ));
+    )
+    .unwrap());
     assert!(probe.has_capability_bearer(fixture.captured.grant.as_ref().unwrap()));
     assert!(probe.issuer.grant_is_current(probe.grant.as_ref().unwrap()));
     assert_eq!(

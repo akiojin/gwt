@@ -298,6 +298,7 @@ impl AppRuntime {
                     reports: Vec::new(),
                     current: None,
                     error: Some("This window has no registered PM.".to_owned()),
+                    current_error: None,
                 },
             )];
         };
@@ -339,6 +340,7 @@ impl AppRuntime {
                     .collect(),
                 current: data.current.map(Box::new),
                 error: data.error,
+                current_error: data.current_error,
             });
         });
         Vec::new()

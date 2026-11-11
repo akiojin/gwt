@@ -16,7 +16,7 @@ const windows = [
 const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777,
   current_task: w.is_pm ? "Coordinate the current project work" : null }));
 function catalog(wins, version = 1) { return { version, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: wins } }] } }; }
-async function fixture(telemetry = null, initialCatalog = catalog(windows), previewAvailable = () => true, observed = false) {
+async function fixture(telemetry = null, initialCatalog = catalog(windows), previewAvailable = () => true, observed = false, initialActivity = { agents: live, count: 2 }) {
   const { createWorksSurface } = await import(moduleUrl);
   const { document, window } = parseHTML("<main></main>");
   const frames = new Set();
@@ -24,7 +24,7 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows), prev
   const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
   const activity = observed ? createAgentActivityModel("project") : null;
   if (activity) activity.applyAgentActivitySnapshot(activitySnapshot(live));
-  const activityModel = activity?.model || createUiStateStore({ agents: live, count: 2 }, options);
+  const activityModel = activity?.model || createUiStateStore(initialActivity, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
   const revocations = [];
   const runtimes = new Map(), mounts = [], layouts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
@@ -388,6 +388,58 @@ test("Works retains native input and fixed names when runtime state and purpose 
   f.flush();
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Running.*Interactive/,
     "a current runtime recovery supersedes the earlier interrupted catalog status");
+  f.surface.dispose();
+});
+
+test("Works retains the selected stopped transcript without adding it to live activity", async () => {
+  const started = { ...windows[0], runtime_started_at_ms: 123 };
+  const stopped = { ...started, status: "stopped", persist: false };
+  const f = await fixture(null, catalog([started, windows[1]]));
+  assert.equal(f.surface.openWork(live[0]), true);
+  const input = f.runtimes.get("one"), nativeRoot = input.parentElement;
+  const row = f.surface.element.querySelector('.work-row[data-window-id="one"]');
+  f.windowCatalogModel.update(() => ({ catalog: catalog([stopped, windows[1]], 2) }));
+  f.activityModel.update(() => ({ agents: [live[1]], count: 1 }));
+  assert.ok(f.revocations.some(revocation => revocation.id === "one" && revocation.root === nativeRoot), "STOP revokes native input before its display frame");
+  f.flush();
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, false);
+  assert.equal(f.surface.element.querySelector('.work-row[data-window-id="one"]'), row);
+  assert.equal(input.parentElement, nativeRoot);
+  assert.equal(f.runtimes.get("one"), input);
+  assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Stopped/);
+  assert.equal(f.mounts.filter(mount => mount.id === "one").at(-1).readOnly, true);
+  assert.equal(f.surface.openWork(live[0]), true, "the same physical transcript keeps its exact assignment");
+  assert.equal(f.surface.element.querySelector(".works-active").textContent, "Active 1");
+  assert.equal(f.surface.element.querySelector('[data-count="running"]').textContent, "0");
+
+  f.windowCatalogModel.update(() => ({ catalog: catalog([{ ...stopped, runtime_started_at_ms: 456 }, windows[1]], 3) })); f.flush();
+  assert.equal(f.surface.openWork(live[0]), false, "a later same-Session process cannot inherit the stopped incarnation");
+  const replacement = { ...live[0], runtime_incarnation: 9 };
+  f.activityModel.update(() => ({ agents: [replacement, live[1]], count: 2 })); f.flush();
+  assert.equal(f.surface.element.querySelectorAll('.work-row[data-window-id="one"]').length, 1);
+  assert.equal(f.surface.openWork(live[0]), false);
+  assert.equal(f.surface.openWork(replacement), true, "live membership takes precedence over the retained catalog row");
+  const rebound = { ...replacement, session_id: "new-session", runtime_incarnation: 10 };
+  f.activityModel.update(() => ({ agents: [rebound, live[1]], count: 2 })); f.flush();
+  assert.equal(f.surface.contains("one"), false, "a mismatched live Session cannot fall back to the old stopped terminal");
+  f.surface.dispose();
+});
+
+test("Works opens a fresh retained STOP snapshot until its canonical window is removed", async () => {
+  const stopped = { ...windows[0], status: "stopped", persist: false, runtime_started_at_ms: 123 };
+  const f = await fixture(null, catalog([stopped,
+    { ...stopped, id: "legacy", persist: true }, { ...stopped, id: "shell", preset: "shell" },
+  ]), undefined, false, { agents: [], count: 0 });
+  assert.deepEqual([...f.surface.element.querySelectorAll(".work-row")].map(row => row.dataset.windowId), ["one"]);
+  assert.equal(f.surface.openWork("one"), true);
+  assert.equal(f.surface.openWork(live[0]), false, "a fresh snapshot must not invent a physical incarnation");
+  assert.equal(f.surface.element.querySelector(".works-active").textContent, "Active 0");
+  assert.equal(f.surface.element.querySelector('[data-count="running"]').textContent, "0");
+  assert.equal(f.surface.element.querySelector(".works-empty").hidden, true);
+  f.windowCatalogModel.update(() => ({ catalog: catalog([], 2) })); f.flush();
+  assert.equal(f.surface.contains("one"), false);
+  assert.equal(f.surface.element.querySelectorAll(".work-row").length, 0);
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
   f.surface.dispose();
 });
 

@@ -52,6 +52,8 @@ pub(super) fn pm_delivery_owner_fixture_with_target_role(
                     model: None,
                     reasoning: None,
                     version: None,
+                    codex_speed: None,
+                    fast_mode: None,
                 });
             },
         )

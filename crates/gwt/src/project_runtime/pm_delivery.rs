@@ -1293,6 +1293,8 @@ pub fn pm_status_from_launch_prefs(
                     model: session.model.clone(),
                     reasoning: session.reasoning_level.clone(),
                     version: session.tool_version.clone(),
+                    codex_speed: Some(session.codex_speed()),
+                    fast_mode: Some(session.fast_mode_enabled()),
                 }
                 .normalized()
             })
@@ -1338,6 +1340,8 @@ pub fn pm_status_from_launch_prefs(
         configured_reasoning: configured
             .as_ref()
             .and_then(|profile| profile.reasoning.clone()),
+        configured_codex_speed: configured.as_ref().and_then(|profile| profile.codex_speed),
+        configured_fast_mode: configured.as_ref().and_then(|profile| profile.fast_mode),
         running_agent_id: running_profile
             .as_ref()
             .map(|profile| profile.agent_id.clone()),

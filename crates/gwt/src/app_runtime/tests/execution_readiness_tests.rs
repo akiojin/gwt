@@ -1347,7 +1347,8 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                 assert!(durable_launch_recovery_exists(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &fixture.pending.binding.session_id
-                ));
+                )
+                .unwrap());
                 let health = fixture
                     .executor
                     .block_on(fixture.owner.command(OwnerCommand::Health))
@@ -1383,7 +1384,8 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         assert!(!durable_launch_recovery_exists(
             &gwt_core::paths::gwt_sessions_dir(),
             &fixture.pending.binding.session_id
-        ));
+        )
+        .unwrap());
         assert!(!gwt_core::paths::gwt_sessions_dir()
             .join(format!("{}.toml", fixture.pending.binding.session_id))
             .exists());
@@ -1866,7 +1868,8 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
             assert!(durable_launch_recovery_exists(
                 &gwt_core::paths::gwt_sessions_dir(),
                 &fixture.pending.binding.session_id
-            ));
+            )
+            .unwrap());
         }
         fixture.shutdown();
     }
@@ -2286,7 +2289,7 @@ fn leave_owner_fresh_activated_before_projection_commit(fixture: &OwnerFreshLaun
             assert!(durable_launch_recovery_exists(
                 &sessions_dir,
                 &fixture.pending.binding.session_id
-            ));
+            ).unwrap());
             Ok(())
         },
     )
@@ -2349,7 +2352,8 @@ fn fresh_execution_continue_repairs_activated_response_loss_before_acknowledging
     assert!(!durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         &fixture.pending.binding.session_id
-    ));
+    )
+    .unwrap());
     fixture.shutdown();
 }
 
@@ -2846,10 +2850,9 @@ fn assert_owner_fresh_worker_completion(scenario: &str) {
             assert!(
                 !gwt_agent::runtime_state_path(&sessions, &pending.binding.session_id).exists()
             );
-            assert!(!durable_launch_recovery_exists(
-                &sessions,
-                &pending.binding.session_id
-            ));
+            assert!(
+                !durable_launch_recovery_exists(&sessions, &pending.binding.session_id).unwrap()
+            );
             assert_eq!(
                 gwt::cli::execution_state::load_generation_ledger(&repo, authority)
                     .unwrap()
@@ -3101,10 +3104,9 @@ fn fresh_execution_generic_close_preserves_activated_or_replaced_candidate() {
             assert!(outcome.is_err());
         }
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(durable_launch_recovery_exists(
-            &sessions,
-            &fixture.pending.binding.session_id
-        ));
+        assert!(
+            durable_launch_recovery_exists(&sessions, &fixture.pending.binding.session_id).unwrap()
+        );
         assert_eq!(
             gwt::cli::execution_state::continuation_attempt_for_operation(
                 &fixture.repo,
@@ -3367,7 +3369,7 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
         let pending = captured.pending_fresh_execution.as_ref().unwrap();
         let source = captured.session.as_ref().unwrap();
         assert!(captured.pty.is_none());
-        assert!(durable_launch_recovery_exists(&sessions, &source.id));
+        assert!(durable_launch_recovery_exists(&sessions, &source.id).unwrap());
         assert!(!pending.readiness_nonce.is_empty());
         let binding = source.execution_binding.as_ref().unwrap();
         let grant = captured.grant.as_ref().unwrap();
@@ -3746,10 +3748,7 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
     assert!(!sessions_dir
         .join(format!("{retained_session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &sessions_dir,
-        &retained_session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&sessions_dir, &retained_session_id,).unwrap());
 }
 
 #[test]
@@ -3814,10 +3813,7 @@ fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candi
     assert!(sessions
         .join(format!("{}.toml", pending.binding.session_id))
         .exists());
-    assert!(durable_launch_recovery_exists(
-        &sessions,
-        &pending.binding.session_id
-    ));
+    assert!(durable_launch_recovery_exists(&sessions, &pending.binding.session_id).unwrap());
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-unrelated-after-fresh-callback-failure",

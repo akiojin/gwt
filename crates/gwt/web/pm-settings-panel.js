@@ -171,8 +171,8 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
       && (
         state.memberId && state.runningMemberId && state.memberId !== state.runningMemberId
         || state.configuredAgentId !== state.runningAgentId
-        || state.configuredModel !== state.runningModel
-        || state.configuredReasoning !== state.runningReasoning
+        || (state.configuredModel !== "" && state.configuredModel !== state.runningModel)
+        || (state.configuredReasoning !== "" && state.configuredReasoning !== state.runningReasoning)
       )
     );
 

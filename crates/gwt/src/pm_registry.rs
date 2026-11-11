@@ -153,6 +153,11 @@ pub struct PmLaunchProfile {
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// None inherits same-provider Agent Settings; explicit Off disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_speed: Option<gwt_agent::CodexSpeed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
 }
 
 /// The agent a project falls back to when nothing is configured.
@@ -225,6 +230,25 @@ impl PmSettings {
 }
 
 impl PmSettings {
+    /// Resolve NEW tuning identically for the GUI draft and its owner fence.
+    /// The saved PM profile and its CAS revision remain project-specific.
+    pub fn launch_profile_with_agent_defaults(&self, project_root: &Path) -> PmLaunchProfile {
+        let mut profile = self.launch_profile_or_default();
+        if let Some(defaults) = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| {
+            prefs.launch_profile_pool().into_iter().find(|candidate| {
+                gwt_agent::resolve_agent_id(&candidate.agent_id)
+                    == gwt_agent::resolve_agent_id(&profile.agent_id)
+            })
+        }) {
+            profile = profile.with_agent_defaults(&defaults);
+        }
+        profile.normalized()
+    }
+
     /// The profile to launch with: the configured one when it names an agent
     /// that can resolve `$gwt-pm`, the built-in default otherwise. Falling back
     /// rather than refusing keeps FR-002's "opening a project starts the PM"
@@ -247,6 +271,20 @@ impl PmSettings {
 }
 
 impl PmLaunchProfile {
+    /// Apply configured agent defaults without replacing explicit PM choices.
+    pub fn with_agent_defaults(mut self, defaults: &crate::IssueMonitorLaunchProfile) -> Self {
+        if gwt_agent::resolve_agent_id(&self.agent_id)
+            != gwt_agent::resolve_agent_id(&defaults.agent_id)
+        {
+            return self;
+        }
+        self.model = self.model.or_else(|| defaults.model.clone());
+        self.reasoning = self.reasoning.or_else(|| defaults.reasoning.clone());
+        self.codex_speed = self.codex_speed.or(Some(defaults.codex_speed));
+        self.fast_mode = self.fast_mode.or(Some(defaults.fast_mode));
+        self
+    }
+
     /// Canonicalize user-entered optional tuning without changing the agent
     /// identity or the legacy optional schema. Blank values mean provider
     /// defaults; non-blank values are persisted and launched without their UI
@@ -919,6 +957,24 @@ pub fn pm_worktree_for_runtime_dir(runtime: &Path) -> Option<PathBuf> {
     require_pm_runtime_parents(&worktree).ok()?;
     require_real_pm_scratch_directory(runtime, "PM runtime directory").ok()?;
     Some(worktree)
+}
+
+/// The resident PM's `pm/` directory when `cwd` is the canonical PM worktree,
+/// its runtime directory, or anything beneath either (Issue #6989).
+///
+/// The PM's canonical references live under the runtime sibling of its
+/// worktree, so navigation policy that only knew the worktree blocked the PM's
+/// own startup reads. Every PM cwd resolves to the same answer, so the
+/// boundary no longer depends on which of the two directories launched it.
+pub fn pm_session_dir_for_cwd(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors().find_map(|dir| {
+        let worktree = if is_canonical_pm_worktree(dir) {
+            dir.to_path_buf()
+        } else {
+            pm_worktree_for_runtime_dir(dir)?
+        };
+        worktree.parent().map(Path::to_path_buf)
+    })
 }
 
 /// Project-state directory for PM-authored scratch notes.
@@ -6323,9 +6379,57 @@ mod tests {
         );
     }
 
-    /// SPEC-3431 FR-026: the profile is optional and additive, so prefs
-    /// written before it existed keep working, and a project that never
-    /// configures one still launches.
+    #[test]
+    fn pm_codex_speed_persists_without_enabling_legacy_fast_mode() {
+        let profile: PmLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "codex_speed": "ultrafast"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&profile).unwrap()["codex_speed"],
+            "ultrafast"
+        );
+        let legacy: PmLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex"
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("codex_speed")
+            .is_none());
+    }
+
+    #[test]
+    fn pm_profile_inherits_same_agent_defaults_but_preserves_explicit_off() {
+        let defaults: crate::IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "model": "gpt-6-astra", "reasoning": "high", "codex_speed": "ultrafast"
+        })).unwrap();
+        let profile = PmLaunchProfile {
+            agent_id: "codex".to_string(),
+            ..Default::default()
+        };
+        let inherited = profile.clone().with_agent_defaults(&defaults);
+        assert_eq!(inherited.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(inherited.reasoning.as_deref(), Some("high"));
+        assert_eq!(
+            inherited.codex_speed,
+            Some(gwt_agent::CodexSpeed::Ultrafast)
+        );
+        let explicit = PmLaunchProfile {
+            codex_speed: Some(gwt_agent::CodexSpeed::Off),
+            model: Some("gpt-6.1-sol".to_string()),
+            ..profile
+        }
+        .with_agent_defaults(&defaults);
+        assert_eq!(explicit.codex_speed, Some(gwt_agent::CodexSpeed::Off));
+        assert_eq!(explicit.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            PmLaunchProfile::default_profile().with_agent_defaults(&defaults),
+            PmLaunchProfile::default_profile()
+        );
+    }
+
+    /// SPEC-3431 FR-026: profiles remain optional and additive for legacy prefs.
     #[test]
     fn launch_profile_defaults_to_none_and_round_trips() {
         let (_dir, path) = temp_prefs_path();
@@ -6341,6 +6445,8 @@ mod tests {
                 model: None,
                 reasoning: None,
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }
         );
 
@@ -6349,6 +6455,8 @@ mod tests {
             model: Some("gpt-5.1-codex-max".to_string()),
             reasoning: Some("high".to_string()),
             version: None,
+            codex_speed: Some(gwt_agent::CodexSpeed::Ultrafast),
+            fast_mode: None,
         };
         let mut prefs = prefs;
         prefs.settings.launch_profile = Some(configured.clone());
@@ -6370,6 +6478,8 @@ mod tests {
             model: Some("grok-4.20-beta".to_string()),
             reasoning: Some("xhigh".to_string()),
             version: None,
+            codex_speed: None,
+            fast_mode: None,
         };
         let prefs = PmPrefs {
             settings: PmSettings {
@@ -6403,6 +6513,8 @@ mod tests {
                 model: None,
                 reasoning: None,
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }
         );
     }
@@ -6415,6 +6527,8 @@ mod tests {
                 model: Some("  gpt-5.6  ".to_string()),
                 reasoning: Some("  xhigh  ".to_string()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }),
             ..PmSettings::default()
         };
@@ -6428,6 +6542,8 @@ mod tests {
                 model: Some(" \t ".to_string()),
                 reasoning: Some("  ".to_string()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }),
             ..PmSettings::default()
         }
@@ -6441,6 +6557,8 @@ mod tests {
                 model: None,
                 reasoning: Some(" AUTO ".to_string()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }),
             ..PmSettings::default()
         }
@@ -6549,6 +6667,41 @@ mod tests {
         assert_eq!(
             pm_worktree_for_runtime_dir(&canonical_runtime),
             Some(dunce::canonicalize(&worktree).unwrap())
+        );
+    }
+
+    #[test]
+    fn pm_session_dir_is_the_same_from_every_pm_cwd() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        fs::create_dir_all(&worktree).unwrap();
+        let runtime = ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+        let references = runtime.join(".claude/skills/gwt-pm/references");
+        fs::create_dir_all(&references).unwrap();
+        let pm_dir = worktree.parent().unwrap().to_path_buf();
+        for cwd in [
+            worktree.clone(),
+            worktree.join("src"),
+            runtime.clone(),
+            references.clone(),
+        ] {
+            assert_eq!(
+                pm_session_dir_for_cwd(&cwd),
+                Some(pm_dir.clone()),
+                "cwd {}",
+                cwd.display()
+            );
+        }
+        assert_eq!(pm_session_dir_for_cwd(&pm_dir), None);
+        assert_eq!(pm_session_dir_for_cwd(home.path()), None);
+        let ordinary = home.path().join("repo/pm/worktree");
+        fs::create_dir_all(ordinary.parent().unwrap().join("runtime")).unwrap();
+        fs::create_dir_all(&ordinary).unwrap();
+        assert_eq!(pm_session_dir_for_cwd(&ordinary), None);
+        assert_eq!(
+            pm_session_dir_for_cwd(&ordinary.parent().unwrap().join("runtime")),
+            None
         );
     }
 

@@ -297,7 +297,9 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     const agent_id = profile.agent_id?.trim() || "";
     let reasoning = profile.reasoning?.trim() || null;
     if (role === "pm" && agent_id === "grok" && /^[aA][uU][tT][oO]$/.test(reasoning || "")) reasoning = null;
-    return { agent_id, model: profile.model?.trim() || null, reasoning };
+    return { agent_id, model: profile.model?.trim() || null, reasoning,
+      ...(role === "pm" && agent_id === "codex" && profile.codex_speed ? { codex_speed: profile.codex_speed } : {}),
+      ...(role === "pm" && agent_id === "claude" && typeof profile.fast_mode === "boolean" ? { fast_mode: profile.fast_mode } : {}) };
   };
   const equal = (left, right, role) => JSON.stringify(values(left, role)) === JSON.stringify(values(right, role));
   function setTarget(key, next) { model.update(state => ({ targets: { ...state.targets, [key]: next } })); }
@@ -356,10 +358,21 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
 
   function editTuning(role, memberId, patch, { composing = false } = {}) {
     const key = keyFor(role, memberId), target = model.read().targets[key];
-    if (!target || target.available === false || !patch || Object.keys(patch).some(field => !["agent_id", "model", "reasoning"].includes(field)
+    if (!target || target.available === false || !patch || Object.keys(patch).some(field => !["agent_id", "model", "reasoning", ...(role === "pm" ? ["speed"] : [])].includes(field)
       || patch[field] !== null && typeof patch[field] !== "string")) return;
     if (role === "implementation" && patch.agent_id !== undefined && patch.agent_id !== target.canonical.agent_id) return;
-    setTarget(key, { ...target, draft: { ...target.draft, ...patch }, composing,
+    const { speed, ...profilePatch } = patch;
+    const draft = { ...target.draft, ...profilePatch };
+    if (profilePatch.agent_id !== undefined && profilePatch.agent_id !== target.draft.agent_id) {
+      delete draft.codex_speed; delete draft.fast_mode;
+    }
+    if (speed !== undefined) {
+      const supported = draft.agent_id === "codex" ? ["", "off", "fast", "ultrafast"] : draft.agent_id === "claude" ? ["", "off", "fast"] : [];
+      if (!supported.includes(speed)) return;
+      if (draft.agent_id === "codex") draft.codex_speed = speed || undefined;
+      else draft.fast_mode = speed === "" ? undefined : speed === "fast";
+    }
+    setTarget(key, { ...target, draft, composing,
       status: composing ? "editing" : target.blocked ? "error" : target.pending ? "saving" : "queued" });
     sendNext();
   }
@@ -404,7 +417,8 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     setPmMember(status.configured_member_id);
     applyTuningSnapshot({ project_key: projectKey, role: "pm", member_id: status.configured_member_id,
       revision: status.profile_revision, agent_options: status.agent_options, agent_id: status.configured_agent_id,
-      model: status.configured_model, reasoning: status.configured_reasoning });
+      model: status.configured_model, reasoning: status.configured_reasoning,
+      codex_speed: status.configured_codex_speed, fast_mode: status.configured_fast_mode });
     setTuningAvailable("pm", status.configured_member_id, true);
   }
 
@@ -444,7 +458,8 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     if (target?.pending?.request_id !== event.request_id || pmMemberId !== undefined && event.member_id !== pmMemberId) return;
     const snapshot = event.profile && typeof event.profile_revision === "string" && event.profile_revision
       ? { project_key: projectKey, role: "pm", member_id: event.member_id, revision: event.profile_revision,
-        agent_id: event.profile.agent_id, model: event.profile.model, reasoning: event.profile.reasoning } : null;
+        agent_id: event.profile.agent_id, model: event.profile.model, reasoning: event.profile.reasoning,
+        codex_speed: event.profile.codex_speed, fast_mode: event.profile.fast_mode } : null;
     if (event.success && snapshot) applyTuningSnapshot(snapshot, event.request_id);
     else {
       if (snapshot && (target.canonical.revision === target.pending.baseRevision || target.canonical.revision === snapshot.revision)) applyTuningSnapshot(snapshot);

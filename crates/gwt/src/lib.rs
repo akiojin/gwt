@@ -9,6 +9,7 @@ pub mod agent_registry_import;
 pub mod agent_resource_policy;
 pub mod docker_launch;
 pub mod launch_runtime;
+pub mod owner_recovery;
 pub mod pane_runtime;
 pub mod session_finalizer;
 pub mod session_launch;

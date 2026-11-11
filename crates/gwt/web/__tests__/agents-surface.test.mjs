@@ -295,6 +295,28 @@ test("Issue #6362 Agents keeps census-proven work busy before catalog hydration 
   f.surface.dispose();
 });
 
+test("Issue #7035 Agents lists slot-occupying review windows with name, target and state, and counts them as busy", async () => {
+  const f = await fixture();
+  f.activityModel.update(state => ({ ...state, count: 2, agents: [...state.agents,
+    { window_id: "review", session_id: "r1", runtime_incarnation: 1, issue_number: 2970, is_pm: false, review_dispatch: true, agent_name: "ウタ" }] }));
+  f.flush();
+  const reviews = f.surface.element.querySelector('[aria-label="Review windows"]');
+  assert.ok(reviews && !reviews.hidden, "running review windows are listed in Team");
+  const row = reviews.querySelector('.roster-row[data-review-session-id="r1"]');
+  assert.ok(row, "one row per observed review window");
+  assert.equal(row.querySelector("h3").textContent, "ウタ");
+  assert.equal(row.querySelector(".roster-purpose").textContent, "Review · Issue #2970");
+  assert.equal(row.querySelector(".roster-state").textContent, "Reviewing #2970");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="r1"]'), null, "a reviewer is not a roster member");
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 2 \/ Team 2/,
+    "Busy counts the implementation member and the review window that both hold slots");
+  f.activityModel.update(state => ({ ...state, count: 1, agents: state.agents.filter(agent => !agent.review_dispatch) }));
+  f.flush();
+  assert.equal(reviews.hidden, true, "the list hides once no review window runs");
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  f.surface.dispose();
+});
+
 const planned = () => ({ snapshot: { project_key: "project", roster_revision: 3, queue_revision: "queue-v1:one", schedule_revision: 7,
   members: [{ agent_member_id: "m1", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }, { issue_number: 5004, reason: "assigned_by_you" }], empty_reason: null },
     { agent_member_id: "m2", issues: [], empty_reason: "No queued issue" }] }, error: null, pending: false });

@@ -628,6 +628,8 @@ impl AppRuntime {
                 configured_agent_id: String::new(),
                 configured_model: None,
                 configured_reasoning: None,
+                configured_codex_speed: None,
+                configured_fast_mode: None,
                 running_agent_id: None,
                 running_model: None,
                 running_reasoning: None,
@@ -2512,7 +2514,9 @@ impl AppRuntime {
                 snapshot.configured_pm_member(&gwt_core::paths::project_scope_hash(project_root))
             })
             .map_err(|error| format!("PM selection is unavailable: {error}"))?;
-        let profile = prefs.settings.launch_profile_or_default();
+        let profile = prefs
+            .settings
+            .launch_profile_with_agent_defaults(project_root);
         // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
         // skill that managed-asset materialization writes into this worktree.
         // Writing it here instead would be futile — the launch's own asset
@@ -2591,7 +2595,9 @@ impl AppRuntime {
             .unwrap_or(gwt_agent::AgentId::ClaudeCode);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
             .working_dir(worktree.to_path_buf())
-            .skip_permissions(true);
+            .skip_permissions(true)
+            .codex_speed(profile.codex_speed.unwrap_or_default())
+            .fast_mode(profile.fast_mode.unwrap_or(false));
         if pm_registry::pm_autonomous_bootstrap_allowed(worktree) {
             builder = builder.extra_arg(PM_BOOTSTRAP_PROMPT);
         }

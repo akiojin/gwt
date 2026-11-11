@@ -240,6 +240,8 @@ fn observe_local_agent_activity(
             issue_number: observed.issue_number,
             is_pm: candidate.is_pm,
             current_task: candidate.is_pm.then(|| pm_current_task.clone()).flatten(),
+            review_dispatch: session.review_dispatch,
+            agent_name: session.agent_name.clone(),
         });
     }
     agents.sort_by(|left, right| {
@@ -6942,6 +6944,8 @@ mod bounded_cache_merge_tests {
                 issue_number: Some(4777),
                 is_pm: false,
                 current_task: None,
+                review_dispatch: false,
+                agent_name: None,
             }]),
         });
         let payload: Arc<str> = Arc::from(

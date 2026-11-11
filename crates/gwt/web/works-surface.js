@@ -4,9 +4,9 @@ const seconds = value => finite(value) ? `${Math.floor(value / 3600)}h ${Math.fl
 const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", stopped: "stopped", exited: "stopped", error: "error", interrupted: "interrupted" })[status] || "unknown";
 const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 
-// Live activity owns membership; a separately arriving catalog only enriches
-// the row and authorizes access to its exact session's local terminal.
-function currentWorks(catalog, activity, roster, projectKey) {
+// Live activity owns active membership. Explicitly stopped catalog windows
+// remain readable without granting the former runtime input authority.
+function currentWorks(catalog, activity, roster, projectKey, entries) {
   const app = catalog.appState, members = roster.members || [];
   const windows = (app.tabs || []).filter(tab => !(projectKey ?? activity.snapshot?.project_key)
     || tab.project_key === (projectKey ?? activity.snapshot.project_key)).flatMap(tab => tab.workspace?.windows || []);
@@ -15,14 +15,34 @@ function currentWorks(catalog, activity, roster, projectKey) {
     const index = windows.findIndex(data => data.id === work.data.id);
     return members.length + (index < 0 ? windows.length : index);
   };
-  return (activity.agents || []).map(assignment => {
+  const live = activity.agents || [];
+  const works = live.map(assignment => {
     const matched = windows.find(data => data.id === assignment.window_id
       && data.session_id === assignment.session_id && data.preset !== "shell");
     const data = matched || { id: assignment.window_id };
     const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
     return { data, assignment, member, projectKey: projectKey ?? activity.snapshot?.project_key, hostId: activity.snapshot?.host_id, ready: !!matched,
       state: matched ? stateFor(catalog.runtimeStates[data.id] ?? data.status) : "unknown" };
-  }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
+  });
+  for (const data of windows) {
+    if (live.some(assignment => assignment.window_id === data.id)
+      || !data.session_id || data.persist !== false
+      || !(data.agent_id || ["agent", "claude", "codex"].includes(data.preset))
+      || data.preset === "shell"
+      || stateFor(catalog.runtimeStates[data.id] ?? data.status) !== "stopped") continue;
+    const previous = entries?.get(data.id)?.work;
+    const hostId = activity.snapshot?.host_id ?? previous?.hostId;
+    const assignment = previous?.assignment.session_id === data.session_id
+      && previous.hostId === hostId && finite(data.runtime_started_at_ms)
+      && previous.data.runtime_started_at_ms === data.runtime_started_at_ms
+      ? previous.assignment
+      : { window_id: data.id, session_id: data.session_id,
+        issue_number: data.linked_issue_number, is_pm: !!data.is_pm };
+    const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
+    works.push({ data, assignment, member, projectKey: projectKey ?? activity.snapshot?.project_key,
+      hostId, ready: true, state: "stopped", retained: true });
+  }
+  return works.sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
 
 const sparkStates = new WeakMap();
@@ -118,7 +138,7 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
   function exactWork(target, catalog = windowCatalogModel.read().catalog) {
     const requested = typeof target === "string" ? { window_id: target } : target;
     if (!requested?.window_id) return null;
-    return currentWorks(catalog, activityModel.read(), rosterModel.read(), projectKey).find(work =>
+    return currentWorks(catalog, activityModel.read(), rosterModel.read(), projectKey, entries).find(work =>
       work.ready && (!projectKey || activityModel.read().snapshot?.project_key === projectKey) &&
       (requested.hostId === undefined || requested.hostId === work.hostId) &&
       work.assignment.window_id === requested.window_id &&
@@ -137,7 +157,7 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
     full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${providerFor(work)} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
     full.querySelector(".works-full-usage").textContent = `${number(t.input_tokens)} input / ${number(t.cache_tokens)} cache / ${number(t.output_tokens)} output · Context ${finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—"}`;
     // Attachment progress may remain after another surface moves the native xterm.
-    if ((rehost || !entry.terminal.querySelector(".xterm")) && work.ready && isPresented()) { mountTerminal(work.data.id, entry.terminal, { readOnly: false, identity: targetFor(work) }); entry.revoked = false; }
+    if ((rehost || !entry.terminal.querySelector(".xterm")) && work.ready && isPresented()) { mountTerminal(work.data.id, entry.terminal, { readOnly: work.retained === true, identity: targetFor(work) }); entry.revoked = false; }
   }
   function openWork(target) {
     if (disposed) return false;
@@ -244,7 +264,7 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
       && left.catalogConflict === right.catalogConflict;
   }
   function displayWorks(catalog, activity, roster) {
-    const live = currentWorks(catalog, activity, roster, projectKey);
+    const live = currentWorks(catalog, activity, roster, projectKey, entries);
     const snapshot = activity.snapshot;
     const tabs = catalog.appState.tabs || [];
     const foreign = (projectKey && snapshot && snapshot.project_key !== projectKey)
@@ -291,7 +311,7 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
     const catalog = incomingCatalog(state);
     for (const entry of entries.values()) {
       const authorized = exactWork(targetFor(entry.work), catalog);
-      if (!authorized) {
+      if (!authorized || authorized.retained) {
         entry.revoked = true;
         onRevokeTerminal(entry.work.data.id, entry.terminal, targetFor(entry.work));
       }
@@ -366,7 +386,7 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {
     if (!exactWork(selected)) return;
-    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read(), projectKey).filter(work => work.ready);
+    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read(), projectKey, entries).filter(work => work.ready);
     const index = works.findIndex(work => work.assignment.window_id === selected?.window_id && work.assignment.session_id === selected?.session_id && work.assignment.runtime_incarnation === selected?.runtime_incarnation);
     if (index < 0 || !works.length) return;
     openWork(works[(index + delta + works.length) % works.length].assignment);

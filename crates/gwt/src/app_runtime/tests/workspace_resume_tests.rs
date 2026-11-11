@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn bootstrap_defers_physical_restores_until_runtime_ownership_is_installed() {
+    // Quit can discard PendingApp before the event loop installs its owner
+    // subscribers. Bootstrap therefore prepares restores without starting a
+    // physical process; StartupReady resumes Continue without waiting for UI.
+    let source = include_str!("../startup.rs");
+    let bootstrap = source
+        .split_once("pub(crate) fn bootstrap(&mut self)")
+        .expect("bootstrap implementation")
+        .1
+        .split_once("\n    }\n")
+        .expect("bootstrap boundary")
+        .0;
+    assert!(
+        !bootstrap.contains("self.start_window("),
+        "startup Quit must not inherit a shell launched before GUI ownership is installed"
+    );
+    assert!(
+        !bootstrap.contains("self.startup_auto_resume_ready_events()"),
+        "Continue must resume after GUI ownership is installed, including legacy PM restores"
+    );
+}
+
+#[test]
+fn installed_startup_resumes_continue_without_a_browser_ready_event() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    gwt_core::project_execution_policy::choose(
+        &repo,
+        &gwt_core::project_execution_policy::ChoiceRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: 0,
+            generation: 1,
+            choice: gwt_core::project_execution_policy::Choice::Continue,
+            consent_source_id: "explicit-continue".into(),
+            actor: "browser:fixture".into(),
+            authorized_work_lineage: vec!["pm".into()],
+        },
+    )
+    .unwrap();
+    runtime.bootstrap();
+    assert_eq!(runtime.pending_startup_pm_tabs, vec!["tab-1"]);
+    runtime.resume_bootstrapped_runtimes();
+    assert!(
+        runtime.pending_startup_pm_tabs.is_empty(),
+        "Continue must consume its prepared PM queue before any browser-ready event"
+    );
+    assert!(recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, UserEvent::Dispatch(_))));
+}
+
+#[test]
 fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() {
     let source = include_str!("../startup.rs");
     let bootstrap = source

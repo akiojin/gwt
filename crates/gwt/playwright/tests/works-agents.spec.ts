@@ -342,6 +342,25 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".works-empty")).toHaveText("No local agents are active.");
   });
 
+  test("Issue #7035 Agents lists slot-occupying review windows and counts them as busy", async ({ page }, info) => {
+    await openRail(page, "agents");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 2 / Team 3");
+    const reviews = roster(page).getByRole("list", { name: "Review windows" });
+    await expect(reviews).toBeHidden();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reviewWindow(2970));
+    await expect(reviews).toBeVisible();
+    const row = reviews.locator('.roster-row[data-review-session-id="s-review"]');
+    await expect(row.locator("h3")).toHaveText("Uta");
+    await expect(row.locator(".roster-purpose")).toHaveText("Review · Issue #2970");
+    await expect(row.locator(".roster-state")).toHaveText("Reviewing #2970");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 3 / Team 3");
+    await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+    await page.screenshot({ path: info.outputPath("issue-7035-review-windows.png") });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(["pm-window", "agent-one"]));
+    await expect(reviews).toBeHidden();
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
+  });
+
   test("PM-first list opens the same native terminal, passes Esc and links exact current members", async ({ page }, info) => {
     await expect(works(page).locator(".work-row")).toHaveCount(3);
     expect(await works(page).locator(".work-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.windowId))).toEqual(["pm-window", "agent-one", "agent-two"]);
@@ -1276,6 +1295,11 @@ async function installWorksAgentsBackend(page: Page) {
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
       releaseSchedule() { if (!pendingSchedule) throw new Error("no schedule mutation is pending"); const action = pendingSchedule; pendingSchedule = null; applySchedule(action); },
       output(id: string, text: string) { socket.emit({ kind: "terminal_output", id, data_base64: btoa(text) }); },
+      reviewWindow(issue_number: number) {
+        agents = [...agents, { window_id: "review-window", session_id: "s-review", runtime_incarnation: 1, issue_number,
+          is_pm: false, review_dispatch: true, agent_name: "Uta" }];
+        socket.emit(activity());
+      },
       census(ids: string[] | null) {
         if (ids !== null) agents = agents.filter(agent => ids.includes(agent.window_id));
         const snapshot = activity().projection.local_agent_activity;

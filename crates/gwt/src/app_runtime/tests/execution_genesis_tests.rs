@@ -455,7 +455,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
         );
         let sessions = gwt_core::paths::gwt_sessions_dir();
         assert!(!sessions.join(format!("{}.toml", source.id)).exists());
-        let retained_after_failure = durable_launch_recovery_exists(&sessions, &source.id);
+        let retained_after_failure = durable_launch_recovery_exists(&sessions, &source.id).unwrap();
         owner.shutdown().await;
         let mut retained_during_startup_fault = None;
         if roster_read_fails {
@@ -474,7 +474,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
                 "{health}"
             );
             retained_during_startup_fault =
-                Some(durable_launch_recovery_exists(&sessions, &source.id));
+                Some(durable_launch_recovery_exists(&sessions, &source.id).unwrap());
             failed_retry.shutdown().await;
             fs::remove_dir(&prefs_path).unwrap();
             fs::rename(&prefs_backup, &prefs_path).unwrap();
@@ -533,7 +533,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
                 "roster recovery failure must retain its durable retry receipt"
             );
         }
-        assert!(!durable_launch_recovery_exists(&sessions, &source.id));
+        assert!(!durable_launch_recovery_exists(&sessions, &source.id).unwrap());
         let assignment = member_before.assignment.as_ref().unwrap();
         assert!(!assignment.reservation_id.is_empty());
         assert_eq!(assignment.session_id.as_deref(), Some(source.id.as_str()));
@@ -1180,10 +1180,7 @@ fn startup_genesis_receipt_imports_flat_authority_and_terminalizes_crash_window(
         ledger.current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
 }
 
 #[cfg(unix)]
@@ -1312,10 +1309,7 @@ fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
 }
 
 #[test]
@@ -1399,10 +1393,7 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         fs::read(&session_path).expect("read retained replacement Session"),
         replacement_before,
     );
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
     assert_optional_files_unchanged(&authority_before);
     assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     session
@@ -1440,10 +1431,7 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         .sessions_dir
         .join(format!("{session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
 }
 
 #[test]
@@ -1928,7 +1916,8 @@ fn continue_work_ready_timeout_hands_off_a_live_pane_instead_of_killing_it() {
     assert!(durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         &fixture.pending.binding.session_id
-    ));
+    )
+    .unwrap());
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &fixture.repo,
@@ -1995,7 +1984,8 @@ fn continue_work_ready_timeout_late_session_start_still_activates_after_a_handof
     assert!(!durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         &fixture.pending.binding.session_id
-    ));
+    )
+    .unwrap());
     fixture.shutdown();
 }
 

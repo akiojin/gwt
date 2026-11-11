@@ -195,15 +195,44 @@ impl IssueMonitorPrefs {
     }
 }
 
+/// Issue #7027: why an enabled member cannot take automatic work, or `None`
+/// when a pooled profile is bound to it with its own tool. Whether that tool
+/// starts stays with the launch path, which resolves the exact command.
+fn automatic_member_ineligibility(
+    pool: &[IssueMonitorLaunchProfile],
+    member: &AgentMember,
+) -> Option<String> {
+    let Some(profile) = pool
+        .iter()
+        .find(|profile| profile.agent_member_id.as_deref() == Some(&member.agent_member_id))
+    else {
+        return Some("not_in_launch_profiles".into());
+    };
+    if member
+        .agent_id
+        .as_deref()
+        .and_then(normalize_issue_monitor_provider)
+        != normalize_issue_monitor_provider(&profile.agent_id)
+    {
+        return Some(format!(
+            "tool_mismatch(profile {}, member {})",
+            profile.agent_id,
+            member.agent_id.as_deref().unwrap_or("none")
+        ));
+    }
+    None
+}
+
 /// Build preferences only; reservations never acquire claims or authorize launches.
+/// Returns the idle local members that could not be planned, with reasons.
 fn reconcile(
     prefs: &mut IssueMonitorPrefs,
     specs: &BTreeMap<u64, u64>,
     historical: &BTreeMap<u64, String>,
     host: &str,
-) -> io::Result<()> {
+) -> io::Result<BTreeMap<String, String>> {
     let Some(roster) = prefs.agent_roster.as_ref() else {
-        return Ok(());
+        return Ok(BTreeMap::new());
     };
     prefs
         .agent_issue_schedule
@@ -215,29 +244,29 @@ fn reconcile(
         .map(|queue| prefs.urgent_queue.projection(queue).entries)
         .unwrap_or_default();
     let pool = prefs.launch_profile_pool();
-    let selected = pool
+    let bound = pool
         .first()
-        .filter(|profile| profile.agent_member_id.is_some())
-        .map(|primary| {
-            pool.iter()
-                .filter(|profile| {
-                    normalize_issue_monitor_provider(&profile.agent_id)
-                        == normalize_issue_monitor_provider(&primary.agent_id)
-                })
-                .filter_map(|profile| profile.agent_member_id.as_deref())
-                .collect::<BTreeSet<_>>()
-        });
-    let eligible = |member: &&AgentMember| {
+        .is_some_and(|profile| profile.agent_member_id.is_some());
+    let mut ineligible = BTreeMap::new();
+    let mut members = Vec::new();
+    for member in roster.members.iter().filter(|member| {
         member.enabled
             && member.implementation_eligible()
-            && selected
-                .as_ref()
-                .is_none_or(|ids| ids.contains(member.agent_member_id.as_str()))
             && member.assignment.as_ref().is_none_or(|assignment| {
                 assignment.host_id.is_empty() || assignment.host_id == host
             })
-    };
-    let members: Vec<_> = roster.members.iter().filter(eligible).collect();
+    }) {
+        match bound
+            .then(|| automatic_member_ineligibility(&pool, member))
+            .flatten()
+        {
+            Some(reason) if member.assignment.is_none() => {
+                ineligible.insert(member.agent_member_id.clone(), reason);
+            }
+            Some(_) => {}
+            None => members.push(member),
+        }
+    }
     let before = prefs.agent_issue_schedule.reservations.clone();
     let mut reservations = before
         .iter()
@@ -430,7 +459,7 @@ fn reconcile(
         prefs.agent_issue_schedule.reservations = reservations;
         prefs.agent_issue_schedule.advance()?;
     }
-    Ok(())
+    Ok(ineligible)
 }
 
 fn context(
@@ -581,7 +610,7 @@ impl IssueMonitorState {
                 .revision,
         ));
         let (specs, historical) = context(root, &prefs, &sessions);
-        reconcile(
+        self.agent_schedule_ineligible = reconcile(
             &mut prefs,
             &specs,
             &historical,
@@ -644,7 +673,7 @@ impl IssueMonitorState {
             .iter()
             .find(|entry| entry.issue_number == number && entry.host_id != host)
         {
-            return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.schedule.read on that host before changing its queue", foreign.host_id));
+            return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.queue.list for that terminal; use issue.monitor.queue.adopt with terminal to recover a retired host, then read issue.monitor.schedule.read", foreign.host_id));
         }
         if let Some(reason) = self.agent_switch_intents.values().find_map(|intent| {
             intent.admission_exclusion(Some(number), self.scheduled_agent_member_id(number), false)
@@ -705,7 +734,30 @@ impl IssueMonitorState {
                 )
             })
             .unwrap_or_else(|| "absent".into());
-        (!available).then(|| format!("scheduled_member_unavailable: expected enabled local idle member {id}; current {current} (including pending claims/deliveries); read issue.monitor.schedule.read and reassign or wait for that member"))
+        // Issue #7027 AC-3: name why the scheduled member itself cannot launch.
+        let own = member
+            .filter(|_| !tool_matches)
+            .and_then(|member| {
+                automatic_member_ineligibility(&self.prefs().launch_profile_pool(), member)
+            })
+            .map(|reason| format!("; scheduled member {id} not eligible: {reason}"))
+            .unwrap_or_default();
+        let current = format!("{current}{own}");
+        let excluded = self
+            .agent_schedule_ineligible
+            .iter()
+            .filter(|(member, _)| member.as_str() != id)
+            .map(|(member, reason)| format!("{member}={reason}"))
+            .collect::<Vec<_>>();
+        let excluded = if excluded.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; idle members not eligible for automatic plans: {}",
+                excluded.join(", ")
+            )
+        };
+        (!available).then(|| format!("scheduled_member_unavailable: expected enabled local idle member {id}; current {current} (including pending claims/deliveries){excluded}; move it with issue.monitor.schedule.reassign (read issue.monitor.schedule.read for revisions) or wait for that member"))
     }
 }
 
@@ -1416,9 +1468,10 @@ mod tests {
             .find(|entry| entry.issue_number == 41)
             .unwrap()
             .reason = AgentScheduleReason::QueueOrder;
-        assert!(
-            prefs.registered_launch_profiles_for_issue(41).is_empty(),
-            "automatic reservations retain the primary tool restriction"
+        assert_eq!(
+            prefs.registered_launch_profiles_for_issue(41),
+            profiles,
+            "Issue #7027: automatic reservations use the planned member's own tool"
         );
         prefs.pending_launch_deliveries.push(serde_json::from_value(serde_json::json!({
             "agent_member_id":profiles[0].agent_member_id, "delivery_id":"delivery-41", "issue_number":41,
@@ -2081,6 +2134,151 @@ mod tests {
         let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), adopted);
         assert!(restored.agent_schedule_launch_exclusion(41).is_none());
     }
+    /// Issue #7027: claude (busy, primary) + three idle codex members in the
+    /// pool, an idle grok member outside it, and two Issues planned on claude.
+    fn issue_7027_busy_plan() -> (
+        tempfile::TempDir,
+        gwt_core::test_support::ScopedGwtHome,
+        AgentRoster,
+        IssueMonitorPrefs,
+    ) {
+        let (temp, home, root, sessions, _) = fixture();
+        let roster = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Resize { size: 5 },
+            None,
+        )
+        .unwrap();
+        let busy = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "busy",
+            Some(99),
+            None,
+            None,
+            Some(&roster.members[0].agent_member_id),
+        )
+        .unwrap();
+        let host = crate::process::current_hostname();
+        let mut prefs =
+            load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+                .unwrap();
+        let members = &mut prefs.agent_roster.as_mut().unwrap().members;
+        members[0] = busy;
+        for (member, tool) in members
+            .iter_mut()
+            .zip(["claude", "codex", "codex", "codex", "grok"])
+        {
+            member.agent_id = Some(tool.into());
+        }
+        let profiles = members[..4]
+            .iter()
+            .map(|member| {
+                serde_json::from_value(serde_json::json!({
+                    "agent_id": member.agent_id, "agent_member_id": member.agent_member_id
+                }))
+                .unwrap()
+            })
+            .collect();
+        prefs.set_launch_profile_pool(profiles);
+        let queue = prefs.terminal_queues.get_mut(&host).unwrap();
+        queue.entries.retain(|entry| entry.number != 43);
+        prefs.agent_issue_schedule.reservations = [41, 42]
+            .map(|number| AgentIssueReservation {
+                host_id: host.clone(),
+                agent_member_id: roster.members[0].agent_member_id.clone(),
+                issue_number: number,
+                reason: AgentScheduleReason::QueueOrder,
+            })
+            .to_vec();
+        (temp, home, roster, prefs)
+    }
+
+    #[test]
+    fn issue_7027_busy_claude_plan_moves_to_idle_pooled_codex_members() {
+        let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
+        let host = crate::process::current_hostname();
+        let ineligible = reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        assert_eq!(
+            ineligible,
+            BTreeMap::from([(
+                roster.members[4].agent_member_id.clone(),
+                "not_in_launch_profiles".to_string()
+            )])
+        );
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let codex: Vec<_> = roster.members[1..4]
+            .iter()
+            .map(|member| member.agent_member_id.as_str())
+            .collect();
+        let planned: Vec<_> = [41, 42]
+            .map(|number| monitor.scheduled_agent_member_id(number).unwrap())
+            .to_vec();
+        assert!(planned.iter().all(|id| codex.contains(id)), "{planned:?}");
+        assert_ne!(planned[0], planned[1], "each idle member takes one Issue");
+        for number in [41, 42] {
+            assert_eq!(monitor.agent_schedule_launch_exclusion(number), None);
+            let profiles = monitor.prefs().registered_launch_profiles_for_issue(number);
+            assert_eq!(profiles.len(), 1);
+            assert_eq!(profiles[0].agent_id, "codex");
+        }
+    }
+
+    #[test]
+    fn issue_7027_ineligible_idle_members_are_named_in_the_exclusion() {
+        let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
+        let host = crate::process::current_hostname();
+        // The codex members now run grok, which their pooled profiles do not.
+        for member in &mut prefs.agent_roster.as_mut().unwrap().members[1..4] {
+            member.agent_id = Some("grok".into());
+        }
+        let ineligible = reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.agent_schedule_ineligible = ineligible;
+        let busy = roster.members[0].agent_member_id.as_str();
+        assert_eq!(monitor.scheduled_agent_member_id(41), Some(busy));
+        let reason = monitor.agent_schedule_launch_exclusion(41).unwrap();
+        assert!(
+            reason.starts_with("scheduled_member_unavailable:"),
+            "{reason}"
+        );
+        for member in &roster.members[1..4] {
+            let named = format!(
+                "{}=tool_mismatch(profile codex, member grok)",
+                member.agent_member_id
+            );
+            assert!(reason.contains(&named), "{reason}");
+        }
+        let grok = format!(
+            "{}=not_in_launch_profiles",
+            roster.members[4].agent_member_id
+        );
+        assert!(reason.contains(&grok), "{reason}");
+        assert!(
+            reason.contains("issue.monitor.schedule.reassign"),
+            "{reason}"
+        );
+    }
+
+    /// Issue #7027 AC-3: an Issue reassigned to an idle member outside the
+    /// pool names that member's own reason, not only the other members'.
+    #[test]
+    fn issue_7027_reassigned_member_outside_pool_names_its_own_reason() {
+        let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
+        let grok = roster.members[4].agent_member_id.clone();
+        prefs.agent_issue_schedule.reservations[0].agent_member_id = grok.clone();
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.scheduled_agent_member_id(41), Some(grok.as_str()));
+        let reason = monitor.agent_schedule_launch_exclusion(41).unwrap();
+        assert!(
+            reason.contains(&format!(
+                "scheduled member {grok} not eligible: not_in_launch_profiles"
+            )),
+            "{reason}"
+        );
+    }
+
     #[test]
     fn agent_schedule_new_plan_uses_idle_member_when_future_load_is_equal() {
         let (_temp, _home, root, sessions, roster) = fixture();

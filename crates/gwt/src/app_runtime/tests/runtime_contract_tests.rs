@@ -1163,6 +1163,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
         2,
         None,
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Degraded,
             detail: Some("fixture connection loss".into()),

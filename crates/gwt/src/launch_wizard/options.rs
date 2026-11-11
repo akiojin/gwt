@@ -1994,6 +1994,7 @@ mod tests {
             live_window_id: None,
             skip_permissions: true,
             codex_fast_mode: true,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
             docker_service: Some("gwt".to_string()),
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,

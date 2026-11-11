@@ -1076,6 +1076,7 @@ pub fn install_agent_launch(
     };
     // This function already runs on a blocking worker. Keep the file guard
     // entirely within the physical spawn, never across a GUI event handoff.
+    let phase = super::launch::LaunchPhaseTimer::start("pty_spawn");
     let spawn = if monitor_admission {
         crate::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
@@ -1103,6 +1104,7 @@ pub fn install_agent_launch(
             });
         }
     };
+    phase.finish();
     input.failed_launch = Some(Box::new(PreparedAgentLaunchSuccess {
         project_root: input.project_root.clone(),
         active_session: active.clone(),
@@ -1288,7 +1290,13 @@ pub fn install_agent_launch(
             ));
         }
     }
-    let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id) {
+    let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id)
+        .map_err(|error| {
+            format!(
+                "launch recovery probe failed for Session {session_id} ({:?}): {error}",
+                error.kind()
+            )
+        })? {
         None
     } else {
         gwt_agent::Session::load_and_migrate(&input.sessions_dir.join(format!("{session_id}.toml")))
@@ -2087,6 +2095,20 @@ impl PreparedIssueMonitorSpawnAdmission {
                     .all(IssueMonitorAdmissionFileStamp::is_current))
             && self.capacity_admits()
     }
+
+    /// Re-evaluate changed observations once, retaining all strict source fences.
+    pub fn revalidate_if_needed(
+        &mut self,
+        input: &IssueMonitorSpawnAdmissionInput,
+    ) -> Result<(), String> {
+        if !self.is_current(&input.host_project_roots) {
+            *self = input.refresh(self)?;
+            if !self.is_current(&input.host_project_roots) {
+                return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl IssueMonitorSpawnAdmissionInput {
@@ -2237,33 +2259,6 @@ impl IssueMonitorSpawnAdmissionInput {
             decision_revalidated: false,
         })
     }
-}
-
-fn ensure_owner_monitor_admission_current(
-    prepared: &mut PreparedIssueMonitorSpawnAdmission,
-    host_project_roots: &[PathBuf],
-    target_branch: &str,
-    issue_link_cache_dir: &Path,
-) -> Result<(), String> {
-    if prepared.is_current(host_project_roots) {
-        return Ok(());
-    }
-    if !prepared.can_revalidate(host_project_roots) {
-        return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-    }
-    let refreshed = IssueMonitorSpawnAdmissionInput {
-        project_root: prepared.project_root.clone(),
-        host_project_roots: host_project_roots.to_vec(),
-        issue_number: prepared.issue_number,
-        target_branch: target_branch.into(),
-        issue_link_cache_dir: issue_link_cache_dir.into(),
-    }
-    .refresh(prepared)?;
-    if !refreshed.is_current(host_project_roots) {
-        return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-    }
-    *prepared = refreshed;
-    Ok(())
 }
 
 pub(super) fn prepare_issue_monitor_spawn_capacity(
@@ -2465,6 +2460,11 @@ impl IssueMonitorLaunchClaimInput {
     pub fn claim_or_reuse(
         &self,
     ) -> Result<bool, crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+            issue_number = self.issue_number, delivery_id = %self.delivery_id,
+            window_id = %self.materializer_window_id);
+        let _claim_span = claim_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start("claim");
         let prefs = crate::load_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&self.project_root),
         )
@@ -2479,9 +2479,14 @@ impl IssueMonitorLaunchClaimInput {
                 crate::process::host_process_start_time(self.materializer_pid),
             )
         {
+            phase.finish();
             return Ok(true);
         }
-        self.claim_from_worker()
+        let result = self.claim_from_worker();
+        if result.is_ok() {
+            phase.finish();
+        }
+        result
     }
 
     fn matches_durable_claim(&self, prefs: &crate::IssueMonitorPrefs) -> bool {
@@ -2791,6 +2796,8 @@ pub(crate) struct OwnerAgentAdmissionInput<'a> {
     pub host_project_roots: &'a [PathBuf],
     pub snapshot: crate::IssueMonitorWindowSnapshot,
     pub snapshot_tabs: std::collections::BTreeSet<String>,
+    pub runtime_handles:
+        &'a std::collections::HashMap<String, std::sync::Arc<gwt_terminal::PtyHandle>>,
     pub known_names: &'a std::collections::HashSet<String>,
     pub metadata: OwnerLaunchMetadata,
     pub is_continue_work: bool,
@@ -2901,12 +2908,13 @@ pub(crate) fn prepare_owner_agent_admission(
             .as_ref()
             .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
-        ensure_owner_monitor_admission_current(
-            prepared,
-            input.host_project_roots,
-            config.branch.as_deref().unwrap_or_default(),
-            input.issue_link_cache_dir,
-        )?;
+        prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
+            project_root: input.project_root.into(),
+            host_project_roots: input.host_project_roots.to_vec(),
+            issue_number,
+            target_branch: config.branch.clone().unwrap_or_default(),
+            issue_link_cache_dir: input.issue_link_cache_dir.into(),
+        })?;
         if !review_dispatch
             && monitor_requested_tier.is_none()
             && !input.is_continue_work
@@ -2934,7 +2942,8 @@ pub(crate) fn prepare_owner_agent_admission(
                         let mut builder =
                             gwt_agent::AgentLaunchBuilder::new(config.agent_id.clone())
                                 .runtime_target(profile.runtime_target)
-                                .fast_mode(profile.fast_mode);
+                                .fast_mode(profile.fast_mode)
+                                .codex_speed(profile.codex_speed);
                         if let Some(model) = profile.model.or(default_model) {
                             builder = builder.model(model);
                         }
@@ -2946,6 +2955,7 @@ pub(crate) fn prepare_owner_agent_admission(
                             && expected.reasoning_level == config.reasoning_level
                             && expected.runtime_target == config.runtime_target
                             && expected.fast_mode == config.fast_mode
+                            && expected.codex_speed == config.codex_speed
                     },
                 );
                 if !matches {
@@ -2962,18 +2972,33 @@ pub(crate) fn prepare_owner_agent_admission(
         {
             return Err(format!("Issues active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"));
         }
+        // A terminal policy status can precede physical tree cleanup. Count
+        // that exact retained PTY for admission without rewriting the original
+        // diagnostic/claim snapshot or replacing the shared host census.
+        let mut capacity_snapshot = input.snapshot.clone();
+        for window in &mut capacity_snapshot.windows {
+            if !window.review_dispatch
+                && matches!(
+                    window.status,
+                    crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
+                )
+                && input
+                    .runtime_handles
+                    .get(&window.window_id)
+                    .is_some_and(|handle| !handle.tree_exit_confirmed())
+            {
+                window.status = crate::WindowProcessStatus::Running;
+            }
+        }
         if let Some(started) = crate::process::host_process_start_time(std::process::id()) {
             monitor.record_window_snapshot_from_host(
-                input.snapshot.clone(),
+                capacity_snapshot,
                 std::process::id(),
                 started,
                 input.snapshot_tabs.clone(),
             );
         } else {
-            monitor.record_window_snapshot_for_tabs(
-                input.snapshot.clone(),
-                input.snapshot_tabs.clone(),
-            );
+            monitor.record_window_snapshot_for_tabs(capacity_snapshot, input.snapshot_tabs.clone());
         }
         if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
             return Err(format!(
@@ -3043,6 +3068,7 @@ pub(crate) fn prepare_owner_agent_admission(
                             && profile.reasoning == config.reasoning_level
                             && profile.runtime_target == config.runtime_target
                             && profile.fast_mode == config.fast_mode
+                            && profile.codex_speed == config.codex_speed
                     })
                 });
                 if !prefs.launch_auto || !eligible {
@@ -3211,6 +3237,8 @@ pub(crate) fn prepare_owner_agent_admission(
                     agent_id: config.agent_id.command(),
                     model: config.model.as_deref(),
                     reasoning: config.reasoning_level.as_deref(),
+                    codex_speed: config.codex_speed,
+                    fast_mode: config.fast_mode,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -4361,6 +4389,7 @@ mod owner_admission_tests {
         };
         let roots = vec![root.clone()];
         let known = std::collections::HashSet::new();
+        let runtime_handles = std::collections::HashMap::new();
         let make_input = || OwnerAgentAdmissionInput {
             project_root: &root,
             sessions_dir: &sessions,
@@ -4374,6 +4403,7 @@ mod owner_admission_tests {
                 windows: vec![],
             },
             snapshot_tabs: Default::default(),
+            runtime_handles: &runtime_handles,
             known_names: &known,
             metadata: OwnerLaunchMetadata {
                 selected_agent_member_id: Some(id.clone()),
@@ -4430,6 +4460,20 @@ mod owner_admission_tests {
         );
         let reservation = fresh.env_vars.remove("GWT_AGENT_RESERVATION_ID").unwrap();
         crate::agent_names::release_project_member(&root, &sessions, &id, &reservation).unwrap();
+        let mut stale_speed = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("new-model")
+            .reasoning_level("medium")
+            .codex_speed(gwt_agent::CodexSpeed::Ultrafast)
+            .build();
+        stale_speed.branch = Some("work/issue-43".into());
+        assert!(
+            matches!(
+                prepare_owner_agent_admission(make_input(), &mut stale_speed),
+                Err(ref error) if error.contains(ISSUE_MONITOR_SPAWN_ADMISSION_STALE)
+            ),
+            "a stale selected member speed must be rejected before allocation"
+        );
         // Unspecified saved tuning must match the effective values produced by
         // the same wizard used for a fresh Monitor launch.
         for agent_id in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
@@ -4618,13 +4662,9 @@ mod owner_admission_tests {
         assert!(prepared.can_revalidate(&input.host_project_roots));
         let unchanged_bytes = std::fs::read(&prefs_path).unwrap();
 
-        ensure_owner_monitor_admission_current(
-            &mut prepared,
-            &input.host_project_roots,
-            &input.target_branch,
-            &input.issue_link_cache_dir,
-        )
-        .expect("owner must retain the same decision after unrelated target prefs churn");
+        prepared
+            .revalidate_if_needed(&input)
+            .expect("owner must retain the same decision after unrelated target prefs churn");
         assert!(prepared.is_current(&input.host_project_roots));
         assert_eq!(prepared.decision, original_decision);
         assert_eq!(prepared.purpose_title, original_purpose);
@@ -4644,14 +4684,204 @@ mod owner_admission_tests {
         assert!(!prepared.can_revalidate(&input.host_project_roots));
         let held_bytes = std::fs::read(&prefs_path).unwrap();
         assert_eq!(
-            ensure_owner_monitor_admission_current(
-                &mut prepared,
-                &input.host_project_roots,
-                &input.target_branch,
-                &input.issue_link_cache_dir,
-            ),
+            prepared.revalidate_if_needed(&input),
             Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into())
         );
         assert_eq!(std::fs::read(&prefs_path).unwrap(), held_bytes);
+    }
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    type PrefsUpdate = fn(&mut crate::IssueMonitorPrefs);
+
+    struct PrefsChurn {
+        path: PathBuf,
+        update: Arc<std::sync::Mutex<Option<PrefsUpdate>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PrefsChurn {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "gwt.launch.timing" {
+                return;
+            }
+            #[derive(Default)]
+            struct CapacityPhase(bool);
+            impl tracing::field::Visit for CapacityPhase {
+                fn record_debug(
+                    &mut self,
+                    _field: &tracing::field::Field,
+                    _value: &dyn std::fmt::Debug,
+                ) {
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0 |= field.name() == "phase" && value == "monitor_shared_capacity";
+                }
+            }
+            let mut phase = CapacityPhase::default();
+            event.record(&mut phase);
+            if phase.0 {
+                let update = self.update.lock().unwrap().take();
+                if let Some(update) = update {
+                    crate::try_mutate_issue_monitor_prefs(&self.path, |prefs| {
+                        update(prefs);
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    fn admit_after_prefs_update(
+        requested_tier: Option<u8>,
+        update: PrefsUpdate,
+    ) -> Result<PreparedOwnerAgentAdmission, String> {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let cache = crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap();
+        gwt_github::Cache::new(cache)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(7016),
+                author_login: None,
+                title: "Owner admission".into(),
+                body: String::new(),
+                labels: vec!["bug".into()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt(now.clone()),
+                comments: Vec::new(),
+            })
+            .unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_auto: requested_tier.is_some(),
+                launch_tiers: requested_tier.map_or_else(Vec::new, |_| {
+                    vec![vec![serde_json::from_value(serde_json::json!({
+                        "agent_id":"codex", "codex_speed":"fast"
+                    }))
+                    .unwrap()]]
+                }),
+                launch_profile: Some(
+                    serde_json::from_value(serde_json::json!({"agent_id":"codex"})).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let update = Arc::new(std::sync::Mutex::new(Some(update)));
+        let subscriber = tracing_subscriber::registry().with(PrefsChurn {
+            path,
+            update: update.clone(),
+        });
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&repo)
+            .branch("work/issue-7016")
+            .linked_issue_number(7016)
+            .codex_speed(if requested_tier.is_some() {
+                gwt_agent::CodexSpeed::Fast
+            } else {
+                gwt_agent::CodexSpeed::Off
+            })
+            .build();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            prepare_owner_agent_admission(
+                OwnerAgentAdmissionInput {
+                    project_root: &repo,
+                    sessions_dir: &gwt_core::paths::gwt_sessions_dir(),
+                    issue_link_cache_dir: &gwt_core::paths::gwt_cache_dir(),
+                    window_id: "tab::agent",
+                    materializer_id: "gui",
+                    host_project_roots: std::slice::from_ref(&repo),
+                    snapshot: crate::IssueMonitorWindowSnapshot {
+                        project_tab_id: "tab".into(),
+                        observed_at: now,
+                        windows: Vec::new(),
+                    },
+                    snapshot_tabs: std::collections::BTreeSet::from(["tab".into()]),
+                    runtime_handles: &std::collections::HashMap::new(),
+                    known_names: &HashSet::new(),
+                    metadata: OwnerLaunchMetadata {
+                        monitor_requested_tier: requested_tier,
+                        launch_feedback_context: Some(LaunchFeedbackContext {
+                            client_id: "fixture".into(),
+                            title: "Issues".into(),
+                            issue_monitor_issue_number: Some(7016),
+                            issue_monitor_delivery_id: None,
+                            issue_monitor_project_root: Some(repo.clone()),
+                            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
+                        }),
+                        ..Default::default()
+                    },
+                    is_continue_work: false,
+                    restore_source: None,
+                },
+                &mut config,
+            )
+        });
+        assert!(update.lock().unwrap().is_none(), "prefs churn was injected");
+        result
+    }
+
+    #[test]
+    fn issue_7016_owner_admission_revalidates_same_decision_prefs_churn() {
+        let result = admit_after_prefs_update(None, |prefs| prefs.priority_order = vec![7]);
+        assert!(result.is_ok(), "owner admission failed: {:?}", result.err());
+        let matching = admit_after_prefs_update(Some(0), |_| {});
+        assert!(
+            matching.is_ok(),
+            "the current Fast tier must be admitted: {:?}",
+            matching.err()
+        );
+        let stale = admit_after_prefs_update(Some(0), |prefs| {
+            prefs.launch_tiers[0][0].codex_speed = gwt_agent::CodexSpeed::Ultrafast;
+        });
+        assert!(
+            matches!(stale, Err(ref error) if error.contains("requested Monitor tier/config changed")),
+            "a tier speed changed after preparation must reject the stale draft: {:?}",
+            stale.err()
+        );
+    }
+
+    #[test]
+    fn issue_7016_owner_admission_preserves_strict_fences_after_prefs_churn() {
+        let result = admit_after_prefs_update(None, |prefs| {
+            prefs.update_drain = Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: chrono::Utc::now().to_rfc3339(),
+                reason: crate::IssueMonitorUpdateDrainReason::Manual,
+                automatic: None,
+                blocking: Vec::new(),
+            });
+        });
+        assert!(result.is_err_and(|error| error == ISSUE_MONITOR_SPAWN_ADMISSION_STALE));
     }
 }

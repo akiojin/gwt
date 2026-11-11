@@ -195,7 +195,9 @@ impl LaunchWizardState {
                 && show_runtime_confirmation,
             show_execution_mode: false,
             show_skip_permissions: false,
-            show_fast_mode: false,
+            show_fast_mode: show_manual_setup && self.effective_agent_id() == "claude",
+            show_codex_speed: show_manual_setup && self.agent_is_codex(),
+            codex_speed: self.codex_speed,
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
@@ -605,7 +607,12 @@ impl LaunchWizardState {
                 },
             });
         }
-        if self.current_agent_supports_fast_mode() {
+        if self.agent_is_codex() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Speed".to_string(),
+                value: format!("{:?}", self.codex_speed),
+            });
+        } else if self.current_agent_supports_fast_mode() {
             summary.push(LaunchWizardSummaryView {
                 label: "Fast mode".to_string(),
                 value: if self.fast_mode_enabled_for_current_agent() {
@@ -1599,6 +1606,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: true,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1679,6 +1687,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -1717,6 +1726,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1777,6 +1787,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1851,6 +1862,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1892,6 +1904,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1969,7 +1982,7 @@ mod tests {
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "off"));
+            .any(|item| item.label == "Speed" && item.value == "Off"));
     }
 
     #[test]
@@ -2262,6 +2275,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3121,6 +3135,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,

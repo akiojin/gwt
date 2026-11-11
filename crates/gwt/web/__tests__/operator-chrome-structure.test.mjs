@@ -2390,7 +2390,7 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
   );
 });
 
-test("Launch wizard omits permission and Fast mode choices while preserving other settings", () => {
+test("Launch wizard omits permission choices while preserving explicit provider speed settings", () => {
   assert.equal(
     launchWizardSource.includes("wizardAdvancedOpen"),
     false,
@@ -2404,16 +2404,13 @@ test("Launch wizard omits permission and Fast mode choices while preserving othe
     );
   }
 
-  // SPEC-1921 AC-1921-L2/L3: permissions and Fast mode are fixed launch
-  // behavior, including when an older backend View still advertises controls.
+  // Permission controls remain fixed; Issue #7030 restores explicit speed
+  // choices through provider-specific controls.
   for (const retired of [
     '"Launch settings"',
     '"Skip permission prompts"',
-    '"Fast mode"',
     "show_skip_permissions",
-    "show_fast_mode",
     "set_skip_permissions",
-    "set_fast_mode",
     "set_codex_fast_mode",
   ]) {
     assert.equal(

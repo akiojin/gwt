@@ -82,7 +82,6 @@ crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expir
 crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline|letdeadline=ResolutionDeadline::at(std::time::Instant::now()-Duration::from_millis(1),Duration::from_secs(1),)|1
 crates/gwt-github/src/client/http.rs|delayed_loopback_request|Ok((stream,_))=>breakstream,Err(error)iferror.kind()==std::io::ErrorKind::WouldBlock&&Instant::now()<accept_deadline=>|1
 crates/gwt-github/src/client/http.rs|delayed_loopback_request|letaccept_deadline=Instant::now()+Duration::from_secs(2)|1
-crates/gwt-github/src/client/http.rs|reqwest_execute_rejects_expired_scoped_deadline_before_submission|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1),)|1
 crates/gwt-github/src/client/http.rs|reqwest_execute_stops_delayed_loopback_response_at_scoped_deadline|assert!(elapsed<Duration::from_millis(750),)|1
 crates/gwt-github/src/client/http.rs|reqwest_execute_with_deadline_uses_earlier_scoped_deadline|assert!(elapsed<Duration::from_millis(750),)|1
 crates/gwt-github/tests/http_client_test.rs|accept_loopback_with_timeout|Ok((stream,_))=>returnstream,Err(error)iferror.kind()==ErrorKind::WouldBlock&&Instant::now()<deadline=>|1

@@ -2661,6 +2661,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: true,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -6182,7 +6183,8 @@ fn leave_fresh_execution_activated_before_projection_commit(
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .unwrap());
 }
 
 impl AppRuntime {
@@ -6597,7 +6599,7 @@ impl OwnerFreshLaunchFixture {
 fn assert_owner_fresh_launch_rolled_back(fixture: &OwnerFreshLaunchFixture) {
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let candidate = &fixture.pending.binding.session_id;
-    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate));
+    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate).unwrap());
     assert!(!sessions_dir.join(format!("{candidate}.toml")).exists());
     assert!(!gwt_agent::runtime_state_path(&sessions_dir, candidate).exists());
     assert!(LaunchWizardMemoryCache::load(&sessions_dir)
@@ -9308,6 +9310,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9326,6 +9329,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9788,6 +9792,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -10076,6 +10081,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         session_mode: Default::default(),
         skip_permissions: false,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
@@ -13013,3 +13019,6 @@ mod work_projection_tests;
 mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
+
+#[cfg(test)]
+mod codex_speed_tests;

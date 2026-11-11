@@ -38,6 +38,38 @@ use std::{
     sync::Arc,
 };
 
+/// Always-on launch diagnostics, including the phase interrupted by an error.
+/// The owner's span supplies the Issue, delivery and window identities.
+pub(super) struct LaunchPhaseTimer {
+    phase: &'static str,
+    started: std::time::Instant,
+    finished: bool,
+}
+
+impl LaunchPhaseTimer {
+    pub(super) fn start(phase: &'static str) -> Self {
+        tracing::info!(target: "gwt.launch.timing", phase, state = "started", "Issues owner launch phase");
+        Self {
+            phase,
+            started: std::time::Instant::now(),
+            finished: false,
+        }
+    }
+
+    pub(super) fn finish(mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for LaunchPhaseTimer {
+    fn drop(&mut self) {
+        tracing::info!(target: "gwt.launch.timing", phase = self.phase,
+            state = if self.finished { "finished" } else { "interrupted" },
+            elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            "Issues owner launch phase");
+    }
+}
+
 /// Inputs captured by the project owner; prepared authority never crosses its wire boundary.
 pub struct AgentLaunchInput {
     pub sessions_dir: PathBuf,
@@ -244,6 +276,7 @@ pub fn prepare_agent_launch(
                 "PM launch requires its exact owner-prepared member and profile reservation".into(),
             );
         }
+        let phase = LaunchPhaseTimer::start("worktree");
         emit(AgentLaunchEvent::Progress {
             message: "Preparing worktree...".to_string(),
         });
@@ -267,14 +300,18 @@ pub fn prepare_agent_launch(
             None
         };
         phases.mark("worktree");
+        phase.finish();
 
+        let phase = LaunchPhaseTimer::start("docker");
         emit(AgentLaunchEvent::Progress {
             message: "Starting Docker service...".to_string(),
         });
         let docker_launch_binding =
             prepare_docker_runtime_for_launch(Path::new(&project_root), &mut config)?;
         phases.mark("docker");
+        phase.finish();
 
+        let phase = LaunchPhaseTimer::start("environment");
         emit(AgentLaunchEvent::Progress {
             message: "Configuring work...".to_string(),
         });
@@ -310,10 +347,14 @@ pub fn prepare_agent_launch(
         }
         resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
         phases.mark("environment");
+        phase.finish();
+        let phase = LaunchPhaseTimer::start("runner_health");
         let runner_health_report = (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
             .then(|| resolve_host_runner_health_checked(&mut config))
             .transpose()?;
         phases.mark("runner_health");
+        phase.finish();
+        let phase = LaunchPhaseTimer::start("managed_assets");
         let codex_hook_discovery_mode =
             codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
         let managed_assets = refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
@@ -332,6 +373,8 @@ pub fn prepare_agent_launch(
             )
         })?;
         phases.mark("managed_assets");
+        phase.finish();
+        let phase = LaunchPhaseTimer::start("session");
         // Issue #4283 AC-5: a split of the phase above, not a sibling of
         // it. Materialization takes one lock per worktree and a short one
         // per repository; when this is most of `managed_assets` the fleet
@@ -840,7 +883,9 @@ pub fn prepare_agent_launch(
         // thread, never on the UI thread, and a worktree-local CODEX_HOME
         // has no contention to pace.
         phases.mark("session");
+        phase.finish();
         if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
+            let phase = LaunchPhaseTimer::start("codex_pace");
             let waited = gwt_agent::pace_shared_codex_spawn();
             if !waited.is_zero() {
                 tracing::debug!(
@@ -849,6 +894,7 @@ pub fn prepare_agent_launch(
                 );
             }
             phases.mark("codex_pace");
+            phase.finish();
         }
         Ok((
             process_launch,

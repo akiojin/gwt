@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "chrono",
  "dunce",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "dirs 7.0.0",
  "fs2",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1439,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.158.0"
+version = "9.161.1"
 dependencies = [
  "thiserror 2.0.21",
 ]

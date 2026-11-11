@@ -309,6 +309,8 @@ pub enum SkillStateAction {
 pub enum CliParseError {
     Usage,
     InvalidJson(String),
+    /// Fixed diagnostic: safe to display even when caller input must be redacted.
+    InvalidVerificationMode,
     InvalidNumber(String),
     MissingFlag(&'static str),
     InvalidValue {
@@ -322,6 +324,9 @@ impl std::fmt::Display for CliParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CliParseError::InvalidJson(message) => write!(f, "invalid JSON envelope: {message}"),
+            CliParseError::InvalidVerificationMode => {
+                write!(f, "verify.plan mode must be full or pre-pr")
+            }
             CliParseError::Usage => write!(
                 f,
                 "usage: gwtd < stdin JSON envelope; e.g. {{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{{\"status\":\"active\",\"summary\":\"<summary>\"}}}}. Managed hook transport remains gwtd hook event <Event>."

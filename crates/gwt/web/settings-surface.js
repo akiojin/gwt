@@ -476,6 +476,15 @@ export function renderMemberTuningControls(host, options) {
       input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
       input.addEventListener("input", event => edit(input.memberComposing || event.isComposing === true));
     }
+    if (target?.canonical.role === "pm") {
+      const label = document.createElement("label"); label.className = "settings-field";
+      const caption = document.createElement("span"); caption.textContent = "Speed";
+      const speed = document.createElement("select"); speed.className = "settings-select";
+      speed.dataset.memberTuningField = "speed"; speed.setAttribute("aria-label", "Speed");
+      setControlExplanation(speed, "Ultrafast requires an eligible Codex account and supported model. Provider warnings explain unavailable service tiers. Changes apply after restart.", "pm-speed");
+      speed.addEventListener("change", () => { if (owns(speed) && !speed.disabled) host.memberTuningOptions.onEdit({ speed: speed.value }); });
+      label.append(caption, speed); host.append(label);
+    }
     const modelUnavailable = document.createElement("p");
     modelUnavailable.className = "settings-help";
     modelUnavailable.setAttribute("role", "status");
@@ -494,7 +503,7 @@ export function renderMemberTuningControls(host, options) {
     ? target.canonical.agent_options.map(option => catalog.find(agent => agent.id === option.id) || option) : catalog;
   const entry = agentChoices.find(agent => agent.id === target?.draft.agent_id);
   const selectedModel = entry?.models?.find(model => model.value === target?.draft.model);
-  for (const input of host.querySelectorAll("[data-member-tuning-field]")) {
+  for (const input of host.querySelectorAll("input[data-member-tuning-field]")) {
     const key = input.dataset.memberTuningField, value = target?.draft[key] ?? "";
     if (!input.memberComposing && input.value !== value) input.value = value;
     input.disabled = !target || !editable || (key === "agent_id" && target.canonical.role === "implementation");
@@ -508,6 +517,21 @@ export function renderMemberTuningControls(host, options) {
       if (key === "model") option.label = entry?.models?.find(model => model.value === value)?.label || value;
       list.append(option);
     }
+  }
+  const speed = host.querySelector('[data-member-tuning-field="speed"]');
+  if (speed) {
+    const agentId = target?.draft.agent_id;
+    speed.parentElement.hidden = !["codex", "claude"].includes(agentId);
+    speed.disabled = !target || !editable;
+    const selected = agentId === "codex" ? target?.draft.codex_speed || ""
+      : typeof target?.draft.fast_mode === "boolean" ? target.draft.fast_mode ? "fast" : "off" : "";
+    speed.replaceChildren();
+    for (const value of agentId === "codex" ? ["", "off", "fast", "ultrafast"] : ["", "off", "fast"]) {
+      const option = document.createElement("option"); option.value = value;
+      option.textContent = value === "" ? "Agent Settings default" : value === "ultrafast" ? "Ultrafast" : value === "fast" ? "Fast" : "Off";
+      option.selected = value === selected; speed.append(option);
+    }
+    speed.setAttribute("aria-invalid", String(!!target?.error && (!target.field || ["codex_speed", "fast_mode"].includes(target.field))));
   }
   const model = target?.draft.model;
   const unlisted = Boolean(entry && (entry.id === "codex" || entry.models?.length) && model && !selectedModel);

@@ -20,6 +20,7 @@ import { parseHTML } from "linkedom";
 
 import { createMemberTuningModel } from "../agent-activity-model.js";
 import { createPmSettingsPanel } from "../pm-settings-panel.js";
+import { renderMemberTuningControls } from "../settings-surface.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
@@ -363,6 +364,50 @@ test("PM status preserves unlisted saved profile facts without mounting another 
   assert.equal(Boolean(document.querySelector('[data-member-tuning-field]')), false); assert.equal(sent.length, 0);
 });
 
+test("Issue #7030: shared PM editor restores Codex speed and keeps Claude speed separate", () => {
+  const { document, sent, panel, tuningController, flush } = fixture();
+  const host = document.createElement("aside"); document.body.append(host);
+  const render = () => renderMemberTuningControls(host, {
+    target: tuningController.model.read().targets["pm:pm-member"],
+    onEdit: patch => tuningController.editTuning("pm", "pm-member", patch),
+  });
+  panel.applyStatus({ ...RUNNING_STATUS, configured_agent_id: "codex", configured_codex_speed: "ultrafast" }); render();
+  const speed = required(host, '[data-member-tuning-field="speed"]');
+  assert.equal(speed.value, "ultrafast");
+  assert.deepEqual([...speed.querySelectorAll("option")].map(option => option.value), ["", "off", "fast", "ultrafast"]);
+  speed.querySelector('option[value="fast"]').selected = true; speed.dispatchEvent(changeEvent(document));
+  const request = sent.at(-1);
+  assert.equal(request.codex_speed, "fast"); assert.equal(request.fast_mode, undefined);
+  assert.equal(request.member_id, "pm-member"); assert.equal(request.expected_profile_revision, RUNNING_STATUS.profile_revision);
+  tuningController.applyPmTuningResult({ project_key: "project", member_id: "pm-member", request_id: request.request_id,
+    success: true, profile_revision: "pm-speed-next", profile: { agent_id: "codex", model: null, reasoning: null, codex_speed: "fast" } });
+  flush(); render(); assert.equal(host.querySelector('[data-member-tuning-status]').textContent, "Saved");
+  speed.querySelector('option[value=""]').selected = true; speed.dispatchEvent(changeEvent(document));
+  assert.equal(sent.at(-1).codex_speed, undefined, "the inherited choice clears the provider override");
+  tuningController.applyPmTuningResult({ project_key: "project", member_id: "pm-member", request_id: sent.at(-1).request_id,
+    success: true, profile_revision: "pm-speed-inherited", profile: { agent_id: "codex", model: null, reasoning: null, codex_speed: "fast" } });
+  flush(); render(); assert.match(host.querySelector('[data-member-tuning-status]').textContent, /changed elsewhere/);
+  assert.equal(speed.value, "", "a receipt retaining Fast cannot replace the clear-override draft");
+  tuningController.retryTuning("pm", "pm-member");
+  assert.equal(sent.at(-1).expected_profile_revision, "pm-speed-inherited");
+  tuningController.applyPmTuningResult({ project_key: "project", member_id: "pm-member", request_id: sent.at(-1).request_id,
+    success: true, profile_revision: "pm-speed-clear", profile: { agent_id: "codex", model: null, reasoning: null, codex_speed: null } });
+  flush(); render(); assert.equal(host.querySelector('[data-member-tuning-status]').textContent, "Saved");
+  assert.equal(speed.value, "", "a None receipt confirms the inherited setting");
+  panel.applyStatus({ ...RUNNING_STATUS, profile_revision: "pm-speed-claude", configured_fast_mode: true }); render();
+  assert.deepEqual([...speed.querySelectorAll("option")].map(option => option.value), ["", "off", "fast"]);
+  assert.equal(speed.value, "fast");
+  speed.querySelector('option[value="off"]').selected = true; speed.dispatchEvent(changeEvent(document));
+  assert.equal(sent.at(-1).fast_mode, false); assert.equal(sent.at(-1).codex_speed, undefined);
+  const claudeRequest = sent.at(-1);
+  tuningController.editTuning("pm", "pm-member", { agent_id: "codex" });
+  tuningController.applyPmTuningResult({ project_key: "project", member_id: "pm-member", request_id: claudeRequest.request_id,
+    success: true, profile_revision: "pm-speed-off", profile: { agent_id: "claude", model: null, reasoning: null, fast_mode: false } });
+  flush(); assert.equal(sent.at(-1).agent_id, "codex");
+  assert.equal(sent.at(-1).fast_mode, undefined); assert.equal(sent.at(-1).codex_speed, undefined, "changing tools does not carry the previous speed");
+  assert.equal(document.querySelector('[data-role="pm-speed-select"]'), null, "profile editing stays in Agents");
+});
+
 test("FR-121: Running as は稼働中の agent/model/effort を configured 値と分けて表示する", () => {
   const { document, panel } = fixture();
   panel.applyStatus({
@@ -566,6 +611,12 @@ test("FR-026: Restart は confirm を通ったときだけ restart_pm_agent を�
   accepted.panel.applyStatus(RUNNING_STATUS);
   required(accepted.document, '[data-role="pm-restart"]').click();
   assert.deepEqual(accepted.sent.at(-1), { kind: "restart_pm_agent" });
+});
+
+test("Issue #7030: inherited PM model and effort do not create a false Pending chip", () => {
+  const { document, panel } = fixture();
+  panel.applyStatus({ ...RUNNING_STATUS, running_model: "gpt-6-astra", running_reasoning: "high" });
+  assert.equal(document.querySelector('[data-role="pm-pending-chip"]').hidden, true);
 });
 
 test("FR-026: Pending チップは configured != running のときだけ出る", () => {
