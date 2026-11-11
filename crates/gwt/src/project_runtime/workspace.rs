@@ -8,6 +8,128 @@ use std::path::Path;
 
 use super::launch_payload::{ActiveAgentSession, WorkspaceResumeContext};
 
+/// Identify the finalizer whose bounded launch publication wait expired.
+pub fn workspace_finalizer_timeout_operation_id(message: &str) -> Option<&str> {
+    let (operation_id, _) = message
+        .strip_prefix("workspace finalizer ")?
+        .split_once(" timed out after ")?;
+    (!operation_id.is_empty() && !operation_id.chars().any(char::is_whitespace))
+        .then_some(operation_id)
+}
+
+// These callers run after releasing launch admission and Session leases. Keep
+// retries here: core transactions must return immediately on inverse lock paths.
+fn retry_workspace_launch_publication<T>(
+    mut publish: impl FnMut() -> gwt_core::error::Result<T>,
+) -> Result<T, String> {
+    use gwt_core::error::GwtError;
+    use gwt_core::operation_deadline::{current, now, ScopedOperationDeadline};
+    use std::time::Duration;
+
+    let started = now();
+    let _budget = ScopedOperationDeadline::enter(started + Duration::from_secs(120));
+    let deadline = current().expect("launch publication deadline is scoped");
+    let mut waiting = false;
+    loop {
+        match publish() {
+            Ok(value) => return Ok(value),
+            Err(GwtError::WorkspaceOperationInFlight { operation_id }) => {
+                if !waiting {
+                    tracing::info!(%operation_id, "launch Work publication waiting for live workspace finalizer");
+                    waiting = true;
+                }
+                let observed = now();
+                if observed < deadline {
+                    std::thread::sleep(
+                        Duration::from_millis(100)
+                            .min(deadline.saturating_duration_since(observed)),
+                    );
+                }
+                let observed = now();
+                if observed >= deadline {
+                    let elapsed_ms = observed.saturating_duration_since(started).as_millis();
+                    return Err(format!(
+                        "workspace finalizer {operation_id} timed out after {elapsed_ms}ms while publishing launch Work; live external commit did not finish before operation deadline"
+                    ));
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod launch_publication_tests {
+    use super::*;
+    use gwt_core::error::GwtError;
+    use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn launch_publication_retries_only_inflight_before_succeeding() {
+        let mut attempts = 0;
+        let result = retry_workspace_launch_publication(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(GwtError::WorkspaceOperationInFlight {
+                    operation_id: "fresh-launch-live".into(),
+                })
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn launch_publication_timeout_names_operation_and_preserves_other_failures() {
+        let start = Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        let _deadline = ScopedOperationDeadline::enter(start + Duration::from_secs(120));
+        let mut elapsed_clock = None;
+        let mut attempts = 0;
+        let result = retry_workspace_launch_publication::<()>(|| {
+            attempts += 1;
+            elapsed_clock = Some(ScopedOperationClock::set(start + Duration::from_secs(120)));
+            Err(GwtError::WorkspaceOperationInFlight {
+                operation_id: "fresh-launch-stuck".into(),
+            })
+        });
+        let error = result.unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error, "workspace finalizer fresh-launch-stuck timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline");
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id(&error),
+            Some("fresh-launch-stuck")
+        );
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id("ordinary failure"),
+            None
+        );
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id(
+                "workspace finalizer  timed out after 120000ms"
+            ),
+            None
+        );
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id(
+                "workspace finalizer two operations timed out after 120000ms"
+            ),
+            None
+        );
+        drop(elapsed_clock);
+        let mut attempts = 0;
+        let result = retry_workspace_launch_publication::<()>(|| {
+            attempts += 1;
+            Err(GwtError::Other("state is malformed".into()))
+        });
+        assert_eq!(attempts, 1);
+        assert_eq!(result, Err("state is malformed".into()));
+    }
+}
+
 /// SPEC-2359 US-80 (FR-427): register a Start-Work Shell as a first-class Work
 /// in the persisted projection so it appears in the Active Work / Workspace
 /// overview like an agent. Shell Works carry the window id as their identity
@@ -158,47 +280,48 @@ pub fn save_workspace_launch_projection(
     launch_kind: WorkspaceLaunchProjectionKind,
     live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now();
-    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
-        project_root,
-        &session.worktree_path,
-        |projection, work_items, _work_items_persisted| {
-            // A worker's launch-time snapshot cannot prove another concurrent
-            // launch is dead. Keep all persisted agents until the GUI requests
-            // a projection refresh with its current live-session registry.
-            let preserved_sessions;
-            let live_session_ids = match live_session_ids {
-                Some(live) => live,
-                None => {
-                    preserved_sessions = projection
-                        .agents
-                        .iter()
-                        .map(|agent| agent.session_id.clone())
-                        .collect();
-                    &preserved_sessions
-                }
-            };
-            let work_events = apply_workspace_launch_for_current_work(
-                project_root,
-                projection,
-                work_items,
-                session,
-                WorkspaceLaunchTransition {
-                    work_id: None,
-                    base_branch,
-                    linked_issue_number,
-                    canonical_owner,
-                    resume_context: workspace_resume_context,
-                    kind: launch_kind,
-                    live_session_ids,
-                    now,
-                },
-                false,
-            )?;
-            Ok(((), work_events))
-        },
-    )
-    .map_err(|error| error.to_string())
+    retry_workspace_launch_publication(|| {
+        gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            project_root,
+            &session.worktree_path,
+            |projection, work_items, _work_items_persisted| {
+                let now = chrono::Utc::now();
+                // A worker's launch-time snapshot cannot prove another concurrent
+                // launch is dead. Keep all persisted agents until the GUI requests
+                // a projection refresh with its current live-session registry.
+                let preserved_sessions;
+                let live_session_ids = match live_session_ids {
+                    Some(live) => live,
+                    None => {
+                        preserved_sessions = projection
+                            .agents
+                            .iter()
+                            .map(|agent| agent.session_id.clone())
+                            .collect();
+                        &preserved_sessions
+                    }
+                };
+                let work_events = apply_workspace_launch_for_current_work(
+                    project_root,
+                    projection,
+                    work_items,
+                    session,
+                    WorkspaceLaunchTransition {
+                        work_id: None,
+                        base_branch,
+                        linked_issue_number,
+                        canonical_owner,
+                        resume_context: workspace_resume_context,
+                        kind: launch_kind,
+                        live_session_ids,
+                        now,
+                    },
+                    false,
+                )?;
+                Ok(((), work_events))
+            },
+        )
+    })
 }
 
 /// Select the Work lifetime before attaching a new Session, under the same
@@ -673,17 +796,19 @@ pub fn save_start_work_workspace_projection(
     live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
     if workspace_resume_context.is_none() && linked_issue_number.is_none() {
-        let now = chrono::Utc::now();
-        return gwt_core::workspace_projection::mutate_workspace_projection(
-            project_root,
-            |projection| {
-                projection
-                    .register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
-                projection.updated_at = now;
-                Ok(())
-            },
-        )
-        .map_err(|error| error.to_string());
+        return retry_workspace_launch_publication(|| {
+            gwt_core::workspace_projection::mutate_workspace_projection(
+                project_root,
+                |projection| {
+                    let now = chrono::Utc::now();
+                    projection.register_unassigned_agent(unassigned_agent_summary_from_session(
+                        session, now,
+                    ));
+                    projection.updated_at = now;
+                    Ok(())
+                },
+            )
+        });
     }
     save_workspace_launch_projection(
         project_root,
