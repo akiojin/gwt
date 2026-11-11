@@ -13566,7 +13566,7 @@ enum ExecutionDiagnosisMode {
     Projection,
 }
 
-const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
+const PROTECTED_RECOVERY_OPERATIONS: [&str; 8] = [
     "build.abort",
     "execution.continue",
     "execution.repair",
@@ -13574,6 +13574,7 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "execution.reopen",
     "workspace.update",
     "workspace.ensure",
+    "workspace.reopen",
 ];
 
 /// Verification recoveries that `verify.*` accepts only from the Session
@@ -13644,7 +13645,7 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 21] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 22] = [
     "execution.settle_delivered",
     "pr.create_from_ci",
     "execution.release_prepared",
@@ -13656,6 +13657,7 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 21] = [
     "execution.adopt",
     "workspace.ensure",
     "workspace.update",
+    "workspace.reopen",
     // Issue #4465: the container-ambiguity refusal names these three. They
     // were absent, so the one refusal that actually needed a prune route could
     // not carry it across the bridge and the agent was left guessing.
@@ -14534,6 +14536,7 @@ fn finalize_recovery_probes(
                 crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
             ),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
+            workspace_reopen_recovery_probe(&snapshot, caller, recovery_context),
         ]
     } else {
         [
@@ -14544,6 +14547,7 @@ fn finalize_recovery_probes(
             "execution.reopen",
             "workspace.update",
             "workspace.ensure",
+            "workspace.reopen",
         ]
         .into_iter()
         .map(invalid_execution_recovery_scope_probe)
@@ -14639,6 +14643,59 @@ fn finalize_recovery_probes(
         snapshot.warnings.push(guidance);
     }
     snapshot
+}
+
+/// Advertise Work-only recovery only to the current primary actor while its
+/// execution remains Active and an attributable Done event can be reversed.
+fn workspace_reopen_recovery_probe(
+    snapshot: &ExecutionDiagnosisSnapshot,
+    caller: &str,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, RecoveryProbe};
+    let unavailable = |cause, reason| {
+        RecoveryProbe::unavailable(
+            "workspace.reopen",
+            protected_recovery_metadata(Some(cause), false),
+            reason,
+        )
+    };
+    if snapshot.ecr_status != ExecutionDiagnosisState::Active
+        || snapshot.binding_state != ExecutionBindingState::Bound
+    {
+        return unavailable(
+            GovernanceCause::DomainInvalid,
+            "workspace_reopen_requires_current_active_execution",
+        );
+    }
+    let Some(Ok(context)) = recovery_context else {
+        return invalid_execution_recovery_scope_probe("workspace.reopen");
+    };
+    let claim = crate::cli::workspace::native_primary_provider_session_id();
+    match crate::agent_project_state::diagnose_terminal_work_for_session(
+        context.project_state_root(),
+        caller,
+        claim.as_deref(),
+    ) {
+        Ok(Some(error))
+            if error
+                .details
+                .as_ref()
+                .is_some_and(|details| details.recoverable) =>
+        {
+            RecoveryProbe::available("workspace.reopen", protected_recovery_metadata(None, false))
+        }
+        Ok(None) => unavailable(
+            GovernanceCause::DomainInvalid,
+            "workspace_reopen_requires_observed_done_event",
+        ),
+        _ => unavailable(
+            GovernanceCause::Authority,
+            "workspace_reopen_primary_or_terminal_authority_unavailable",
+        ),
+    }
 }
 
 /// The Host permits identity updates only for the exact current Active or
@@ -28942,7 +28999,7 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 9);
+            assert_eq!(probes.len(), 10);
             assert!(probes.iter().all(|probe| {
                 let operation = probe["operation"].as_str().unwrap_or_default();
                 let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
@@ -29608,6 +29665,7 @@ exit 1
                     "verify.plan",
                     "verify.run",
                     "workspace.ensure",
+                    "workspace.reopen",
                     "workspace.update",
                 ],
             );
@@ -36746,6 +36804,71 @@ exit 1
                 probe["governance"]["cause"], "authority",
                 "the refusal the Host answers is an authority mismatch: {probe:?}"
             );
+        }
+
+        #[test]
+        fn status_advertises_work_reopen_only_for_primary_active_done_authority() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            let session_id = "session-work-reopen-probe";
+            let owner = prepare_generation_bound_execution(
+                repo.path(),
+                session_id,
+                3725,
+                ExecutionControlStatus::Active,
+            );
+            seed_build_abort_work_authority(repo.path(), session_id, owner);
+            let session_path =
+                gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+            let mut session = gwt_agent::Session::load(&session_path).unwrap();
+            session.agent_session_id = Some("private-reopen-primary".into());
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            let _native = ScopedEnvVar::set("CODEX_THREAD_ID", "private-reopen-primary");
+            let advertised = |snapshot: &serde_json::Value| {
+                snapshot["available_recoveries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|operation| operation == "workspace.reopen")
+            };
+            assert!(!advertised(&status_snapshot(repo.path(), session_id)));
+            crate::apply_authenticated_work_terminalization(
+                repo.path(),
+                session_id,
+                crate::AgentWorkTerminalizationRequest {
+                    schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+                    claimed_session_id: session_id.into(),
+                    primary_provider_session_id: session.agent_session_id.clone(),
+                    observation: crate::observe_agent_runtime(repo.path()).unwrap(),
+                    terminal_kind: crate::AgentWorkTerminalKind::Done,
+                },
+            )
+            .unwrap();
+            let eligible = status_snapshot(repo.path(), session_id);
+            assert!(advertised(&eligible), "{eligible:?}");
+            assert_all_operation_local_recovery_probes(&diagnose(repo.path(), Some(session_id)));
+            assert_projection_has_no_protected_recovery(&diagnose_for_projection(
+                repo.path(),
+                Some(session_id),
+            ));
+            {
+                let _helper = ScopedEnvVar::set("CODEX_THREAD_ID", "private-helper-thread");
+                assert!(!advertised(&status_snapshot(repo.path(), session_id)));
+            }
+            replace_current_generation_authority(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: owner.kind,
+                    number: 3726,
+                },
+            );
+            assert!(!advertised(&status_snapshot(repo.path(), session_id)));
         }
 
         /// Issue #4154 AC-1 / AC-2: `execution.adopt` transfers a settled

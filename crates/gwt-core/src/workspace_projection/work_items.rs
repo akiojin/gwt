@@ -150,6 +150,52 @@ pub enum WorkEventKind {
 
 /// One append-only event in a Work item's lifecycle. Events are folded into
 /// [`WorkItem`]s by [`WorkItemsProjection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAuthorityClass {
+    PrimaryAgent,
+    TrustedHost,
+}
+
+/// Nonsecret evidence identifying the operation authorized to close a Work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkTerminalProvenance {
+    pub source_operation: String,
+    pub authority_class: WorkAuthorityClass,
+    pub execution_generation: Option<String>,
+}
+
+impl WorkTerminalProvenance {
+    pub fn apply_to(&self, event: &mut WorkEvent) {
+        event.source_operation = Some(self.source_operation.clone());
+        event.authority_class = Some(self.authority_class);
+        event.execution_generation = self.execution_generation.clone();
+    }
+}
+
+/// The exact terminal event explicitly reversed by a recovery operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkRecoveryLink {
+    pub terminal_event_id: String,
+    pub reason: String,
+}
+
+/// Safe diagnostic details shared by terminal rejection and recovery paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkTerminalDiagnosis {
+    pub work_id: String,
+    pub event_id: Option<String>,
+    pub event_time: Option<DateTime<Utc>>,
+    pub source_operation: String,
+    pub authority_class: Option<WorkAuthorityClass>,
+    pub execution_generation: Option<String>,
+    pub terminal_kind: WorkEventKind,
+    pub recoverable: bool,
+    pub recovery_operation: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkEvent {
@@ -182,6 +228,14 @@ pub struct WorkEvent {
     pub execution_container: Option<WorkspaceExecutionContainerRef>,
     #[serde(default)]
     pub related_work_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_class: Option<WorkAuthorityClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<WorkRecoveryLink>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -332,6 +386,10 @@ impl WorkEvent {
             board_entry_id: None,
             execution_container: None,
             related_work_item_id: None,
+            source_operation: None,
+            authority_class: None,
+            execution_generation: None,
+            recovery: None,
             updated_at,
         }
     }
@@ -434,6 +492,76 @@ impl WorkItem {
     /// terminal close — either completed (Done) or explicitly discarded.
     pub fn is_terminal(&self) -> bool {
         self.status_category == WorkspaceStatusCategory::Done || self.discarded
+    }
+
+    /// Locate the accepted close for the current terminal interval, ignoring
+    /// later close attempts and closes superseded by an explicit Resume.
+    /// Eventless legacy terminal state has no attributable event.
+    pub fn current_terminal_event(&self) -> Option<&WorkEvent> {
+        if !self.is_terminal() {
+            return None;
+        }
+        if self.discarded {
+            let at = self.discarded_at?;
+            return self.events.iter().find(|event| {
+                event.updated_at == at
+                    && event.kind == WorkEventKind::Discard
+                    && workspace_work_event_status(event) != WorkspaceStatusCategory::Done
+            });
+        }
+        let resumed = self.events.iter().rposition(|event| {
+            event.kind == WorkEventKind::Resume
+                && event
+                    .status_category
+                    .is_some_and(|status| status != WorkspaceStatusCategory::Done)
+        });
+        if resumed.is_none()
+            && self
+                .legacy_metadata_snapshot
+                .as_deref()
+                .is_some_and(|item| item.is_terminal())
+        {
+            return None;
+        }
+        let at = self.completed_at?;
+        self.events
+            .iter()
+            .skip(resumed.map_or(0, |index| index + 1))
+            .find(|event| {
+                event.updated_at == at
+                    && event.kind != WorkEventKind::Backfill
+                    && workspace_work_event_status(event) == WorkspaceStatusCategory::Done
+            })
+    }
+
+    pub fn terminal_diagnosis(&self) -> Option<WorkTerminalDiagnosis> {
+        if !self.is_terminal() {
+            return None;
+        }
+        let event = self.current_terminal_event();
+        let recoverable =
+            !self.discarded && event.is_some_and(|event| event.kind == WorkEventKind::Done);
+        Some(WorkTerminalDiagnosis {
+            work_id: self.id.clone(),
+            event_id: event.map(|event| event.id.clone()),
+            event_time: event.map(|event| event.updated_at).or(if self.discarded {
+                self.discarded_at
+            } else {
+                self.completed_at
+            }),
+            source_operation: event
+                .and_then(|event| event.source_operation.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            authority_class: event.and_then(|event| event.authority_class),
+            execution_generation: event.and_then(|event| event.execution_generation.clone()),
+            terminal_kind: if self.discarded {
+                WorkEventKind::Discard
+            } else {
+                WorkEventKind::Done
+            },
+            recoverable,
+            recovery_operation: recoverable.then(|| "workspace.reopen".to_string()),
+        })
     }
 
     /// #3065: the most recent non-empty `next_action` across this Work's
@@ -1368,6 +1496,112 @@ mod tests {
             Some(format!("board-{}", clock - 1).as_str()),
             "the newest refs are the ones kept"
         );
+    }
+
+    #[test]
+    fn work_terminal_provenance_and_recovery_roundtrip_without_provider_identity() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
+        let mut value =
+            serde_json::to_value(WorkEvent::new(WorkEventKind::Done, "work", at)).unwrap();
+        value["source_operation"] = serde_json::json!("execution.complete");
+        value["authority_class"] = serde_json::json!("primary_agent");
+        value["execution_generation"] = serde_json::json!("generation-1");
+        let event: WorkEvent = serde_json::from_value(value.clone()).expect("read provenance");
+        assert_eq!(serde_json::to_value(event).unwrap(), value);
+
+        let mut resume =
+            serde_json::to_value(WorkEvent::new(WorkEventKind::Resume, "work", at)).unwrap();
+        resume["recovery"] = serde_json::json!({
+            "terminal_event_id": "terminal-1", "reason": "Completion was premature"
+        });
+        let event: WorkEvent = serde_json::from_value(resume.clone()).expect("read recovery link");
+        assert_eq!(serde_json::to_value(event).unwrap(), resume);
+    }
+
+    #[test]
+    fn terminal_diagnosis_tracks_current_close_after_resume_and_ignores_later_closes() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(at);
+        let first = WorkEvent::new(WorkEventKind::Done, "work", at);
+        projection.apply_event(first.clone());
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, "work", at));
+        assert_eq!(
+            projection.work_items[0].current_terminal_event(),
+            Some(&first)
+        );
+        assert_eq!(
+            projection.work_items[0]
+                .terminal_diagnosis()
+                .unwrap()
+                .source_operation,
+            "unknown"
+        );
+        let mut resume = WorkEvent::new(WorkEventKind::Resume, "work", at);
+        resume.status_category = Some(WorkspaceStatusCategory::Active);
+        resume.recovery = Some(WorkRecoveryLink {
+            terminal_event_id: first.id.clone(),
+            reason: "Premature completion".to_string(),
+        });
+        projection.apply_event(resume);
+        assert!(projection.work_items[0].terminal_diagnosis().is_none());
+        let mut second = WorkEvent::new(WorkEventKind::Done, "work", at);
+        WorkTerminalProvenance {
+            source_operation: "execution.complete".to_string(),
+            authority_class: WorkAuthorityClass::PrimaryAgent,
+            execution_generation: Some("generation-2".to_string()),
+        }
+        .apply_to(&mut second);
+        projection.apply_event(second.clone());
+        projection.apply_event(WorkEvent::new(WorkEventKind::Done, "work", at));
+        assert_eq!(
+            projection.work_items[0].current_terminal_event(),
+            Some(&second)
+        );
+        let diagnosis = projection.work_items[0].terminal_diagnosis().unwrap();
+        assert_eq!(diagnosis.event_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(diagnosis.source_operation, "execution.complete");
+        assert_eq!(
+            diagnosis.execution_generation.as_deref(),
+            Some("generation-2")
+        );
+        assert!(diagnosis.recoverable);
+        assert_eq!(
+            diagnosis.recovery_operation.as_deref(),
+            Some("workspace.reopen")
+        );
+    }
+
+    #[test]
+    fn terminal_diagnosis_preserves_discard_and_unknown_eventless_legacy() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(at);
+        let discard = WorkEvent::new(WorkEventKind::Discard, "work", at);
+        projection.apply_event(discard.clone());
+        let mut resume = WorkEvent::new(WorkEventKind::Resume, "work", at);
+        resume.status_category = Some(WorkspaceStatusCategory::Active);
+        projection.apply_event(resume);
+        projection.apply_event(WorkEvent::new(WorkEventKind::Done, "work", at));
+        let item = &mut projection.work_items[0];
+        assert_eq!(item.current_terminal_event(), Some(&discard));
+        let diagnosis = item.terminal_diagnosis().unwrap();
+        assert_eq!(diagnosis.terminal_kind, WorkEventKind::Discard);
+        assert!(!diagnosis.recoverable);
+        item.events.clear();
+        let diagnosis = item.terminal_diagnosis().unwrap();
+        assert_eq!(diagnosis.source_operation, "unknown");
+        assert!(diagnosis.event_id.is_none());
+        assert!(!diagnosis.recoverable);
+
+        let mut legacy = WorkItemsProjection::empty(at);
+        let mut update = WorkEvent::new(WorkEventKind::Update, "legacy-done", at);
+        update.status_category = Some(WorkspaceStatusCategory::Done);
+        legacy.apply_event(update);
+        let diagnosis = legacy.work_items[0].terminal_diagnosis().unwrap();
+        assert!(
+            !diagnosis.recoverable,
+            "reopen requires an explicit Done event"
+        );
+        assert!(diagnosis.recovery_operation.is_none());
     }
 
     #[test]

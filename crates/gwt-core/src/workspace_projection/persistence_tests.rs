@@ -7159,14 +7159,35 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
         agent_id: strict.target.agent_id.clone(),
     };
     assert_eq!(
-        emit_workspace_terminal_event_for_resolved_work_target(
+        emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
             &strict_target,
             WorkCloseKind::Done,
             Utc::now(),
+            WorkTerminalProvenance {
+                source_operation: "execution.complete".to_string(),
+                authority_class: WorkAuthorityClass::PrimaryAgent,
+                execution_generation: Some("generation-1".to_string()),
+            },
             |_, _| Ok(()),
         )
         .expect("strict split-root terminal event"),
         WorkspaceTerminalEventOutcome::Emitted
+    );
+    let terminal_events = t812_read_events(&gwt_workspace_work_events_closed_path_for_repo_path(
+        &strict.target.project_state_root,
+    ));
+    let terminal = terminal_events.last().expect("terminal event");
+    assert_eq!(
+        terminal.source_operation.as_deref(),
+        Some("execution.complete")
+    );
+    assert_eq!(
+        terminal.authority_class,
+        Some(WorkAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(
+        terminal.execution_generation.as_deref(),
+        Some("generation-1")
     );
     assert!(
         gwt_workspace_work_events_closed_path_for_repo_path(&strict.target.project_state_root)
@@ -7180,12 +7201,17 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
 
     let wrapper = t812_seed_session_bound_fixture(&temp.path().join("wrapper"));
     assert_eq!(
-        emit_workspace_done_event_for_session_outcome(
+        emit_workspace_terminal_event_for_session_with_provenance(
             &wrapper.target.project_state_root,
-            &wrapper.target.work_event_root,
             &wrapper.target.session_id,
             &wrapper.target.work_id,
+            WorkCloseKind::Done,
             Utc::now(),
+            WorkTerminalProvenance {
+                source_operation: "build.complete".into(),
+                authority_class: WorkAuthorityClass::TrustedHost,
+                execution_generation: None,
+            },
         )
         .expect("wrapper split-root terminal event"),
         WorkspaceTerminalEventOutcome::Emitted
@@ -7198,6 +7224,13 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
         !gwt_workspace_work_events_closed_path_for_repo_path(&wrapper.target.work_event_root)
             .exists(),
         "wrapper must keep the close ledger with repo-global WorkItems"
+    );
+    let legacy_events = t812_read_events(&gwt_workspace_work_events_closed_path_for_repo_path(
+        &wrapper.target.project_state_root,
+    ));
+    assert_eq!(
+        legacy_events.last().unwrap().source_operation.as_deref(),
+        Some("build.complete")
     );
 }
 
@@ -8303,7 +8336,7 @@ fn session_bound_update_persists_identity_rewritten_by_pre_persist_recovery() {
     let recovered_event_id = "event-recovered-before-persist";
     let recovered_journal_id = "journal-recovered-before-persist";
 
-    let entry = update_workspace_projection_with_journal_for_resolved_work_target(
+    let entry = update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
         &fixture.target,
         WorkspaceProjectionUpdate {
             title: None,
@@ -8318,6 +8351,11 @@ fn session_bound_update_persists_identity_rewritten_by_pre_persist_recovery() {
             agent_title_summary: None,
         },
         TrackedWorkEventPolicy::Persist,
+        Some(WorkTerminalProvenance {
+            source_operation: "workspace.update".to_string(),
+            authority_class: WorkAuthorityClass::PrimaryAgent,
+            execution_generation: Some("generation-1".to_string()),
+        }),
         |_, _| Ok(()),
         |event, entry| {
             event.id = recovered_event_id.to_string();
@@ -8352,6 +8390,21 @@ fn session_bound_update_persists_identity_rewritten_by_pre_persist_recovery() {
     assert_eq!(
         target.events.last().expect("projected recovered event").id,
         recovered_event_id
+    );
+    let terminal = target
+        .current_terminal_event()
+        .expect("attributable terminal event");
+    assert_eq!(
+        terminal.source_operation.as_deref(),
+        Some("workspace.update")
+    );
+    assert_eq!(
+        terminal.authority_class,
+        Some(WorkAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(
+        terminal.execution_generation.as_deref(),
+        Some("generation-1")
     );
 }
 

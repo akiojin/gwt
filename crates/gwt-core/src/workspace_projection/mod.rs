@@ -57,8 +57,12 @@ pub use persistence::{
     emit_workspace_done_event_for_session_paths, emit_workspace_done_event_if_absent,
     emit_workspace_done_event_if_absent_paths,
     emit_workspace_terminal_event_for_exact_resolved_work_target,
-    emit_workspace_terminal_event_for_resolved_work_target, external_workspace_operation_lock_path,
-    external_workspace_operation_retry_hint_at, find_work_item_for_container,
+    emit_workspace_terminal_event_for_exact_resolved_work_target_with_provenance,
+    emit_workspace_terminal_event_for_resolved_work_target,
+    emit_workspace_terminal_event_for_resolved_work_target_with_provenance,
+    emit_workspace_terminal_event_for_session_with_provenance,
+    external_workspace_operation_lock_path, external_workspace_operation_retry_hint_at,
+    find_work_item_for_container,
     heal_same_container_duplicate_claim_attachments_for_work_event_root,
     load_or_default_workspace_projection, load_or_default_workspace_projection_from_path,
     load_or_synthesize_workspace_work_items, load_or_synthesize_workspace_work_items_from_paths,
@@ -94,6 +98,7 @@ pub use persistence::{
     try_resolve_workspace_assignment_for_session, try_resolve_workspace_id_for_session,
     update_workspace_projection_with_journal,
     update_workspace_projection_with_journal_for_resolved_work_target,
+    update_workspace_projection_with_journal_for_resolved_work_target_with_provenance,
     update_workspace_projection_with_journal_for_work_event_root,
     update_workspace_projection_with_journal_paths,
     update_workspace_projection_with_journal_paths_at, with_exact_workspace_done_read_only,
@@ -122,9 +127,10 @@ pub use projection::{
 pub use work_items::workspace_execution_container_same;
 pub use work_items::MAX_INLINE_WORK_EVENTS;
 pub use work_items::{
-    DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
-    WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,
-    WorkspacePrLink, WorkspaceWorkAgentRef, WorkspaceWorkEvent, WorkspaceWorkEventKind,
-    WorkspaceWorkItem, WorkspaceWorkItemsCache, WorkspaceWorkItemsProjection,
-    WorkspaceWorkItemsRebuildOutcome,
+    DuplicateWorkEventProvenance, WorkAgentRef, WorkAuthorityClass, WorkEvent,
+    WorkEventApplyOutcome, WorkEventKind, WorkItem, WorkItemsProjection, WorkRecoveryLink,
+    WorkTerminalDiagnosis, WorkTerminalProvenance, WorkspaceExecutionContainerRef,
+    WorkspaceIssueLink, WorkspacePrLink, WorkspaceWorkAgentRef, WorkspaceWorkEvent,
+    WorkspaceWorkEventKind, WorkspaceWorkItem, WorkspaceWorkItemsCache,
+    WorkspaceWorkItemsProjection, WorkspaceWorkItemsRebuildOutcome,
 };

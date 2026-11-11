@@ -155,6 +155,7 @@ fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention
         assert_eq!(fs::read(predecessor_path).unwrap(), *predecessor_bytes);
         let (status, body) = executor
             .block_on(probe.workspace_update(&gwt::AgentWorkspaceUpdateRequest {
+                primary_provider_session_id: None,
                 schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: fixture.pending.binding.session_id.clone(),
                 observation: gwt::observe_agent_runtime(&fixture.repo).unwrap(),
@@ -2083,6 +2084,7 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
     let (status, body) = fixture
         .executor
         .block_on(active.workspace_update(&gwt::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: fixture.pending.binding.session_id.clone(),
             observation: gwt::observe_agent_runtime(&fixture.repo).unwrap(),
