@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    pty::{CursorPositionReport, PendingPty, PtyHandle, SpawnConfig},
+    pty::{CursorPositionReport, GrokPromptReadiness, PendingPty, PtyHandle, SpawnConfig},
     TerminalError,
 };
 
@@ -44,43 +44,78 @@ const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 /// mode shortcut. Blocking permission/question/edit surfaces replace that
 /// footer, even when they reuse a prompt widget. Pin: xai-org/grok-build
 /// 2bdd1d6, views/agent.rs:781-829 and app/agent_view/render.rs:201-317.
-fn grok_prompt_composer_ready(screen: &vt100::Screen) -> bool {
-    if screen.hide_cursor() {
-        return false;
-    }
+fn grok_prompt_readiness(screen: &vt100::Screen) -> GrokPromptReadiness {
+    use GrokPromptReadiness::{HiddenSubmit, Unknown, Visible};
+
     let (cursor_row, cursor_col) = screen.cursor_position();
     let lines: Vec<_> = screen.rows(0, screen.size().1).collect();
     let Some(footer_row) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
-        return false;
+        return Unknown;
     };
-    if footer_row <= usize::from(cursor_row) {
-        return false;
-    }
     let footer: Vec<_> = lines[footer_row].split_whitespace().collect();
     if !footer.windows(2).any(|pair| pair == ["Shift+Tab", "mode"]) {
-        return false;
+        return Unknown;
     }
-    // Do not borrow a historical prompt above the current input block. A
-    // blank separation or an unrecognizable layout requires fresh evidence.
-    let cursor_row = usize::from(cursor_row);
-    let block_start = lines[..=cursor_row]
-        .iter()
-        .rposition(|line| line.trim().is_empty())
-        .map_or(0, |row| row + 1);
-    if block_start > cursor_row {
-        return false;
-    }
-    let Some(prompt_offset) = lines[block_start..=cursor_row].iter().rposition(|line| {
-        let prompt = line.trim_start();
-        prompt == "❯" || prompt.starts_with("❯ ") || prompt == ">" || prompt.starts_with("> ")
-    }) else {
-        return false;
+    let prefix_column = |row: usize| {
+        let prompt = lines[row].trim_start();
+        (prompt == "❯" || prompt.starts_with("❯ ") || prompt == ">" || prompt.starts_with("> "))
+            .then(|| {
+                lines[row]
+                    .chars()
+                    .take_while(|ch| ch.is_whitespace())
+                    .count()
+                    + 2
+            })
     };
-    let prompt_row = block_start + prompt_offset;
-    // The upstream prefix is two display columns (also on legacy ConHost).
-    let prompt = &lines[prompt_row];
-    let prefix_col = prompt.chars().take_while(|ch| ch.is_whitespace()).count() + 2;
-    prompt_row < cursor_row || usize::from(cursor_col) >= prefix_col
+    // PromptWidget reserves the prefix gutter on every textarea row, even
+    // when a legal one-line paste wraps whitespace onto a whole blank row.
+    let has_gutter =
+        |row: usize, column: usize| lines[row].chars().take(column).all(char::is_whitespace);
+    // Both caret and prefix must belong to the latest root prompt box.
+    // A modal can retain a historical prefix and the normal footer.
+    let Some(bottom) = (0..footer_row)
+        .rev()
+        .find(|row| !lines[*row].trim().is_empty())
+    else {
+        return Unknown;
+    };
+    if !lines[bottom].trim().starts_with('╰') || !lines[bottom].trim().ends_with('╯') {
+        return Unknown;
+    }
+    let Some(top) = (0..bottom).rev().find(|row| {
+        let line = lines[*row].trim();
+        line.starts_with('╭') && line.ends_with('╮')
+    }) else {
+        return Unknown;
+    };
+    let Some(first) = (top + 1..bottom).find(|row| !lines[*row].trim().is_empty()) else {
+        return Unknown;
+    };
+    let Some(column) = prefix_column(first) else {
+        return Unknown;
+    };
+    if !screen.hide_cursor() {
+        let cursor_row = usize::from(cursor_row);
+        return if (first..bottom).contains(&cursor_row)
+            && usize::from(cursor_col) >= column
+            && (first + 1..=cursor_row).all(|row| has_gutter(row, column))
+        {
+            Visible
+        } else {
+            Unknown
+        };
+    }
+    // Exact-fill textareas omit their caret. This box can support an owned
+    // CR, never authority for a fresh body: modals retain the background.
+    // The caller preserves staged-body/replay ownership and input revision.
+    if footer
+        .windows(2)
+        .any(|pair| pair == ["Enter", "send"] || pair == ["Enter", "queue"])
+        && (first + 1..bottom).all(|row| has_gutter(row, column))
+    {
+        return HiddenSubmit;
+    }
+    Unknown
 }
 
 #[derive(Default)]
@@ -567,11 +602,13 @@ impl Pane {
                 self.incomplete_output_tail.clear();
             }
         }
-        self.pty.set_grok_prompt_composer_ready(
-            self.incomplete_output_tail.is_empty()
-                && self.cursor_query_prefix.is_empty()
-                && grok_prompt_composer_ready(self.parser.screen()),
-        );
+        let grok_readiness =
+            if self.incomplete_output_tail.is_empty() && self.cursor_query_prefix.is_empty() {
+                grok_prompt_readiness(self.parser.screen())
+            } else {
+                GrokPromptReadiness::Unknown
+            };
+        self.pty.set_grok_prompt_readiness(grok_readiness);
     }
 
     /// At physical EOF an unfinished candidate cannot become a handled query.
@@ -768,7 +805,8 @@ impl Pane {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let started = std::time::Instant::now();
         // Require a fresh child redraw after changing the observed geometry.
-        self.pty.set_grok_prompt_composer_ready(false);
+        self.pty
+            .set_grok_prompt_readiness(GrokPromptReadiness::Unknown);
         self.pty.resize(cols, rows)?;
         self.snapshot_cache.take();
         let pty_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1039,7 +1077,8 @@ mod tests {
         for prefix in ["❯", ">"] {
             pane.process_bytes(
                 format!(
-                    "\x1b[2J\x1b[H\x1b[21;1H{prefix} \x1b[24;1HShift+Tab mode\x1b[21;3H\x1b[?25h"
+                    "\x1b[2J\x1b[20;1H╭{}╮\x1b[21;1H  {prefix} \x1b[22;1H╰{}╯\x1b[24;1HShift+Tab mode\x1b[21;5H\x1b[?25h",
+                    "─".repeat(78), "─".repeat(78),
                 )
                 .as_bytes(),
             );
@@ -1048,13 +1087,63 @@ mod tests {
                 "idle {prefix}"
             );
             pane.process_bytes(
-                b"\x1b[24;1HEnter queue  Shift+Enter/Alt+Enter newline  Shift+Tab mode\x1b[21;3H",
+                b"\x1b[24;1HEnter queue  Shift+Enter/Alt+Enter newline  Shift+Tab mode\x1b[21;5H",
             );
             assert!(
                 pty.ensure_grok_prompt_input_ready().is_ok(),
                 "Working {prefix}"
             );
         }
+        // A legal one-line paste can soft-wrap NBSP into a visually blank
+        // continuation. Grok keeps the prefix gutter on every text row.
+        pane.process_bytes(
+            format!(
+                "\x1b[2J\x1b[16;1H╭{}╮\x1b[17;1H  ❯ notification\x1b[18;1H    {}\x1b[19;1H    tail\x1b[20;1H╰{}╯\x1b[24;1HEnter send  Shift+Tab mode\x1b[19;9H\x1b[?25h",
+                "─".repeat(78), "\u{a0}".repeat(75), "─".repeat(78),
+            )
+            .as_bytes(),
+        );
+        assert!(pty.ensure_grok_prompt_input_ready().is_ok(), "NBSP wrap");
+        // The native textarea omits its caret when the last row fills exactly.
+        // Its complete current root box and explicit submit hint remain visible.
+        pane.resize(205, 24).unwrap();
+        pane.process_bytes(
+            format!(
+                "\x1b[2J\x1b[20;1H╭{}╮\x1b[21;1H  ❯ {}\x1b[22;1H╰{}╯\x1b[24;1HEnter send  Shift+Tab mode\x1b[?25l",
+                "─".repeat(203), "x".repeat(200), "─".repeat(203),
+            )
+            .as_bytes(),
+        );
+        assert!(pty.ensure_grok_prompt_input_ready().is_err(), "hidden body");
+        assert!(
+            pty.ensure_grok_prompt_submit_ready().is_ok(),
+            "owned exact fill"
+        );
+        pane.process_bytes(
+            "\x1b[2J\x1b[H❯ historical prompt\x1b[24;1HEnter send  Shift+Tab mode\x1b[?25l"
+                .as_bytes(),
+        );
+        assert!(
+            pty.ensure_grok_prompt_input_ready().is_err(),
+            "hidden history"
+        );
+        assert!(
+            pty.ensure_grok_prompt_submit_ready().is_err(),
+            "hidden history submit"
+        );
+        // Feedback retains the root footer and history to its left, but its
+        // own visible caret cannot borrow a historical user prompt prefix.
+        pane.process_bytes(
+            format!(
+                "\x1b[2J\x1b[20;1H╭{}╮\x1b[21;1H  ❯ \x1b[22;1H╰{}╯\x1b[11;1H  ❯ previous prompt\x1b[8;33H┌ Feedback ┐\x1b[9;33H│ Write  Drafts\x1b[10;33H├─────────\x1b[11;33H│  Tell us what happened\x1b[15;33H└─────────┘\x1b[24;1HShift+Tab mode\x1b[11;36H\x1b[?25h",
+                "─".repeat(203), "─".repeat(203),
+            )
+            .as_bytes(),
+        );
+        assert!(
+            pty.ensure_grok_prompt_input_ready().is_err(),
+            "Feedback caret above the current root box"
+        );
         pane.process_bytes(b"\x1b[2J\x1b[H1. Yes, always allow\x1b[24;1H1/2 select  Ctrl+O always-approve\x1b[?25l");
         assert!(pty.ensure_grok_prompt_input_ready().is_err());
         pty.write_input(b"\x1b").expect("ordinary recovery input");

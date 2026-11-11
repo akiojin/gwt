@@ -777,10 +777,15 @@ pub fn authenticated_pm_pane_send_input_events(
                 bracketed_paste,
                 2,
                 |bytes| {
+                    let owned_submit = bytes == b"\r" && (body_written || replay.is_some());
                     let written = reservation
                         .write_input_authorized(bytes, |commit| {
                             if target_is_grok {
-                                expected_pty.ensure_grok_prompt_input_ready()?;
+                                if owned_submit {
+                                    expected_pty.ensure_grok_prompt_submit_ready()?;
+                                } else {
+                                    expected_pty.ensure_grok_prompt_input_ready()?;
+                                }
                             }
                             if Instant::now() >= deadline
                                 || worker_responder
@@ -860,7 +865,11 @@ pub fn authenticated_pm_pane_send_input_events(
                                 // Recheck after the body/submit settle and at
                                 // every retry, including submit-only recovery.
                                 if target_is_grok {
-                                    expected_pty.ensure_grok_prompt_input_ready()?;
+                                    if owned_submit {
+                                        expected_pty.ensure_grok_prompt_submit_ready()?;
+                                    } else {
+                                        expected_pty.ensure_grok_prompt_input_ready()?;
+                                    }
                                 }
                                 commit(&mut mark_attempted)
                             })

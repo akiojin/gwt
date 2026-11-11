@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Condvar, Mutex,
     },
     thread,
@@ -599,6 +599,15 @@ impl CursorPositionReport {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum GrokPromptReadiness {
+    Unknown,
+    Visible,
+    // Visual evidence only: an owning operation must still authorize CR.
+    HiddenSubmit,
+}
+
 pub struct PtyHandle {
     /// `None` once [`PtyHandle::release_descriptors`] has run. The master and
     /// the writer clone `portable-pty` dups out of it are two of the three
@@ -626,7 +635,7 @@ pub struct PtyHandle {
     transcript_overlay: AtomicBool,
     /// Positive evidence from the current parsed screen, consulted only for
     /// Grok PM delivery. Unknown and blocking surfaces are never prompt-ready.
-    grok_prompt_composer_ready: AtomicBool,
+    grok_prompt_readiness: AtomicU8,
     /// Published only after bounded confirmation that the captured tree exited.
     tree_exit_confirmed: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -927,7 +936,7 @@ impl PtyHandle {
             startup_cursor_report_sent: AtomicBool::new(false),
             bracketed_paste: AtomicBool::new(false),
             transcript_overlay: AtomicBool::new(false),
-            grok_prompt_composer_ready: AtomicBool::new(false),
+            grok_prompt_readiness: AtomicU8::new(GrokPromptReadiness::Unknown as u8),
             tree_exit_confirmed: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
@@ -952,15 +961,28 @@ impl PtyHandle {
         self.transcript_overlay.store(visible, Ordering::Release);
     }
 
-    pub(crate) fn set_grok_prompt_composer_ready(&self, ready: bool) {
-        self.grok_prompt_composer_ready
-            .store(ready, Ordering::Release);
+    pub(crate) fn set_grok_prompt_readiness(&self, readiness: GrokPromptReadiness) {
+        self.grok_prompt_readiness
+            .store(readiness as u8, Ordering::Release);
     }
 
     /// Protected Grok delivery must never type into a permission card. Raw
     /// human input deliberately does not use this provider-specific guard.
     pub fn ensure_grok_prompt_input_ready(&self) -> Result<(), TerminalError> {
-        if !self.grok_prompt_composer_ready.load(Ordering::Acquire) {
+        self.ensure_grok_prompt_ready(false)
+    }
+
+    /// Only an operation owning the staged body may use this for CR, under
+    /// its unchanged ordinary-input revision and runtime-generation checks.
+    pub fn ensure_grok_prompt_submit_ready(&self) -> Result<(), TerminalError> {
+        self.ensure_grok_prompt_ready(true)
+    }
+
+    fn ensure_grok_prompt_ready(&self, owned_submit: bool) -> Result<(), TerminalError> {
+        let readiness = self.grok_prompt_readiness.load(Ordering::Acquire);
+        if readiness != GrokPromptReadiness::Visible as u8
+            && !(owned_submit && readiness == GrokPromptReadiness::HiddenSubmit as u8)
+        {
             return Err(TerminalError::PtyIoError {
                 details:
                     "Grok composer is not confirmed ready; focus the normal prompt before sending"

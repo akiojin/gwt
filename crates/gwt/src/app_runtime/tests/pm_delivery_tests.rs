@@ -1,9 +1,22 @@
 use super::*;
 
-// Native root composer: pager views/agent.rs:781-829, glyphs.rs:15-25.
-const GROK_COMPOSER: &str =
-    "\x1b[2J\x1b[H\x1b[21;1H❯ \x1b[24;1HShift+Tab mode  Ctrl+K commands\x1b[21;3H\x1b[?25h";
 const GROK_PERMISSION: &str = "\x1b[2J\x1b[HRun command?\r\n1. Yes, and don't ask again for anything\r\n2. No\x1b[24;1H1/2 select  Tab next option  Ctrl+O always-approve  Ctrl+C cancel\x1b[?25l";
+
+fn grok_visible_composer(cols: usize) -> String {
+    format!(
+        "\x1b[2J\x1b[20;1H╭{}╮\x1b[21;1H  ❯ \x1b[22;1H╰{}╯\x1b[24;1HShift+Tab mode  Ctrl+K commands\x1b[21;5H\x1b[?25h",
+        "─".repeat(cols - 2), "─".repeat(cols - 2),
+    )
+}
+
+fn grok_hidden_composer(cols: usize) -> String {
+    // Root chrome reserves two left padding columns, the prefix, and one
+    // right padding column. Exact-fill omits the native textarea caret.
+    format!(
+        "\x1b[2J\x1b[20;1H╭{}╮\x1b[21;1H  ❯ {}\x1b[22;1H╰{}╯\x1b[24;1HEnter send  Shift+Tab mode\x1b[?25l",
+        "─".repeat(cols - 2), "x".repeat(cols - 5), "─".repeat(cols - 2),
+    )
+}
 
 // Every resource below is captured from the canonical actor. This fixture
 // observes real writer entries and never installs a GUI writer or Session.
@@ -71,7 +84,7 @@ fn pm_delivery_owner_fixture_for_agent(
             .pane
             .lock()
             .unwrap()
-            .process_bytes(GROK_COMPOSER.as_bytes());
+            .process_bytes(grok_visible_composer(80).as_bytes());
     }
     PmDeliveryFixture {
         repo,
@@ -260,13 +273,22 @@ fn issue_3706_grok_pm_send_refuses_permission_and_unknown_surfaces_before_body()
     let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
     let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
     // Upstream Options mode has its own shortcut footer and owns Enter.
-    for surface in ["\x1b[2J\x1b[Hunknown surface\x1b[21;3H", GROK_PERMISSION] {
-        fixture
-            .target
-            .pane
-            .lock()
-            .unwrap()
-            .process_bytes(surface.as_bytes());
+    let hidden_root = grok_hidden_composer(80);
+    let feedback = format!(
+        "{}\x1b[11;1H  ❯ previous prompt\x1b[8;33H┌ Feedback ┐\x1b[11;33H│  Tell us what happened\x1b[15;33H└─────────┘\x1b[11;36H\x1b[?25h",
+        grok_visible_composer(205),
+    );
+    for (surface, cols) in [
+        ("\x1b[2J\x1b[Hunknown surface\x1b[21;3H", 80),
+        (GROK_PERMISSION, 80),
+        (hidden_root.as_str(), 80),
+        (feedback.as_str(), 205),
+    ] {
+        {
+            let mut pane = fixture.target.pane.lock().unwrap();
+            pane.resize(cols, 24).unwrap();
+            pane.process_bytes(surface.as_bytes());
+        }
         let operation = uuid::Uuid::new_v4().to_string();
         let (responder, result, cancellation) =
             AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
@@ -303,7 +325,7 @@ fn issue_3706_grok_pm_send_refuses_permission_and_unknown_surfaces_before_body()
 }
 
 #[test]
-fn issue_3706_grok_permission_appearing_after_body_blocks_submit() {
+fn issue_3706_grok_submit_rechecks_the_current_composer_surface() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -314,36 +336,84 @@ fn issue_3706_grok_permission_appearing_after_body_blocks_submit() {
     let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
     let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
     let target = &fixture.target;
-    let reservation = Arc::clone(&target.pty).reserve_input_transaction().unwrap();
-    let mut writes = Vec::new();
-    let outcome = gwt::project_runtime::agent_dispatch::drive_verified_pane_submit(
-        "PM notification\r",
-        false,
-        2,
-        |bytes| {
-            reservation
-                .write_input_authorized(bytes, |commit| {
-                    target.pty.ensure_grok_prompt_input_ready()?;
-                    commit(&mut || {})
-                })
-                .map_err(|error| error.to_string())?;
-            writes.push(bytes.to_vec());
-            Ok(())
-        },
-        |_| {
-            // The driver's settle boundary orders this transition; no timer
-            // or scheduler assumption is needed to place the card before CR.
-            target
-                .pane
-                .lock()
-                .unwrap()
-                .process_bytes(GROK_PERMISSION.as_bytes());
-        },
-        || Ok(false),
+    let wrapped = format!(
+        "\x1b[2J\x1b[16;1H╭{}╮\x1b[17;1H  ❯ notification\x1b[18;1H    {}\x1b[19;1H    tail\x1b[20;1H╰{}╯\x1b[24;1HEnter send  Shift+Tab mode\x1b[19;9H\x1b[?25h",
+        "─".repeat(78), "\u{a0}".repeat(75), "─".repeat(78),
     );
-    drop(reservation);
-    assert!(outcome.is_err_and(|error| error.contains("Grok composer")));
-    assert_eq!(writes, [b"PM notification".to_vec()]);
+    let exact_fill = grok_hidden_composer(205);
+    for (body, cols, surface, accepts_submit) in [
+        (
+            format!("A{}B", "\u{a0}".repeat(150)),
+            80,
+            wrapped.as_str(),
+            true,
+        ),
+        ("x".repeat(42), 205, exact_fill.as_str(), true),
+        ("PM notification".into(), 80, GROK_PERMISSION, false),
+    ] {
+        let text = gwt::pm_registry::protected_pm_delivery_prompt(
+            "72fc3cd4-ad49-43e3-bf3d-d79135763706",
+            &body,
+        )
+        .expect("one-line PM input must be valid");
+        {
+            let mut pane = target.pane.lock().unwrap();
+            pane.resize(cols, 24).unwrap();
+            pane.process_bytes(grok_visible_composer(cols.into()).as_bytes());
+        }
+        let reservation = Arc::clone(&target.pty).reserve_input_transaction().unwrap();
+        let mut writes = Vec::new();
+        let submitted = std::cell::Cell::new(false);
+        let body_written = std::cell::Cell::new(false);
+        let outcome = gwt::project_runtime::agent_dispatch::drive_verified_pane_submit(
+            &text,
+            false,
+            2,
+            |bytes| {
+                reservation
+                    .write_input_authorized(bytes, |commit| {
+                        if bytes == b"\r" && body_written.get() {
+                            target.pty.ensure_grok_prompt_submit_ready()?;
+                        } else {
+                            target.pty.ensure_grok_prompt_input_ready()?;
+                        }
+                        commit(&mut || {})
+                    })
+                    .map_err(|error| error.to_string())?;
+                submitted.set(bytes == b"\r");
+                if bytes != b"\r" {
+                    body_written.set(true);
+                }
+                writes.push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {
+                // The settle boundary orders the redraw before CR.
+                target
+                    .pane
+                    .lock()
+                    .unwrap()
+                    .process_bytes(surface.as_bytes());
+            },
+            || Ok(submitted.get()),
+        );
+        drop(reservation);
+        assert_eq!(submitted.get(), accepts_submit, "{outcome:?}");
+        if accepts_submit {
+            assert_eq!(
+                outcome,
+                Ok(
+                    gwt::project_runtime::agent_dispatch::VerifiedPaneSubmitOutcome::Verified {
+                        submit_attempts: 1
+                    }
+                )
+            );
+            assert_eq!(writes.last().unwrap(), b"\r");
+        } else {
+            assert!(outcome.is_err_and(|error| error.contains("Grok composer")));
+            assert_eq!(writes.len(), 1, "permission card cannot receive CR");
+        }
+    }
 }
 
 #[test]
@@ -624,6 +694,15 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
 /// not prove delivery. Report uncertainty and preserve a later human draft.
 #[test]
 fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
+    assert_pm_unconfirmed_delivery_preserves_a_later_draft(gwt_agent::AgentId::Codex);
+}
+
+#[test]
+fn issue_3706_grok_user_input_revokes_hidden_submit_recovery() {
+    assert_pm_unconfirmed_delivery_preserves_a_later_draft(gwt_agent::AgentId::GrokBuild);
+}
+
+fn assert_pm_unconfirmed_delivery_preserves_a_later_draft(agent_id: gwt_agent::AgentId) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -631,7 +710,8 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _owner_home = ScopedGwtHome::set(temp.path());
-    let fixture = pm_delivery_owner_fixture(temp.path());
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id.clone());
     let repo = fixture.repo.clone();
     let target_window = fixture.target.id.clone();
 
@@ -694,6 +774,16 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
         },
     ))
     .unwrap();
+    if agent_id == gwt_agent::AgentId::GrokBuild {
+        // A modal can retain this hidden root box/footer. User input still
+        // revokes ownership, so it cannot authorize a recovered CR.
+        fixture
+            .target
+            .pane
+            .lock()
+            .unwrap()
+            .process_bytes(grok_hidden_composer(80).as_bytes());
+    }
     let (responder, result, _cancellation) = AgentPmSendResponder::channel();
     fixture.send(
         "origin-client".into(),
