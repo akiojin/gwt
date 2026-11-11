@@ -19315,6 +19315,9 @@ impl IssueMonitorState {
         else {
             return 0;
         };
+        if let Some(excluded) = self.terminal_queue_exclusions.get_mut(&host) {
+            excluded.retain(|number| !movable.contains(number));
+        }
         let mut orphan = self
             .terminal_queues
             .remove(terminal)
@@ -49217,7 +49220,14 @@ mod tests {
             }))
             .unwrap(),
         );
+        monitor
+            .terminal_queue_exclusions
+            .insert(host.clone(), BTreeSet::from([7, 8, 99]));
         assert_eq!(monitor.adopt_terminal_queue("old-host", now), 1);
+        assert_eq!(
+            monitor.terminal_queue_exclusions[&host],
+            BTreeSet::from([8, 99])
+        );
         assert_eq!(monitor.terminal_queues["old-host"].entries[0].number, 8);
         assert_eq!(monitor.terminal_queues[&host].entries[0].number, 7);
         assert_eq!(monitor.agent_issue_schedule.reservations.len(), 1);
