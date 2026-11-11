@@ -73,10 +73,19 @@ pub(crate) struct WindowRuntime {
     pub(crate) pane: Arc<Mutex<Pane>>,
     pub(crate) output_thread: Option<thread::JoinHandle<()>>,
     pub(crate) status_thread: Option<thread::JoinHandle<()>>,
+    pending_exit: Option<PendingExit>,
+    exit_drained: bool,
+    worker_error: Option<String>,
     pty_status: crate::WindowProcessStatus,
     hook_status: Option<crate::WindowProcessStatus>,
     output_bytes: u64,
     pub(crate) agent: Option<AgentRuntimeRecord>,
+}
+
+struct PendingExit {
+    status: WindowProcessStatus,
+    detail: Option<String>,
+    pm_crash_candidate: bool,
 }
 
 impl Drop for WindowRuntime {
@@ -430,6 +439,16 @@ pub(crate) struct LegacyFocusPublication {
 }
 
 pub(crate) enum OwnerMessage {
+    ExitReaped {
+        id: String,
+        incarnation: u64,
+        result: Result<(), String>,
+    },
+    ExitDrained {
+        id: String,
+        incarnation: u64,
+        result: Result<(), String>,
+    },
     #[cfg(any(test, feature = "test-gh-guard"))]
     SetOperationClock(Option<std::time::Instant>, oneshot::Sender<()>),
     #[cfg(any(test, feature = "test-gh-guard"))]
@@ -1876,6 +1895,20 @@ impl OwnerState {
                     cause,
                     result,
                 } => self.closed(id, incarnation, runtime, cause, result),
+                OwnerMessage::ExitDrained {
+                    id,
+                    incarnation,
+                    result,
+                } => {
+                    self.exit_drained(id, incarnation, result);
+                }
+                OwnerMessage::ExitReaped {
+                    id,
+                    incarnation,
+                    result,
+                } => {
+                    self.exit_reaped(id, incarnation, result);
+                }
                 OwnerMessage::AgentMaterialized {
                     operation_id,
                     id,
@@ -2366,6 +2399,9 @@ impl OwnerState {
                 pane,
                 output_thread: Some(output_thread),
                 status_thread: Some(status_thread),
+                pending_exit: None,
+                exit_drained: false,
+                worker_error: None,
                 pty_status: crate::WindowProcessStatus::Running,
                 hook_status: None,
                 output_bytes: 0,
@@ -10092,6 +10128,16 @@ impl OwnerState {
         if self.exact(&id, incarnation).is_err() {
             return;
         }
+        let runtime = self.runtimes.get_mut(&id).expect("exact owner status");
+        if !exit_confirmed && raw_status == WindowProcessStatus::Error {
+            runtime.worker_error =
+                Some(detail.clone().unwrap_or_else(|| "PTY worker failed".into()));
+        }
+        // Duplicate exit observations and delayed reader errors cannot classify
+        // a partial screen or overwrite the final classification.
+        if runtime.pending_exit.is_some() || runtime.exit_drained {
+            return;
+        }
         // The EOF reader can deliver a pre-exit Running snapshot after the
         // independent status worker has recorded the physical exit.
         if raw_status == crate::WindowProcessStatus::Running
@@ -10105,6 +10151,9 @@ impl OwnerState {
             })
         {
             return;
+        }
+        if raw_status == WindowProcessStatus::Running {
+            self.runtimes.get_mut(&id).unwrap().worker_error = None;
         }
         // Capture current ownership before terminal status revokes its writer.
         // Only the registered PM's actual nonzero exit can bypass the generic
@@ -10148,7 +10197,115 @@ impl OwnerState {
         }
         if exit_confirmed {
             self.persist_owner_exit_receipt(&id);
+            let runtime = self.runtimes.get_mut(&id).expect("exact exiting runtime");
+            runtime.pending_exit = Some(PendingExit {
+                status: raw_status,
+                detail,
+                pm_crash_candidate,
+            });
+            let pty = runtime.pty.clone();
+            let sender = self.sender.clone();
+            // Keep both reader handles until tree exit is proven. A failed
+            // reap must remain recoverable without joining a live slave.
+            spawn_owner_worker(move || {
+                let result = crate::session_finalizer::kill_and_reap(&pty, &id)
+                    .map_err(|error| error.to_string())
+                    .and_then(|exited| {
+                        exited
+                            .then_some(())
+                            .ok_or_else(|| "owned process tree did not exit".into())
+                    });
+                if result.is_ok() {
+                    // ConPTY needs descriptor release before reader EOF.
+                    pty.release_descriptors();
+                }
+                let _ = sender.send(OwnerMessage::ExitReaped {
+                    id,
+                    incarnation,
+                    result,
+                });
+            });
+            return;
         }
+        self.classify_owner_status(
+            id,
+            incarnation,
+            raw_status,
+            detail,
+            false,
+            pm_crash_candidate,
+        );
+    }
+
+    fn exit_reaped(&mut self, id: String, incarnation: u64, result: Result<(), String>) {
+        if self.exact(&id, incarnation).is_err() {
+            return;
+        }
+        if let Err(error) = result {
+            // The existing exact finalizer owns retry/reconciliation. Retain
+            // both original worker handles and never select NaturalExit.
+            let mut runtime = self.runtimes.remove(&id).unwrap();
+            runtime.pty_status = WindowProcessStatus::Error;
+            runtime.detail = Some(error);
+            runtime.policy.recoverable_error = true;
+            let (reply, _) = oneshot::channel();
+            self.start_close(id, runtime, CloseCause::DiagnosticExit, reply);
+            return;
+        }
+        let runtime = self.runtimes.get_mut(&id).unwrap();
+        let output = runtime.output_thread.take();
+        let status = runtime.status_thread.take();
+        let sender = self.sender.clone();
+        // Explicit Close, shutdown and Drop still join the same drain before
+        // acknowledging cleanup, including when this completion arrives late.
+        runtime.output_thread = Some(spawn_owner_worker(move || {
+            let mut result = Ok(());
+            for (worker, name) in [(output, "output"), (status, "status")] {
+                if let Some(worker) = worker {
+                    result =
+                        result.and(worker.join().map_err(|_| format!("{name} worker panicked")));
+                }
+            }
+            let _ = sender.send(OwnerMessage::ExitDrained {
+                id,
+                incarnation,
+                result,
+            });
+        }));
+    }
+
+    fn exit_drained(&mut self, id: String, incarnation: u64, result: Result<(), String>) {
+        if self.exact(&id, incarnation).is_err() {
+            // Explicit close/replacement owns the captured wrapper now. It
+            // must never resurrect a pane when this completion arrives late.
+            return;
+        }
+        let runtime = self.runtimes.get_mut(&id).unwrap();
+        let Some(exit) = runtime.pending_exit.take() else {
+            return;
+        };
+        runtime.exit_drained = true;
+        let error = result.err().or_else(|| runtime.worker_error.take());
+        if error.is_some() {
+            runtime.policy.recoverable_error = true;
+        }
+        let pm_crash_candidate = exit.pm_crash_candidate && error.is_none();
+        let (status, detail) = match error {
+            Some(error) => (WindowProcessStatus::Error, Some(error)),
+            None => (exit.status, exit.detail),
+        };
+        self.classify_owner_status(id, incarnation, status, detail, true, pm_crash_candidate);
+    }
+
+    fn classify_owner_status(
+        &mut self,
+        id: String,
+        incarnation: u64,
+        raw_status: WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+        pm_crash_candidate: bool,
+    ) {
         let runtime = self.runtimes.get_mut(&id).expect("exact owner status");
         let screen = runtime
             .pane
@@ -13691,6 +13848,9 @@ mod tests {
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: Some(finalizer),
+            pending_exit: None,
+            exit_drained: false,
+            worker_error: None,
             pty_status: crate::WindowProcessStatus::Running,
             hook_status: None,
             output_bytes: 0,
@@ -13879,6 +14039,15 @@ mod tests {
 
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
+        check_exit_after_reader_drain(false).await;
+    }
+
+    #[tokio::test]
+    async fn reader_failure_before_clean_exit_retains_diagnostics_after_drain() {
+        check_exit_after_reader_drain(true).await;
+    }
+
+    async fn check_exit_after_reader_drain(reader_error: bool) {
         let root = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -13917,22 +14086,75 @@ mod tests {
             readiness_deadline: None,
         });
         let mut events = handle.subscribe();
+        if reader_error {
+            // Queue a real exit 0, then deliver the reader failure before the
+            // actor consumes either worker's terminal observation.
+            state.runtimes["pane"]
+                .pty
+                .write_machine_input(b"finish\n")
+                .unwrap();
+            state.runtimes["pane"].pty.wait().unwrap();
+            state.runtimes["pane"]
+                .pane
+                .lock()
+                .unwrap()
+                .check_status()
+                .unwrap();
+            state.owner_status_event(
+                "pane".into(),
+                1,
+                WindowProcessStatus::Error,
+                Some("reader failed before EOF".into()),
+                false,
+            );
+        }
         let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
-        handle
-            .request(request(OwnerCommand::Input {
-                id: "pane".into(),
-                incarnation: 1,
-                data: b"finish\n".to_vec(),
-            }))
-            .await
-            .unwrap();
+        if !reader_error {
+            handle
+                .request(request(OwnerCommand::Input {
+                    id: "pane".into(),
+                    incarnation: 1,
+                    data: b"finish\n".to_vec(),
+                }))
+                .await
+                .unwrap();
+        }
         // test-hygiene: allow-wall-clock-deadline Bounds the actual terminal owner event; durable/process assertions determine success.
         let terminal = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
-                if matches!(events.recv().await.unwrap(), OwnerEvent::Status { ref id, incarnation: 1, exit_confirmed: true, .. } if id == "pane") { break; }
+                if let OwnerEvent::Status {
+                    ref id,
+                    incarnation: 1,
+                    exit_confirmed: true,
+                    status,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    if id == "pane" {
+                        break status;
+                    }
+                }
             }
-        }).await;
+        })
+        .await;
         handle.request(request(OwnerCommand::Health)).await.unwrap();
+        if reader_error {
+            assert_eq!(terminal.unwrap(), WindowProcessStatus::Error);
+            let inventory = handle
+                .request(request(OwnerCommand::ListPanes))
+                .await
+                .unwrap();
+            assert_eq!(
+                inventory["panes"].as_array().unwrap().len(),
+                1,
+                "reader failure must not become a clean natural close after drain"
+            );
+            assert!(!std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, OwnerEvent::WindowRemoved { .. })));
+            handle.shutdown().await;
+            actor.join().unwrap();
+            return;
+        }
         let observed =
             gwt_agent::Session::load(&sessions.join(format!("{}.toml", snapshot.id))).unwrap();
         let child_gone = !crate::process::is_process_alive(child_pid);
@@ -14920,6 +15142,9 @@ mod drop_tests {
             pane: pane.clone(),
             output_thread: None,
             status_thread: None,
+            pending_exit: None,
+            exit_drained: false,
+            worker_error: None,
             pty_status: crate::WindowProcessStatus::Running,
             hook_status: None,
             output_bytes: 0,

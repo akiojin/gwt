@@ -137,6 +137,59 @@ async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
 
+test.describe("Issue #6767 final quota output (isolated checkout)", () => {
+  test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  test("retains Waiting and the native conversation after exit 0, then allows explicit close", async ({ page }, info) => {
+    test.setTimeout(240_000);
+    const fixture = await startExactRelaunchFixture(info, {
+      exitNotice: "\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n"
+        + "  to purchase more credits or try again at Aug 22nd, 2026 12:46 PM.\n",
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const sessionId = launch.gwt_session_id!;
+      const pane = await liveCodexWindow(page, sessionId);
+      await expect.poll(async () => tomlString(await sessionRecord(fixture.home, sessionId), "agent_session_id"),
+        { timeout: 60_000 }).toBe(launch.provider_session_id);
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
+      await expect(page.locator(".xterm-screen:visible")).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pane.id, data: "GWT_FIXTURE_PING\r" });
+      await expect.poll(async () => (await page.locator(".xterm-screen:visible").innerText())
+        .split("GWT_FAKE_PROVIDER_READY").length, { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pane.id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(async () => (await codexWindows(page)).find(entry => entry.id === pane.id),
+        { timeout: 60_000 }).toMatchObject({ session_id: sessionId, status: "waiting" });
+      await expect.poll(async () => await sessionRecord(fixture.home, sessionId),
+        { timeout: 60_000 }).toMatch(/^last_exit_code\s*=\s*0/m);
+      expect(tomlString(await sessionRecord(fixture.home, sessionId), "agent_session_id"))
+        .toBe(launch.provider_session_id);
+      // The retained terminal still renders the refusal after its native PTY
+      // has exited; no synthetic WebSocket state supplies this result.
+      await expect(page.locator(".xterm-screen:visible")).toContainText("usage limit");
+      await attachScreenshot(page, info, `quota-waiting-${theme}`);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).some(entry => entry.id === pane.id),
+        { timeout: 30_000 }).toBe(false);
+      expect(errors, "console/page errors across quota retention and explicit close").toEqual([]);
+    } catch (error) {
+      await attachScreenshot(page, info, `quota-failure-${theme}`);
+      throw error;
+    } finally {
+      await fixture.stop();
+    }
+  });
+});
+
 test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // The fixture spawns this checkout's target/debug/gwt, which the embedded
   // CI Playwright job does not build.
