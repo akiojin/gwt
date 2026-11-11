@@ -44,13 +44,16 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
 
-test('Tasks is the default PM view and preserves the unfinished filter and stable rows', () => {
+test('Home is the default PM view; Tasks preserves the unfinished filter and stable rows', () => {
   const { root, update, view, model } = fixture({ tasksDefault: true });
   update([report()], null, { request_tasks: taskOverview([
     trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
       wait_reason: 'Waiting for CI', review_required: true }),
     trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
   ]) });
+  assert.ok(root.querySelector('.task-home'), 'a Home surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true, 'Home is the entry view');
+  view.showTasks();
   const tasks = root.querySelector('.pm-chat__tasks');
   assert.ok(tasks, 'a separate Tasks surface exists');
   assert.equal(tasks.hidden, false);
@@ -250,7 +253,7 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   const { root, update, copied } = fixture();
   update([report()]);
   assert.equal(root.querySelector('[role="log"]').getAttribute('aria-label'), 'PM reports');
-  assert.equal(root.querySelector('h1').textContent, 'Update');
+  assert.equal(root.querySelector('.pm-chat__transcript h1').textContent, 'Update');
   assert.equal(root.querySelector('article strong').textContent, 'Ready');
   assert.equal(root.querySelector('li').textContent, 'checked');
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
@@ -711,7 +714,7 @@ const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: '
 test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
   const { root, model, view, update } = fixture({ tasksDefault: true });
   update([report()]);
-  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Tasks remains the default view');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Home remains the default view');
   assert.deepEqual(model.requestPmConversation('pm'), { kind: 'load_pm_conversation', id: 'pm' });
   assert.equal(model.requestPmConversation('missing'), null);
   model.applyPmWindowReceiveEvent(conversation([
