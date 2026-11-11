@@ -730,6 +730,16 @@ the requested `numbers` from every terminal queue saved in this machine's projec
 store and preserves their manual auto-refill exclusions. Omit the option to affect
 only this host. It does not change another machine's independent project store.
 
+On macOS, CLI and Monitor use `scutil --get LocalHostName` for the host ID,
+falling back to `whoami::hostname` when unavailable; other platforms use
+`whoami::hostname`. The ID is cached once per process, so restart gwt after
+renaming the machine. `issue.monitor.status` includes `caller_host_identity`
+with the ID, its source, and the reason when the network hostname differs.
+To recover a retired host's queued work, call `issue.monitor.queue.adopt` with
+`{"terminal":"old-host"}`. It moves pending entries to this host and releases
+their old schedule reservations for replanning; work already claiming, launching,
+or running stays with its existing owner. Other host queues are left alone.
+
 Active cards have an agent process observed on this terminal. The Active badge
 counts agents, including PM, and separately shows distinct Issue and PM counts;
 two agents on one Issue produce one card. `Active —` means runtime observation
