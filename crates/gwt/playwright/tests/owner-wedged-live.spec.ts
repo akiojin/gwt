@@ -40,6 +40,9 @@ test("Issue #6992: Wedged status exposes a cancelable confirmation and sends one
     const health = page.locator("[data-project-owner-health]");
     const restart = health.locator("[data-owner-restart]");
     const modal = page.locator("#owner-restart-modal");
+    // Observe initial owner discovery before injecting a later health transition.
+    // Otherwise its legitimate initial snapshot can overwrite the fixture event.
+    await expect(health).toHaveAttribute("data-state", "healthy", { timeout: 30_000 });
     await injectHealth("degraded");
     await expect(health).toContainText("Unavailable");
     await expect(restart).toBeHidden();
