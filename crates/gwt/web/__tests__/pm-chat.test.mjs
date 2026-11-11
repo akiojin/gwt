@@ -17,11 +17,13 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [];
+  const visibility = [], copied = [], sent = [];
+  let model;
   const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text) });
+    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
+    onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
-  const model = createPmWindowModel();
+  model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
   let revision = 0;
@@ -33,7 +35,7 @@ function fixture({ tasksDefault = false } = {}) {
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, update };
+  return { root, model, view, visibility, copied, sent, update };
 }
 
 const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
@@ -254,7 +256,10 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
   assert.equal(root.querySelector('article time').getAttribute('datetime'), report().created_at);
   assert.match(root.textContent, /progress/);
-  assert.equal(root.querySelectorAll('input, textarea, form, [contenteditable], button[type="submit"]').length, 0);
+  // Only the Chat composer (FR-CHAT-3) accepts input; Reports and Tasks stay read-only.
+  const editable = 'input, textarea, form, [contenteditable], button[type="submit"]';
+  assert.deepEqual([...root.querySelectorAll(editable)].filter(node => !node.closest('.pm-chat__composer')), []);
+  assert.equal(root.querySelectorAll('.pm-chat__composer').length, 1);
   root.querySelector('[aria-label="Copy report"]').click();
   await Promise.resolve();
   assert.deepEqual(copied, [report().body]);
@@ -751,4 +756,80 @@ test('Chat rejects stale sessions and explains unavailable conversations', () =>
   assert.equal(model.readPmWindowState().windows.pm, before, 'identical snapshots do not re-render');
   model.bindPmWindowState('pm', 'replacement');
   assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0);
+});
+
+test('Chat composer sends text to the PM pane and keeps it until delivery is confirmed (AC-3431-CHAT-3)', () => {
+  const { root, model, view, sent } = fixture();
+  view.showChat();
+  const chat = root.querySelector('.pm-chat__chat');
+  const form = chat.querySelector('form.pm-chat__composer');
+  const draft = form.querySelector('textarea');
+  const button = form.querySelector('button[type="submit"]');
+  const status = form.querySelector('.pm-chat__composer-status');
+  assert.equal(draft.getAttribute('aria-label'), 'Message to PM');
+  assert.equal(button.disabled, true, 'an empty draft cannot be sent');
+  const key = (extra = {}) => {
+    const event = new root.ownerDocument.defaultView.Event('keydown', { bubbles: true, cancelable: true });
+    Object.assign(event, { key: 'Enter', shiftKey: false, isComposing: false }, extra);
+    draft.dispatchEvent(event);
+    return event;
+  };
+  draft.value = '   ';
+  draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  assert.equal(button.disabled, true, 'whitespace is not a message');
+  draft.value = 'Ship #3431?\nThen report.';
+  draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  assert.equal(button.disabled, false);
+  assert.equal(key({ shiftKey: true }).defaultPrevented, false, 'Shift+Enter inserts a new line');
+  assert.equal(key({ isComposing: true }).defaultPrevented, false, 'Enter during IME composition is not a send');
+  assert.equal(sent.length, 0);
+  assert.equal(key().defaultPrevented, true);
+  assert.deepEqual(sent, [{ kind: 'pane_send_input', session_id: 'session', text: 'Ship #3431?\nThen report.\r' }]);
+  assert.equal(draft.value, 'Ship #3431?\nThen report.', 'the draft is kept while delivery is pending');
+  assert.equal(button.disabled, true);
+  assert.equal(draft.readOnly, true, 'the pending draft cannot be edited and then lost on success');
+  assert.match(status.textContent, /Sending/);
+  key();
+  assert.equal(sent.length, 1, 'a pending message is not sent twice');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'other', error: null });
+  assert.match(status.textContent, /Sending/, 'another window result is ignored');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'no live runtime for remote pane' });
+  assert.equal(draft.value, 'Ship #3431?\nThen report.', 'a refused message stays in the draft');
+  assert.equal(status.textContent, 'Not sent: no live runtime for remote pane. Your message is kept.');
+  assert.equal(button.disabled, false);
+  assert.equal(draft.readOnly, false);
+  form.dispatchEvent(new root.ownerDocument.defaultView.Event('submit', { cancelable: true }));
+  assert.equal(sent.length, 2);
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'pm', error: null });
+  assert.equal(draft.value, '', 'a delivered message clears the draft');
+  assert.equal(status.textContent, '');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'late' });
+  assert.equal(status.textContent, '', 'an unsolicited result does not change the composer');
+  draft.value = 'Next';
+  draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  key();
+  model.expirePmChatSend('pm');
+  assert.match(status.textContent, /not confirmed/i);
+  assert.equal(draft.value, 'Next');
+  model.markPmChatSendUnavailable('pm');
+  assert.match(status.textContent, /not confirmed/i, 'only a pending send can fail');
+  key();
+  model.markPmChatSendUnavailable('pm');
+  assert.match(status.textContent, /Not sent.*not connected/i);
+  key();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: null, error: 'no pane bound to this project session' });
+  assert.match(status.textContent, /Not sent.*no pane bound/, 'a session refusal reaches the only pending send');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.requestPmChatSend('pm', 'x').session_id, 'replacement');
+});
+
+test('Chat composer is Operator-styled and stays below the scrolling conversation', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  const rule = name => css.match(new RegExp(`\\.${name}\\s*\\{([^}]*)\\}`))?.[1] || '';
+  assert.match(rule('pm-chat__chat'), /display:\s*flex/);
+  assert.match(rule('pm-chat__conversation'), /overflow-y:\s*auto/);
+  assert.match(rule('pm-chat__composer'), /border-top:\s*1px solid var\(--color-border\)/);
+  for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status']) {
+    assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
+  }
 });
