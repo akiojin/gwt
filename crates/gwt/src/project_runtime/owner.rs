@@ -354,6 +354,7 @@ pub(crate) struct AgentPrepared {
 #[derive(Clone, Copy)]
 pub(crate) enum CloseCause {
     ExplicitClose,
+    ExplicitStop,
     NaturalExit,
     DiagnosticExit,
     PmGenericCrash,
@@ -362,7 +363,9 @@ pub(crate) enum CloseCause {
 impl CloseCause {
     fn restore_policy(self) -> Option<bool> {
         match self {
-            Self::ExplicitClose | Self::NaturalExit | Self::DiagnosticExit => Some(false),
+            Self::ExplicitClose | Self::ExplicitStop | Self::NaturalExit | Self::DiagnosticExit => {
+                Some(false)
+            }
             Self::PmGenericCrash | Self::GuiLifetime => None,
         }
     }
@@ -623,6 +626,12 @@ pub(crate) enum OwnerMessage {
         cause: CloseCause,
         result: Result<(), String>,
     },
+    CloseAfterStop {
+        id: String,
+        incarnation: u64,
+        result: OwnerReply,
+        reply: oneshot::Sender<OwnerReply>,
+    },
     Retired {
         id: String,
         incarnation: u64,
@@ -676,8 +685,14 @@ pub(crate) enum OwnerMessage {
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
-    GuiAttached(oneshot::Sender<Result<u64, String>>),
-    GuiDetached(u64),
+    GuiAttached {
+        instance: uuid::Uuid,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    GuiDetached {
+        id: u64,
+        quit: bool,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -748,17 +763,20 @@ impl OwnerHandle {
     pub(crate) fn residency(&self) -> tokio::sync::watch::Receiver<ResidencySnapshot> {
         self.residency.clone()
     }
-    pub(crate) async fn attach_gui(&self) -> Result<u64, String> {
+    pub(crate) async fn attach_gui(&self, instance: uuid::Uuid) -> Result<u64, String> {
         let (send, receive) = oneshot::channel();
         self.sender
-            .send(OwnerMessage::GuiAttached(send))
+            .send(OwnerMessage::GuiAttached {
+                instance,
+                reply: send,
+            })
             .map_err(|_| "project owner unavailable".to_string())?;
         receive
             .await
             .map_err(|_| "project owner stopped before GUI attachment".to_string())?
     }
-    pub(crate) fn detach_gui(&self, id: u64) {
-        let _ = self.sender.send(OwnerMessage::GuiDetached(id));
+    pub(crate) fn detach_gui(&self, id: u64, quit: bool) {
+        let _ = self.sender.send(OwnerMessage::GuiDetached { id, quit });
     }
     pub async fn request(&self, request: OwnerRequest) -> OwnerReply {
         let (send, receive) = oneshot::channel();
@@ -1314,8 +1332,8 @@ impl OwnerState {
                 next_project_policy_check = now + std::time::Duration::from_secs(1);
             }
             if !self.stopping
-                && !continue_active
-                && self.gui_presence.expired(std::time::Instant::now())
+                && (self.gui_presence.quit_requested()
+                    || (!continue_active && self.gui_presence.expired(std::time::Instant::now())))
             {
                 self.begin_shutdown(None);
             }
@@ -1742,20 +1760,25 @@ impl OwnerState {
                     let _ = reply.send(result.map(|_| json!({"updated":true})));
                     self.resume_agent_transport();
                 }
-                OwnerMessage::GuiAttached(reply) => {
+                OwnerMessage::GuiAttached { instance, reply } => {
                     if self.stopping {
                         let _ = reply.send(Err("project owner is shutting down".into()));
                     } else {
                         self.next_gui_presence_id += 1;
                         let id = self.next_gui_presence_id;
-                        self.gui_presence.attach(id);
+                        self.gui_presence.attach(id, instance);
                         if reply.send(Ok(id)).is_err() {
                             self.gui_presence.detach(id, std::time::Instant::now());
                         }
                     }
                 }
-                OwnerMessage::GuiDetached(id) => {
-                    self.gui_presence.detach(id, std::time::Instant::now())
+                OwnerMessage::GuiDetached { id, quit } => {
+                    if quit {
+                        self.gui_presence
+                            .detach_for_quit(id, std::time::Instant::now());
+                    } else {
+                        self.gui_presence.detach(id, std::time::Instant::now());
+                    }
                 }
                 OwnerMessage::Request(ref request, _)
                     if self.stopping
@@ -1763,6 +1786,7 @@ impl OwnerState {
                             request.command,
                             OwnerCommand::Health
                                 | OwnerCommand::Close { .. }
+                                | OwnerCommand::Stop { .. }
                                 | OwnerCommand::PendingCancelExact { .. }
                         ) =>
                 {
@@ -1844,11 +1868,20 @@ impl OwnerState {
                         }
                     }
                     if result.is_ok() {
-                        if let Retirement::SwitchStoppedWindow { proof, .. } = &captured {
+                        let removed_session = match &captured {
+                            Retirement::SwitchStoppedWindow { proof, .. } => {
+                                Some(proof.session_id.clone())
+                            }
+                            Retirement::StoppedWindow(capture) if capture.expected.is_none() => {
+                                capture.cleanup.expected_session_id.clone()
+                            }
+                            _ => None,
+                        };
+                        if let Some(session_id) = removed_session {
                             let _ = self.events.send(OwnerEvent::WindowRemoved {
                                 id: id.clone(),
                                 incarnation,
-                                session_id: Some(proof.session_id.clone()),
+                                session_id: Some(session_id),
                             });
                         }
                     }
@@ -1895,6 +1928,28 @@ impl OwnerState {
                     cause,
                     result,
                 } => self.closed(id, incarnation, runtime, cause, result),
+                OwnerMessage::CloseAfterStop {
+                    id,
+                    incarnation,
+                    result,
+                    reply,
+                } => {
+                    self.input_jobs = self.input_jobs.saturating_sub(1);
+                    if result
+                        .as_ref()
+                        .is_ok_and(|receipt| receipt["explicit_stop"] == true)
+                    {
+                        self.request(
+                            OwnerRequest {
+                                project_key: self.project_key.clone(),
+                                command: OwnerCommand::Close { id, incarnation },
+                            },
+                            reply,
+                        );
+                    } else {
+                        let _ = reply.send(result);
+                    }
+                }
                 OwnerMessage::ExitDrained {
                     id,
                     incarnation,
@@ -2185,7 +2240,7 @@ impl OwnerState {
     fn begin_shutdown(&mut self, reply: Option<oneshot::Sender<()>>) {
         tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
             gui_presence_count = self.gui_presence.count(), retained_cleanups = self.retirements.len(),
-            reason = if reply.is_some() { "shutdown_requested" } else { "gui_presence_expired" },
+            reason = if reply.is_some() { "shutdown_requested" } else if self.gui_presence.quit_requested() { "gui_quit" } else { "gui_presence_expired" },
             "project owner shutdown started");
         self.stopping = true;
         self.pm_wake_permits.cancel_mobile_for_pane(None);
@@ -3218,6 +3273,7 @@ impl OwnerState {
                 | OwnerCommand::RestoreSavedSession { .. }
                 | OwnerCommand::ContinueWork { .. }
                 | OwnerCommand::Close { .. }
+                | OwnerCommand::Stop { .. }
                 | OwnerCommand::CloseStoppedSession { .. }
         ) {
             let issues = match &request.command {
@@ -3580,6 +3636,7 @@ impl OwnerState {
             }
             return;
         }
+        let explicit_stop = matches!(&request.command, OwnerCommand::Stop { .. });
         let result = match request.command {
             OwnerCommand::PromoteStandalone => {
                 self.gui_presence.promote();
@@ -3611,16 +3668,39 @@ impl OwnerState {
                 "reconciliation":self.retirements.keys().map(|(id,incarnation)| json!({"id":id,"incarnation":incarnation})).collect::<Vec<_>>(),
             })),
 
-            OwnerCommand::Close { id, incarnation } => {
+            OwnerCommand::Close { id, incarnation } | OwnerCommand::Stop { id, incarnation } => {
                 if self
                     .closing
                     .get(&id)
                     .is_some_and(|closing| closing.incarnation == incarnation)
                 {
-                    self.close_replies
-                        .entry((id, incarnation))
-                        .or_default()
-                        .push(reply);
+                    if explicit_stop {
+                        self.close_replies
+                            .entry((id, incarnation))
+                            .or_default()
+                            .push(reply);
+                    } else {
+                        // Close must still remove the row when a preceding STOP
+                        // is currently draining the same physical incarnation.
+                        let (completed, receive) = oneshot::channel();
+                        self.close_replies
+                            .entry((id.clone(), incarnation))
+                            .or_default()
+                            .push(completed);
+                        let sender = self.sender.clone();
+                        self.input_jobs += 1;
+                        spawn_owner_worker(move || {
+                            let result = receive.blocking_recv().unwrap_or_else(|_| {
+                                Err("owner stopped before close acknowledgement".into())
+                            });
+                            let _ = sender.send(OwnerMessage::CloseAfterStop {
+                                id,
+                                incarnation,
+                                result,
+                                reply,
+                            });
+                        });
+                    }
                     return;
                 }
                 if let Some(captured) = self
@@ -3631,6 +3711,12 @@ impl OwnerState {
                     match captured {
                         Retirement::Runtime { runtime, cause } => {
                             self.retirements.remove(&(id.clone(), incarnation));
+                            let cause =
+                                if !explicit_stop && matches!(cause, CloseCause::ExplicitStop) {
+                                    CloseCause::ExplicitClose
+                                } else {
+                                    cause
+                                };
                             self.start_close(id, *runtime, cause, reply);
                         }
                         captured => {
@@ -3644,10 +3730,27 @@ impl OwnerState {
                     .get(&id)
                     .is_some_and(|runtime| runtime.incarnation == incarnation)
                 {
+                    if !explicit_stop {
+                        if let Some(capture) = self.stopped_window_close_capture(&id, incarnation) {
+                            self.start_retirement(
+                                id,
+                                incarnation,
+                                Retirement::StoppedWindow(Box::new(capture)),
+                                Some(reply),
+                                None,
+                            );
+                            return;
+                        }
+                    }
                     Err("pane incarnation mismatch".into())
                 } else {
                     let runtime = self.runtimes.remove(&id).expect("validated exact pane");
-                    self.start_close(id, runtime, CloseCause::ExplicitClose, reply);
+                    let cause = if explicit_stop {
+                        CloseCause::ExplicitStop
+                    } else {
+                        CloseCause::ExplicitClose
+                    };
+                    self.start_close(id, runtime, cause, reply);
                     return;
                 }
             }
@@ -5425,6 +5528,11 @@ impl OwnerState {
             },
         );
         let snapshot = self.owner_monitor_window_snapshot(&id);
+        let runtime_handles = self
+            .runtimes
+            .iter()
+            .map(|(id, runtime)| (id.clone(), runtime.pty.clone()))
+            .collect();
         let snapshot_tabs: std::collections::BTreeSet<String> = snapshot
             .windows
             .iter()
@@ -5747,6 +5855,7 @@ impl OwnerState {
                             host_project_roots: &host_project_roots,
                             snapshot,
                             snapshot_tabs,
+                            runtime_handles: &runtime_handles,
                             known_names: &known_names,
                             metadata: *metadata,
                             is_continue_work: input.is_continue_work,
@@ -7457,6 +7566,7 @@ impl OwnerState {
                 id: id.clone(),
                 incarnation,
                 error: result.as_ref().err().cloned(),
+                explicit_stop: matches!(cause, CloseCause::ExplicitStop),
                 final_screen,
             });
             if result.is_err() {
@@ -7469,7 +7579,20 @@ impl OwnerState {
             } else {
                 self.retirements.remove(&(id.clone(), incarnation));
             }
-            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle}))
+            if result.is_ok() && matches!(cause, CloseCause::ExplicitStop) {
+                for operation in self
+                    .agent_operations
+                    .values_mut()
+                    .filter(|operation| operation.id == id && operation.incarnation == incarnation)
+                {
+                    if let Some(Ok(receipt)) = operation.result.as_mut() {
+                        receipt["closed"] = json!(true);
+                        receipt["explicit_stop"] = json!(true);
+                        receipt["status"] = json!(crate::WindowProcessStatus::Stopped);
+                    }
+                }
+            }
+            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle,"explicit_stop":matches!(cause, CloseCause::ExplicitStop)}))
         };
         for reply in self
             .close_replies
@@ -8942,6 +9065,64 @@ impl OwnerState {
             let _ = sender.send(OwnerMessage::OwnerLayoutCommitted { result, reply });
         });
     }
+    fn stopped_window_close_capture(
+        &self,
+        id: &str,
+        incarnation: u64,
+    ) -> Option<super::agent_dispatch::StoppedWindowRetirement> {
+        if self.runtimes.contains_key(id)
+            || self.pending.contains_key(id)
+            || self.closing.contains_key(id)
+            || self
+                .retirements
+                .keys()
+                .any(|(candidate, _)| candidate == id)
+            || self
+                .agent_operations
+                .values()
+                .any(|operation| operation.id == id && operation.incarnation > incarnation)
+        {
+            return None;
+        }
+        let operation = self.agent_operations.values().find(|operation| {
+            operation.id == id
+                && operation.incarnation == incarnation
+                && !operation.current.load(Ordering::Acquire)
+                && operation.result.as_ref().is_some_and(|result| {
+                    result.as_ref().is_ok_and(|receipt| {
+                        receipt["closed"] == true && receipt["explicit_stop"] == true
+                    })
+                })
+        })?;
+        let session_id = operation.session_id.as_ref()?;
+        let raw = id.strip_prefix(&format!("{}::", self.project_key))?;
+        let row = self
+            .registry_projection
+            .windows
+            .iter()
+            .find(|row| row.id == raw)?;
+        if row.session_id.as_ref() != Some(session_id)
+            || row.status != crate::WindowProcessStatus::Stopped
+            || row.persist
+        {
+            return None;
+        }
+        Some(super::agent_dispatch::StoppedWindowRetirement {
+            sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+            // The exact successful STOP already committed Session/Work and
+            // reaped its tree. This retirement removes only that retained row.
+            expected: None,
+            cleanup: super::agent_dispatch::OwnedWindowRecordCleanup {
+                registry: self.agent_registry.as_ref().ok()?.clone(),
+                registry_path: crate::persistence::workspace_state_path(&self.root),
+                root: self.root.clone(),
+                project_key: self.project_key.clone(),
+                canonical_id: id.into(),
+                expected_session_id: Some(session_id.clone()),
+            },
+        })
+    }
+
     fn close_stopped_owner_session(
         &mut self,
         session_id: String,
@@ -11748,7 +11929,12 @@ pub(crate) fn close_runtime(
             .join()
             .map_err(|_| "status worker panicked".to_string())?;
     }
-    if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
+    if matches!(cause, CloseCause::ExplicitStop) {
+        if let Some(cleanup) = runtime.registry_cleanup.as_ref() {
+            cleanup.retain_stopped()?;
+            runtime.registry_cleanup = None;
+        }
+    } else if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
         if let Some(cleanup) = runtime.registry_cleanup.as_ref() {
             cleanup.finish()?;
             runtime.registry_cleanup = None;
@@ -11891,7 +12077,7 @@ pub(crate) fn close_runtime(
     if let Some(agent) = runtime.agent.as_ref() {
         let pm_cause = match cause {
             CloseCause::PmGenericCrash => super::pm_delivery::PmLifecycleCause::Crash,
-            CloseCause::ExplicitClose | CloseCause::NaturalExit => {
+            CloseCause::ExplicitClose | CloseCause::ExplicitStop | CloseCause::NaturalExit => {
                 super::pm_delivery::PmLifecycleCause::Deregister
             }
             CloseCause::DiagnosticExit
@@ -12297,6 +12483,96 @@ mod tests {
         .unwrap();
         (session, pane)
     }
+    #[tokio::test]
+    async fn dispatch_close_without_writer_tears_down_runtime_and_drains_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (snapshot, pane) = unbound_fixture(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state.project_key = gwt_core::paths::project_scope_hash(root.path()).to_string();
+        let id = format!("{}::pane", state.project_key);
+        let registry = state.agent_registry.as_ref().unwrap().clone();
+        let row = super::super::agent_dispatch::owned_process_window_state(
+            root.path(),
+            &id,
+            Some(&snapshot),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        super::super::agent_dispatch::publish_owned_process_window(
+            &registry,
+            root.path(),
+            &id,
+            None,
+            row,
+            &AtomicBool::new(true),
+        )
+        .map_err(|error| error.detail)
+        .unwrap();
+        state.refresh_registry_projection();
+        state
+            .install_pane(id.clone(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let pty = state.runtimes[&id].pty.clone();
+        assert!(crate::session_finalizer::kill_and_reap(&pty, &id).unwrap());
+        // Terminal status handling removes this entry before a later close.
+        state.pty_writers.write().unwrap().remove(&id).unwrap();
+        let caller = gwt_agent::Session::new(
+            root.path(),
+            "main",
+            gwt_agent::AgentId::Custom("caller".into()),
+        );
+        caller.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let token = state.issuer.issue(root.path(), &caller.id).unwrap().token;
+        let grant = state.issuer.grant_for_test(&token).unwrap();
+        state.dispatch_agent_frontend(
+            "origin".into(),
+            grant,
+            crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                id: id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        );
+        let mut completion = loop {
+            match receiver
+                // test-hygiene: allow-wall-clock-deadline Hang guard for the real dispatch completion, not an elapsed-time assertion.
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+            {
+                OwnerMessage::AgentDispatchFinished(completion) => break completion,
+                _ => continue,
+            }
+        };
+        let close = completion.close.as_mut().expect("captured close");
+        let result = close.result.clone();
+        let accepted = close.accepted;
+        let runtime = close.runtime.as_mut().unwrap();
+        let joined = runtime.output_thread.is_none() && runtime.status_thread.is_none();
+        // Keep the regression failure from leaving physical fixture workers behind.
+        if !joined {
+            close_runtime(&id, runtime, CloseCause::ExplicitClose).unwrap();
+            close.result = Ok(());
+        }
+        state.agent_dispatch_finished(*completion);
+        let drained = state.closing.is_empty() && state.retirements.is_empty();
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        // test-hygiene: allow-wall-clock-deadline Hang guard for actual owner drain.
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
+            .await
+            .unwrap();
+        actor.join().unwrap();
+        assert!(accepted, "close must pass the normal authorization gates");
+        assert!(
+            result.is_ok(),
+            "writer absence must not prevent teardown: {result:?}"
+        );
+        assert!(joined, "accepted close must join both runtime workers");
+        assert!(drained, "accepted close must not leave deferred retirement");
+    }
+
     fn active_fixture(root: &std::path::Path, session: &gwt_agent::Session) -> ActiveAgentSession {
         ActiveAgentSession {
             window_id: "pane".into(),
@@ -13489,7 +13765,7 @@ mod tests {
             state.start_initial_gui_attach_grace();
             run_fixture_owner(state, receiver);
         });
-        let attached = handle.attach_gui().await;
+        let attached = handle.attach_gui(uuid::Uuid::new_v4()).await;
         handle.shutdown().await;
         actor.join().unwrap();
         assert!(

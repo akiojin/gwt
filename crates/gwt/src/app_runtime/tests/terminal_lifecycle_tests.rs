@@ -3596,7 +3596,7 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
 /// Paused Work marker (FR-350) on a background thread — the works.json
 /// load+save must not run on the UI event loop (it reaches megabytes and the
 /// synchronous write made × clicks stall for seconds). The record itself must
-/// still land; the test polls for it.
+/// still land before the exact stop ACK, without removing the retained window.
 #[test]
 fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     let _env_lock = env_test_lock()
@@ -3620,6 +3620,12 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     state.project_owner_connection_id = 1;
     state.project_owner_identity = owner.client().identity().cloned();
     let window_id = combined_window_id("tab-1", "agent-1");
+    let before = runtime.tabs[0]
+        .workspace
+        .window("agent-1")
+        .expect("owner-persisted Agent window")
+        .clone();
+    let mut owner_events = owner.subscribe();
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let started = Instant::now();
@@ -3638,11 +3644,118 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
         1,
         "the exact close runs off the event loop"
     );
-    drain_queued_blocking_tasks(&tasks);
+    drain_browser_owner_input(&mut runtime);
     assert!(
         pane.pty.try_wait().unwrap().is_some(),
         "the owner reaps its captured child"
     );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .expect("owner mailbox barrier after the exact stop ACK");
+    let retained: gwt::persistence::PersistedWindowRegistry =
+        serde_json::from_value(inventory["canonical_rows"].clone()).unwrap();
+    let retained = retained
+        .windows
+        .iter()
+        .find(|row| row.id == before.id)
+        .expect("STOP retains the canonical window instead of closing it");
+    assert_eq!(retained.status, WindowProcessStatus::Stopped);
+    assert!(!retained.persist);
+    assert_eq!(retained.session_id, before.session_id);
+    assert_eq!(retained.placement, before.placement);
+    let saved =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&repo))
+            .expect("durable stopped snapshot");
+    assert!(
+        saved.windows.iter().all(|row| row.id != before.id),
+        "the retained Agent window must not be restored on the next startup"
+    );
+    let observed: Vec<_> = std::iter::from_fn(|| owner_events.try_recv().ok()).collect();
+    assert!(!observed.iter().any(|event| matches!(event,
+        gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, .. } if id == &pane.id
+    )));
+    let final_screen = observed
+        .iter()
+        .find_map(|event| match event {
+            gwt::project_runtime::events::OwnerEvent::Closed {
+                id,
+                incarnation,
+                error: None,
+                final_screen: Some(frame),
+                ..
+            } if id == &pane.id && *incarnation == pane.incarnation => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the exact owner stop carries its reader-drained final screen");
+    let identity = owner.client().identity().unwrap().clone();
+    let mut projected = Vec::new();
+    for event in observed {
+        projected.extend(runtime.handle_project_owner_event(&context, 1, &identity, event));
+    }
+    assert!(
+        projected.iter().any(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.workspace.windows)
+                .any(|row| row.id == window_id
+                    && row.status == WindowProcessStatus::Stopped
+                    && !row.persist),
+            _ => false,
+        }),
+        "STOP publishes the retained snapshot marker to existing clients"
+    );
+    let window = runtime.tabs[0]
+        .workspace
+        .window(&before.id)
+        .expect("the GUI keeps the same stopped window after owner publications");
+    assert_eq!(window.status, WindowProcessStatus::Stopped);
+    assert!(!window.persist);
+    assert_eq!(window.session_id, before.session_id);
+    assert_eq!(window.placement, before.placement);
+    assert!(runtime.tabs[0]
+        .workspace
+        .persistable_state()
+        .windows
+        .iter()
+        .all(|row| row.id != before.id));
+    let stopped = &runtime.runtimes[&window_id];
+    assert!(stopped.has_final_snapshot);
+    assert_eq!(stopped.screen, final_screen.screen);
+    assert_eq!(stopped.screen_ansi, final_screen.screen_ansi);
+    assert_eq!(stopped.screen_seq, final_screen.screen_seq);
+    let queued = tasks.lock().unwrap().len();
+    assert!(runtime
+        .update_terminal_grid_events(&window_id, 90, 30)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        queued,
+        "a confirmed stopped PTY must not receive another resize command"
+    );
+    assert!(
+        runtime
+            .handle_remote_runtime_command_complete(super::super::RemoteRuntimeCommandCompletion {
+                context: context.clone(),
+                connection_id: 1,
+                identity: identity.clone(),
+                id: window_id.clone(),
+                incarnation: pane.incarnation,
+                kind: super::super::RemoteRuntimeCommandKind::Resize,
+                approval_resolution_started: false,
+                input_command_id: None,
+                result: Err("pane incarnation mismatch".into()),
+            })
+            .is_empty(),
+        "a late resize failure after confirmed exit is no longer actionable"
+    );
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .unwrap();
+    assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!session.restore_window_on_startup);
     let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .unwrap()
         .expect("owner-persisted Work");
@@ -3655,6 +3768,82 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
                     .any(|event| event.agent_session_id.as_deref() == Some(&session_id))
         }),
         "the exact stopped Session still records its Paused Work"
+    );
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        }),
+    )
+    .expect("explicit Close after STOP removes the exact retained window");
+    let closed = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(closed["canonical_rows"]["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["id"] != before.id));
+    assert!(
+        std::iter::from_fn(|| owner_events.try_recv().ok()).any(|event| matches!(event,
+            gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation, .. }
+                if id == pane.id && incarnation == pane.incarnation
+        )),
+        "explicit Close publishes removal to every connected GUI"
+    );
+}
+
+#[test]
+fn stop_failure_close_retry_removes_the_exact_owner_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let (owner, pane) = pane_control_tests::control_owner_agent(&repo, "agent-1", 42);
+    let mut events = owner.subscribe();
+    let snapshot = gwt::persistence::workspace_state_path(&repo);
+    fs::remove_file(&snapshot).unwrap();
+    fs::create_dir(&snapshot).unwrap();
+    let stopped = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Stop {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ));
+    // Repair the isolated storage before any assertion, so owner drain can
+    // finish even when the deliberately failed STOP has unexpected results.
+    fs::remove_dir(&snapshot).unwrap();
+    assert!(stopped.is_err(), "STOP must retain its failed finalizer");
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        }),
+    )
+    .expect("Close retries the exact failed STOP after storage recovers");
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["canonical_rows"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != "agent-1"),
+        "Close retry must remove the row instead of repeating STOP retention"
+    );
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
+            gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation, .. }
+                if id == pane.id && incarnation == pane.incarnation
+        )),
+        "successful Close retry publishes removal to every connected GUI"
     );
 }
 

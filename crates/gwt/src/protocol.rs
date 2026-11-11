@@ -2538,6 +2538,9 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
+        /// Current-card failure only; `reports` remain authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_error: Option<String>,
     },
     PmRequestTask {
         id: String,
@@ -4378,7 +4381,7 @@ mod tests {
             matches!(request, FrontendEvent::LoadPmReports { request_id: 7, version: Some(cursor), .. } if cursor == version)
         );
         let event = BackendEvent::PmReports {
-            id: "pm".into(), session_id: Some("session".into()), error: None,
+            id: "pm".into(), session_id: Some("session".into()), error: None, current_error: None,
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {

@@ -95,10 +95,12 @@ export function createPmWindowModel() {
         const taskOverview = event.current?.request_tasks;
         const taskError = taskOverview?.state === 'error' ? taskOverview.message
           : (!taskOverview ? event.error || 'Request tasks are unavailable. Reload this page to try again.' : null);
-        next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
+        // A Current-card failure fences only that card; saved reports still apply (#6950).
+        const currentFailed = Boolean(event.error || event.current_error);
+        next = { ...next, reportsVersion: event.version, error: event.error || event.current_error || null, loaded: true,
           requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
           requestTasksError: taskError,
-          current: event.error ? previous.current : (event.current || null),
+          current: currentFailed ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
             content: report.structured ? { type: 'text', body: reportDisplayText(report) }
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
