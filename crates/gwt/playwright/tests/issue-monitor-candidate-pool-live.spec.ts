@@ -41,7 +41,7 @@ async function seedCustomCandidate(): Promise<void> {
   }
 }
 
-test.describe("Issue Monitor candidate pool", () => {
+test.describe("Issues candidate pool", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
@@ -96,8 +96,8 @@ test.describe("Issue Monitor candidate pool", () => {
       await customRow.click();
       await expect(page.locator(".roster-detail")).toContainText(CUSTOM_ID);
       await page.screenshot({ path: testInfo.outputPath("registered-member-tools.png") });
-      // The live fixture has Monitor and PM disabled. This only edits profiles;
-      // it never starts an agent, enables the Monitor, or creates a branch.
+      // The live fixture has Issues and PM disabled. This only edits profiles;
+      // it never starts an agent, enables the Issues, or creates a branch.
       await sendLiveGwtEvent(page, {
         kind: "issue_monitor_profiles_set",
         profiles: [{ agent_member_id: claudeMember.agent_member_id, agent_id: "claude", model: "sonnet", prefer_for: ["kind:spec"] }],

@@ -4,7 +4,7 @@
 The Release PR (develop -> main) must never carry GitHub closing keywords:
 `main` is the default branch, so `Closes #N` in its body closes the Issue on
 merge even when acceptance criteria are still open (Issue #3545). Issues are
-settled by the Issue Monitor when the work branch merges into `develop`
+settled by Issues when the work branch merges into `develop`
 (Issue #3917); the Release PR only *references* them.
 """
 
@@ -541,7 +541,7 @@ def render_release_pr_body(
             "",
             _issue_list_section(report.delivered_issues),
             "",
-            "Reference-only on purpose: Issues are settled by the Issue Monitor when their "
+            "Reference-only on purpose: Issues are settled by Issues when their "
             "work merges into `develop` (Issue #3917). A Release PR must not close Issues "
             "(Issue #3545).",
             "",

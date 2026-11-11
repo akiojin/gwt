@@ -8,7 +8,7 @@ Windows の debug build で以下の 3 実行を計測した。最終 after は 
 | native 接続のみの試行 | `0067510ba7da982736575e28a73a0738d91e6f8b` | `d27d8353e2d04452bca8d7db57f82272` | [metadata](native-only-attempt/checkout-evidence.json) |
 | 最終 after（native 接続 + Git metadata の狭い fast path） | `91800263ecc62b2480b9b859a032040d9336b2bc` | `4a7ca315866b492e99cda61396a6f05e` | [metadata](after/checkout-evidence.json) |
 
-各実行の fresh HOME に memory 文書を 1 件だけ置き、実モデル `intfloat/multilingual-e5-base` を既存キャッシュから offline で読み込んだ。Python 依存だけを共有し、index・coordinator・resident worker は隔離した。PM・Issue Monitor・バックグラウンド索引は停止した。実モデルの事前ウォームアップ後、最初の GUI 検索を測定対象から除外し、同一の `memory` query を 20 回逐次送信した。その後、別々の request ID で 8 件を同時送信し、検索が pending の間の settings・preset list 応答と Health タブ操作を検証した。
+各実行の fresh HOME に memory 文書を 1 件だけ置き、実モデル `intfloat/multilingual-e5-base` を既存キャッシュから offline で読み込んだ。Python 依存だけを共有し、index・coordinator・resident worker は隔離した。PM・Issues・バックグラウンド索引は停止した。実モデルの事前ウォームアップ後、最初の GUI 検索を測定対象から除外し、同一の `memory` query を 20 回逐次送信した。その後、別々の request ID で 8 件を同時送信し、検索が pending の間の settings・preset list 応答と Health タブ操作を検証した。
 
 実 Chromium の headed 実行で dark、light の順に検証した。baseline は p95 の閾値失敗を許可し、両テストが成功した。[baseline 結果](baseline/playwright-last-run.json)。native 試行では閾値を厳格に適用し、dark が p95 2533.966 ms で失敗、light が成功した。[native 試行の結果](native-only-attempt/playwright-last-run.json)。最終 after は閾値を厳格に適用し、両テーマが成功した。[最終 after 結果](after/playwright-last-run.json)。console/page error は全実行・両テーマで 0 件だった。最後の実 UI 入力による検索成功は baseline と最終 after の両テーマ、native 試行の light で確認した。native 試行の dark は p95 assertion でその前に終了したため、実 UI 入力の成功を確認済みとはしない。
 

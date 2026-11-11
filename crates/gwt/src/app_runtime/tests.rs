@@ -3354,7 +3354,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
 fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
     LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(issue_number),
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: None,
@@ -4118,6 +4118,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
                 generation,
                 context: Some(context.clone()),
                 current: Arc::new(AtomicBool::new(true)),
+                launch_in_flight: true,
                 operation_id: captured.operation_id.clone(),
                 owner_pane_id: captured.id.clone(),
                 client_cell,
@@ -7756,9 +7757,10 @@ fn owner_monitor_fixture_with_prefs(
             std::process::id(),
         ),
     ) {
-        assert_eq!(
-            error.to_string(),
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+        assert!(
+            matches!(error,
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(message)
+                if message == gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR),
             "the actual initial source scan must be reserved or already running"
         );
     }
@@ -7874,6 +7876,7 @@ fn owner_monitor_fresh_fixture(
         delivery,
         prepty_failure,
         gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
     )
 }
 
@@ -7883,6 +7886,7 @@ fn owner_monitor_fresh_fixture_with_control_budget(
     delivery: bool,
     prepty_failure: bool,
     control_budget: Duration,
+    configure: impl FnOnce(&mut gwt_agent::LaunchConfig),
 ) -> OwnerFreshLaunchFixture {
     let (root, owner, delivery_id) = owner_monitor_fixture_with_prefs(
         temp,
@@ -7925,10 +7929,13 @@ fn owner_monitor_fresh_fixture_with_control_budget(
                 .unwrap();
         }
         let mut command = owner_fresh_agent_command(&owner, &repo, choice, None);
-        let gwt::project_runtime::events::OwnerCommand::LaunchAgent { metadata, .. } = &mut command
+        let gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            config, metadata, ..
+        } = &mut command
         else {
             unreachable!()
         };
+        configure(config);
         let mut feedback = issue_monitor_feedback(2359);
         feedback.issue_monitor_delivery_id = delivery_id;
         feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
@@ -11765,7 +11772,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
     }
 }
 
-/// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
+/// Repo with an enabled Issues, a registered PM whose pane is live,
 /// and a second non-PM pane that the wake must never reach.
 pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     let repo = temp.path().join("repo");

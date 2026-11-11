@@ -43,7 +43,7 @@ use crate::types::{AgentId, LaunchRoute};
 pub enum PermissionLaunchSource {
     /// A human pressed Start Work in the GUI.
     StartWork,
-    /// A saved Issue Monitor launch profile.
+    /// A saved Issues launch profile.
     IssueMonitorProfile,
     /// The Launch Wizard's last-used settings for this agent.
     LaunchWizardLastSettings,
@@ -51,7 +51,7 @@ pub enum PermissionLaunchSource {
     ResumeOrAdopt,
     /// A `PhaseLaunchPacket` materialized for a phase hand-off.
     PhaseLaunchPacket,
-    /// An Issue Monitor launch made with no window and nobody watching.
+    /// An Issues launch made with no window and nobody watching.
     SilentIssueMonitor,
     /// A `$gwt-execute` prompt launch.
     GwtExecute,
@@ -365,7 +365,7 @@ pub fn decide(inputs: &PermissionModeInputs<'_>) -> PermissionModeDecision {
 /// Re-decide an already-materialized launch.
 ///
 /// Two launch surfaces only identify themselves — or only force
-/// skip-permissions — *after* the config exists: the Issue Monitor stamps its
+/// skip-permissions — *after* the config exists: Issues stamps its
 /// own route onto a request the wizard already built. Re-deciding from the
 /// mapping the first decision resolved keeps the recorded verdict describing
 /// the launch that actually ships, instead of the one the builder guessed at.

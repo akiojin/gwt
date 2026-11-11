@@ -15,6 +15,50 @@ import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt, readLiveHubCatalog } from "./_helpers/live-gwt";
 
+test("Issue #5333: Issues naming across Issues, Settings and notifications (isolated checkout)", async ({ page }, info) => {
+  test.setTimeout(120_000);
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(({ theme, origin }) => {
+    if (location.origin === origin) localStorage.setItem("gwt:ui:theme", theme);
+  }, { theme, origin: new URL(base!).origin });
+  await gotoLiveGwt(page, base!, { enableTestBridge: true });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const capture = async (surface: string) => {
+    const path = info.outputPath(`issues-naming-${surface}-${theme}.png`);
+    await page.screenshot({ path, fullPage: true });
+    await info.attach(`${surface}-${theme}`, { path, contentType: "image/png" });
+  };
+
+  await page.locator('#op-rail [data-surface="issues"]').click();
+  await expect(page.locator('.workspace-window[data-preset="issue"]')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#op-strip-issue-monitor")).toHaveAttribute("title", /Issues:/);
+  await capture("issues");
+
+  await page.locator('#op-rail [data-surface="settings"]').click();
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  await expect(settings).toBeVisible();
+  await settings.getByRole("tab", { name: "Issues execution settings", exact: true }).click();
+  await expect(settings.locator('[data-settings-panel="issues"]')).toBeVisible();
+  await capture("settings");
+
+  await inject(page, { kind: "issue_monitor_toast", level: "error",
+    message: "Issues scan stalled; last scan at 2026-11-10T00:00:00Z", issue_number: 5333 });
+  await page.locator("#op-notifications-button").click();
+  await expect(page.locator("#notification-center")).toBeVisible();
+  await expect(page.locator("#notification-center")).toContainText("Issues");
+  await expect(page.locator("#notification-center")).toContainText("#5333");
+  await capture("notifications");
+  const retiredName = new RegExp(["issue", "monitor"].join("\\s+"), "i");
+  expect(await page.locator("body").innerText()).not.toMatch(retiredName);
+  expect(errors, "zero console and page errors across the renamed surfaces").toEqual([]);
+});
+
 test("Issue #6659 / Issue #6932 removes resolved Agent Error rows for unmounted and mounted windows (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
@@ -171,13 +215,13 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
     app_version: "playwright", active_tab_id: primary.id, recent_projects: [],
     tabs: [
       { ...primary, kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] } },
-      { id: "notifications-background", project_key: "6729672967296729", title: "Monitor Off", project_root: "/fixture/foreign",
+      { id: "notifications-background", project_key: "6729672967296729", title: "Issues Off", project_root: "/fixture/foreign",
         kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 },
           windows: [first, successor, real, unprovenSuccessor, agent("foreign-machine", 9999), recoveredOld, recoveredNew] } },
     ],
   };
   // Use binary-served assets with a deterministic runtime stream. No Agent is
-  // launched and the isolated Monitor remains Off throughout the measurement.
+  // launched and the isolated Issues remains Off throughout the measurement.
   await page.addInitScript(({ theme, snapshot }) => {
     localStorage.setItem("gwt:ui:theme", theme);
     class SnapshotSocket extends EventTarget {
@@ -281,7 +325,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   expect(errors).toEqual([]);
 });
 
-test("Issue #6932 Monitor notifications group repeated failures and continued/stalled diagnoses (isolated checkout)", async ({ page }, testInfo) => {
+test("Issue #6932 Issues notifications group repeated failures and continued/stalled diagnoses (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
   const errors: string[] = [];
@@ -300,7 +344,7 @@ test("Issue #6932 Monitor notifications group repeated failures and continued/st
   // Deterministic receive events exercise binary-served app wiring, without
   // triggering real autonomous launches or changing the backend protocol.
   await page.evaluate(() => {
-    const launch = { kind: "issue_monitor_toast", level: "info", message: "Issue Monitor launch requested", issue_number: 5016 };
+    const launch = { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 5016 };
     for (let i = 0; i < 4; i += 1) {
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: launch }));
     }
@@ -309,9 +353,9 @@ test("Issue #6932 Monitor notifications group repeated failures and continued/st
   await page.evaluate(() => {
     const notice = { kind: "issue_monitor_toast", level: "warn", message: "Repeated notice", issue_number: 5016 };
     for (const payload of [
-      { ...notice, level: "info", message: "Issue Monitor launch requested", issue_number: 5017 },
+      { ...notice, level: "info", message: "Issues launch requested", issue_number: 5017 },
       notice, notice,
-      { ...notice, level: "error", message: "Issue Monitor launch requested" },
+      { ...notice, level: "error", message: "Issues launch requested" },
       { ...notice, notification_transition: "needs_human", level: "error", message: "Decision needed" },
     ]) {
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
@@ -324,15 +368,15 @@ test("Issue #6932 Monitor notifications group repeated failures and continued/st
   await expect(rows.first()).toContainText("Needs human #5016");
   await expect(rows.first()).toHaveAttribute("data-level", "error");
   await expect(rows.filter({ hasText: "Repeated notice" })).toHaveCount(2);
-  await expect(rows.filter({ hasText: "Issue Monitor launch requested" })).toHaveCount(3);
-  await expect(rows.last()).toContainText("Issue Monitor #5016");
+  await expect(rows.filter({ hasText: "Issues launch requested" })).toHaveCount(3);
+  await expect(rows.last()).toContainText("Issues #5016");
   await expect(badge).toBeHidden();
   const launchRow = drawer.locator('[data-error-key="issue-monitor:launch-requested:5016"]');
   await expect(launchRow).toHaveCount(1);
   await launchRow.locator(".notification-center__dismiss").click();
   await expect(rows).toHaveCount(5);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
-    detail: { kind: "issue_monitor_toast", level: "info", message: "Issue Monitor launch requested", issue_number: 5016 },
+    detail: { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 5016 },
   })));
   await expect(launchRow).toHaveCount(1);
   await expect(rows).toHaveCount(6);
@@ -346,7 +390,7 @@ test("Issue #6932 Monitor notifications group repeated failures and continued/st
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await expect(drawer).toBeHidden();
   const failure = { kind: "issue_monitor_toast", level: "error",
-    message: "issue monitor scan failed at open-pr-readback stage: GitHub connection failed" };
+    message: "Issues scan failed at open-pr-readback stage: GitHub connection failed" };
   for (let i = 0; i < 5; i++) await inject(page, failure);
   await expect(rows).toHaveCount(1);
   await expect(rows.locator(".notification-center__count")).toHaveText("×5");
@@ -360,7 +404,7 @@ test("Issue #6932 Monitor notifications group repeated failures and continued/st
       queue_len: 0, active_count: 0, max_active_agents: 1, last_error: message } });
   }
   await expect(rows).toHaveCount(0);
-  const stalled = "Issue Monitor scan stalled; last scan at 2026-11-09T00:00:00Z; previous failure: issue #42: needs_human: decision needed";
+  const stalled = "Issues scan stalled; last scan at 2026-11-09T00:00:00Z; previous failure: issue #42: needs_human: decision needed";
   await inject(page, { ...failure, message: stalled });
   await bell.click();
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
@@ -808,7 +852,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
 
     const rows = drawer.locator(".notification-center__item");
     await expect(rows).toHaveCount(12);
-    await expect(rows.first()).toContainText("Issue Monitor #3011");
+    await expect(rows.first()).toContainText("Issues #3011");
     await expect(rows.first()).toContainText("autonomous event 11");
     await expect(rows.first()).toHaveAttribute("data-level", "error");
     await expect(rows.last()).toContainText("#3000");
@@ -906,7 +950,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(drawer).toHaveAttribute("data-open", "false");
   });
 
-  test("FR-017: an Issue Monitor error is read only in the notification center, never in the Issue window", async ({
+  test("FR-017: an Issues error is read only in the notification center, never in the Issue window", async ({
     page,
   }) => {
     const issueWindow = page.locator(".surface-knowledge .issue-bridge-root");

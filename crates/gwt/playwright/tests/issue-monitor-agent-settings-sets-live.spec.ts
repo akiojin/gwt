@@ -1,6 +1,6 @@
-/* Issue #4911 AC-9 — `＋` / `−` / reorder / save of the Issue Monitor Agent
+/* Issue #4911 AC-9 — `＋` / `−` / reorder / save of Issues Agent
  * Settings sets against a real backend, in both themes. The save only writes
- * the candidate pool; it never starts an agent, enables the Monitor, or
+ * the candidate pool; it never starts an agent, enables the Issues, or
  * creates a branch.
  */
 import { readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -16,9 +16,9 @@ import {
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const UPDATE_FIXTURE = process.env.GWT_E2E_AGENT_UPDATE_FIXTURE_DIR ?? "";
 
-test.describe("Issue Monitor Agent Settings sets", () => {
+test.describe("Issues Agent Settings sets", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
-  // Windows status publication can wait for the disabled Monitor's 60s scan.
+  // Windows status publication can wait for the disabled Issues's 60s scan.
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
@@ -293,7 +293,7 @@ test.describe("Issue Monitor Agent Settings sets", () => {
               issue_monitor_pool: before.issue_monitor_pool,
             });
           }
-          // Runtime observations may change while the disabled Monitor runs.
+          // Runtime observations may change while the disabled Issues runs.
           // The update must preserve the saved configuration, including pool order.
           const updatedPreferences = JSON.parse(await readFile(preferences, "utf8"));
           for (const key of ["launch_profile", "launch_profiles", "launch_auto", "enabled"]) {

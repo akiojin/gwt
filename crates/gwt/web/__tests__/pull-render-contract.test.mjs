@@ -525,7 +525,7 @@ test("Autostart receivers commit shared state and reject bypass rendering", () =
   assert.ok(findings(bypass).length > 0);
 });
 
-test("Monitor notification receiver only commits model data and rejects direct history rendering", () => {
+test("Issues notification receiver only commits model data and rejects direct history rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const monitorFindings = source => scanModule(source, 'crates/gwt/web/app.js')
     .filter(finding => finding.root === 'receive' && finding.context === '/issue_monitor_toast');
@@ -780,7 +780,7 @@ test("baseline cannot grow and first introduction is bounded by base source find
   assert.throws(() => assertBaseline([], receiverKeys(old), receiverKeys(old), old), /stale/i);
 });
 
-test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () => {
+test("migrated Issues and Usage receiver roots contain no DOM sinks", () => {
   for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js", "operator-shell.js"]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
     const migrated = scanModule(source, file).filter(finding =>
@@ -799,7 +799,7 @@ test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () 
   assert.deepEqual(committed, [status]);
 });
 
-test("Monitor renderer remains a DOM sink when reached from a receiver", () => {
+test("Issues renderer remains a DOM sink when reached from a receiver", () => {
   const file = 'operator-shell.js';
   const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
   const bypass = source + '\nfunction receive(event) { renderIssueMonitorStatus(document, event); }';
@@ -812,7 +812,7 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   const file = 'crates/gwt/web/app.js';
   const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
   const migrated = findings => findings.filter(finding => finding.root === 'receive'
-    && /^\/(pm_reports|terminal_output|terminal_snapshot)$/.test(finding.context));
+    && /^\/(pm_reports\|pm_conversation|terminal_output|terminal_snapshot)$/.test(finding.context));
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
   const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
@@ -871,7 +871,7 @@ test("Workspace state notice receiver resolves only shared model updates", () =>
     'case "workspace_state_notice": element.textContent = event.kind;');
   assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
   const directRender = notice.replace('function receive(notice) {',
-    'function receive(notice) { render(notice);');
+    'function receive(notice) { container.textContent = notice.message;');
   assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
   assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
 });

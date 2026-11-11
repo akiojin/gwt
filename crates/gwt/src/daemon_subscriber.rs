@@ -91,7 +91,7 @@ impl DaemonSubscriber {
 
     /// Spawn the GUI's daemon subscriber. This is deliberately separate from
     /// the general observer API: only this path acquires the daemon's
-    /// connection-bound Issue Monitor materializer lease.
+    /// connection-bound Issues materializer lease.
     pub fn spawn_materializer_with_resolver<R, F>(
         resolver: R,
         channels: Vec<String>,
@@ -456,8 +456,7 @@ mod tests {
             // The joined callback thread has dropped its sender; any remaining
             // message would be an unexpected duplicate delivery.
             assert_eq!(received.try_recv(), Err(mpsc::TryRecvError::Disconnected));
-            server_handle.abort();
-            let _ = server_handle.await;
+            server_handle.shutdown().await;
         });
     }
 
@@ -487,8 +486,7 @@ mod tests {
             // Drop without sending any events; stop() must complete promptly.
             subscriber.stop();
 
-            server_handle.abort();
-            let _ = server_handle.await;
+            server_handle.shutdown().await;
         });
     }
 
@@ -531,8 +529,7 @@ mod tests {
             .await
             .expect("stopped subscriber releases presence lease");
 
-            server_handle.abort();
-            let _ = server_handle.await;
+            server_handle.shutdown().await;
         });
     }
 
@@ -706,8 +703,7 @@ mod tests {
             );
 
             subscriber.stop();
-            server_handle.abort();
-            let _ = server_handle.await;
+            server_handle.shutdown().await;
         });
     }
 
@@ -860,8 +856,7 @@ mod tests {
             );
 
             subscriber.stop();
-            server_handle.abort();
-            let _ = server_handle.await;
+            server_handle.shutdown().await;
         });
     }
 }

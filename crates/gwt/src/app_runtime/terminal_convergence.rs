@@ -3,7 +3,7 @@
 //!
 //! The runtime, not the PM, closes an Agent window once its Work is
 //! canonically terminal: the execution record settled cleanly, the Issue has a
-//! durable closed record, or the Issue Monitor durably replaced the launch.
+//! durable closed record, or Issues durably replaced the launch.
 //! The design is one observer plus the existing detached finalizer:
 //!
 //! 1. A short tick on the Tao thread captures only immutable facts about each
@@ -100,7 +100,7 @@ pub(crate) fn settle_issue_monitor_terminal_delivery_in_background(
 ) -> Result<(), String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-        .map_err(|error| format!("Issue Monitor prefs could not be read: {error}"))?;
+        .map_err(|error| format!("Issues prefs could not be read: {error}"))?;
     let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     let target = gwt::IssueMonitorStopTarget {
         issue_number,
@@ -222,7 +222,7 @@ fn observe_terminal_windows_with_monitor_loader(
                                         window_id = %snapshot.window_id,
                                         issue_number,
                                         reason = reason.as_str(),
-                                        "settled the Issue Monitor terminal delivery before automatic close"
+                                        "settled Issues terminal delivery before automatic close"
                                     );
                                     TerminalCloseEligibility::Eligible(reason)
                                 }

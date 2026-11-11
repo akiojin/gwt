@@ -3,7 +3,7 @@
 //! Before this suite the only caller that ever reached `serve_blocking` was a
 //! human typing `gwtd daemon start`. Every production caller that resolved
 //! `DaemonBootstrapAction::Spawn` declined to spawn, so `daemon.subscribe`
-//! and the Issue Monitor control lane were permanently unavailable while the
+//! and Issues control lane were permanently unavailable while the
 //! monitor still reported a healthy snapshot.
 
 #![cfg(unix)]
@@ -138,7 +138,7 @@ fn ensure_running_starts_a_daemon_when_no_endpoint_is_published() {
 }
 
 /// A daemon that already owns the endpoint must never be duplicated: two
-/// drivers on one project is the Issue Monitor duplicate-launch trap.
+/// drivers on one project is Issues duplicate-launch trap.
 #[test]
 fn ensure_running_reuses_a_live_daemon_endpoint_instead_of_spawning() {
     let fixture = fixture();

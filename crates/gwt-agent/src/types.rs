@@ -464,7 +464,7 @@ pub enum SessionMode {
 /// stamped onto the durable Session record at launch instead of being
 /// inferred later from ambient environment variables. `GWT_AUTONOMOUS_EXECUTION`
 /// is set only when the project opted into unattended autonomous mode, so an
-/// Issue Monitor launch made while that preference reads false used to
+/// Issues launch made while that preference reads false used to
 /// classify itself as human-driven and then stall waiting for a human who was
 /// never there (#3777, #3697).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,7 +475,7 @@ pub enum LaunchRoute {
     /// keeps every pre-#4217 session on the human-gated behavior.
     #[default]
     Manual,
-    /// The Issue Monitor claimed the owner Issue and launched this session
+    /// Issues claimed the owner Issue and launched this session
     /// with nobody watching.
     Autonomous,
 }

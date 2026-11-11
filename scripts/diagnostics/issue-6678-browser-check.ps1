@@ -108,7 +108,7 @@ try {
         gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');binary=$gwt;
         binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;
         source_sha256=@($sources | ForEach-Object {@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $checkout $_) -Algorithm SHA256).Hash}});
-        scenario='isolated idle GUI; PM auto-start and Issue Monitor disabled';
+        scenario='isolated idle GUI; PM auto-start and Issues disabled';
         limitation='This is a GUI log-volume observation, not the busy-owner Deferred-loop reproduction. The root regression is covered separately by the Rust test.';
         baseline_source='Issue #6678 observed approximately 350 gwt.pm.refresh lines/second';baseline_lines_per_second=350}
     [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 8))

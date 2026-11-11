@@ -125,7 +125,7 @@ leaves `agent_identity.migration.json` unchanged (or absent).
 The embedded frontend requires an operation ID for cleanup requests. Reload older
 open tabs after upgrading. Launch Wizard always skips permission prompts and
 launches with Fast mode off; it reads older saved choices without rewriting them.
-Issue Monitor profiles and direct Session resume keep their existing preferences.
+Issues profiles and direct Session resume keep their existing preferences.
 
 ## Requirements
 
@@ -589,8 +589,7 @@ metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte ca
 long posts increase the size, and `all: true` can return hundreds of KiB or more.
 
 Managed hooks and project runtime delegation use `gwtd`. Opening a project
-starts or reconnects to its shared daemon, which owns agent panes and the Issue
-Monitor. A connection failure affects that project; the Hub and other projects
+starts or reconnects to its shared daemon, which owns agent panes and the Issues runtime. A connection failure affects that project; the Hub and other projects
 remain available. GUI-managed daemons drain after the last GUI disconnects and
 a reconnect grace period expires. An explicit Continue retains that project's
 runtime while admitted work is unfinished. Closing one GUI does not kill a shared daemon.
@@ -624,7 +623,7 @@ platform's console shutdown signal.
    `gwt-spec` design-required label and SPEC artifacts on that Issue. Intake
    never creates a branch.
 4. In the **Execute** lane, run the registered work: `Open Workspace` launches
-   an `Agent` on an existing branch, the background `Issue Monitor` picks up
+   an `Agent` on an existing branch, the background `Issues` runtime picks up
    registered Issues automatically, or launch directly from an Issue detail
    with the unified prompt form `gwt-execute #N` when the owner is already known.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
@@ -640,11 +639,11 @@ platform's console shutdown signal.
 Common windows include:
 
 - `Agent` — live coding-agent process windows created through Intake, Open
-  Workspace, the Issue Monitor, or Launch Agent
+  Workspace, Issues, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view. Issue Monitor agents are mirrored read-only in
+  open this same Work Item view. Issues agents are mirrored read-only in
   the Issue window's right pane,
   and `Windowize` opens the same session in its native terminal in Works for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
@@ -670,7 +669,7 @@ Common windows include:
   System shows the saved and effective values and pending-update blockers.
   Change the preference in the GUI or ask the PM to use `update.settings.set`
   with `auto_apply_updates`; `update.settings.status` reports its state.
-  It is no longer an Issue Monitor setting.
+  It is no longer a setting for Issues.
   `Restart now` opens a confirmation showing active agent counts, pending
   claims, verification leases, and affected Issues. When work is active,
   `Apply after all agents finish` is the default choice; it holds new launches
@@ -711,7 +710,7 @@ The mouse wheel scrolls retained history even when an agent tracks the mouse.
 Use `Shift+drag` to select text in mouse-tracking applications (`Option+drag` on
 macOS); the terminal's hover hint also shows these modifiers.
 
-## Issue surface and Issue Monitor
+## Issue surface and Issues
 
 Open **Issues** from the rail to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
@@ -951,7 +950,7 @@ provider's latest usage reading under `provider_usage`, or why there is none.
 Every rate-limit refusal immediately holds its provider. If all candidates
 are held, the queue resumes at the earliest known reset; if every reset is
 unknown, `needs_human_fleet` reports `launch_candidates_exhausted` instead
-of periodically retrying. In the GUI, the Issue Monitor settings form
+of periodically retrying. In the GUI, the Issues settings form
 (`⚙ Settings`) lists the same pool as Agent Settings sets: `＋` adds a set, `−`
 removes one, the arrows reorder them, and the saved order is the launch order.
 All operations accept an optional
@@ -1093,8 +1092,15 @@ monitor armed. The full gate design and threat model live in SPEC
 Once a work branch merges into `develop`, the monitor settles the delivered
 Issue itself (`Closes #N` only fires on the default branch). When every
 acceptance criterion is checked, it posts a comment carrying the PR number and
-merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
-`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open. With
+Autonomous on, the comment explains that remaining implementation work returns
+to the queue with a fresh session. If every remaining criterion is
+explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
+as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
+`awaiting_measurement`. Update its acceptance checklist
+after measurement to allow close, or choose **Return to queue** to resume work.
+With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
+`merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria
 does not bypass the unchecked checklist. Auto-close follows the
 `Autonomous` toggle by default; `issue.monitor.config.set` with
@@ -1150,7 +1156,7 @@ persist per project. The human-gated baseline is SPEC
 Each project also runs one resident **PM agent** pane. It is the single
 conversational window: you describe what you want in natural language, and the
 PM decomposes it into Issues, registers them, plans the design-required ones,
-decides the semantic execution order, and tells the Issue Monitor which Issue
+decides the semantic execution order, and tells the Issues runtime which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
 
@@ -1528,20 +1534,20 @@ as a digest rather than copied into the audit. They likewise lack direct Issue
 mapping. These records do not schedule work or prove duplicate prevention or notification.
 
 The PM never launches implementation agents itself — it moves an Issue to the
-front of the queue and asks for a scan, and the Issue Monitor's existing
+front of the queue and asks for a scan, and the existing Issues
 claim/slot path does the launching, so the duplicate-launch protections are
 unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
 - PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
-  across restarts while the PM remains available for conversation; Issue Monitor
+  across restarts while the PM remains available for conversation; Issues
   and running agents keep working. Resume reconciles the latest status. JSON
   operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
   reports `paused` separately from registration.
 - Closing the PM pane stops it; it will not restart itself. A crash does
   auto-resume, with a backoff so a crash loop cannot spin.
-- Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
+- Only the PM may turn on `enabled` / `autonomous_mode` for Issues
   from the CLI; every other agent session must use the GUI. Merges are
   unaffected — the strong automated gate above still decides every merge.
 - There is one PM per **repository**, not per project store, so a repository
@@ -2104,6 +2110,12 @@ confirmed list with a warning. Task editing, automatic intake, and history impor
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 
+The PM window's **Chat** view shows the PM conversation as chat bubbles: your
+messages on the right and PM replies on the left, with PM Markdown (headings,
+lists, tables, and code) formatted. It reads the PM session's own conversation
+record and omits tool calls, hook notes, and automatic prompts. It is read-only
+in this release; use **Execution log** to talk with PM.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
@@ -2409,7 +2421,7 @@ processes or unavailable samples do not imply low CPU usage. A warning is an
 observation, not proof that a particular worktree caused the load; inspect
 active filesystem consumers and Spotlight privacy settings before attributing it.
 
-Spotlight's own indexing daemon is reported from the Issue Monitor snapshot
+Spotlight's own indexing daemon is reported from the Issues snapshot
 instead: `spotlight` in `issue.monitor.status` lists every `mds_stores`
 process with its CPU percentage and carries a `warning` once one of them
 exceeds 100%. On a host with hundreds of worktrees the daemon can outrank the

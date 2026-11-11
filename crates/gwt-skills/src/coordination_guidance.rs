@@ -241,7 +241,7 @@ posting output and every PM-facing surface repeat back to you:
 
 ### Waiting is not a stall: declare it
 
-The Issue Monitor judges a launched agent stuck when it sees no activity
+The Issues runtime judges a launched agent stuck when it sees no activity
 for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
 costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
 serialization ruling, or on a long verification run you must not touch
@@ -265,8 +265,8 @@ Clear it the moment you resume:
     JSON
 
 Always pass `number`. Omitting it resolves the owner Issue from
-`GWT_AUTONOMOUS_ISSUE`, which only exists directly inside a session the
-Issue Monitor launched - a bootstrap script, a subshell, a wrapper
+`GWT_AUTONOMOUS_ISSUE`, which only exists directly inside a session
+launched by Issues - a bootstrap script, a subshell, a wrapper
 process, or an agent you started yourself does not have it, and there the
 call is refused with `issue_unknown`.
 
@@ -754,7 +754,7 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
 
 ### 待機は停滞ではない: 申告する
 
-Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+Issues は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
 を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
 排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
 の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
@@ -775,7 +775,7 @@ PM は `issue.monitor.status` の自分の行の `waiting` フィールドから
     JSON
 
 `number` は必ず渡してください。省略した場合は `GWT_AUTONOMOUS_ISSUE` から
-担当 Issue を解決しますが、この env は Issue Monitor が起動したセッションの
+担当 Issue を解決しますが、この env は Issues が起動したセッションの
 直下にしか存在しません。bootstrap スクリプト、サブシェル、ラッパープロセス、
 自分で起動した agent には届かず、そこでは `issue_unknown` で拒否されます。
 
@@ -2000,7 +2000,7 @@ mod tests {
     /// Issue #4334 AC-1 / AC-4 / AC-5: every shipped `issue.monitor.wait`
     /// example must pass `number` explicitly.
     ///
-    /// Omitting it only resolves inside a session the Issue Monitor launched,
+    /// Omitting it only resolves inside a session launched by Issues,
     /// where `GWT_AUTONOMOUS_ISSUE` names the owner. Anywhere else — a
     /// bootstrap script, a subshell, a manually started agent — the operation
     /// refuses with `issue_unknown`, and agents put the clear call in a

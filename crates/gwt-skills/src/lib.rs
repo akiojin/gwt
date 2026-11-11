@@ -810,8 +810,8 @@ mod tests {
                 "expected an explicit auto-merge opt-out path: {relative}"
             );
             assert!(
-                issue_skill.contains("Issue Monitor"),
-                "expected the Issue Monitor eligibility alignment note: {relative}"
+                issue_skill.contains("Issues"),
+                "expected the Issues eligibility alignment note: {relative}"
             );
         }
     }
@@ -2555,7 +2555,7 @@ mod tests {
         }
     }
 
-    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issue Monitor)
+    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issues)
     /// launch must never wait for a human to look at a screen, and the agent's
     /// own headed browser-check must be recorded as its own evidence line
     /// instead of being laundered into the user's verification result. Manual

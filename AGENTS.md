@@ -18,7 +18,7 @@
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd` JSON operation `memory.add` でマシンローカルの work-notes memory（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`、SPEC-3214）に記録し、同種の作業を始める前に確認する。repo-local `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は読み取り fallback / legacy alias として扱う。
 - **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは PM・実装 agent 共通の [`gwt-feedback`](.codex/skills/gwt-feedback/SKILL.md) で報告する。観測内容と受付結果の PM への共有は、generated `gwt-coordination` SKILL.md の Board 手順に従う。
-- **PM 面の修正も実装エージェントが担当する:** PM guidance / PM skill、PM が呼ぶ `issue.monitor.*` / `pm.*` operation、PM が裁定に使う Board・escalation 面、PM が作業を観測・順序付け・決着できなくなる欠陥の修正も、他の Issue と同じく Issue Monitor が起動する実装エージェントが担当する（ユーザー指示 2026-10-06）。実装エージェントは、修正対象が PM 面であることを理由に blocked を宣言しない。PM はこれらを PM worktree で実装しない。その修正なしでは艦隊を steer できない場合、PM はその Issue をキューの先頭に置き、それでも進まなければユーザーへエスカレーションする。
+- **PM 面の修正も実装エージェントが担当する:** PM guidance / PM skill、PM が呼ぶ `issue.monitor.*` / `pm.*` operation、PM が裁定に使う Board・escalation 面、PM が作業を観測・順序付け・決着できなくなる欠陥の修正も、他の Issue と同じく Issues が起動する実装エージェントが担当する（ユーザー指示 2026-10-06）。実装エージェントは、修正対象が PM 面であることを理由に blocked を宣言しない。PM はこれらを PM worktree で実装しない。その修正なしでは艦隊を steer できない場合、PM はその Issue をキューの先頭に置き、それでも進まなければユーザーへエスカレーションする。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -177,7 +177,7 @@
 - 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。残件がある場合は PR 本文に後続タスクとして明記し、**Draft に倒すのではなく follow-up Issue を立てる。**
 - PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS` と PR 本文 checklist 完了を確認する。`User Verification Result` は任意の記録欄で、オーナーが明示的に確認を求めた場合のみ必須とする。**これは Ready 化の条件ではなく PR 作成の条件になった。**
 - **検証が通らない変更は PR を作らない。** Draft という逃げ道が無くなったため、「とりあえず Draft で出して CI を見る」ことはできない。ローカルで検証してから PR を作る。
-- **起動経路は実行記録から判定する（Issue #4217 FR-002）。** `execution.status` の `launch_route` が `autonomous` なら自動実行、`manual` または不明なら手動起動として扱う。`GWT_AUTONOMOUS_EXECUTION` は legacy シグナルであり、**設定されていることは autonomous の証拠になるが、設定されていないことは manual の証拠にならない**。この env は「プロジェクトが unattended mode を opt-in したか」でのみ書かれるため、Issue Monitor 起動でも未設定になり、実際に 2 窓が「手動起動」と誤判定して視覚検証待ちで停止した（#3777 / #3697）。
+- **起動経路は実行記録から判定する（Issue #4217 FR-002）。** `execution.status` の `launch_route` が `autonomous` なら自動実行、`manual` または不明なら手動起動として扱う。`GWT_AUTONOMOUS_EXECUTION` は legacy シグナルであり、**設定されていることは autonomous の証拠になるが、設定されていないことは manual の証拠にならない**。この env は「プロジェクトが unattended mode を opt-in したか」でのみ書かれるため、Issues 起動でも未設定になり、実際に 2 窓が「手動起動」と誤判定して視覚検証待ちで停止した（#3777 / #3697）。
 - **自動実行（`launch_route: autonomous`）では、実装・自動検証・Ready PR Gate を満たしたら Ready PR を作成し、既存の CI 自動マージまで完結させる（Issue #4326）。** ユーザーへ視覚確認を依頼せず、UI surface の有無にかかわらず `User Verification Result: n/a (autonomous)` を記録する。agent 自身の確認を人間の `confirmed` と偽ってはならない。
 - **旧 `deferred (autonomous execution)` は移行互換として扱う。** 既存の自動実行 PR は本文を書き換えず、fresh な検証証跡と他の Ready Gate 条件を満たせば `pr.ready` / 非 draft の `pr.create` を実行できる。`pr.list` の `deferred_user_verification` は新旧の自動実行値では `false`、manual / 一般の deferred では `true` とする。本文を hydrate していない場合はフィールドを省略する。
 - **自動実行では、人間の視覚確認の不在を理由に `execution.blocked` を打ってはならない。** 自動テスト・実 headed E2E・CI の失敗、既知 blocker、他の Ready Gate 未達は解消してから進む。`execution.blocked` は一時停止ではなく terminal であるため、一時的な検証待ちにも使用しない。
@@ -230,8 +230,8 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
   - 機能要件（FR-\*）
-  - 成功基準（検証コマンドと期待結果。Issue Monitor は読まない）
-  - 受け入れ基準（`- [ ] AC-N:` 形式のチェックリスト。Issue Monitor の autonomous gate が読む唯一の場所。`auto-merge` ラベル付きで欠けていると `issue.create` / `issue.spec.create` / `issue.spec.edit` が拒否する）
+  - 成功基準（検証コマンドと期待結果。Issues は読まない）
+  - 受け入れ基準（`- [ ] AC-N:` 形式のチェックリスト。Issues の autonomous gate が読む唯一の場所。`auto-merge` ラベル付きで欠けていると `issue.create` / `issue.spec.create` / `issue.spec.edit` が拒否する）
   - Out of Scope / Related Artifacts
 - `gwt-plan-spec` で `plan` / `tasks` section も策定してから実装に入る
 - 新規 SPEC を作成した場合でも、エージェントは自分で新規ブランチや Worktree を作成しない。実装に進む場合は、承認済み SPEC と `gwt-plan-spec` の成果物に基づき、現在起動されている branch/worktree で作業する。

@@ -1,4 +1,4 @@
-/** Issue #5596: real Monitor delivery completion + PTY handoff, offline providers. */
+/** Issue #5596: real Issues delivery completion + PTY handoff, offline providers. */
 import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
@@ -8,12 +8,15 @@ import { gotoLiveGwt, sendLiveGwtEvent } from './_helpers/live-gwt';
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || '';
 const HOME = process.env.GWT5596_HOME || '';
 const SEQUENTIAL = process.env.GWT5596_SEQUENTIAL === '1';
+const LAUNCH_ACCEPTANCE = process.env.GWT5596_LAUNCH_ACCEPTANCE === '1';
 const LAUNCH_COUNT = Number(process.env.GWT5596_LAUNCH_COUNT || '10');
+const EXE_SUFFIX = process.platform === 'win32' ? '.exe' : '';
 test.skip(!BASE || !HOME, 'requires scripts/verify-issue-5596.ps1');
 test.use({ headless: false });
-test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launches finish within 120 seconds each`
+test(LAUNCH_ACCEPTANCE ? 'Issue #7016: six retained panes, ten single launches and two concurrent launches meet their deadlines'
+  : SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launches finish within 120 seconds each`
   : 'Issue #5596: twelve admitted launches keep completion handlers within budget', async ({ page }, info) => {
-  test.setTimeout(SEQUENTIAL ? 1_400_000 : 600_000);
+  test.setTimeout(LAUNCH_ACCEPTANCE ? 2_400_000 : SEQUENTIAL ? 1_400_000 : 600_000);
   const fixture = JSON.parse(await readFile(join(HOME, 'fixture.json'), 'utf8'));
   const count = fixture.sequential ? fixture.launch_count ?? 10 : 12;
   const theme = info.project.name.includes('light') ? 'light' : 'dark';
@@ -26,7 +29,12 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
   try {
     expect(fixture.issues).toHaveLength(count);
     expect(fixture.expected_deliveries).toHaveLength(count);
-    expect(fixture.checkout_binary.replaceAll('\\', '/')).toContain('/target/debug/gwt.exe');
+    if (fixture.launch_acceptance) {
+      const members = fixture.expected_deliveries.map((delivery: any) => delivery.agent_member_id);
+      expect(members.every((member: unknown) => typeof member === 'string' && member.length > 0)).toBe(true);
+      expect(new Set(members).size, 'confirmed deliveries retain distinct scheduled members').toBe(count);
+    }
+    expect(fixture.checkout_binary.replaceAll('\\', '/')).toContain(`/target/debug/gwt${EXE_SUFFIX}`);
     await page.addInitScript(theme => localStorage.setItem('gwt:ui:theme', theme), theme);
     await page.bringToFront();
     await gotoLiveGwt(page, BASE, { enableTestBridge: true, projectKey: fixture.project_key });
@@ -44,7 +52,7 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
       await Promise.all(providers.map(provider => writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n')));
       return providers.length;
     }, {
-      timeout: 300_000, message: `${count} real local provider PTYs from persisted Monitor deliveries`,
+      timeout: 300_000, message: `${count} real local provider PTYs from persisted Issues deliveries`,
     }).toBe(count);
     const providers = await launches();
     expect(new Set(providers.map(entry => entry.session_id)).size).toBe(count);
@@ -64,21 +72,24 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
           const hook = JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8'));
           return hook.success === true
             && measurement.user_prompt_authenticated_sessions.includes(provider.session_id)
-            && measurement.user_prompt_matched_sessions.includes(provider.session_id)
+            && measurement.user_prompt_bound_sessions.includes(provider.session_id)
             && measurement.durable_launch_ack_complete
             && measurement.durable_launch_ack_rows.some((ack: any) => ack.complete
               && provider.argv.join(' ').includes(`#${ack.issue_number}`)
               && ack.matched_session_ids.includes(provider.session_id));
         } catch { return false; }
       }));
-    }, { timeout: 120_000, message: 'all exact UserPromptSubmit hooks are authenticated, matched and durably acknowledged by the GUI' }).toEqual(Array(count).fill(true));
+    }, { timeout: 120_000, message: 'all exact UserPromptSubmit hooks are authenticated and durably acknowledged by the GUI' }).toEqual(Array(count).fill(true));
     const windowListCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
     await sendLiveGwtEvent(page, { kind: 'list_windows' });
-    await expect.poll(() => page.evaluate(({ sessions, cursor }) => {
+    await expect.poll(() => page.evaluate(({ bindings, cursor }) => {
       const entry = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
       const windows = entry?.payload.windows || [];
-      return sessions.filter(session => windows.some((window: any) => window.session_id === session && ['running', 'idle'].includes(window.status))).length;
-    }, { sessions: providers.map(provider => provider.session_id), cursor: windowListCursor }), { timeout: 120_000, message: 'provider sessions are bound to running Work windows' }).toBe(count);
+      return bindings.filter(binding => windows.some((window: any) => window.linked_issue_number === binding.issue_number
+        && window.session_id === binding.session_id && ['running', 'idle'].includes(window.status))).length;
+    }, { bindings: measurement.durable_launch_ack_rows.map((ack: any) => ({
+      issue_number: ack.issue_number, session_id: ack.matched_session_ids[0],
+    })), cursor: windowListCursor }), { timeout: 120_000, message: 'provider sessions are bound to their exact running Work windows' }).toBe(count);
     // The summary contains only >50 ms handlers. Wait for a complete owned
     // minute after the final completion, so an absent target row has meaning.
     if (!fixture.sequential) {
@@ -93,7 +104,29 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
     }
     expect(await launches(), 'exactly the admitted provider receipts remain after measurement').toHaveLength(count);
     expect(errors, 'zero console/page errors').toEqual([]);
-    expect(measurement.failed_issue_rows, 'no failed Monitor deliveries').toEqual([]);
+    expect(measurement.failed_issue_rows, 'no failed Issues deliveries').toEqual([]);
+    if (fixture.launch_acceptance) {
+      await expect.poll(async () => {
+        measurement = await observe(fixture);
+        const acceptance = await launchAcceptanceEvidence(fixture, measurement);
+        return acceptance.phase_coverage.every((coverage: any) => coverage.missing.length === 0);
+      }, { timeout: 30_000, message: 'correlated launch phase logs are flushed after the final durable ACK' }).toBe(true);
+      expect(errors, 'zero console/page errors through phase-log convergence').toEqual([]);
+      const acceptance = await launchAcceptanceEvidence(fixture, measurement);
+      expect(fixture.launch_acceptance.initial_prefs_bytes, 'production-sized retained prefs').toBeGreaterThanOrEqual(1_100_000);
+      expect(acceptance.single_launches).toHaveLength(10);
+      expect(acceptance.single_p95_ms, 'ten single launches with six retained panes have p95 at most 60 seconds').toBeLessThanOrEqual(60_000);
+      expect(acceptance.concurrent_launches).toHaveLength(2);
+      expect(acceptance.concurrent_launches[0].enqueued_at, 'both deliveries were enqueued together').toBe(acceptance.concurrent_launches[1].enqueued_at);
+      for (const receipt of [...acceptance.single_launches, ...acceptance.concurrent_launches]) {
+        expect(receipt.retained_window_count, 'six real warmup panes remain running').toBe(6);
+        expect(receipt.complete).toBe(true);
+        expect(receipt.elapsed_ms).toBeLessThan(120_000);
+      }
+      for (const coverage of acceptance.phase_coverage) {
+        expect(coverage.missing, `issue/delivery-correlated completed phases for #${coverage.issue_number}`).toEqual([]);
+      }
+    }
     await info.attach(`launch-performance-${theme}`, { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
     passed = true;
   } finally {
@@ -113,7 +146,8 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
         missing_shell_image: /pwsh\.dll.*(?:not exist|not found)/i.test(output) };
     }), measurement.durable_launch_ack_rows.filter((row: any) => row.window_id).map((row: any) => row.window_id));
     const evidence = {
-      issue: fixture.cargo_load ? 6393 : fixture.sequential ? 6096 : 5596, phase: fixture.phase, theme, passed, fixture, ...measurement,
+      issue: fixture.launch_acceptance ? 7016 : fixture.cargo_load ? 6393 : fixture.sequential ? 6096 : 5596, phase: fixture.phase, theme, passed, fixture, ...measurement,
+      launch_acceptance: fixture.launch_acceptance ? await launchAcceptanceEvidence(fixture, measurement) : undefined,
       cargo_load_period: fixture.cargo_load ? cargoLoadPeriod : undefined,
       terminal_diagnostics: terminalDiagnostics,
       sequential_launches: fixture.sequential ? JSON.parse(await readFile(join(HOME, 'sequential-launches.json'), 'utf8').catch(() => '[]')) : undefined,
@@ -137,30 +171,38 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
     // Confirm the normal daemon control lane before starting any delivery's
     // timer. Every subsequent enqueue includes its own acknowledged scan wake.
     await new Promise<void>((resolve, reject) => {
-      execFile(join(HOME, 'bin/enqueue.exe'), ['--ready'], {
+      execFile(join(HOME, `bin/enqueue${EXE_SUFFIX}`), ['--ready'], {
         cwd: fixture.project, timeout: 30_000, windowsHide: true,
       }, error => error ? reject(error) : resolve());
     });
-    for (const expected of fixture.expected_deliveries) {
+    for (const [index, expected] of fixture.expected_deliveries.entries()) {
+      const retainedWindowCount = fixture.launch_acceptance && index >= 6
+        ? await assertRetainedWarmupPanes(page, receipts.slice(0, 6)) : undefined;
       const loadBefore = fixture.cargo_load ? await cargoLoadSample(fixture) : undefined;
-      const enqueuedAt = new Date().toISOString();
+      // The final pair shares one actual enqueue and one deadline, even when
+      // the production materializer serializes its physical launches.
+      const secondConcurrent = fixture.launch_acceptance && index === 17;
+      const enqueuedAt = secondConcurrent ? receipts[16].enqueued_at : new Date().toISOString();
       const receipt: any = { ...expected, enqueued_at: enqueuedAt, complete: false, cargo_load_before: loadBefore,
+        retained_window_count: retainedWindowCount,
         timing_boundary: fixture.cargo_load ? 'durable-materialization-and-ready-native-window' : 'authenticated-provider-handoff' };
       receipts.push(receipt);
       await writeFile(receiptsPath, JSON.stringify(receipts, null, 2));
       try {
         // The helper links this checkout's production locked prefs mutation.
         // No shell, external GitHub write or whole-file read/replace is used.
-        await new Promise<void>((resolve, reject) => {
-          const child = execFile(join(HOME, 'bin/enqueue.exe'), [], {
+        if (!secondConcurrent) await new Promise<void>((resolve, reject) => {
+          const child = execFile(join(HOME, `bin/enqueue${EXE_SUFFIX}`), [], {
             cwd: fixture.project, timeout: 120_000, windowsHide: true,
           }, (error, _stdout, stderr) => error
             ? reject(new Error(`fixture enqueue failed: ${stderr.trim() || error.message}`))
             : resolve());
-          child.stdin!.end(JSON.stringify({
-            ...expected, branch_name: `work/issue-${expected.issue_number}`, linked_issue_kind: 'issue',
+          const delivery = (entry: any) => ({
+            ...entry, branch_name: `work/issue-${entry.issue_number}`, linked_issue_kind: 'issue',
             claim_owner: 'fixture', launch_session_strategy: 'fresh_required', created_at: enqueuedAt,
-          }));
+          });
+          child.stdin!.end(JSON.stringify(fixture.launch_acceptance && index === 16
+            ? fixture.expected_deliveries.slice(16).map(delivery) : delivery(expected)));
         });
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await expect.poll(async () => {
@@ -169,7 +211,7 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
             // admission handshake while we measure windows independently.
             await Promise.all((await launches()).map(provider => writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n')));
             const measurement = await observe(fixture);
-            expect(measurement.failed_issue_rows, 'no failed Monitor deliveries under Cargo load').toEqual([]);
+            expect(measurement.failed_issue_rows, 'no failed Issues deliveries under Cargo load').toEqual([]);
             const ack = measurement.durable_launch_ack_rows.find((ack: any) => ack.issue_number === expected.issue_number);
             if (!ack?.window_id || ack.confirmation_delivery_id !== expected.delivery_id
               || ack.confirmation_claim_id !== expected.claim_id || ack.launched_claim_id !== expected.claim_id
@@ -199,10 +241,11 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
           const hook = JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8').catch(() => '{}'));
           if (!hook.success || !measurement.user_prompt_authenticated_sessions.includes(provider.session_id)) return false;
           await sendLiveGwtEvent(page, { kind: 'list_windows' });
-          const bound = await page.evaluate(({ session, cursor }: any) => {
+          const bound = await page.evaluate(({ session, issueNumber, cursor }: any) => {
             const reply = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
-            return reply?.payload.windows?.some((window: any) => window.session_id === session && ['running', 'idle'].includes(window.status));
-          }, { session: provider.session_id, cursor });
+            return reply?.payload.windows?.some((window: any) => window.linked_issue_number === issueNumber
+              && window.session_id === session && ['running', 'idle'].includes(window.status));
+          }, { session: provider.session_id, issueNumber: expected.issue_number, cursor });
           if (bound) Object.assign(receipt, { window_id: ack.window_id, session_id: provider.session_id });
           return bound === true;
         }, { timeout: Math.max(1, 120_000 - (Date.now() - Date.parse(enqueuedAt))), message: `#${expected.issue_number} exact ACK and live window within 120 seconds` }).toBe(true);
@@ -238,6 +281,47 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
         .toBeGreaterThan(before.find((entry: any) => entry.pid === receipt.cargo_load_before.workload.pid)?.cpu_ms);
     }
   }
+}
+
+async function assertRetainedWarmupPanes(page: any, warmup: any[]): Promise<number> {
+  expect(warmup, 'six real launches precede the timed acceptance batch').toHaveLength(6);
+  const providers = await launches();
+  for (const receipt of warmup) {
+    const provider = providers.find(provider => provider.session_id === receipt.session_id);
+    expect(provider, 'each retained pane has its own provider process').toBeTruthy();
+    expect(() => process.kill(provider.pid, 0), 'retained provider process remains alive').not.toThrow();
+  }
+  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+  await sendLiveGwtEvent(page, { kind: 'list_windows' });
+  await expect.poll(() => page.evaluate(({ sessions, cursor }: any) => {
+    const reply = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) =>
+      entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
+    return sessions.filter((session: string) => reply?.payload.windows?.some((window: any) =>
+      window.session_id === session && ['running', 'idle'].includes(window.status))).length;
+  }, { sessions: warmup.map(receipt => receipt.session_id), cursor }), {
+    timeout: 30_000, message: 'six retained implementation panes are bound and running before the next launch',
+  }).toBe(6);
+  return 6;
+}
+
+async function launchAcceptanceEvidence(fixture: any, measurement: any): Promise<any> {
+  const receipts = JSON.parse(await readFile(join(HOME, 'sequential-launches.json'), 'utf8').catch(() => '[]'));
+  const singles = receipts.slice(6, 16);
+  const elapsed = singles.map((receipt: any) => receipt.elapsed_ms).filter(Number.isFinite).sort((a: number, b: number) => a - b);
+  const required = ['claim', 'worktree', 'runner_health', 'pty_spawn', 'window_publish_ack'];
+  return {
+    warmup_launches: receipts.slice(0, 6), single_launches: singles, concurrent_launches: receipts.slice(16, 18),
+    single_p95_ms: elapsed.length === 10 ? elapsed[Math.ceil(elapsed.length * 0.95) - 1] : null,
+    phase_coverage: fixture.expected_deliveries.map((expected: any) => {
+      const phases = (measurement.launch_phase_rows || []).filter((row: any) => {
+        const identity = Object.assign({}, ...(row.spans || []), row.span || {}, row.fields || {});
+        return identity.issue_number === expected.issue_number && identity.delivery_id === expected.delivery_id
+          && row.fields?.state === 'finished' && Number.isFinite(row.fields?.elapsed_ms);
+      });
+      return { ...expected, missing: required.filter(phase => !phases.some((row: any) => row.fields.phase === phase)), rows: phases };
+    }),
+    limitations: 'Offline confirmed upstream claims are seeded. Timings start at the locked delivery enqueue and include daemon scan wake, owner claim, real worktree preparation, PTY spawn, authenticated provider handoff and durable window ACK. Both themes inspect the same retained live batch; model execution and upstream GitHub claim latency are excluded.',
+  };
 }
 
 async function setCargoLoad(fixture: any, active: boolean): Promise<any> {
@@ -311,8 +395,12 @@ async function observe(fixture: any): Promise<any> {
   } catch (error) {
     prefsReadError = error instanceof SyntaxError ? 'invalid_json' : 'read_error';
   }
-  const matchedReceipts = promptReceipts.filter(row => row.fields.stage === 'window'
-    && row.fields.outcome === 'matched' && row.fields.route === 'live');
+  // The project owner routes authenticated hook events by Session identity;
+  // it no longer emits the legacy GUI's stage=window diagnostics. Join the
+  // receipt to the exact provider, then assert its live window binding above.
+  const authenticatedReceipts = promptReceipts.filter(row => row.fields.stage === 'receipt'
+    && row.fields.outcome === 'authenticated');
+  const providers = await launches();
   const durableAckRows = (fixture.expected_deliveries || []).map((expected: any) => {
     const confirmation = prefs.launch_confirmations?.[expected.issue_number];
     const windowId = confirmation?.window_id ?? null;
@@ -320,8 +408,9 @@ async function observe(fixture: any): Promise<any> {
     const launchedClaim = prefs.launched_claims?.[expected.issue_number] ?? null;
     const launchedIssueMatches = (prefs.launched_issues || []).some((launched: any) =>
       launched.issue_number === expected.issue_number && launched.window_id === windowId);
-    const matchedSessions = [...new Set(matchedReceipts.filter(row => row.fields.window_id === windowId)
-      .map(row => row.fields.gwt_session_id))];
+    const matchedSessions = providers.filter(provider => provider.argv.join(' ').includes(`#${expected.issue_number}`)
+      && authenticatedReceipts.some(row => row.fields.gwt_session_id === provider.session_id))
+      .map(provider => provider.session_id);
     return {
       issue_number: expected.issue_number, delivery_id: expected.delivery_id, claim_id: expected.claim_id,
       window_id: windowId, confirmation_delivery_id: confirmation?.delivery_id ?? null,
@@ -400,8 +489,7 @@ async function observe(fixture: any): Promise<any> {
   return {
     user_prompt_authenticated_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'receipt'
       && row.fields.outcome === 'authenticated').map(row => row.fields.gwt_session_id))],
-    user_prompt_matched_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'window'
-      && row.fields.outcome === 'matched' && row.fields.route === 'live').map(row => row.fields.gwt_session_id))],
+    user_prompt_bound_sessions: [...new Set(durableAckRows.flatMap((ack: any) => ack.matched_session_ids))],
     user_prompt_receipt_rows: promptReceipts,
     durable_launch_ack_rows: durableAckRows,
     durable_launch_ack_counts: durableAckCounts,

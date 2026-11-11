@@ -1,4 +1,4 @@
-/* Issue #4079 AC-2 — the Issue Monitor Agent Settings form always writes
+/* Issue #4079 AC-2 — Issues Agent Settings form always writes
  * candidate 1 of the launch candidate pool, so it must say which candidate that
  * replaces and what the pool summary becomes before the operator commits. The
  * reported symptom was the opposite: switching to Codex looked like a no-op
@@ -20,13 +20,13 @@ const POOL_IMPACT = {
   replaced_agent_id: "claude",
   title: "Replaces candidate 1 (claude)",
   detail:
-    "Agent Settings always writes candidate 1, the agent Issue Monitor launches first. " +
+    "Agent Settings always writes candidate 1, the agent Issues launches first. " +
     `After saving: ${RESULTING_SUMMARY}`,
   resulting_summary: RESULTING_SUMMARY,
 };
 
 const SETTINGS_WIZARD = {
-  title: "Configure Issue Monitor",
+  title: "Configure Issues",
   branch_name: "develop",
   selected_branch_name: "develop",
   branch_mode: "use_selected",
@@ -54,7 +54,7 @@ const SETTINGS_WIZARD = {
   issue_monitor_pool_impact: POOL_IMPACT,
 };
 
-test.describe("Launch Wizard — Issue Monitor candidate pool impact", () => {
+test.describe("Launch Wizard — Issues candidate pool impact", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
   test("names the replaced candidate and the resulting pool summary", async ({

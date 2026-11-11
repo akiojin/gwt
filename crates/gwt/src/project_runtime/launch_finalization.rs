@@ -860,7 +860,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
         // worktree drops that pair while the ledger stays. Rebuild a lost
         // publication from the ledger before the strict authority read
         // below; otherwise every relaunch on this worktree dies before the
-        // PTY and burns the Issue Monitor retry budget. A heal failure is
+        // PTY and burns Issues retry budget. A heal failure is
         // logged and the strict read reports the real state.
         heal_lost_generation_publication_best_effort(worktree, owner);
         // Issue #6118: retain a legacy Active owner in the generation ledger
@@ -957,7 +957,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 })
         {
             return Err(format!(
-                "Issue Monitor owner {} #{} already has an Active execution; inspect execution.status and continue the existing holder; if stale, use its recommended recovery before requeueing",
+                "Issues owner {} #{} already has an Active execution; inspect execution.status and continue the existing holder; if stale, use its recommended recovery before requeueing",
                 owner.kind.as_str(),
                 owner.number,
             ).into());

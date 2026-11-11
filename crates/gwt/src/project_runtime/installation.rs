@@ -1022,6 +1022,7 @@ pub fn install_agent_launch(
     };
     // This function already runs on a blocking worker. Keep the file guard
     // entirely within the physical spawn, never across a GUI event handoff.
+    let phase = super::launch::LaunchPhaseTimer::start("pty_spawn");
     let spawn = if monitor_admission {
         crate::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
@@ -1049,6 +1050,7 @@ pub fn install_agent_launch(
             });
         }
     };
+    phase.finish();
     input.failed_launch = Some(Box::new(PreparedAgentLaunchSuccess {
         project_root: input.project_root.clone(),
         active_session: active.clone(),
@@ -1448,7 +1450,7 @@ const ISSUE_MONITOR_PREFS_OBSERVATIONAL_RECORD_FIELDS: [(&str, &str); 2] = [
     ("autonomous_records", "last_heartbeat"),
 ];
 
-/// Content digest of Issue Monitor prefs bytes that ignores observation-only
+/// Content digest of Issues prefs bytes that ignores observation-only
 /// churn. `open_pr_observations` keeps only each Issue's non-null `hold`
 /// (launch admission reads the hold; `observed_at` only orders merges).
 /// Unparsable bytes hash raw so any byte change still invalidates.
@@ -1536,7 +1538,7 @@ fn issue_monitor_prefs_admission_map(
     }
 }
 
-/// Freshness fence for Issue Monitor prefs consumed by launch preparation.
+/// Freshness fence for Issues prefs consumed by launch preparation.
 /// Metadata is read before the content, so an unchanged metadata pair always
 /// still describes the digested bytes; a metadata change falls back to the
 /// content digest so observation-only rewrites keep prepared facts current.
@@ -1691,12 +1693,12 @@ pub struct IssueMonitorSpawnAdmissionInput {
 }
 
 pub const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
-    "Issue Monitor spawn admission changed; prepare the launch again";
+    "Issues spawn admission changed; prepare the launch again";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorAdmissionFileVersion {
     Metadata(Option<(std::time::SystemTime, u64)>),
-    /// Issue #6096: Issue Monitor prefs are fenced by admission-relevant
+    /// Issue #6096: Issues prefs are fenced by admission-relevant
     /// content, because the daemon rewrites observation-only keys every few
     /// seconds on every host project.
     IssueMonitorPrefs(Option<IssueMonitorPrefsStamp>),
@@ -1994,6 +1996,20 @@ impl PreparedIssueMonitorSpawnAdmission {
                     .all(IssueMonitorAdmissionFileStamp::is_current))
             && self.capacity_admits()
     }
+
+    /// Re-evaluate changed observations once, retaining all strict source fences.
+    pub fn revalidate_if_needed(
+        &mut self,
+        input: &IssueMonitorSpawnAdmissionInput,
+    ) -> Result<(), String> {
+        if !self.is_current(&input.host_project_roots) {
+            *self = input.refresh(self)?;
+            if !self.is_current(&input.host_project_roots) {
+                return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl IssueMonitorSpawnAdmissionInput {
@@ -2081,7 +2097,7 @@ impl IssueMonitorSpawnAdmissionInput {
             phase = "monitor_admission_metadata",
             elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
             thread = "worker",
-            "Issue Monitor launch phase"
+            "Issues launch phase"
         );
         phase_started = std::time::Instant::now();
         let hold = prepare_host_update_drain_launch_hold(&self.host_project_roots)?;
@@ -2090,7 +2106,7 @@ impl IssueMonitorSpawnAdmissionInput {
             phase = "monitor_host_drain",
             elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
             thread = "worker",
-            "Issue Monitor launch phase"
+            "Issues launch phase"
         );
         phase_started = std::time::Instant::now();
         if let Some(hold) = hold {
@@ -2106,7 +2122,7 @@ impl IssueMonitorSpawnAdmissionInput {
             phase = "monitor_shared_capacity",
             elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
             thread = "worker",
-            "Issue Monitor launch phase"
+            "Issues launch phase"
         );
         let capacity = monitor
             .agent_status_at(&chrono::Utc::now().to_rfc3339())
@@ -2345,6 +2361,11 @@ impl IssueMonitorLaunchClaimInput {
     pub fn claim_or_reuse(
         &self,
     ) -> Result<bool, crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+            issue_number = self.issue_number, delivery_id = %self.delivery_id,
+            window_id = %self.materializer_window_id);
+        let _claim_span = claim_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start("claim");
         let prefs = crate::load_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&self.project_root),
         )
@@ -2359,9 +2380,14 @@ impl IssueMonitorLaunchClaimInput {
                 crate::process::host_process_start_time(self.materializer_pid),
             )
         {
+            phase.finish();
             return Ok(true);
         }
-        self.claim_from_worker()
+        let result = self.claim_from_worker();
+        if result.is_ok() {
+            phase.finish();
+        }
+        result
     }
 
     fn matches_durable_claim(&self, prefs: &crate::IssueMonitorPrefs) -> bool {
@@ -2781,9 +2807,13 @@ pub(crate) fn prepare_owner_agent_admission(
             .as_ref()
             .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
-        if !prepared.is_current(input.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-        }
+        prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
+            project_root: input.project_root.into(),
+            host_project_roots: input.host_project_roots.to_vec(),
+            issue_number,
+            target_branch: config.branch.clone().unwrap_or_default(),
+            issue_link_cache_dir: input.issue_link_cache_dir.into(),
+        })?;
         let now = chrono::Utc::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
@@ -2791,7 +2821,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 .autonomous_wait(issue_number)
                 .is_some_and(|wait| crate::issue_monitor::wait_declaration_in_force(wait, &now))
         {
-            return Err(format!("Issue Monitor active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"));
+            return Err(format!("Issues active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"));
         }
         if let Some(started) = crate::process::host_process_start_time(std::process::id()) {
             monitor.record_window_snapshot_from_host(
@@ -2808,25 +2838,25 @@ pub(crate) fn prepare_owner_agent_admission(
         }
         if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
             return Err(format!(
-                "Issue Monitor implementation pane already exists for Issue #{issue_number}"
+                "Issues implementation pane already exists for Issue #{issue_number}"
             ));
         }
         if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
             return Err(format!(
-                "Issue Monitor source admission refused Issue #{issue_number}: {reason}"
+                "Issues source admission refused Issue #{issue_number}: {reason}"
             ));
         }
         if !review_dispatch {
             if let Some(reason) = monitor.launch_dependency_exclusion(issue_number) {
                 return Err(format!(
-                    "Issue Monitor dependency admission refused Issue #{issue_number}: {reason}"
+                    "Issues dependency admission refused Issue #{issue_number}: {reason}"
                 ));
             }
         }
         if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
             let status = monitor.agent_status_at(&now);
             return Err(format!(
-                "Issue Monitor max_active reached ({}/{}) before launching Issue #{issue_number}",
+                "Issues max_active reached ({}/{}) before launching Issue #{issue_number}",
                 status
                     .occupied_slot_count
                     .unwrap_or(status.active_launches.len()),
@@ -2851,8 +2881,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 };
                 if !claim.claim_or_reuse().map_err(|error| error.to_string())? {
                     return Err(
-                        "Issue Monitor launch delivery claim changed before owner materialization"
-                            .into(),
+                        "Issues launch delivery claim changed before owner materialization".into(),
                     );
                 }
             }
@@ -2898,7 +2927,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 prefs.record_tier_launch(issue_number, tier);
                 Ok(())
             })
-            .map_err(|error| format!("Could not record Issue Monitor launch tier: {error}"))?;
+            .map_err(|error| format!("Could not record Issues launch tier: {error}"))?;
         }
         if deliver_pending_autonomous_answer {
             crate::preserve_answered_handoff_resume_strategy_from_prefs(&prefs_path, issue_number)
@@ -3232,7 +3261,7 @@ impl ExecutionTerminalFacts {
     }
 }
 
-/// Facts read from the repository-scoped Issue Monitor prefs for one window.
+/// Facts read from the repository-scoped Issues prefs for one window.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MonitorTerminalFacts {
     /// The Monitor durably binds this exact window to the linked Issue.
@@ -3509,7 +3538,7 @@ fn restore_admission_for_ineligible(cause: &'static str) -> RestoreAdmission {
         | "obligation_open"
         | "execution_blocked_or_corrupt"
         | "session_interrupted" => RestoreAdmission::Admit,
-        // Issue #4441 (AC-3): the Issue Monitor is holding this row. A hold is
+        // Issue #4441 (AC-3): Issues is holding this row. A hold is
         // reversible, so the placeholder and the restore flag stay: releasing
         // the row brings the window back.
         "needs_human" | "failure_hold" => RestoreAdmission::RefuseHeld(cause),
@@ -3551,7 +3580,7 @@ pub enum RestoreAdmission {
     /// Issue #5510 AC-3: keep the placeholder but let the stale Active holder
     /// reach the reaper and the Monitor's existing fresh-launch recovery.
     RefuseFreshSession,
-    /// Issue #4441 (AC-3): the Issue Monitor is holding this row. Do not
+    /// Issue #4441 (AC-3): Issues is holding this row. Do not
     /// spawn, but keep the placeholder — the hold is reversible.
     RefuseHeld(&'static str),
     /// The canonical facts could not be read. Do not spawn, but keep the

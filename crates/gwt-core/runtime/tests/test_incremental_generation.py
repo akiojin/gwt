@@ -260,17 +260,27 @@ class _IncrementalFixture(unittest.TestCase):
             "runner_hash": "runner-a",
         }
 
-    def _physical_collection_count(self, artifact_dir: Path) -> int:
-        stores = [path.parent for path in artifact_dir.rglob("chroma.sqlite3")]
-        self.assertEqual(
-            len(stores),
-            1,
-            f"one files vector store is required under {artifact_dir}: {stores}",
+    def _artifact_collection_count(
+        self, artifact_dir: Path, collection_name: str = runner.V2_FILES_CODE_COLLECTION
+    ) -> int:
+        descriptor = json.loads(
+            (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
         )
-        client, collection = runner._open_chroma_collection(
-            stores[0], runner.V2_FILES_CODE_COLLECTION
+        store = runner._file_artifact_store(artifact_dir, descriptor)
+        self.assertTrue((store / "chroma.sqlite3").is_file())
+        client, collection = runner._open_file_index_v2_collection(
+            store, collection_name
         )
         try:
+            if runner._uses_file_record_pool(descriptor):
+                entries = json.loads(
+                    (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+                )["entries"]
+                scope = "files" if collection_name == runner.V2_FILES_CODE_COLLECTION else "files-docs"
+                ids = runner._file_member_ids(entries, scope)
+                stored_ids = collection.get(ids=ids, include=[])["ids"] if ids else []
+                self.assertEqual(set(stored_ids), set(ids))
+                return len(stored_ids)
             return int(collection.count())
         finally:
             runner._close_chroma_client(client)
@@ -378,6 +388,71 @@ class _IncrementalFixture(unittest.TestCase):
 
 
 class IncrementalGenerationTests(_IncrementalFixture):
+    def test_file_record_pool_pruning_retains_members_and_respects_reader_pin(self):
+        result = self._build_protocol_v2(self.project, WORKTREE_HASH)
+        self.assertTrue(result.get("ok"), result)
+        v2_root = runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH, WORKTREE_HASH, result["overlay_generation_id"], db_root=self.db_root
+        )
+        descriptor = runner._read_artifact_descriptor(overlay_dir)
+        store = runner._file_artifact_store(overlay_dir, descriptor)
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            collection.upsert(ids=["orphan"], documents=["unused"],
+                              embeddings=[[1.0] * runner._FakeEmbeddingModel.DIM],
+                              metadatas=[{"path": "unused.rs"}])
+        finally:
+            runner._close_chroma_client(client)
+        future_artifact = v2_root / "bases" / "future-artifact"
+        future_artifact.mkdir(parents=True)
+        future_descriptor = copy.deepcopy(descriptor)
+        future_descriptor["compatibility"]["writer_protocol"] = "future-writer"
+        (future_artifact / "descriptor.json").write_text(json.dumps(future_descriptor))
+        self.assertEqual(runner._prune_file_record_pool(v2_root), 0)
+        (future_artifact / "descriptor.json").unlink()
+        future_artifact.rmdir()
+        with runner._file_index_v2_pin(REPO_HASH, WORKTREE_HASH, "reader", self.db_root):
+            self.assertEqual(runner._prune_file_record_pool(v2_root), 0)
+        self.assertEqual(runner._prune_file_record_pool(v2_root), 1)
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            self.assertEqual(collection.count(), 8)
+        finally:
+            runner._close_chroma_client(client)
+
+    def test_canonical_refresh_reuses_records_across_successive_file_changes(self):
+        project = self._make_canonical_repo()
+        first = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(first.get("ok"), first)
+        original_make = runner._make_file_index_v2_collection
+        written_paths = []
+
+        def observed_make(*args, **kwargs):
+            client, collection = original_make(*args, **kwargs)
+            original_upsert = collection.upsert
+
+            def observed_upsert(*args, **kwargs):
+                written_paths.extend(meta["path"] for meta in kwargs["metadatas"])
+                return original_upsert(*args, **kwargs)
+
+            return client, mock.Mock(wraps=collection, upsert=observed_upsert)
+
+        for index in (0, 1):
+            path = project / "src" / f"module_{index:02}.rs"
+            path.write_text(f"//! updated module {index}\nfn updated_{index}() {{}}\n")
+            self._run_git("-C", str(project), "add", "src")
+            self._run_git(
+                "-C", str(project), "-c", "user.name=gwt tests", "-c",
+                "user.email=gwt-tests@example.invalid", "commit", "--quiet",
+                "-m", f"change module {index}",
+            )
+            written_paths.clear()
+            with mock.patch.object(runner, "_make_file_index_v2_collection", observed_make):
+                result = self._build_protocol_v2(project, WORKTREE_HASH)
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(written_paths, [f"src/module_{index:02}.rs"])
+
     def test_file_index_v2_collection_creation_failure_closes_client(self):
         for operation, client_method in (
             (runner._make_file_index_v2_collection, "get_or_create_collection"),
@@ -456,7 +531,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
         self.assertNotIn(None, embedding_get_batch_sizes)
         self.assertLessEqual(max(embedding_get_batch_sizes), 16)
 
-        class CountOnlyCollection:
+        class MembershipOnlyCollection:
             def __init__(self, collection):
                 self._collection = collection
 
@@ -464,11 +539,14 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 return getattr(self._collection, name)
 
             def get(self, *args, **kwargs):
-                raise AssertionError("warm verified reuse must not fetch collection rows")
+                self_ids = kwargs.get("ids")
+                if self_ids is None or kwargs.get("include") != []:
+                    raise AssertionError("warm verified reuse may only check member IDs")
+                return self._collection.get(*args, **kwargs)
 
         def count_only_open(*args, **kwargs):
             client, collection = original_open(*args, **kwargs)
-            return client, CountOnlyCollection(collection)
+            return client, MembershipOnlyCollection(collection)
 
         with mock.patch.object(
             runner,
@@ -869,19 +947,19 @@ class IncrementalGenerationTests(_IncrementalFixture):
         })
         self.assertEqual(
             base_descriptor["files_generation"],
-            {"store": "store", "collection": runner.V2_FILES_CODE_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_CODE_COLLECTION},
         )
         self.assertEqual(
             base_descriptor["files_docs_generation"],
-            {"store": "store", "collection": runner.V2_FILES_DOCS_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_DOCS_COLLECTION},
         )
         self.assertEqual(
             overlay_descriptor["files_generation"],
-            {"store": "store", "collection": runner.V2_FILES_CODE_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_CODE_COLLECTION},
         )
         self.assertEqual(
             overlay_descriptor["files_docs_generation"],
-            {"store": "store", "collection": runner.V2_FILES_DOCS_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_DOCS_COLLECTION},
         )
         self.assertEqual(overlay_descriptor["files_shadow"], ["src/overlay.rs"])
         self.assertEqual(
@@ -894,13 +972,10 @@ class IncrementalGenerationTests(_IncrementalFixture):
             (overlay_dir, {runner.V2_FILES_CODE_COLLECTION: 1, runner.V2_FILES_DOCS_COLLECTION: 1}),
         ):
             for collection_name, expected_count in expected_counts.items():
-                client, collection = runner._open_file_index_v2_collection(
-                    artifact_dir / "store", collection_name
+                self.assertEqual(
+                    self._artifact_collection_count(artifact_dir, collection_name),
+                    expected_count,
                 )
-                try:
-                    self.assertEqual(collection.count(), expected_count)
-                finally:
-                    runner._close_chroma_client(client)
 
     def test_concurrent_subprocess_builds_single_flight_cas_and_atomic_artifacts(self):
         canonical_repo = self._make_canonical_repo()
@@ -1076,7 +1151,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
         for artifact_dir, expected_count in artifact_counts:
             self.assertTrue((artifact_dir / "descriptor.json").is_file())
             self.assertTrue((artifact_dir / "manifest.json").is_file())
-            self.assertTrue((artifact_dir / "store" / "chroma.sqlite3").is_file())
+            self.assertEqual(self._artifact_collection_count(artifact_dir), expected_count)
             descriptor = json.loads(
                 (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
             )
@@ -1311,8 +1386,8 @@ class IncrementalGenerationTests(_IncrementalFixture):
                         db_root=self.db_root,
                     )
                 )
-                self.assertEqual(self._physical_collection_count(base_dir), 8)
-                self.assertEqual(self._physical_collection_count(overlay_dir), 1)
+                self.assertEqual(self._artifact_collection_count(base_dir), 8)
+                self.assertEqual(self._artifact_collection_count(overlay_dir), 1)
                 physical_base_dirs.add(base_dir.resolve())
                 physical_overlay_dirs.add(overlay_dir.resolve())
 

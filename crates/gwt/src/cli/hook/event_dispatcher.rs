@@ -595,7 +595,7 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
         .as_ref()
         .map(|snapshot| snapshot.ids.join(", "))
         .unwrap_or_default();
-    Some(format!("Issue Monitor requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
+    Some(format!("Issues requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
 }
 
 fn handle_pre_tool_use(
@@ -606,7 +606,7 @@ fn handle_pre_tool_use(
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
     // later check that returns first would let the provider open the question
-    // UI and hold the Issue Monitor slot until the stuck timeout.
+    // UI and hold Issues slot until the stuck timeout.
     let question_guard = run_step(event, "autonomous-question-guard", || {
         autonomous_question_guard::handle_with_input(input)
     })?;

@@ -1423,6 +1423,27 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertLess(events.index("artifact:overlay:done"), events.index("head:replace"))
         self.assertLess(events.index("view:verified"), events.index("head:replace"))
 
+    def test_shared_file_records_sync_parent_entries_before_artifact_publication(self):
+        events = []
+        real_publish = runner._durably_replace_file_index_v2_directory
+
+        def published(staging, target):
+            events.append(("publish", target))
+            return real_publish(staging, target)
+
+        with mock.patch.object(runner, "_fsync_directory", side_effect=lambda path: events.append(("sync", path))):
+            with mock.patch.object(runner, "_durably_replace_file_index_v2_directory", side_effect=published):
+                result = self._build()
+        self.assertTrue(result.get("ok"), result)
+        v2_root = runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+        base_dir = v2_root / "bases" / result["base_generation_id"]
+        descriptor = runner._read_artifact_descriptor(base_dir)
+        store = runner._file_artifact_store(base_dir, descriptor)
+        before_publish = events[:events.index(("publish", base_dir))]
+        parents = [store, store.parent, store.parent.parent, store.parent.parent.parent, v2_root]
+        indices = [before_publish.index(("sync", path)) for path in parents]
+        self.assertEqual(indices, sorted(indices))
+
     @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
     def test_directory_artifact_publish_fsyncs_tree_and_parent_around_replace(self):
         publish = getattr(

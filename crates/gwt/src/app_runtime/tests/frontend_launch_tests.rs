@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn issue_7015_synchronous_launch_refusal_retires_starting_placeholder() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .suppress_execution_control()
+        .build();
+    assert!(runtime
+        .spawn_agent_window("tab-1", config, None)
+        .unwrap_err()
+        .contains("worker unavailable"));
+    let window = &runtime.tabs[0].workspace.persisted().windows[0];
+    assert_eq!(window.status, WindowProcessStatus::Error);
+    assert_eq!(
+        runtime.window_status(&combined_window_id("tab-1", &window.id)),
+        Some(WindowProcessStatus::Error)
+    );
+    assert!(runtime.inflight_launches.is_empty());
+    assert!(runtime.pending_launch_completions.is_empty());
+}
+
 type ActualManualHolderFixture = (
     AppRuntime,
     Arc<Mutex<Vec<UserEvent>>>,
@@ -995,6 +1023,16 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
     let completion = take_remote_owner_launch_completion(&recorded_events);
     let successor = completion.window_id.clone();
     assert!(
+        runtime
+            .capture_update_quiescence_inputs()
+            .0
+            .iter()
+            .any(|pane| {
+                pane.window_id == successor && pane.state == WindowProcessStatus::Starting
+            }),
+        "the exact retry protects its real pending launch"
+    );
+    assert!(
         completion.result.is_ok(),
         "normal GUI retry must reach the real owner: {:?}",
         completion.result.as_ref().err()
@@ -1203,6 +1241,18 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         failure = Some(runtime.handle_remote_owner_launch_complete(completion));
     });
     let failure = failure.expect("synchronous failure events");
+
+    assert!(
+        runtime
+            .pending_launch_completions
+            .values()
+            .any(|pending| { pending.current.load(Ordering::Acquire) }),
+        "exact recovery capability remains current"
+    );
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "a completed failed launch retained for retry has no process to drain"
+    );
 
     assert!(
         failure.iter().any(|event| matches!(
@@ -2896,7 +2946,7 @@ fn app_runtime_dock_to_issue_refusals_notify_without_changing_the_window() {
     let agent_id = combined_window_id("tab-1", "agent-1");
     for (linked_issue, reason) in [
         (None, "no linked Issue"),
-        (Some(4812), "no Issue or Issue Monitor"),
+        (Some(4812), "no Issue or Issues"),
     ] {
         let workspace = &mut runtime.tab_mut("tab-1").unwrap().workspace;
         workspace.set_linked_issue_number("agent-1", linked_issue);
@@ -3129,7 +3179,7 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_boar
     assert_eq!(agent.placement, WindowPlacement::Surface);
 }
 
-// SPEC-3671 FR-002 / T-007: an Issue Monitor auto-launch is mirrored inside the Issue
+// SPEC-3671 FR-002 / T-007: an Issues auto-launch is mirrored inside the Issue
 // window instead of opening a canvas window.
 #[test]
 fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
@@ -3176,7 +3226,7 @@ fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
 
     runtime
         .spawn_agent_window_with_feedback("tab-1", config, None, issue_monitor_feedback(3671))
-        .expect("issue monitor launch");
+        .expect("Issues launch");
 
     assert_eq!(
         spawned_agent_placement(&runtime, "tab-1"),
@@ -3223,7 +3273,7 @@ fn app_runtime_issue_monitor_launch_falls_back_to_canvas_without_issue_window() 
 
     runtime
         .spawn_agent_window_with_feedback("tab-1", config, None, issue_monitor_feedback(3671))
-        .expect("issue monitor launch without issue window");
+        .expect("Issues launch without issue window");
 
     assert_eq!(
         spawned_agent_placement(&runtime, "tab-1"),
@@ -3274,7 +3324,7 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
         WindowPlacement::Surface
     );
 
-    // A Launch Agent launch carries feedback but no Issue Monitor issue number.
+    // A Launch Agent launch carries feedback but no Issues issue number.
     runtime
         .spawn_agent_window_with_feedback(
             "tab-1",
@@ -3313,7 +3363,7 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
     }
 }
 
-// SPEC-3671 FR-006 / T-013: Issue Monitor delivery tracking keys off the window id, not
+// SPEC-3671 FR-006 / T-013: Issues delivery tracking keys off the window id, not
 // the placement, so an off-canvas preview stays fully tracked.
 #[test]
 fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
@@ -3353,7 +3403,7 @@ fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
 
     runtime
         .spawn_agent_window_with_feedback("tab-1", config, None, feedback)
-        .expect("issue monitor launch");
+        .expect("Issues launch");
 
     let raw_id = runtime
         .tab("tab-1")

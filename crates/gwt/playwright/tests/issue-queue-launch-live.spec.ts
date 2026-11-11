@@ -25,7 +25,7 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge:true });
       await page.locator('[data-surface="issues"]').click();
-      const controls = page.getByRole("group", { name:"Monitor controls", exact:true });
+      const controls = page.getByRole("group", { name:"Issues controls", exact:true });
       const refill = controls.getByRole("switch", { name:"Auto-refill", exact:true });
       await expect(refill).toHaveAttribute("aria-checked", "false");
       await controls.getByRole("button", { name:"Issues settings", exact:true }).click();
@@ -49,7 +49,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(beforeStart.enabled).toBe(false);
       expect(Object.values(beforeStart.terminal_queues ?? {}).flatMap((queue: any) => queue.entries)).toEqual([]);
       await expect(page.locator('[data-role="monitor-refill-guidance"]')).toBeVisible();
-      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the Monitor to begin Auto-refill.");
+      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the Issues to begin Auto-refill.");
       const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
       await controls.getByRole("button", { name:"Start", exact:true }).click();
       const firstScan = await page.waitForFunction(({ cursor, previousScan }) => {
@@ -319,7 +319,7 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  test("T20b saved checkpoint switches through the real Host and Monitor", async ({ page }, info) => {
+  test("T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -414,7 +414,7 @@ test.describe("Issue queue real backend launch", () => {
         expect(afterStop.kind).toBe("agent_switch");
       }
       await expect.poll(async () => (await fixture.launches()).length,
-        { timeout: Math.max(1, handoffDeadline - Date.now()), message: "actual source checkpoint ACK, physical exit and ordinary target Monitor launch" }).toBe(2);
+        { timeout: Math.max(1, handoffDeadline - Date.now()), message: "actual source checkpoint ACK, physical exit and ordinary target Issues launch" }).toBe(2);
       const launches = await fixture.launches();
       const target = launches[1];
       const completionDeadline = Date.now() + 30_000;
@@ -642,11 +642,11 @@ test.describe("Issue queue real backend launch", () => {
         .toHaveText("Assigned by you");
       await expect(current.getByRole("region", { name: "Main pane", exact: true }).locator(".roster-detail h3"))
         .toHaveText(target.name);
-      expect(await fixture.launches(), "disabled Monitor stays idle across restart").toEqual([]);
+      expect(await fixture.launches(), "disabled Issues stays idle across restart").toEqual([]);
       await info.attach(`agent-schedule-ui-restored-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
       await expect.poll(async () => (await fixture.launches()).length,
-        { timeout: 90_000, message: "normal Monitor launches the reassigned queued Issue" }).toBe(1);
+        { timeout: 90_000, message: "normal Issues launches the reassigned queued Issue" }).toBe(1);
       const launch = (await fixture.launches())[0];
       expect(launch.gwt_session_id).toBeTruthy();
       expect(() => process.kill(launch.pid, 0)).not.toThrow();
@@ -698,7 +698,7 @@ test.describe("Issue queue real backend launch", () => {
       fixture.auditHooks(launch.cwd);
 
       // Stop only the owned provider, then recover through the real authenticated
-      // Monitor path. No incoming census or roster frame is manufactured here.
+      // Issues path. No incoming census or roster frame is manufactured here.
       await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
       await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
       await sendLiveGwtEvent(current, { kind: "terminal_input", id: firstObservation.agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
@@ -722,7 +722,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(requeued.ok, JSON.stringify(requeued)).toBe(true);
       await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
       await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled,
-        { timeout: 30_000, message: "Monitor enable is durable before the separate launch_now operation" }).toBe(true);
+        { timeout: 30_000, message: "Issues enable is durable before the separate launch_now operation" }).toBe(true);
       const immediate = fixture.fixtureOperation("issue.monitor.launch_now", { number: fixture.issueNumber });
       expect(immediate.ok, JSON.stringify(immediate)).toBe(true);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);

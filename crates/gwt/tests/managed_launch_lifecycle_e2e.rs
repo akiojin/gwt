@@ -408,7 +408,7 @@ fn the_permission_gate_precedes_the_window_on_every_managed_launch_route() {
     let wizard = read_source(&root, "crates/gwt/src/app_runtime/wizard.rs");
     let monitor_gate = wizard
         .find("permission_readiness::pre_launch_block")
-        .expect("the Issue Monitor launch route must consult the permission gate");
+        .expect("Issues launch route must consult the permission gate");
     let spawn = wizard
         .find(".spawn_agent_window_with_monitor_intent(")
         .expect("implementation and independent review converge on the Monitor intent adapter");
