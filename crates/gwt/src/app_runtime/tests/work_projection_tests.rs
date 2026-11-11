@@ -67,6 +67,8 @@ fn local_agent_activity_cache_removes_retired_members_without_redating_proof() {
             issue_number: Some(4777),
             is_pm: false,
             current_task: None,
+            review_dispatch: false,
+            agent_name: None,
         });
     let observed_at = activity.observed_at.clone();
     runtime
