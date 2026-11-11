@@ -409,6 +409,27 @@ pub struct MergedIssueSettlement {
     pub settled_at: String,
 }
 
+impl MergedIssueSettlement {
+    fn matches_unmet_acceptance_failure(&self, message: &str) -> bool {
+        let unmet = match &self.action {
+            MergedIssueSettlementAction::UnmetAcceptance { unmet }
+            | MergedIssueSettlementAction::ContinueWork { unmet }
+            | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+            _ => return false,
+        };
+        let detail = if unmet.is_empty() {
+            "acceptance criteria block missing".to_string()
+        } else {
+            unmet.join(", ")
+        };
+        message
+            == format!(
+                "PR #{} merged with unmet acceptance criteria: {detail}",
+                self.pr_number
+            )
+    }
+}
+
 /// Issue #3917: decide what settling a merged delivery does for `issue`.
 ///
 /// Pure and syntactic: Issue #5126 forbids substituting PR prose or delegation
@@ -13879,13 +13900,49 @@ impl IssueMonitorState {
     ) {
         for failed in &disk.failed_issues {
             let issue_number = failed.issue_number;
+            let newer_release = self
+                .released_failures
+                .get(&issue_number)
+                .filter(|release| release.release_version > disk.failure_release_version);
+            // A continuation supersedes this exact earlier merge verdict, even
+            // when the stale writer still carries its NeedsHuman companion.
+            let superseded_merge_park = newer_release.is_some()
+                && self
+                    .merged_issue_settlements
+                    .get(&issue_number)
+                    .is_some_and(|current| {
+                        current.matches_unmet_acceptance_failure(&failed.message)
+                                && disk.merged_issue_settlements.iter().any(|prior| {
+                                    prior.issue_number == issue_number
+                                        && prior.pr_number == current.pr_number
+                                        && prior.merge_sha == current.merge_sha
+                                        && match (&current.action, &prior.action) {
+                                            (
+                                                MergedIssueSettlementAction::ContinueWork { unmet }
+                                                | MergedIssueSettlementAction::AwaitMeasurement {
+                                                    unmet,
+                                                },
+                                                MergedIssueSettlementAction::UnmetAcceptance {
+                                                    unmet: prior_unmet,
+                                                }
+                                                | MergedIssueSettlementAction::ContinueWork {
+                                                    unmet: prior_unmet,
+                                                }
+                                                | MergedIssueSettlementAction::AwaitMeasurement {
+                                                    unmet: prior_unmet,
+                                                },
+                                            ) => unmet == prior_unmet,
+                                            _ => false,
+                                        }
+                                })
+                    });
             if failed.message.trim().is_empty()
+                || superseded_merge_park
                 // Suppress only the exact automatically released failure.
                 // A lower disk watermark can also carry a concurrent terminal
                 // decision that supersedes an uncommitted local retry.
-                || (self.released_failures.get(&issue_number).is_some_and(|release| {
-                    release.release_version > disk.failure_release_version
-                        && release.retry_record.as_ref().is_some_and(|record| {
+                || (newer_release.is_some_and(|release| {
+                    release.retry_record.as_ref().is_some_and(|record| {
                             record.last_failure_message.as_deref() == Some(failed.message.as_str())
                         })
                 }) && !disk.autonomous_records.iter().any(|record| {
@@ -18589,38 +18646,6 @@ impl IssueMonitorState {
             self.label_excluded_issues.remove(&issue_number);
         }
         let mut existing = self.inbox_item(issue_number).cloned();
-        // Upgrade only the old merged-acceptance park, never an actual user
-        // decision or an operator stop recorded after that settlement.
-        if self.autonomous_mode
-            && existing.as_ref().is_some_and(|item| {
-                item.state == MonitorInboxState::NeedsHuman
-                    && item.error_message.as_deref().is_some_and(|message| {
-                        message.starts_with("PR #")
-                            && message.contains("merged with unmet acceptance criteria:")
-                    })
-            })
-        {
-            if let Some(settlement) = self
-                .merged_issue_settlements
-                .get(&issue_number)
-                .cloned()
-                .filter(|settlement| {
-                    matches!(
-                        settlement.action,
-                        MergedIssueSettlementAction::UnmetAcceptance { .. }
-                    )
-                })
-            {
-                self.record_merged_issue_settlement(
-                    issue_number,
-                    settlement.pr_number,
-                    settlement.merge_sha,
-                    settlement.action,
-                    &format_rfc3339_utc(chrono::Utc::now()),
-                );
-                existing = self.inbox_item(issue_number).cloned();
-            }
-        }
         let exclusion = issue_monitor_candidate_exclusion(&issue, self.source_repository)
             .or_else(|| {
                 (!allowed).then(|| {
@@ -18826,6 +18851,68 @@ impl IssueMonitorState {
             );
         }
         self.upsert_inbox(item);
+        // Reclassify the exact old merge park using the incoming live body.
+        // This also repairs cold snapshots whose continuation fence was lost.
+        if state == MonitorInboxState::NeedsHuman
+            && self.autonomous_mode
+            && self
+                .inbox_item(issue_number)
+                .is_some_and(|item| item.issue.state == IssueMonitorIssueState::Open)
+            && !self.issue_is_closed(issue_number)
+            && !self.active_launches.contains(&issue_number)
+            && !self.launched_windows.contains_key(&issue_number)
+            && !self.process_held_issues.contains(&issue_number)
+            && !self.has_monitor_pane_for_issue(issue_number)
+            && !self
+                .pending_launches
+                .iter()
+                .any(|launch| launch.issue_number == issue_number)
+            && !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|launch| launch.issue_number == issue_number)
+        {
+            if let Some(settlement) = self
+                .merged_issue_settlements
+                .get(&issue_number)
+                .filter(|settlement| {
+                    self.failed_issues
+                        .get(&issue_number)
+                        .is_some_and(|message| settlement.matches_unmet_acceptance_failure(message))
+                })
+                .cloned()
+            {
+                let unmet = match settlement.action {
+                    MergedIssueSettlementAction::UnmetAcceptance { unmet }
+                    | MergedIssueSettlementAction::ContinueWork { unmet }
+                    | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+                    _ => unreachable!("matched an acceptance failure"),
+                };
+                self.record_merged_issue_settlement(
+                    issue_number,
+                    settlement.pr_number,
+                    settlement.merge_sha,
+                    MergedIssueSettlementAction::UnmetAcceptance { unmet },
+                    &format_rfc3339_utc(chrono::Utc::now()),
+                );
+                // Continuation may restore retired SPEC queue membership;
+                // retain exclusions that still apply after that restoration.
+                if let Some((excluded, reason)) = exclusion.as_ref().filter(|(excluded, _)| {
+                    *excluded != MonitorInboxState::Skipped
+                        || !allowed
+                        || !self.terminal_queue_contains(issue_number)
+                }) {
+                    if let Some(item) = self
+                        .inbox
+                        .iter_mut()
+                        .find(|item| item.issue.number == issue_number)
+                    {
+                        item.state = *excluded;
+                        item.exclusion_reason = Some(reason.clone());
+                    }
+                }
+            }
+        }
         self.enforce_measurement_waits();
         let state = self
             .inbox_item(issue_number)
@@ -51980,6 +52067,8 @@ mod tests {
             },
             "2026-09-01T01:00:00Z",
         );
+        monitor.autonomous_record_mut(42).attempts = 2;
+        let stale_park = monitor.prefs();
         let mut stopped = monitor.clone();
         stopped.adopt_stopped_terminal_state(42, "operator decision");
         for state in [&mut monitor, &mut stopped] {
@@ -51994,6 +52083,34 @@ mod tests {
             stopped.inbox_item(42).unwrap().state,
             MonitorInboxState::NeedsHuman
         );
+        for rebase in [
+            IssueMonitorState::rebase_gui_observer_prefs
+                as fn(&mut IssueMonitorState, &IssueMonitorPrefs),
+            IssueMonitorState::rebase_daemon_driver_prefs,
+        ] {
+            let mut continued = monitor.clone();
+            rebase(&mut continued, &stale_park);
+            assert!(
+                continued.released_failures.contains_key(&42),
+                "the old merge park must not erase the newer continuation fence"
+            );
+            assert!(!continued.agent_status().needs_human.contains(&42));
+            assert_eq!(continued.attempt_count(42), 2);
+        }
+
+        // Deployed snapshots already lost the fence while retaining ContinueWork.
+        let mut broken = stale_park;
+        broken.autonomous_mode = true;
+        broken.merged_issue_settlements = monitor.prefs().merged_issue_settlements;
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), broken.clone());
+        cold.record_candidate(candidate);
+        cold.rebase_daemon_driver_prefs(&broken);
+        assert_eq!(
+            cold.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!cold.agent_status().needs_human.contains(&42));
+        assert_eq!(cold.attempt_count(42), 2);
     }
 
     #[test]

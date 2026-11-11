@@ -415,6 +415,16 @@ mod windows_job {
                 .map_err(|source| operation_error("AssignProcessToJobObject", source))
         }
 
+        /// Borrow the live Job handle for `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so a
+        /// creator places its child in this Job atomically at process creation.
+        /// Returns `None` once the Job handle has been closed.
+        pub fn job_handle(&self) -> Option<std::os::windows::io::BorrowedHandle<'_>> {
+            // SAFETY: the owned Job handle stays open while `self` is borrowed;
+            // closing it requires `&mut self`.
+            self.handle
+                .map(|job| unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(job.0) })
+        }
+
         /// Configure a hard CPU cap (1..=100 percent of total machine CPU
         /// time) for every process in the Job. Kill-on-close stays armed; the
         /// two limits live in different information classes.
