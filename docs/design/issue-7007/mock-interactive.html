@@ -584,12 +584,6 @@
                 <div class="set-row"><div class="grow"><div class="t">Grok Build</div><div class="d2">Not installed — installing adds the tool so agents can be registered with it.</div></div><button class="btn primary" type="button">Install</button></div>
                 <div class="set-row"><div class="grow"><div class="t">OpenCode</div><div class="d2">Installed · version 1.1.8 · latest 1.1.8 — up to date</div></div><span class="badge b-done">Ready</span></div>
               </div>
-<div class="set-group">
-                <h4>Custom Tools &amp; backends</h4>
-                <p class="d">Register your own command-line tools, and override how a built-in tool connects (backend profiles). Each custom tool has its own environment variables.</p>
-                <div class="set-row"><div class="grow"><div class="t">Custom tools</div><div class="d2">External CLI tools you registered yourself — add, edit, or remove. Agents can then be registered with them, like built-in tools.</div></div><button class="btn" type="button">Manage</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Tool backends</div><div class="d2">Backend override profiles for Claude Code and Codex — where the tool actually connects.</div></div><button class="btn" type="button">Manage</button></div>
-              </div>
 </div>
 <div class="set-pane" data-pane="launch">
 <div class="set-group">
@@ -1336,7 +1330,7 @@
           </div>
       </div>
     <footer class="doc">
-      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。Open／Recent から開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。Your PM は独立ページで、置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面は各プロジェクトページの中だけ）。1画面の主役は1つ：Your PM の Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（ページ内切替）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。</p>
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。Open／Recent から開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。Your PM は独立ページで、置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面は各プロジェクトページの中だけ）。1画面の主役は1つ：Your PM の Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（ページ内切替）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。Custom Agents／Backends は廃止決定（2026-11-12）：Agents 領域の深掘りで両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（Tool は組み込みの検出・Install／Update・自動更新のみが残る）。</p>
     </footer>
   </div>
 
