@@ -1602,7 +1602,20 @@ fn run_work_repair(
         })
         .collect();
     let [anchor] = anchors.as_slice() else {
-        return Err(refuse("exactly one absolute worktree anchor is required"));
+        let candidates = anchors
+            .iter()
+            .map(|container| {
+                format!(
+                    "branch={}, worktree_path={}",
+                    container.branch.as_deref().unwrap_or("<missing>"),
+                    container.worktree_path.as_deref().unwrap().display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(refuse(&format!(
+            "exactly one absolute worktree anchor is required; candidates: [{candidates}]"
+        )));
     };
     let root = anchor.worktree_path.as_deref().unwrap();
     let branch = anchor
@@ -2984,6 +2997,13 @@ fn workspace_execution_container_matches_recovery(
     container: &WorkspaceExecutionContainerRef,
     recovery: &crate::agent_project_state::ValidatedWorkspaceRecoverySession,
 ) -> bool {
+    // Relative roots need their immutable source context. Resolving them
+    // against reader CWD would duplicate the durable absolute anchor.
+    if container.worktree_path.as_deref().is_none_or(|path| {
+        !gwt_core::paths::normalize_windows_child_process_path(path).is_absolute()
+    }) {
+        return false;
+    }
     let branch_matches = container
         .branch
         .as_deref()
@@ -8855,6 +8875,170 @@ pub(crate) mod tests {
                 "{label} refusal must preserve every Workspace recovery surface"
             );
         }
+    }
+
+    #[test]
+    fn workspace_ensure_portable_alias_cannot_acquire_reader_cwd_authority() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-7033");
+        let session_id = "session-portable-alias";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 7033);
+        let validated =
+            crate::agent_project_state::validated_workspace_recovery_session(&worktree, session_id)
+                .unwrap()
+                .unwrap();
+        let crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(mut recovery) =
+            validated
+        else {
+            panic!("expected host recovery");
+        };
+        // Model a reader running in its bound root without changing process CWD.
+        recovery.worktree_identity = dunce::canonicalize(".").unwrap();
+        let mut local = WorkspaceExecutionContainerRef {
+            branch: Some(recovery.branch_identity.clone()),
+            worktree_path: Some(recovery.worktree_identity.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+        assert!(workspace_execution_container_matches_recovery(
+            &local, &recovery
+        ));
+        local.worktree_path = Some(PathBuf::from("."));
+        assert!(
+            !workspace_execution_container_matches_recovery(&local, &recovery),
+            "portable aliases require source evidence and cannot use reader CWD"
+        );
+        local.worktree_path = Some(temp.path().join("other-host/work/issue-7033"));
+        assert!(!workspace_execution_container_matches_recovery(
+            &local, &recovery
+        ));
+    }
+
+    #[test]
+    fn workspace_ensure_selects_local_anchor_with_portable_and_foreign_refs() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-7033");
+        let session_id = "session-local-anchor";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 7033);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            session_id,
+            Some("Issue #7033"),
+            "codex",
+        );
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let mut projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        let target = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == work_id)
+            .unwrap();
+        let mut portable = target.execution_containers[0].clone();
+        portable.worktree_path = Some(PathBuf::from("."));
+        let mut foreign = portable.clone();
+        foreign.worktree_path = Some(temp.path().join("other-host/work/issue-7033"));
+        target.execution_containers.extend([portable, foreign]);
+        let refs = target.execution_containers.clone();
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &works_path,
+            &projection,
+        )
+        .unwrap();
+        ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Recover local Work anchor".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("local durable anchor must remain unambiguous across hosts");
+        let after =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            after
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .unwrap()
+                .execution_containers,
+            refs
+        );
+    }
+
+    #[test]
+    fn work_repair_names_competing_absolute_anchors() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-7033");
+        let session_id = "session-repair-anchors";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 7033);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            session_id,
+            Some("Issue #7033"),
+            "codex",
+        );
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let mut projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        let target = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == work_id)
+            .unwrap();
+        let mut foreign = target.execution_containers[0].clone();
+        foreign.worktree_path = Some(temp.path().join("other-host/work/issue-7033"));
+        let paths: Vec<_> = [
+            target.execution_containers[0]
+                .worktree_path
+                .clone()
+                .unwrap(),
+            foreign.worktree_path.clone().unwrap(),
+        ]
+        .into();
+        target.execution_containers.push(foreign);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &works_path,
+            &projection,
+        )
+        .unwrap();
+        let before = std::fs::read(&works_path).unwrap();
+        let error = run_work_repair(&project_root, &work_id, false, &mut String::new())
+            .unwrap_err()
+            .to_string();
+        for path in paths {
+            assert!(error.contains(&path.display().to_string()), "{error}");
+        }
+        assert!(error.contains("work/20260601-0934"), "{error}");
+        assert_eq!(std::fs::read(&works_path).unwrap(), before);
     }
 
     #[test]
