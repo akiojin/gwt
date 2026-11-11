@@ -12463,6 +12463,96 @@ mod tests {
         .unwrap();
         (session, pane)
     }
+    #[tokio::test]
+    async fn dispatch_close_without_writer_tears_down_runtime_and_drains_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (snapshot, pane) = unbound_fixture(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state.project_key = gwt_core::paths::project_scope_hash(root.path()).to_string();
+        let id = format!("{}::pane", state.project_key);
+        let registry = state.agent_registry.as_ref().unwrap().clone();
+        let row = super::super::agent_dispatch::owned_process_window_state(
+            root.path(),
+            &id,
+            Some(&snapshot),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        super::super::agent_dispatch::publish_owned_process_window(
+            &registry,
+            root.path(),
+            &id,
+            None,
+            row,
+            &AtomicBool::new(true),
+        )
+        .map_err(|error| error.detail)
+        .unwrap();
+        state.refresh_registry_projection();
+        state
+            .install_pane(id.clone(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let pty = state.runtimes[&id].pty.clone();
+        assert!(crate::session_finalizer::kill_and_reap(&pty, &id).unwrap());
+        // Terminal status handling removes this entry before a later close.
+        state.pty_writers.write().unwrap().remove(&id).unwrap();
+        let caller = gwt_agent::Session::new(
+            root.path(),
+            "main",
+            gwt_agent::AgentId::Custom("caller".into()),
+        );
+        caller.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let token = state.issuer.issue(root.path(), &caller.id).unwrap().token;
+        let grant = state.issuer.grant_for_test(&token).unwrap();
+        state.dispatch_agent_frontend(
+            "origin".into(),
+            grant,
+            crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                id: id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        );
+        let mut completion = loop {
+            match receiver
+                // test-hygiene: allow-wall-clock-deadline Hang guard for the real dispatch completion, not an elapsed-time assertion.
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+            {
+                OwnerMessage::AgentDispatchFinished(completion) => break completion,
+                _ => continue,
+            }
+        };
+        let close = completion.close.as_mut().expect("captured close");
+        let result = close.result.clone();
+        let accepted = close.accepted;
+        let runtime = close.runtime.as_mut().unwrap();
+        let joined = runtime.output_thread.is_none() && runtime.status_thread.is_none();
+        // Keep the regression failure from leaving physical fixture workers behind.
+        if !joined {
+            close_runtime(&id, runtime, CloseCause::ExplicitClose).unwrap();
+            close.result = Ok(());
+        }
+        state.agent_dispatch_finished(*completion);
+        let drained = state.closing.is_empty() && state.retirements.is_empty();
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        // test-hygiene: allow-wall-clock-deadline Hang guard for actual owner drain.
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
+            .await
+            .unwrap();
+        actor.join().unwrap();
+        assert!(accepted, "close must pass the normal authorization gates");
+        assert!(
+            result.is_ok(),
+            "writer absence must not prevent teardown: {result:?}"
+        );
+        assert!(joined, "accepted close must join both runtime workers");
+        assert!(drained, "accepted close must not leave deferred retirement");
+    }
+
     fn active_fixture(root: &std::path::Path, session: &gwt_agent::Session) -> ActiveAgentSession {
         ActiveAgentSession {
             window_id: "pane".into(),

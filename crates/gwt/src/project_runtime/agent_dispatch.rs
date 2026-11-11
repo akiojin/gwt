@@ -3128,9 +3128,12 @@ impl AgentDispatchCapture {
                     .read()
                     .map_err(|error| error.to_string())?
                     .get(&id)
-                    .cloned()
-                    .ok_or("close target lost its physical writer")?;
-                invalidate_current_writer(&self.writers, &id, &entry)?;
+                    .cloned();
+                // Terminal status may already have removed this runtime's
+                // writer. Its captured physical handle still needs teardown.
+                if let Some(entry) = entry {
+                    invalidate_current_writer(&self.writers, &id, &entry)?;
+                }
                 super::owner::close_runtime(&id, runtime, super::owner::CloseCause::ExplicitClose)
             } else {
                 captured
