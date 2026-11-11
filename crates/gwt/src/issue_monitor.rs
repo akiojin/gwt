@@ -9963,12 +9963,15 @@ impl IssueMonitorState {
             .iter_mut()
             .find(|item| item.issue.number == issue_number)
         {
-            item.error_message = Some(message);
+            item.error_message = Some(message.clone());
         }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
         }
+        // A resident daemon unions in-flight state during rebase. Persist the
+        // release so it cannot resurrect this reservation from an older scan.
+        self.fence_relaunch_preserving_attempts(issue_number, &message, now, false);
     }
 
     /// SPEC #3200 T-043/FR-029: whether `issue_number` may relaunch now. `true`

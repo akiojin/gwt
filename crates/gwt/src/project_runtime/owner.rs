@@ -11981,9 +11981,35 @@ mod worker_tests {
 
         prefs.pending_launch_deliveries.pop();
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        // The resident daemon can still hold this in-flight reservation when
+        // the physical owner's capacity refusal commits through another writer.
+        let mut driver = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        driver.set_source_repository(Some(("example", "project")));
+        driver.record_candidate(
+            serde_json::from_value(json!({
+                "number": 42, "title": "capacity", "labels": ["gwt-queued"], "state": "open"
+            }))
+            .unwrap(),
+        );
+        assert!(driver.launch_identity(42).active);
         assert!(
             retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
                 .unwrap()
+        );
+        driver.rebase_daemon_driver_prefs(&crate::load_issue_monitor_prefs(&path).unwrap());
+        assert!(
+            !driver.launch_identity(42).active,
+            "a committed capacity retry must revoke the stale daemon's reservation"
+        );
+        assert!(driver.prefs().pending_launch_deliveries.is_empty());
+        assert!(driver.queued_issue_numbers().contains(&42));
+        assert_eq!(driver.attempt_count(42), 3);
+        assert_eq!(
+            driver.autonomous_record(42).unwrap().phase,
+            crate::issue_monitor::AutonomousPhase::Idle
         );
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
