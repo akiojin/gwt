@@ -12897,4 +12897,5 @@ mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
 
+#[cfg(test)]
 mod codex_speed_tests;

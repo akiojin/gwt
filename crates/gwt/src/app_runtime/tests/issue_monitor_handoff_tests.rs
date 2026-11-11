@@ -5404,7 +5404,7 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
     );
     assert_eq!(
         status.launch_profile_summary,
-        "codex / gpt-5.5 / high / host / fast:off"
+        "codex / gpt-5.5 / high / host / speed:off"
     );
 }
 
@@ -6226,7 +6226,9 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     );
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
-        LaunchWizardAction::SetFastMode { enabled: true },
+        LaunchWizardAction::SetCodexSpeed {
+            speed: gwt_agent::CodexSpeed::Fast,
+        },
     );
     let view = events
         .iter()
@@ -6237,9 +6239,10 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
             _ => None,
         })
         .expect("launch wizard view");
-    assert!(
-        view.fast_mode,
-        "profile editing honors its own Fast preference"
+    assert_eq!(
+        view.codex_speed,
+        gwt_agent::CodexSpeed::Fast,
+        "profile editing honors its explicit speed preference"
     );
     let pool = view
         .issue_monitor_pool
@@ -6321,7 +6324,14 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         expected_members,
         "saving preserves the exact previewed member order"
     );
-    assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
+    assert_eq!(
+        prefs
+            .launch_profile
+            .as_ref()
+            .expect("saved head")
+            .codex_speed,
+        gwt_agent::CodexSpeed::Fast
+    );
     let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs)
         .status_view()
         .launch_profile_summary;
