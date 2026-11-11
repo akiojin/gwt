@@ -114,6 +114,30 @@ test("windowless NeedsHuman uses one notification history entry, never the inbox
   await page.screenshot({ path: testInfo.outputPath("needs-human-history.png"), fullPage: true });
 });
 
+test("Issue #5016 AC-HS3: identical Issue Monitor notices aggregate into one counted row", async ({ page }, testInfo) => {
+  const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+  }, detail);
+  const steering = {
+    kind: "issue_monitor_toast", level: "warn", issue_number: 4499,
+    message: "Issue #4499 steering requested (1): resolve the review before closing",
+  };
+  await inject(steering);
+  await inject({ ...steering, issue_number: 4500, message: "Issue #4500 steering requested (1): resolve the review before closing" });
+  await inject(steering);
+  await inject(steering);
+  const bell = page.locator("#op-notifications-button");
+  await expect(bell.locator(".op-rail__badge")).toHaveText("2");
+  await bell.click();
+  const rows = page.locator("#notification-center .notification-center__item");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first()).toContainText("#4499");
+  await expect(rows.first().locator(".notification-center__count")).toHaveText("×3");
+  await expect(rows.nth(1)).toContainText("#4500");
+  await expect(rows.nth(1).locator(".notification-center__count")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("aggregated-history.png"), fullPage: true });
+});
+
 test(controllerTestTitle, async ({ page }, testInfo) => {
   const observed = await page.evaluate(() => {
     const state = window as any;
