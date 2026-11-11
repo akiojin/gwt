@@ -194,6 +194,10 @@ pub enum IssueCommand {
         reason: Option<String>,
         issue_numbers: Vec<u64>,
     },
+    MonitorQueueAdopt {
+        project_root: Option<std::path::PathBuf>,
+        terminal: String,
+    },
     MonitorQueueList {
         project_root: Option<std::path::PathBuf>,
         terminal: Option<String>,

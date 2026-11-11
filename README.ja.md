@@ -683,6 +683,14 @@ Queued には `auto-refill` などの追加元も表示されます。
 project store に保存された全端末のキューから `numbers` を外し、自動補充の手動除外も記録します。
 省略時はこのホストだけが対象です。別マシンの独立した project store は変更しません。
 
+macOS では CLI と Monitor が `scutil --get LocalHostName` をホスト ID として使用し、
+取得できない場合は `whoami::hostname` にフォールバックします。他 OS は `whoami::hostname` を使います。
+ID はプロセスごとに一度取得するため、マシン名の変更後は gwt を再起動してください。
+`issue.monitor.status` の `caller_host_identity` で ID・取得元・ネットワーク上のホスト名と異なる理由を確認できます。
+旧ホストのキューを復旧するには、`issue.monitor.queue.adopt` に `{"terminal":"old-host"}` を渡します。
+未実行の項目を自ホストへ移し、旧スケジュール予約を解放して再計画します。
+claim 取得中・起動中・実行中の作業は既存の所有者に残し、他のホストのキューは変更しません。
+
 前提 Issue の完了を待つには、Issue 本文に `Blocked-by: #123 #456` のような行を追加します。
 Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号を
 表示して、次の実行可能な Issue を起動します。

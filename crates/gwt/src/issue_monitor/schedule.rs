@@ -610,7 +610,7 @@ impl IssueMonitorState {
             .iter()
             .find(|entry| entry.issue_number == number && entry.host_id != host)
         {
-            return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.schedule.read on that host before changing its queue", foreign.host_id));
+            return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.queue.list for that terminal; use issue.monitor.queue.adopt with terminal to recover a retired host, then read issue.monitor.schedule.read", foreign.host_id));
         }
         if let Some(reason) = self.agent_switch_intents.values().find_map(|intent| {
             intent.admission_exclusion(Some(number), self.scheduled_agent_member_id(number), false)

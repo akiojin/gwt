@@ -983,6 +983,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 expected_schedule_revision: required_u64(params, "expected_schedule_revision")?,
             },
         }),
+        "issue.monitor.queue.adopt" => CliCommand::Issue(IssueCommand::MonitorQueueAdopt {
+            project_root: optional_path(params, "project_root")?,
+            terminal: required_string(params, "terminal")?,
+        }),
         "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
             project_root: optional_path(params, "project_root")?,
             terminal: optional_string(params, "terminal")?,

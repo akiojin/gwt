@@ -264,6 +264,10 @@ pub(super) fn run<E: CliEnv>(
             &issue_numbers,
             out,
         )?,
+        IssueCommand::MonitorQueueAdopt {
+            project_root,
+            terminal,
+        } => run_monitor_queue_adopt(env, project_root.as_deref(), &terminal, out)?,
         IssueCommand::MonitorQueueList {
             project_root,
             terminal,
@@ -943,6 +947,7 @@ fn run_monitor_status<E: CliEnv>(
         output["needs_human_authority"] = needs_human_authority;
     }
     output["project_root"] = serde_json::json!(project_root);
+    output["caller_host_identity"] = serde_json::json!(crate::process::current_host_identity());
     output["reliability"] = super::reliability::load_report(&project_root, chrono::Utc::now());
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
@@ -2348,6 +2353,36 @@ fn check_expected_queue_order(
         }
     }
     Ok(())
+}
+
+fn run_monitor_queue_adopt<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    terminal: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+    let now = chrono::Utc::now().to_rfc3339();
+    let (prefs, adopted) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let adopted = monitor.adopt_terminal_queue(terminal, &now);
+        *prefs = monitor.prefs();
+        Ok(adopted)
+    })
+    .map_err(io_as_api_error)?;
+    let response = serde_json::json!({
+        "terminal": terminal,
+        "host_id": crate::process::current_hostname(),
+        "adopted": adopted,
+        "terminal_queues": prefs.terminal_queues,
+    });
+    out.push_str(&serde_json::to_string(&response).expect("queue adoption serializes"));
+    out.push('\n');
+    Ok(0)
 }
 
 fn run_monitor_queue_remove<E: CliEnv>(
@@ -11408,6 +11443,68 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_queue_adopt_moves_retired_host_and_releases_its_schedule() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[41], "operator", "2026-11-11T00:00:00Z");
+        let host = crate::process::current_hostname();
+        let mut prefs = monitor.prefs();
+        let queue = prefs.terminal_queues.remove(&host).unwrap();
+        prefs
+            .terminal_queues
+            .insert("retired-host".into(), queue.clone());
+        let mut unrelated = queue;
+        unrelated.entries[0].number = 42;
+        prefs
+            .terminal_queues
+            .insert("unrelated-host".into(), unrelated);
+        prefs.agent_issue_schedule.reservations = vec![
+            crate::issue_monitor::AgentIssueReservation {
+                host_id: "retired-host".into(),
+                agent_member_id: "member".into(),
+                issue_number: 41,
+                reason: crate::issue_monitor::AgentScheduleReason::QueueOrder,
+            },
+            crate::issue_monitor::AgentIssueReservation {
+                host_id: "unrelated-host".into(),
+                agent_member_id: "other-member".into(),
+                issue_number: 42,
+                reason: crate::issue_monitor::AgentScheduleReason::QueueOrder,
+            },
+        ];
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        let super::super::CliCommand::Issue(command) =
+            super::super::json_envelope::parse_operation(
+                "issue.monitor.queue.adopt",
+                &serde_json::json!({"terminal":"retired-host"}),
+            )
+            .expect("canonical retired-host adoption")
+        else {
+            panic!("expected Issue command")
+        };
+        let mut output = String::new();
+        run(&mut env, command, &mut output).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.terminal_queues.contains_key("retired-host"));
+        assert_eq!(saved.terminal_queues[&host].entries[0].number, 41);
+        assert_eq!(
+            saved.terminal_queues["unrelated-host"],
+            prefs.terminal_queues["unrelated-host"]
+        );
+        assert_eq!(
+            saved.agent_issue_schedule.reservations,
+            prefs.agent_issue_schedule.reservations[1..]
+        );
+        let reply: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(reply["adopted"], 1);
+    }
+
+    #[test]
     fn issue_monitor_queue_remove_all_terminals_preserves_unrelated_entries() {
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -13908,6 +14005,13 @@ mod tests {
         assert_eq!(code, 0);
         let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
         assert_eq!(status["last_scan_at"], "2020-01-01T00:00:00Z");
+        assert_eq!(
+            status["caller_host_identity"]["host_id"],
+            crate::process::current_hostname()
+        );
+        assert!(status["caller_host_identity"]["source"]
+            .as_str()
+            .is_some_and(|source| !source.is_empty()));
         assert!(
             status["scan_stall"]
                 .as_str()
