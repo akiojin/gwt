@@ -83,12 +83,14 @@ pub fn current_host_identity() -> &'static HostIdentity {
     static IDENTITY: std::sync::OnceLock<HostIdentity> = std::sync::OnceLock::new();
     IDENTITY.get_or_init(|| {
         #[cfg(target_os = "macos")]
-        let local = std::process::Command::new("/usr/sbin/scutil")
-            .args(["--get", "LocalHostName"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok());
+        let local = gwt_core::process::resolved_command(
+            gwt_core::process::ProcessPlanRequest::new("/usr/sbin/scutil")
+                .args(["--get", "LocalHostName"]),
+        )
+        .ok()
+        .and_then(|mut command| command.output().ok())
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok());
         #[cfg(not(target_os = "macos"))]
         let local: Option<String> = None;
         resolve_host_identity(local.as_deref(), whoami::hostname().ok().as_deref())
