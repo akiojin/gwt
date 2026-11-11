@@ -121,6 +121,9 @@
       .statebar .seg{margin:0}
       .empty-col{max-width:660px}
       .empty-col .opt{margin-top:10px}
+      .mrow{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid var(--line)}
+      .mrow .badge{margin-left:auto}
+      .many-search{margin:10px 0 4px}
       .pblock{border:1px solid var(--line);border-radius:12px;padding:11px 13px 6px;margin-bottom:10px;background:var(--panel)}
       .pblock .phead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
       .pblock .phead .rel{margin-left:auto}
@@ -388,6 +391,7 @@
       <div class="seg" role="group" aria-label="開始画面の状態切替">
         <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
         <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
+        <button type="button" data-startstate="many" aria-pressed="false">プロジェクトが多い（20件）</button>
       </div>
     </div>
     <div class="mock" id="app">
@@ -580,6 +584,169 @@
                     <div class="grow">
                       <div class="d">新しい課題はありません</div>
                     </div>
+                  </div>
+                </div>
+                <p class="h-sec">新しく始める</p>
+                <div class="btnrow">
+                  <button class="btn" type="button">フォルダを開く…</button>
+                  <button class="btn" type="button" data-clone-open>GitHub から取り込む…</button>
+                </div>
+                <div class="lrow" style="margin-top:16px">
+                  <div class="grow">
+                    <div class="t">アプリ全体の設定</div>
+                  </div>
+                  <button class="btn ghost" type="button" data-openpage="settings">設定を開く</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="start-wrap" id="startMany" hidden>
+            <div class="start-grid">
+              <div class="chat-col">
+                <div class="chat-head">
+                  <span class="pm-face"><span class="dot wait"></span></span>
+                  <div>
+                    <div class="nm">ツムギ</div>
+                    <div class="sub">あなたの PM · 判断待ち 5件</div>
+                  </div>
+                </div>
+                <div class="chat" id="manyChat">
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。プロジェクトは全部で20件あります。昨夜の間に変わったのは2件だけです。gwt の共有状態モデル（#7048）が終わってレビュー待ちになりました。実装は Haruto です。KeibaDB は、Sora が夜の分まで取り込みを完了しています。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-works"><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">gwt · Haruto · Codex</div></div><span class="badge b-wait">レビュー待ち</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>いま動いている作業は4件、止まっているのは3件です。gwt では Yui がホームと判断の画面（#7007）を続けていて、KeibaDB では Sora がレース結果の取り込み（#130）の途中、llmlb は応答時間の定期計測中、event-magazine は公開前チェックの途中です。止まっているのは、gwt の #7047（チェック4件の失敗）、KeibaDB の毎日の取り込み（#121、形式の変更）、それと unity-cli で、3日動きがありません。様子が変わったプロジェクトはこの5件だけで、残りの15件は変化がありません。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-board"><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">gwt · Haruto · チェック4件が失敗して停止中</div></div><span class="badge b-block">止まっている</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。対応表を直せば取り込みはそのまま続けられ、止めれば安全に止まります。
+                    <div class="wcard" data-openpage="keibadb" data-openscreen="k-decide"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">KeibaDB · 48分待ち · 対応表の判断待ち</div></div><span class="badge b-block">要対応</span></div>
+                    <div class="btnrow"><button class="btn primary" type="button" data-msay="対応表を直して、取り込みを続けて" data-mreply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直す</button><button class="btn" type="button" data-msay="取り込みを止めて" data-mreply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断が 2件あります。「ホームと判断の画面」（#7007）の計画の承認と、保存されていない変更の扱いです。ほかのプロジェクトにも 2件あります。
+                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>プロジェクトの中身の相談は、そのプロジェクトのページの「相談」が早いです。たとえばメモリの課題（#5561）の詳しい話は、gwt の相談で聞いてください。
+                    <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-ask">gwt の相談へ</button></div></div>
+                </div>
+                <div class="composer">
+                  <textarea id="manyInput" placeholder="ツムギに話しかける…"></textarea>
+                  <div class="send"><button class="btn primary" type="button" id="manySend">送る</button></div>
+                </div>
+              </div>
+              <div class="field-col">
+                <p class="h-sec">プロジェクトの今</p>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                    <span class="badge b-run">作業中</span>
+                    <span class="badge b-wait">判断待ち 2件</span>
+                    <span class="rel">未解決132件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">新しい画面の共有状態モデル（#7048）</div>
+                      <div class="d">Haruto · Codex · 実装が入ってレビュー待ち</div>
+                    </div>
+                    <span class="badge b-wait">レビュー待ち</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">刷新のホームと判断の画面（#7007）</div>
+                      <div class="d">Yui · Claude Code · 1時間12分実行中 · 進み具合 55%</div>
+                      <div class="bar"><i style="width:55%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">状態モデルの変更でチェックが失敗（#7047）</div>
+                      <div class="d">Haruto · チェック4件が失敗して停止中</div>
+                    </div>
+                    <span class="badge b-block">止まっている</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                    <span class="badge b-wait">判断待ち 1件</span>
+                    <span class="rel">未解決14件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">レース結果の取り込み — 2026-11-11（#130）</div>
+                      <div class="d">Sora · Claude Code · 25分実行中 · 24レース中18件</div>
+                      <div class="bar"><i style="width:75%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div>
+                      <div class="d">対応表の判断待ち · 48分</div>
+                    </div>
+                    <span class="badge b-block">要対応</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#2563eb"></i>llmlb</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">応答時間の定期計測</div>
+                      <div class="d">直近24時間 · 異常なし</div>
+                    </div>
+                    <span class="badge b-run">計測中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#c2410c"></i>event-magazine</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">公開前チェック（11月特集）</div>
+                      <div class="d">確認 20件中12件</div>
+                      <div class="bar"><i style="width:60%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">動いているセッションはありません · 最後の活動は3日前</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span style="font-weight:700;font-size:13px">ほか15件は変化なし</span>
+                    <button class="btn ghost" type="button" id="manyAllToggle" aria-expanded="false" style="margin-left:auto">すべてのプロジェクトを見る</button>
+                  </div>
+                  <div id="manyAll" hidden>
+                    <div class="many-search"><input class="field" style="width:100%" type="text" id="manySearch" placeholder="プロジェクト名で絞り込む" aria-label="プロジェクト名で絞り込む"></div>
+                    <div class="mrow" data-name="gwt"><a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a><span class="badge b-run">作業中</span></div>
+                    <div class="mrow" data-name="KeibaDB"><a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a><span class="badge b-wait">判断待ち</span></div>
+                    <div class="mrow" data-name="llmlb"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="badge b-run">作業中</span></div>
+                    <div class="mrow" data-name="event-magazine"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="badge b-run">作業中</span></div>
+                    <div class="mrow" data-name="unity-cli"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="badge b-block">止まっている</span></div>
+                    <div class="mrow" data-name="155-Demi"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="160-Idina"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="161-Kura Portal"><span class="ptag"><i style="background:#0f766e"></i>161-Kura Portal</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="harbor-works"><span class="ptag"><i style="background:#2563eb"></i>harbor-works</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="207-Sakura CMS"><span class="ptag"><i style="background:#be123c"></i>207-Sakura CMS</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="note-relay"><span class="ptag"><i style="background:#c2410c"></i>note-relay</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="318-Field Log"><span class="ptag"><i style="background:#6d28d9"></i>318-Field Log</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="pixel-bench"><span class="ptag"><i style="background:#a16207"></i>pixel-bench</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="402-Kaze API"><span class="ptag"><i style="background:#475569"></i>402-Kaze API</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="drum-tutor"><span class="ptag"><i style="background:#0f766e"></i>drum-tutor</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="511-Umi Chart"><span class="ptag"><i style="background:#2563eb"></i>511-Umi Chart</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="lantern-docs"><span class="ptag"><i style="background:#be123c"></i>lantern-docs</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="623-Toki Store"><span class="ptag"><i style="background:#c2410c"></i>623-Toki Store</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="fern-search"><span class="ptag"><i style="background:#6d28d9"></i>fern-search</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="730-Mori Lab"><span class="ptag"><i style="background:#a16207"></i>730-Mori Lab</span><span class="badge b-done">止まっています</span></div>
                   </div>
                 </div>
                 <p class="h-sec">新しく始める</p>
@@ -1408,7 +1575,7 @@
       </div>
     </div>
     <footer class="doc">
-      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面は体験から設計した（2026-11-12 オーナー方針「コードから再現する必要はない。今回の刷新は体験重視」）。さらに同日のオーナー承認で、開始画面の役割自体を作り替えた：プロジェクトのランチャーではなく、端末 PM との会話の場所とする。開くと PM（アバター＋名前）が様子を話しかけ、直近の変化と進んでいる作業を会話で伝え、判断待ちは会話の中で、選ぶと何が起きると一緒に提示する（その場で選べる。腰を据えて決める場合は各プロジェクトの判断面へ進む）。状態の要約は別ブロックにせず、PM の発言に溶かす。プロジェクトの「今」は会話の隣に置く：プロジェクトごとに、進行中の作業（名前・担当者・状態・進み具合）、止まっている作業と理由、判断待ち、直近で完了した作業を実データの粒度で並べ、選ぶとそのプロジェクトのページが開く（2026-11-12 オーナーの追加フィードバック「会話はアリ。でもプロジェクトの内容が分からなさ過ぎる」「単なるチャットアプリに見えてしまう」「シンプルすぎる」を受けた再調整。密度を上げるのは説明文ではなく現場の実物で、PM の発言にも実名の作業・Issue 番号・担当者・状態と、押せる作業カードを埋め込む）。フォルダを開く／GitHub から取り込む導線も脇に置く。現行再現のために入れていた項目のうち、フォルダのパスの入力欄・終了待ちのプロジェクト・行ごとの実行ポリシー状態行・開いている／最近の二分は落とした。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。端末全体を見る PM との会話は開始画面に置き、PM の状態（何を見ていて、作業が進んでいるか）・判断待ち・報告の未読は、要約ブロックとして別に置かず PM の発言に溶かす。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示のうち端末全体の話は開始画面の会話で、プロジェクト固有の話はプロジェクトページの「相談」で行い、開始画面の会話でプロジェクト固有の話題が出たら PM がそのプロジェクトのページへ誘導する。報告の一覧ページも廃止し、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：開始画面の会話と各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。PM の顔（2026-11-12 オーナー提案「PM にはアバター機能はあった方が良いかも。Muse のような」）：PM にはアバターと名前（モックでは「ツムギ」という仮名）を持たせ、開始画面の会話・相談での発言・判断の提示者では、一貫して「アバター＋名前」で出す。状態（見ている／判断待ち／止まっている）は、アバターの小さな印と一言だけで控えめに伝える。アバターと名前は、設定「あなたの PM」で変えられる想定で置いた。画面の中に説明文は置かない（2026-11-12 オーナー指摘「説明のページみたい」を受けた作法）：画面に残すのは、ボタンのラベル、状態を伝える一言、PM の発言、空状態の短い案内だけとし、設計の意図・前提・決定の記録はこのノートに集約する。設定は2層で、プロジェクトページの設定（そのプロジェクトの差分）が、端末全体の設定より優先される。プロジェクトがない場合（2026-11-12 オーナーの問い「プロジェクトがない場合の画面は？」を受けた追加）：プロジェクトが0件のとき、開始画面に「プロジェクトの今」パネルは置かず、PM との会話がそのまま案内役になる。PM が「まだプロジェクトがありません」から始めて、最初の一歩（フォルダを開く／GitHub から取り込む）を会話の中で示し、取り込みの入口は脇ではなく主役級に大きく出す。取り込みが完了したら、プロジェクトのある通常の開始画面へ切り替わる。モックでは両方の状態を確認できるよう、外枠（製品画面の外）に「状態：プロジェクトあり／プロジェクトなし」の切替を置いた（製品画面の中には切替を置かない）。</p>
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面は体験から設計した（2026-11-12 オーナー方針「コードから再現する必要はない。今回の刷新は体験重視」）。さらに同日のオーナー承認で、開始画面の役割自体を作り替えた：プロジェクトのランチャーではなく、端末 PM との会話の場所とする。開くと PM（アバター＋名前）が様子を話しかけ、直近の変化と進んでいる作業を会話で伝え、判断待ちは会話の中で、選ぶと何が起きると一緒に提示する（その場で選べる。腰を据えて決める場合は各プロジェクトの判断面へ進む）。状態の要約は別ブロックにせず、PM の発言に溶かす。プロジェクトの「今」は会話の隣に置く：プロジェクトごとに、進行中の作業（名前・担当者・状態・進み具合）、止まっている作業と理由、判断待ち、直近で完了した作業を実データの粒度で並べ、選ぶとそのプロジェクトのページが開く（2026-11-12 オーナーの追加フィードバック「会話はアリ。でもプロジェクトの内容が分からなさ過ぎる」「単なるチャットアプリに見えてしまう」「シンプルすぎる」を受けた再調整。密度を上げるのは説明文ではなく現場の実物で、PM の発言にも実名の作業・Issue 番号・担当者・状態と、押せる作業カードを埋め込む）。フォルダを開く／GitHub から取り込む導線も脇に置く。現行再現のために入れていた項目のうち、フォルダのパスの入力欄・終了待ちのプロジェクト・行ごとの実行ポリシー状態行・開いている／最近の二分は落とした。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。端末全体を見る PM との会話は開始画面に置き、PM の状態（何を見ていて、作業が進んでいるか）・判断待ち・報告の未読は、要約ブロックとして別に置かず PM の発言に溶かす。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示のうち端末全体の話は開始画面の会話で、プロジェクト固有の話はプロジェクトページの「相談」で行い、開始画面の会話でプロジェクト固有の話題が出たら PM がそのプロジェクトのページへ誘導する。報告の一覧ページも廃止し、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：開始画面の会話と各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。PM の顔（2026-11-12 オーナー提案「PM にはアバター機能はあった方が良いかも。Muse のような」）：PM にはアバターと名前（モックでは「ツムギ」という仮名）を持たせ、開始画面の会話・相談での発言・判断の提示者では、一貫して「アバター＋名前」で出す。状態（見ている／判断待ち／止まっている）は、アバターの小さな印と一言だけで控えめに伝える。アバターと名前は、設定「あなたの PM」で変えられる想定で置いた。画面の中に説明文は置かない（2026-11-12 オーナー指摘「説明のページみたい」を受けた作法）：画面に残すのは、ボタンのラベル、状態を伝える一言、PM の発言、空状態の短い案内だけとし、設計の意図・前提・決定の記録はこのノートに集約する。設定は2層で、プロジェクトページの設定（そのプロジェクトの差分）が、端末全体の設定より優先される。プロジェクトがない場合（2026-11-12 オーナーの問い「プロジェクトがない場合の画面は？」を受けた追加）：プロジェクトが0件のとき、開始画面に「プロジェクトの今」パネルは置かず、PM との会話がそのまま案内役になる。PM が「まだプロジェクトがありません」から始めて、最初の一歩（フォルダを開く／GitHub から取り込む）を会話の中で示し、取り込みの入口は脇ではなく主役級に大きく出す。取り込みが完了したら、プロジェクトのある通常の開始画面へ切り替わる。モックでは両方の状態を確認できるよう、外枠（製品画面の外）に「状態：プロジェクトあり／プロジェクトなし」の切替を置いた（製品画面の中には切替を置かない）。プロジェクトが多い場合（2026-11-12 オーナーとの合意を受けた追加）：プロジェクトが20件規模になると、全件を同格には並べない。「プロジェクトの今」に出すのは、今、注意が要るプロジェクト（動いている／止まっている／判断待ちがある）だけを厚くし、静かなプロジェクトは「ほか15件は変化なし」の1行に畳んで、展開できる全件リスト（名前と状態だけの薄い行、名前で絞り込み可）に分ける。会話側も同じ原則で、PM は全件を報告せず、変化と判断だけを蒸留して話す。モックの状態切替は「プロジェクトが多い（20件）」を加えた3状態にした。</p>
     </footer>
   </div>
 
@@ -1596,20 +1763,23 @@
       m.appendChild(document.createTextNode(text));
       (chat || startChat).appendChild(m);
     }
-    /* ----- Start screen state: no projects yet / has projects ----- */
+    /* ----- Start screen states: has projects / no projects yet / many projects ----- */
     var startHas = document.getElementById("startHas");
     var startEmpty = document.getElementById("startEmpty");
-    function setStartState(empty) {
-      if (startHas) startHas.hidden = !!empty;
-      if (startEmpty) startEmpty.hidden = !empty;
+    var startMany = document.getElementById("startMany");
+    function setStartState(state) {
+      if (state === true) state = "empty";
+      if (state === false || state === undefined || state === null) state = "has";
+      if (startHas) startHas.hidden = state !== "has";
+      if (startEmpty) startEmpty.hidden = state !== "empty";
+      if (startMany) startMany.hidden = state !== "many";
       document.querySelectorAll("[data-startstate]").forEach(function (b) {
-        var on = (b.getAttribute("data-startstate") === "empty") === !!empty;
-        b.setAttribute("aria-pressed", on ? "true" : "false");
+        b.setAttribute("aria-pressed", b.getAttribute("data-startstate") === state ? "true" : "false");
       });
     }
     document.querySelectorAll("[data-startstate]").forEach(function (b) {
       b.addEventListener("click", function () {
-        setStartState(b.getAttribute("data-startstate") === "empty");
+        setStartState(b.getAttribute("data-startstate"));
       });
     });
     document.querySelectorAll("[data-say]").forEach(function (b) {
@@ -1644,6 +1814,46 @@
     document.getElementById("emptySend").addEventListener("click", emptySend);
     emptyInput.addEventListener("keydown", function (ev) {
       if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); emptySend(); }
+    });
+    /* ----- Start screen, many-projects state ----- */
+    var manyChat = document.getElementById("manyChat");
+    var manyInput = document.getElementById("manyInput");
+    function manySend() {
+      var v = manyInput.value.trim();
+      if (!v) return;
+      manyInput.value = "";
+      startAppend("me", v, manyChat);
+      setTimeout(function () {
+        startAppend("pm", "受け取りました。その方向で進めます。様子が変わったらここで伝えます。", manyChat);
+      }, 350);
+    }
+    document.getElementById("manySend").addEventListener("click", manySend);
+    manyInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); manySend(); }
+    });
+    document.querySelectorAll("[data-msay]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        startAppend("me", b.getAttribute("data-msay"), manyChat);
+        startAppend("pm", b.getAttribute("data-mreply"), manyChat);
+        var row = b.closest(".btnrow");
+        if (row) row.querySelectorAll("[data-msay]").forEach(function (x) { x.disabled = true; });
+      });
+    });
+    var manyAll = document.getElementById("manyAll");
+    var manyAllToggle = document.getElementById("manyAllToggle");
+    manyAllToggle.addEventListener("click", function () {
+      var open = manyAll.hidden;
+      manyAll.hidden = !open;
+      manyAllToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      manyAllToggle.textContent = open ? "一覧を閉じる" : "すべてのプロジェクトを見る";
+    });
+    var manySearch = document.getElementById("manySearch");
+    manySearch.addEventListener("input", function () {
+      var q = manySearch.value.trim().toLowerCase();
+      document.querySelectorAll("#manyAll .mrow").forEach(function (r) {
+        var hit = q === "" || r.getAttribute("data-name").toLowerCase().indexOf(q) >= 0;
+        r.style.display = hit ? "" : "none";
+      });
     });
     startInput.addEventListener("keydown", function (ev) {
       if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); startSend(); }
