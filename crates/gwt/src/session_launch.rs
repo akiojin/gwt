@@ -93,6 +93,7 @@ pub fn launch_config_from_persisted_session(
     if session.skip_permissions || pm_scratch.is_some() {
         builder = builder.skip_permissions(true);
     }
+    builder = builder.codex_speed(session.codex_speed());
     if session.fast_mode_enabled() {
         builder = builder.fast_mode(true);
     }

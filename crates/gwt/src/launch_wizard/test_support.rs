@@ -201,6 +201,7 @@ pub(super) fn quick_start_entry(
         live_window_id: live_window_id.map(str::to_string),
         skip_permissions: true,
         codex_fast_mode,
+        codex_speed: Default::default(),
         runtime_target,
         docker_service: docker_service.map(str::to_string),
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,

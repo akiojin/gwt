@@ -2661,6 +2661,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: true,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9266,6 +9267,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9284,6 +9286,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9746,6 +9749,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -10034,6 +10038,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         session_mode: Default::default(),
         skip_permissions: false,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
@@ -12891,3 +12896,6 @@ mod work_projection_tests;
 mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
+
+#[cfg(test)]
+mod codex_speed_tests;
