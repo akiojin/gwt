@@ -3820,6 +3820,11 @@ fn advance_one_autonomous_issue(
             }
         }
         crate::AutonomousPhase::Reviewing => {
+            // Issue #6877: gate inputs cannot use remote evidence until both
+            // local review fields arrive. Keep rejecting verdicts eligible.
+            if record.reviewed_sha.is_none() || record.review_passed.is_none() {
+                return Ok(());
+            }
             let Some(pr) = record.pr_number else {
                 return Ok(());
             };
@@ -10209,6 +10214,44 @@ exit 0
             monitor.autonomous_record(42).map(|record| record.phase),
             Some(crate::AutonomousPhase::Reviewing)
         );
+        // Issue #6877: before a verdict arrives, gate readback cannot be used.
+        // An exhausted read budget makes any attempted remote stage observable
+        // without running gh or relying on wall-clock scheduling.
+        let reviewing = monitor.autonomous_record(42).cloned();
+        let calls_before_wait = std::fs::read_to_string(&call_log).unwrap();
+        {
+            let deadline = Instant::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            assert_eq!(scan(&mut monitor, "2026-07-28T00:10:01Z"), 0);
+            let _timer = gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(
+                ISSUE_MONITOR_PERIODIC_READ_MAX_AGE,
+            );
+            assert_eq!(scan(&mut monitor, "2026-07-28T00:10:02Z"), 0);
+            assert_eq!(monitor.autonomous_record(42), reviewing.as_ref());
+            assert!(monitor.pending_effects().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(&call_log).unwrap(),
+                calls_before_wait
+            );
+            for passed in [false, true] {
+                let mut ready = monitor.clone();
+                ready.record_review_verdict(42, passed);
+                let failure = advance_one_autonomous_issue(
+                    &mut ready,
+                    &issues,
+                    "owner/repo",
+                    &container_root,
+                    "develop",
+                    Some(&open_prs),
+                    b"secret",
+                    42,
+                    "2026-07-28T00:10:03Z",
+                )
+                .expect_err("either completed verdict must resume live gate readback");
+                assert_eq!(failure.stage, IssueMonitorScanStage::BranchProtection);
+            }
+        }
         // The review window fails to start.
         monitor.record_launch_failed_at(42, "spawn failed: os error 206", "2026-07-28T00:10:05Z");
         let attempts = monitor
