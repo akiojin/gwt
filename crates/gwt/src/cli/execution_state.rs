@@ -17107,7 +17107,8 @@ fn pm_repair_workspace_recoveries(
         }
         let root = dunce::canonicalize(root)?;
         let event_root = dunce::canonicalize(&session.worktree_path)?;
-        if gwt_core::repo_hash::detect_repo_hash(&root) != Some(repo.clone())
+        if gwt_core::repo_hash::detect_repo_identity(&root).map(|identity| identity.hash)
+            != Some(repo.clone())
             || gwt_core::repo_hash::detect_repo_hash(&event_root) != Some(repo.clone())
         {
             return Err(generation_conflict(
@@ -32584,10 +32585,51 @@ exit 1
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _runtime_env = unset_live_session_env();
             let pm = tempfile::tempdir().unwrap();
-            let target = tempfile::tempdir().unwrap();
-            for path in [pm.path(), target.path()] {
-                crate::cli::trusted_store::init_git_repo_with_origin(path);
+            crate::cli::trusted_store::init_git_repo_with_origin(pm.path());
+            let workspace_home = tempfile::tempdir().unwrap();
+            let bare = workspace_home.path().join("repo.git");
+            let target = tempfile::Builder::new()
+                .prefix("target-")
+                .tempdir_in(workspace_home.path())
+                .unwrap();
+            for args in [
+                vec![
+                    "clone",
+                    "--bare",
+                    pm.path().to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
+                vec![
+                    "-C",
+                    bare.to_str().unwrap(),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.com/t/trusted-store.git",
+                ],
+                vec![
+                    "-C",
+                    bare.to_str().unwrap(),
+                    "worktree",
+                    "add",
+                    "-b",
+                    "repair-target",
+                    target.path().to_str().unwrap(),
+                ],
+            ] {
+                assert!(
+                    gwt_core::process::run_git_logged(&args, Some(workspace_home.path()))
+                        .unwrap()
+                        .status
+                        .success()
+                );
             }
+            assert!(gwt_core::repo_hash::detect_repo_hash(workspace_home.path()).is_none());
+            assert_eq!(
+                gwt_core::repo_hash::detect_repo_identity(workspace_home.path())
+                    .map(|identity| identity.hash),
+                gwt_core::repo_hash::detect_repo_hash(target.path())
+            );
             let owner = generation_owner();
             let mut active = active_record("previous-holder");
             active.owner_number = owner.number;
@@ -32613,7 +32655,9 @@ exit 1
             );
             let sessions = gwt_core::paths::gwt_sessions_dir();
             let session_path = sessions.join(format!("{}.toml", request.initial_session_id));
-            let session = gwt_agent::Session::load(&session_path).unwrap();
+            let mut session = gwt_agent::Session::load(&session_path).unwrap();
+            session.project_state_root = Some(workspace_home.path().to_path_buf());
+            session.save(&sessions).unwrap();
             let session_before = fs::read(&session_path).unwrap();
             let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
                 .unwrap()
@@ -32830,7 +32874,8 @@ exit 1
                     pr_state: None,
                 },
             );
-            gwt_core::workspace_projection::transact_workspace_state_with_commit(
+            gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
+                workspace_home.path(),
                 target.path(),
                 &request.operation_id,
                 |_, _, _| Ok(((), vec![event])),
