@@ -109,6 +109,7 @@ const ROOT_MODULES = new Set([
   "issue-render-sync.js",
   "render-degradation-banner.js",
   "workspace-state-notice.js",
+  "react/islands.js",
   // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
   "terminal-attachments.js",
   "terminal-copy-shortcut.js",

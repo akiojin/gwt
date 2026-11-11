@@ -186,15 +186,19 @@ export function createProviderUsageSurface({
         const lbl = document.createElement("span");
         lbl.className = "op-usage-win__lbl";
         applyUsageWindowLabel(lbl, w);
-        const bar = buildUsageBar(w.used_percent, limitReached);
-        bar.classList.add("op-usage-win__bar");
+        const raw = w.used_percent;
+        const number = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "")
+          ? Number(raw) : NaN;
+        const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : null;
         const pct = document.createElement("span");
         pct.className = "op-usage-win__pct";
-        pct.textContent = `${Math.round(w.used_percent)}%`;
+        pct.textContent = percent == null ? "—" : `${Math.round(percent)}%`;
         const reset = document.createElement("span");
         reset.className = "op-usage-win__reset";
         reset.textContent = w.resets_at ? `↻ ${usageFmtResetShort(w.resets_at)}` : "";
         row.appendChild(lbl);
+        const bar = percent == null ? document.createElement("span") : buildUsageBar(percent, limitReached);
+        bar.classList.add("op-usage-win__bar");
         row.appendChild(bar);
         row.appendChild(pct);
         row.appendChild(reset);
@@ -438,10 +442,13 @@ export function createProviderUsageSurface({
           const wins = document.createElement("div");
           wins.className = "op-usage-wins";
           for (const w of windows) {
-            wins.appendChild(buildUsageWindowRow(w, account.limit_reached));
+            const modelWindow = account.provider === "claude_code" &&
+              (w.kind === "fable_weekly" || w.kind === "opus_weekly");
+            wins.appendChild(buildUsageWindowRow(w, !modelWindow && account.limit_reached));
           }
           card.appendChild(wins);
-        } else {
+        }
+        {
           const reason = usageStateReason(account.state);
           if (reason) {
             const isDisabled = (account.state && account.state.kind) === "disabled";

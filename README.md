@@ -32,9 +32,10 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — hover over USAGE for account limits, including Claude's
-  Fable weekly limit and enabled Usage credits with utilization, used/limit,
-  and currency. Enable Claude account usage in Settings → Usage & Limits.
+- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
+  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
+  account limits, reset times, and enabled Usage credits with utilization,
+  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
 
 ## Install
 
@@ -1092,8 +1093,15 @@ monitor armed. The full gate design and threat model live in SPEC
 Once a work branch merges into `develop`, the monitor settles the delivered
 Issue itself (`Closes #N` only fires on the default branch). When every
 acceptance criterion is checked, it posts a comment carrying the PR number and
-merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
-`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open. With
+Autonomous on, the comment explains that remaining implementation work returns
+to the queue with a fresh session. If every remaining criterion is
+explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
+as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
+`awaiting_measurement`. Update its acceptance checklist
+after measurement to allow close, or choose **Return to queue** to resume work.
+With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
+`merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria
 does not bypass the unchecked checklist. Auto-close follows the
 `Autonomous` toggle by default; `issue.monitor.config.set` with
@@ -2102,6 +2110,12 @@ shortened; the saved tasks remain complete. A read failure retains the last
 confirmed list with a warning. Task editing, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
+
+The PM window's **Chat** view shows the PM conversation as chat bubbles: your
+messages on the right and PM replies on the left, with PM Markdown (headings,
+lists, tables, and code) formatted. It reads the PM session's own conversation
+record and omits tool calls, hook notes, and automatic prompts. It is read-only
+in this release; use **Execution log** to talk with PM.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from

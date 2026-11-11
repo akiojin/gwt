@@ -812,7 +812,7 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   const file = 'crates/gwt/web/app.js';
   const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
   const migrated = findings => findings.filter(finding => finding.root === 'receive'
-    && /^\/(pm_reports|terminal_output|terminal_snapshot)$/.test(finding.context));
+    && /^\/(pm_reports\|pm_conversation|terminal_output|terminal_snapshot)$/.test(finding.context));
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
   const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
@@ -871,7 +871,7 @@ test("Workspace state notice receiver resolves only shared model updates", () =>
     'case "workspace_state_notice": element.textContent = event.kind;');
   assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
   const directRender = notice.replace('function receive(notice) {',
-    'function receive(notice) { render(notice);');
+    'function receive(notice) { container.textContent = notice.message;');
   assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
   assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
 });

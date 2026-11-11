@@ -29,8 +29,9 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
-  有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
+- **Provider usage** — USAGE に Claude の Fable / Opus の週次枠を同時表示します。
+  未提供の枠は `—`、古い取得値は `stale` と表示します。ホバーすると共通の
+  アカウント枠・リセット時刻や、有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
   Claude アカウント枠は Settings → Usage & Limits で有効化してください。
 
 ## インストール
@@ -998,7 +999,14 @@ work ブランチが `develop` に merge されると、monitor は delivered �
 自分で決着させます（`Closes #N` は default branch でしか発火しません）。
 受け入れ基準がすべてチェック済みなら、PR 番号と merge
 SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
-`merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
+Issue を open のままにします。Autonomous が on の場合、実装残件を新しい session の
+queue に戻す旨をコメントします。未達の基準がすべて `(measurement)` または
+`[measurement]` で明示されていれば、NeedsHuman に含めず Backlog の
+**Awaiting measurement** として実測を待ち、コメントにも `awaiting_measurement` を示します。
+測定後に受け入れ基準をチェックすると
+close を再評価でき、**Return to queue** で作業を再開することもできます。
+Autonomous が off の場合は `merge 済み・未達 AC あり` とコメントして
+従来どおり `NeedsHuman` にします。`gwt-spec` Issue は
 全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に
 委譲しても、未チェックの項目があれば close しません。auto-close は既定で
 `Autonomous` トグルに連動し、`issue.monitor.config.set` の
@@ -1919,6 +1927,11 @@ PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲
 長い概要は短縮しますが、保存済みの内容は保持します。読取り失敗時は最後に確認できた一覧を
 警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
 同じツールバーから **Reports** と **Execution log** に切り替えられます。
+
+PM ウィンドウの **Chat** は PM との会話をチャット形式で表示します。自分の発言は右、PM の応答は
+左のバブルに並び、PM の Markdown（見出し・箇条書き・表・コード）を整形します。PM セッション自身の
+会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。現在は閲覧専用のため、
+PM への入力には **Execution log** を使います。
 
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、

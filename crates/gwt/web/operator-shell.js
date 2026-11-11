@@ -321,21 +321,24 @@ function usageProviderLabel(provider) {
   return compact || "?";
 }
 
+function usageWindowPercent(window) {
+  const value = window?.used_percent;
+  if (typeof value !== "number" &&
+      !(typeof value === "string" && value.trim() !== "")) return null;
+  const percent = Number(value);
+  return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+}
+
 function usageSummaryPercent(account) {
+  if (account.provider === "claude_code" &&
+      !["ok", "stale"].includes(account.state?.kind)) return null;
   const percentages = (account.windows || [])
     .filter(
       (window) => account.provider !== "claude_code" ||
         window.kind === "five_hour" || window.kind === "weekly",
     )
-    .map((window) => window.used_percent)
-    .filter(
-      (percent) =>
-        typeof percent === "number" ||
-        (typeof percent === "string" && percent.trim() !== ""),
-    )
-    .map(Number)
-    .filter(Number.isFinite)
-    .map((percent) => Math.max(0, Math.min(100, percent)));
+    .map(usageWindowPercent)
+    .filter((percent) => percent != null);
   return percentages.length ? Math.max(...percentages) : null;
 }
 
@@ -365,8 +368,26 @@ function usageCriticality(account) {
   return usageSummaryPercent(account) ?? -1;
 }
 
+function usageModelSummaries(account) {
+  const state = account.state || {};
+  const readable = state.kind === "ok" || state.kind === "stale";
+  return [["fable_weekly", "Fable"], ["opus_weekly", "Opus"]].map(([kind, name]) => {
+    const window = (account.windows || []).find((item) => item.kind === kind);
+    const percent = readable ? usageWindowPercent(window) : null;
+    const value = state.kind === "disabled" ? "off"
+      : state.kind === "unavailable" ? "n/a"
+      : percent != null ? `${Math.round(percent)}%` : "—";
+    const severity = percent == null ? "" : percent >= 95 ? "danger"
+      : percent >= 80 ? "warning" : "normal";
+    const description = value === "—"
+      ? readable ? "not provided" : state.kind === "no_data" ? "No data yet" : "unknown"
+      : value;
+    return { kind, name, value, severity, description };
+  });
+}
+
 // SPEC-2970 — status-strip USAGE cell: a stable, consolidated summary
-// (`USAGE CX 23% CC 9%`). Hover, focus, and click all show the same consolidated
+// with both Claude model windows. Hover, focus, and click show the consolidated
 // popover (all windows + consumption) via the app-provided hooks. No ticker
 // rotation — everything is visible at a glance / in the popover.
 export function applyProviderUsage(doc, snapshot = {}) {
@@ -404,6 +425,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
       ? "limit reached"
       : usageSeverity(account),
     criticality: usageCriticality(account),
+    models: account.provider === "claude_code" ? usageModelSummaries(account) : null,
   }));
   const visibleSummaries =
     summaries.length <= 2
@@ -420,7 +442,27 @@ export function applyProviderUsage(doc, snapshot = {}) {
     chip.dataset.provider = account.provider;
     if (account.limit_reached) chip.dataset.limit = "true";
     if (summary.severity) chip.dataset.severity = summary.severity;
-    chip.textContent = `${summary.label} ${summary.value}`;
+    if (summary.models) {
+      chip.classList.add("op-usage-sum--models");
+      chip.appendChild(doc.createTextNode(`${summary.label} `));
+      for (const model of summary.models) {
+        const item = doc.createElement("span");
+        item.className = "op-usage-model";
+        item.dataset.windowKind = model.kind;
+        if (model.severity) item.dataset.severity = model.severity;
+        item.textContent = `${model.name} weekly ${model.value}`;
+        chip.appendChild(item);
+        chip.appendChild(doc.createTextNode(" "));
+      }
+      if (account.state?.kind === "stale") {
+        const stale = doc.createElement("span");
+        stale.className = "op-usage-stale";
+        stale.textContent = "stale";
+        chip.appendChild(stale);
+      }
+    } else {
+      chip.textContent = `${summary.label} ${summary.value}`;
+    }
     cell.appendChild(chip);
   }
   if (summaries.length > 2) {
@@ -432,10 +474,20 @@ export function applyProviderUsage(doc, snapshot = {}) {
   }
   const accessibleSummary = `Provider usage: ${summaries
     .map(
-      (summary) =>
-        `${summary.accessibleLabel} ${summary.value}${
+      (summary) => {
+        if (summary.models) {
+          const state = summary.account.state || {};
+          const reason = state.kind === "stale" ? `stale ${Math.round((state.age_secs || 0) / 60)}m`
+            : state.kind === "unavailable" ? state.reason || "Unavailable"
+            : state.kind === "disabled" ? "Enable in Settings" : "";
+          return `${summary.accessibleLabel}, ${summary.models.map((model) =>
+            `${model.name} weekly ${model.description}`).join(", ")}, shared quota ${summary.value}${
+            summary.accessibleSeverity ? ` ${summary.accessibleSeverity}` : ""}${reason ? `, ${reason}` : ""}`;
+        }
+        return `${summary.accessibleLabel} ${summary.value}${
           summary.accessibleSeverity ? ` ${summary.accessibleSeverity}` : ""
-        }`,
+        }`;
+      },
     )
     .join(", ")}`;
   cell.setAttribute("aria-label", accessibleSummary);

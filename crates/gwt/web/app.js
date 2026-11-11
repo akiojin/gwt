@@ -4202,7 +4202,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4263,6 +4263,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
+          onChatVisible: () => requestVisiblePmReports(false, windowData.id),
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -4289,6 +4290,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (windowData.is_pm && view && view.logHost.hidden) {
             const request = requestPmReports(windowData.id, resync);
             if (request) send(request);
+            const conversation = view.controller?.isChatVisible() ? requestPmConversation(windowData.id) : null;
+            if (conversation) send(conversation);
           }
         }
       }
@@ -5191,7 +5194,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "runtime_health":
             runtimeHealthModel.update(() => event.snapshot || {});
             break;
-          case "pm_reports": {
+          case "pm_reports":
+          case "pm_conversation": {
             applyPmWindowReceiveEvent(event);
             break;
           }

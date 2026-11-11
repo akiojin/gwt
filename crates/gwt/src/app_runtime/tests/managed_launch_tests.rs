@@ -2830,6 +2830,7 @@ fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
                 generation,
                 context: Some(context.clone()),
                 current: Arc::new(AtomicBool::new(true)),
+                launch_in_flight: true,
                 operation_id: "actual-pre-pty-failure".into(),
                 owner_pane_id: captured.id.clone(),
                 client_cell: client_cell.clone(),
