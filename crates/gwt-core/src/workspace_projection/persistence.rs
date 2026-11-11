@@ -2922,6 +2922,26 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
     before_persist: impl FnOnce(&mut WorkEvent, &mut WorkspaceJournalEntry) -> Result<()>,
 ) -> Result<WorkspaceJournalEntry> {
+    update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
+        target,
+        update,
+        tracked_event_policy,
+        None,
+        revalidate,
+        before_persist,
+    )
+}
+
+/// Attach trusted close provenance before the transaction is staged, preserving
+/// the pre-persist callback's restriction to recovered event/journal identities.
+pub fn update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceMutationTarget,
+    update: WorkspaceProjectionUpdate,
+    tracked_event_policy: TrackedWorkEventPolicy,
+    provenance: Option<WorkTerminalProvenance>,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+    before_persist: impl FnOnce(&mut WorkEvent, &mut WorkspaceJournalEntry) -> Result<()>,
+) -> Result<WorkspaceJournalEntry> {
     validate_session_bound_target_shape(target, &update)?;
 
     let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
@@ -3011,6 +3031,11 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             locked.execution_container,
             updated_at,
         );
+        if matches!(event.kind, WorkEventKind::Done | WorkEventKind::Discard) {
+            if let Some(provenance) = provenance {
+                provenance.apply_to(&mut event);
+            }
+        }
         let event_before_identity_recovery = event.clone();
         let entry_before_identity_recovery = entry.clone();
         before_persist(&mut event, &mut entry)?;
@@ -3083,6 +3108,25 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
         close_kind,
         updated_at,
         WorkspaceTerminalTargetSelection::LatestAssigned,
+        None,
+        revalidate,
+    )
+}
+
+/// Session-bound close with nonsecret authority evidence stored on its event.
+pub fn emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    close_kind: WorkCloseKind,
+    updated_at: DateTime<Utc>,
+    provenance: WorkTerminalProvenance,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::LatestAssigned,
+        Some(provenance),
         revalidate,
     )
 }
@@ -3197,6 +3241,35 @@ pub fn emit_workspace_terminal_event_for_exact_resolved_work_target(
             work_id: expected_work_id,
             policy,
         },
+        None,
+        revalidate,
+    )
+}
+
+/// Exact-Work variant retaining provenance on the original accepted close.
+pub fn emit_workspace_terminal_event_for_exact_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    expected_work_id: &str,
+    close_kind: WorkCloseKind,
+    policy: ExactWorkspaceTerminalPolicy,
+    updated_at: DateTime<Utc>,
+    provenance: WorkTerminalProvenance,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    if expected_work_id.trim().is_empty() {
+        return Err(GwtError::Other(
+            "exact Work terminalization received an empty Work id".to_string(),
+        ));
+    }
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::Exact {
+            work_id: expected_work_id,
+            policy,
+        },
+        Some(provenance),
         revalidate,
     )
 }
@@ -3215,6 +3288,7 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
     close_kind: WorkCloseKind,
     updated_at: DateTime<Utc>,
     selection: WorkspaceTerminalTargetSelection<'_>,
+    provenance: Option<WorkTerminalProvenance>,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     validate_session_bound_target_identity_shape(target)?;
@@ -3352,6 +3426,9 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
             }
         };
         event.agent_session_id = Some(target.session_id.clone());
+        if let Some(provenance) = provenance {
+            provenance.apply_to(&mut event);
+        }
         emit_workspace_terminal_event_outcome_locked(
             &work_items_path,
             &events_path,
@@ -7490,6 +7567,34 @@ pub fn emit_workspace_discard_event_for_session_outcome(
         session_id,
         legacy_work_item_id,
         updated_at,
+    )
+}
+
+/// Legacy target selection with additive, nonsecret terminal provenance.
+pub fn emit_workspace_terminal_event_for_session_with_provenance(
+    project_state_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    close_kind: WorkCloseKind,
+    updated_at: DateTime<Utc>,
+    provenance: WorkTerminalProvenance,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    let kind = match close_kind {
+        WorkCloseKind::Done => WorkEventKind::Done,
+        WorkCloseKind::Discarded => WorkEventKind::Discard,
+    };
+    let mut event = WorkEvent::new(kind, legacy_work_item_id, updated_at);
+    if kind == WorkEventKind::Done {
+        event.status_category = Some(WorkspaceStatusCategory::Done);
+    }
+    provenance.apply_to(&mut event);
+    emit_workspace_terminal_event_for_session_paths(
+        &gwt_workspace_projection_path_for_repo_path(project_state_root),
+        &gwt_workspace_work_items_path_for_repo_path(project_state_root),
+        &gwt_workspace_work_events_closed_path_for_repo_path(project_state_root),
+        session_id,
+        legacy_work_item_id,
+        event,
     )
 }
 

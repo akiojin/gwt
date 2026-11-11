@@ -2549,6 +2549,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_reopen_route_requires_agent_capability() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let target = server
+            .agent_capability_issuer()
+            .issue(project.path(), "session-reopen")
+            .expect("agent capability");
+        let mut url = reqwest::Url::parse(&target.url).expect("agent URL");
+        url.set_path("/internal/workspace-reopen");
+        let response = reqwest::blocking::Client::new()
+            .post(url)
+            .json(&serde_json::json!({
+                "schema_version": 1,
+                "claimed_session_id": "session-reopen",
+                "observation": {
+                    "cwd": "/repo", "git_toplevel": "/repo",
+                    "repo_hash": "repo", "branch": "work/reopen"
+                },
+                "primary_provider_session_id": "private-primary-id",
+                "reason": "continue after premature completion",
+                "observed_done_event_id": "done-event"
+            }))
+            .send()
+            .expect("reopen request without bearer");
+        assert_eq!(response.status(), HttpStatusCode::UNAUTHORIZED);
+        let body = response.text().expect("rejection body");
+        assert!(!body.contains("private-primary-id"));
+        server.shutdown();
+    }
+
+    #[test]
     fn execution_binding_probe_route_rejects_inspection_principal_without_mutation() {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, events) = AppEventProxy::stub();
