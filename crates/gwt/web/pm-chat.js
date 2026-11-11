@@ -51,7 +51,7 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null, conversation: null };
+      requestTasks: null, requestTasksError: null, conversation: null, chatSend: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -115,6 +115,17 @@ export function createPmWindowModel() {
               : { type: 'text', body: message.text || '' } })) };
         if (JSON.stringify(conversation) === JSON.stringify(previous.conversation)) return state;
         next = { ...next, conversation };
+      } else if (event.kind === 'pane_send_result') {
+        // Results carry no correlation id; only a pending Chat send consumes one. Session
+        // refusals omit the window, which is unambiguous only with one send in flight.
+        const pendingIds = Object.keys(state.windows).filter(id => state.windows[id].chatSend?.status === 'pending');
+        const windowId = event.window_id ?? (pendingIds.length === 1 ? pendingIds[0] : null);
+        const pending = state.windows[windowId];
+        if (pending?.chatSend?.status !== 'pending') return state;
+        const chatSend = { sequence: pending.chatSend.sequence, status: event.ok ? 'sent' : 'failed',
+          error: event.ok ? null : event.error || 'The PM pane refused the message.' };
+        return { ...state, windows: { ...state.windows, [windowId]: { ...pending, chatSend,
+          revision: pending.revision + 1 } }, changedWindowId: windowId };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
@@ -122,6 +133,35 @@ export function createPmWindowModel() {
     });
     return needsResync;
   }
+  let chatSendSequence = 0;
+  function setChatSend(windowId, accept, chatSend) {
+    let changed = false;
+    model.update(state => {
+      const previous = state.windows[windowId];
+      if (!previous?.sessionId || !accept(previous.chatSend)) return state;
+      changed = true;
+      return { ...state, windows: { ...state.windows, [windowId]: { ...previous, chatSend,
+        revision: previous.revision + 1 } }, changedWindowId: windowId };
+    });
+    return changed;
+  }
+  // The existing pane input path pastes the body and submits it on its own.
+  function requestPmChatSend(windowId, text) {
+    const sessionId = model.read().windows[windowId]?.sessionId;
+    if (!sessionId || !String(text ?? '').trim()) return null;
+    const sequence = ++chatSendSequence;
+    if (!setChatSend(windowId, current => current?.status !== 'pending', { sequence, status: 'pending', error: null })) return null;
+    return { kind: 'pane_send_input', session_id: sessionId, text: `${text}\r` };
+  }
+  function failPendingChatSend(windowId, error, sequence = null) {
+    const current = model.read().windows[windowId]?.chatSend;
+    return setChatSend(windowId, send => send?.status === 'pending' && (sequence === null || send.sequence === sequence),
+      { sequence: current?.sequence, status: 'failed', error });
+  }
+  const markPmChatSendUnavailable = windowId => failPendingChatSend(windowId,
+    'The PM connection is not connected. Reconnect, then send again.');
+  const expirePmChatSend = (windowId, sequence = null) => failPendingChatSend(windowId,
+    'Delivery was not confirmed. Check the execution log before sending again.', sequence);
   function requestPmConversation(windowId) {
     return model.read().windows[windowId]?.sessionId ? { kind: 'load_pm_conversation', id: windowId } : null;
   }
@@ -134,11 +174,11 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, requestPmConversation, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {},
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onSend = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -147,6 +187,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let includeCompleted = false;
   let tasksDigest = '';
   let chatDigest;
+  let chatSend = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -177,7 +218,18 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const chatLog = element('div', 'pm-chat__conversation');
   chatLog.setAttribute('role', 'log');
   chatLog.setAttribute('aria-label', 'PM conversation messages');
-  chatBody.append(chatNotice, chatLog);
+  const composer = element('form', 'pm-chat__composer');
+  composer.setAttribute('aria-label', 'Message PM');
+  const draft = element('textarea', 'pm-chat__draft');
+  draft.setAttribute('aria-label', 'Message to PM');
+  draft.rows = 2;
+  draft.placeholder = 'Message PM (Enter to send, Shift+Enter for a new line)';
+  const sendButton = element('button', '', 'Send');
+  sendButton.type = 'submit';
+  const composerStatus = element('p', 'pm-chat__composer-status');
+  composerStatus.setAttribute('aria-live', 'polite');
+  composer.append(draft, sendButton, composerStatus);
+  chatBody.append(chatNotice, chatLog, composer);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
   const tasksHeader = element('div', 'pm-chat__history-header');
@@ -248,7 +300,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     onLogVisibility(logs);
     if (value === 'reports') restoreScroll();
     if (value === 'chat') {
-      chatBody.scrollTop = chatBody.scrollHeight;
+      chatLog.scrollTop = chatLog.scrollHeight;
       onChatVisible();
     }
   }
@@ -315,7 +367,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     const nextDigest = JSON.stringify(conversation);
     if (chatDigest === nextDigest) return;
     chatDigest = nextDigest;
-    const following = chatBody.scrollHeight - chatBody.clientHeight - chatBody.scrollTop <= 32;
+    const following = chatLog.scrollHeight - chatLog.clientHeight - chatLog.scrollTop <= 32;
     const messages = conversation?.availability === 'ready' ? conversation.messages : [];
     chatLog.replaceChildren(...messages.map(message => {
       const user = message.role === 'user';
@@ -328,9 +380,33 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     }));
     chatNotice.textContent = !conversation ? 'Loading PM conversation…'
       : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
-        : messages.length ? '' : 'No conversation yet. Use the execution log to talk with PM.';
+        : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
     chatNotice.hidden = !chatNotice.textContent;
-    if (following) chatBody.scrollTop = chatBody.scrollHeight;
+    if (following) chatLog.scrollTop = chatLog.scrollHeight;
+  }
+  function syncComposer() {
+    const pending = chatSend?.status === 'pending';
+    // The sent text stays visible but frozen, so a confirmation clears only what was sent.
+    draft.readOnly = pending;
+    sendButton.disabled = pending || !draft.value.trim();
+    const text = pending ? 'Sending…'
+      : chatSend?.status === 'failed' ? `Not sent: ${String(chatSend.error).replace(/[.\s]+$/, '')}. Your message is kept.` : '';
+    if (composerStatus.textContent !== text) composerStatus.textContent = text;
+  }
+  function renderComposer(next) {
+    // A confirmed delivery clears only the draft that was sent.
+    if (next?.status === 'sent' && chatSend?.status === 'pending' && chatSend.sequence === next.sequence) draft.value = '';
+    chatSend = next || null;
+    syncComposer();
+  }
+  function submitDraft(event) {
+    event?.preventDefault();
+    if (disposed || chatSend?.status === 'pending' || !draft.value.trim()) return;
+    onSend(draft.value);
+  }
+  function draftKeydown(event) {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    submitDraft(event);
   }
   function renderCurrent(current) {
     const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
@@ -414,6 +490,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     root.dataset.stateVersion = String(state.revision);
     renderTasks(state);
     renderChat(state.conversation);
+    renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
     const reports = state.reports;
@@ -488,6 +565,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     tasksDigest = '';
     chatDigest = undefined;
     chatLog.replaceChildren();
+    draft.value = '';
+    renderComposer(null);
     includeCompleted = false;
     completedButton.setAttribute('aria-pressed', 'false');
     transcript.replaceChildren();
@@ -504,6 +583,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     body.removeEventListener('scroll', rememberScroll);
     resizeObserver?.disconnect();
     chatButton.removeEventListener('click', showChat);
+    composer.removeEventListener('submit', submitDraft);
+    draft.removeEventListener('keydown', draftKeydown);
+    draft.removeEventListener('input', syncComposer);
     tasksButton.removeEventListener('click', showTasks);
     completedButton.removeEventListener('click', filterTasks);
     reportsButton.removeEventListener('click', showReports);
@@ -513,6 +595,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }
   chatButton.addEventListener('click', showChat);
+  composer.addEventListener('submit', submitDraft);
+  draft.addEventListener('keydown', draftKeydown);
+  draft.addEventListener('input', syncComposer);
   reportsButton.addEventListener('click', showReports);
   tasksButton.addEventListener('click', showTasks);
   completedButton.addEventListener('click', filterTasks);
