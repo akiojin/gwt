@@ -291,19 +291,16 @@
       .projrow:hover{border-color:var(--line2)}
     </style>
 <style>
-      /* ---------- v2 tab skeleton additions ---------- */
+      /* ---------- page skeleton additions ---------- */
       .mock{position:relative}
       [hidden]{display:none!important}
-      .tabbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px 10px;border-bottom:1px solid var(--line);background:var(--panel2)}
-      .ptab{font:inherit;font-size:13px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink2);border-radius:9px;padding:8px 13px;cursor:pointer;min-height:36px;display:inline-flex;align-items:center;gap:7px}
-      .ptab:hover{color:var(--ink)}
-      .ptab.on{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent)}
-      .ptab .cnt{background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px}
-      .ptab .pdot{width:8px;height:8px;border-radius:50%;display:block;flex:none}
-      .ptab .tabx{color:var(--ink3);font-weight:400;font-size:14px;line-height:1}
-      .ptab .home-ico{font-size:15px;line-height:1}
-      .tabgroup{display:none;flex:1;min-width:0}
-      .tabgroup.on{display:flex}
+      .pagehead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+      .urlchip{font-size:12px;font-weight:700;color:var(--ink2);border:1px solid var(--line2);border-radius:999px;padding:3px 10px;background:var(--panel)}
+      .ph-note{font-size:12.5px;color:var(--ink3)}
+      .pagehead .plink{margin-left:auto}
+      .pagerow{display:flex;flex:1;min-width:0}
+      .pagegroup{display:none;flex:1;min-width:0;flex-direction:column}
+      .pagegroup.on{display:flex}
       .start-wrap{flex:1;padding:24px 28px 28px;min-width:0}
       @media (max-width:640px){.start-wrap{padding:16px}}
       .proj-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--gray-soft)}
@@ -343,36 +340,30 @@
       .repo-row .rt{font-weight:800;display:block}
       .repo-row .rd{font-size:12.5px;color:var(--ink2);display:block}
       .repo-row .rm{font-size:11.8px;color:var(--ink3);display:block}
-      [data-opentab]{cursor:pointer}
+      [data-openpage]{cursor:pointer}
 </style>
 </head>
 <body>
   <div class="wrap">
     <header class="doc">
       <h1>gwt 全画面刷新モック — 対話型</h1>
-      <p class="lead">刷新案を、現行アプリと同じ骨格で触れる形に組み直したモックです。起点は<strong>開始画面（現行の Hub）</strong>で、タブバーの左端に固定され、プロジェクト一覧・最近・開く・GitHub から clone の導線が集まります（clone は検索→保存先→進捗→完了で新しいプロジェクトタブが開くまで動きます）。プロジェクトは<strong>別タブ</strong>で開き、タブの中はそのプロジェクトの情報だけです。<strong>Your PM タブ</strong>には判断待ち（Decide）と件数レベルの要約だけを置き、作業面（Issues／Works 等）の横断版は置きません。1画面＝1文脈、主役は1つ、階層は3層まで、を原則に要素を絞っています（2026-11-12、実際に触った本人のフィードバックを受けて改修）。</p>
+      <p class="lead">刷新案を、現行アプリと同じ骨格で触れる形に組み直したモックです。各画面は<strong>独立したページ</strong>で、それぞれ固有の URL を持ちます。起点は<strong>開始画面（現行の Hub、URL: /）</strong>で、プロジェクト一覧・最近・開く・GitHub から clone の導線が集まります。プロジェクトを開くと、そのプロジェクト専用のページ（URL: /p/&lt;hash&gt;）へ移ります——標準では<strong>新しいブラウザタブ</strong>で開き、複数プロジェクトを並べて見るのはブラウザタブの役割です（アプリの中に横断の入れ物は作りません）。<strong>Your PM</strong> も独立したページで、判断待ち（Decide）と件数レベルの要約だけを置き、作業面（Issues／Works 等）の横断版は置きません。1画面＝1文脈、主役は1つ、を原則に要素を絞っています（2026-11-12、実際に触った本人のフィードバックと「タブ＝ブラウザのタブ」の訂正を受けて改修）。</p>
     </header>
     <div class="mock" id="app">
       <div class="mock-head">
         <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
-        <span><b>gwt</b> — <span id="appTitle">Start</span></span>
-      </div>
-      <div class="tabbar">
-        <button class="ptab on" type="button" data-ptab="start"><span class="home-ico" aria-hidden="true">⌂</span> Start</button>
-        <button class="ptab" type="button" data-ptab="pm">Your PM <span class="cnt">5</span></button>
-        <button class="ptab" type="button" data-ptab="gwt"><i class="pdot" style="background:#0f766e"></i>gwt <span class="tabx" aria-hidden="true">×</span></button>
-        <button class="ptab" type="button" data-ptab="keibadb"><i class="pdot" style="background:#be123c"></i>KeibaDB <span class="tabx" aria-hidden="true">×</span></button>
-        <button class="ptab" type="button" data-ptab="vr" id="vrTab" hidden><i class="pdot" style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span> <span class="tabx" aria-hidden="true">×</span></button>
+        <span><b>gwt</b> — <span id="appTitle">Start screen</span></span>
       </div>
       <div class="mock-body">
 
-        <div class="tabgroup on" data-group="start">
+        <div class="pagegroup on" data-page="start">
+          <div class="pagehead"><span class="urlchip">Page · Start screen — URL: /</span><span class="ph-note">The page gwt opens on — projects open from here</span></div>
           <div class="start-wrap">
             <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
               <p class="h-big" style="font-size:26px">gwt</p>
               <span class="badge b-done">v9.161.0</span>
             </div>
-            <p class="h-sub">Projects on this device. Open a project to work in it — each project opens in its own tab, and this start screen is always here.</p>
+            <p class="h-sub">Projects on this device. Open one to go to that project&rsquo;s own page — by default it opens in a new browser tab, so this start screen stays open in its own tab.</p>
             <div class="btnrow" style="margin-bottom:6px">
               <button class="btn primary" type="button">Open Folder…</button>
               <button class="btn" type="button" data-clone-open>Clone from GitHub…</button>
@@ -384,23 +375,25 @@
                 <button class="btn" type="button">Open path</button>
               </div>
             </details>
-            <div class="notice" id="startNotice" hidden>Opened <b class="dyn-proj-name">vr-cabin-exposure</b>. <a class="plink" data-opentab="vr">Open in a new tab</a></div>
+            <p class="rel" style="margin:10px 0 2px">Your PM has <b>5 decisions</b> waiting — <a class="plink" data-openpage="pm">open the Your PM page</a>.</p>
+            <div class="notice" id="startNotice" hidden>Opened <b class="dyn-proj-name">vr-cabin-exposure</b>. <a class="plink" data-openpage="vr">Open in a new tab</a></div>
+            <p class="rel" style="margin:14px 0 2px">Opening a project from <b>Open</b> or <b>Recent</b> goes to that project&rsquo;s own page — normally in a new browser tab. Lining several projects up side by side is the browser tabs&rsquo; job; gwt itself has no cross-project container.</p>
             <p class="h-sec">Open</p>
             <div>
               <div class="lrow">
-                <a class="plink" data-opentab="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
                 <span class="badge b-done">Ready</span>
                 <div class="grow"><div class="d">Project · gwt: Running · Saved choice: Continue</div></div>
                 <button class="btn ghost" type="button">Close Project</button>
               </div>
               <div class="lrow">
-                <a class="plink" data-opentab="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
                 <span class="badge b-done">Ready</span>
                 <div class="grow"><div class="d">Project · KeibaDB: Running · Saved choice: Continue</div></div>
                 <button class="btn ghost" type="button">Close Project</button>
               </div>
               <div class="lrow" id="startVrRow" hidden>
-                <a class="plink" data-opentab="vr"><span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span></a>
+                <a class="plink" data-openpage="vr"><span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span></a>
                 <span class="badge b-done">Ready</span>
                 <div class="grow"><div class="d">Project · <span class="dyn-proj-name">vr-cabin-exposure</span>: Running · Saved choice: Continue</div></div>
                 <button class="btn ghost" type="button">Close Project</button>
@@ -437,7 +430,9 @@
           </div>
         </div>
 
-        <div class="tabgroup" data-group="pm">
+        <div class="pagegroup" data-page="pm">
+          <div class="pagehead"><span class="urlchip">Page · Your PM — its own page</span><a class="plink" data-openpage="start">&larr; Start screen</a></div>
+          <div class="pagerow">
           <div class="rail">
             <div class="pm-card">
               <div class="who">
@@ -450,18 +445,18 @@
             <a href="#" data-nav="decide">Decide<span class="cnt">5</span></a>
             <a href="#" data-nav="notifications">Notifications<span class="cnt gray">9</span></a>
             <a href="#" data-nav="settings">Settings</a>
-            <div class="foot">Decisions and counts live here. The work itself lives in each project&rsquo;s tab.</div>
+            <div class="foot">Decisions and counts live here. The work itself lives in each project&rsquo;s own page.</div>
           </div>
           <div class="content">
 
             <div class="screen-pane on" data-screen="home">
               <p class="h-big">Home</p>
-              <p class="h-sub">Wednesday, Nov 11 · Your PM is watching all 7 projects. This screen shows only what needs you — the work itself is inside each project&rsquo;s tab.</p>
+              <p class="h-sub">Wednesday, Nov 11 · Your PM is watching all 7 projects. This screen shows only what needs you — the work itself is inside each project&rsquo;s own page.</p>
               <p class="h-sec">Open a project</p>
               <div class="btnrow">
-                <button class="btn" type="button" data-opentab="gwt">Open gwt in its tab</button>
-                <button class="btn" type="button" data-opentab="keibadb">Open KeibaDB in its tab</button>
-                <button class="btn ghost" type="button" data-opentab="start">Go to the Start screen</button>
+                <button class="btn" type="button" data-openpage="gwt">Open the gwt page</button>
+                <button class="btn" type="button" data-openpage="keibadb">Open the KeibaDB page</button>
+                <button class="btn ghost" type="button" data-openpage="start">Go to the Start screen</button>
               </div>
               <p class="h-sec">The one thing waiting for you</p>
               <div class="hero">
@@ -473,7 +468,7 @@
                 <p class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren&rsquo;t committed or pushed. If this device is wiped first, that work is lost. <b>Commit &amp; push all</b> saves everything now. <b>Review in Decide first</b> lets you check each project before anything is saved.</p>
                 <div class="btnrow">
                   <button class="btn amber" type="button">Commit &amp; push all</button>
-                  <button class="btn" type="button" data-opentab="pm" data-openscreen="decide">Review in Decide first</button>
+                  <button class="btn" type="button" data-openpage="pm" data-openscreen="decide">Review in Decide first</button>
                 </div>
               </div>
               <p class="rel" style="margin-top:10px">+ 4 more decisions are waiting — <a class="plink" data-nav="decide">open Decide</a> to work through them.</p>
@@ -525,7 +520,7 @@
                       </div>
             <div class="screen-pane" data-screen="notifications">
               <p class="h-big">Notifications</p>
-              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Notifications point at things; the things themselves live in Decide or in a project&rsquo;s tab.</p>
+              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Notifications point at things; the things themselves live in Decide or on a project&rsquo;s own page.</p>
               <p class="h-sec">Needs your decision · 5</p>
               <div class="card amber" style="margin-bottom:18px">
                 <div class="t" style="margin-top:0">5 decisions are waiting — newest: unsaved work in 3 projects</div>
@@ -538,7 +533,7 @@
                   <div class="t">KeibaDB — the daily import stopped</div>
                   <div class="d">The source file format changed, and the mapping decision is waiting in Decide.</div>
                 </div>
-                <button class="btn" type="button" data-opentab="pm" data-openscreen="decide">Open in Decide</button>
+                <button class="btn" type="button" data-openpage="pm" data-openscreen="decide">Open in Decide</button>
               </div>
               <div class="lrow">
                 <span class="badge b-block">Blocked</span>
@@ -610,14 +605,14 @@
 <div class="set-group">
                 <h4>Projects</h4>
                 <p class="d">Each project inherits the device settings above. Only the differences are listed.</p>
-                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">2 differences: reports go to the team channel · React work has priority this week</div></div><button class="btn" type="button" data-opentab="gwt" data-openscreen="g-settings">Open in its tab</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">2 differences: reports go to the team channel · React work has priority this week</div></div><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-settings">Open its page</button></div>
                 <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d2">1 difference: service restarts need your decision</div></div><button class="btn" type="button">Open</button></div>
                 <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">1 difference: imports run at 6:00 daily</div></div><button class="btn" type="button">Open</button></div>
                 <div class="set-row"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d2">No differences — using device settings as-is</div></div></div>
               </div>
 <div class="set-group">
                 <h4>Board sharing — this device</h4>
-                <p class="d">Where board posts go. The conversation itself stays per project (see Project); this only chooses the provider and the connection.</p>
+                <p class="d">Where board posts go. The conversation itself stays per project (see each project&rsquo;s page); this only chooses the provider and the connection.</p>
                 <div class="set-row"><div class="grow"><div class="t">Board provider</div><div class="d2">Local (this device only), Slack, or Teams. Switching providers rewires the board hooks. GitHub Discussions is not a provider — it is the device-to-device handoff path for decisions, blocked notes and handoffs.</div></div><button class="btn" type="button">Local ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Slack / Teams connection</div><div class="d2">Client ID and secret, tenant and default channel; sign in or out here. The sign-in (OAuth) redirect URL to register is shown in place.</div></div><button class="btn" type="button">Set up</button></div>
               </div>
@@ -634,13 +629,16 @@
 </div>
           </div>
           </div>
+          </div>
         </div>
 
-        <div class="tabgroup" data-group="gwt">
+        <div class="pagegroup" data-page="gwt">
+          <div class="pagehead"><span class="urlchip">Page · Project: gwt — URL: /p/&lt;hash&gt;</span><a class="plink" data-openpage="start">&larr; Start screen</a></div>
+          <div class="pagerow">
           <div class="rail">
             <div class="proj-card">
               <span class="ptag"><i style="background:#0f766e"></i>gwt</span>
-              <div class="sub">Project tab · Policy: Running</div>
+              <div class="sub">Project page · Policy: Running</div>
             </div>
             <a href="#" data-nav="g-issues" class="on">Issues</a>
             <a href="#" data-nav="g-works">Works</a>
@@ -650,7 +648,7 @@
             <a href="#" data-nav="g-index">Index</a>
             <a href="#" data-nav="g-branches">Branches</a>
             <a href="#" data-nav="g-settings">Settings</a>
-            <div class="foot">Everything in this tab is gwt only.</div>
+            <div class="foot">Everything on this page is gwt only.</div>
           </div>
           <div class="content">
 
@@ -698,7 +696,7 @@
                 <h4>Goal</h4>
                 <p class="d">Stop the GUI&rsquo;s memory from growing during long sessions (about 0.85 GB to 2.7 GB over roughly 4 hours) so gwt can stay open all day without a restart.</p>
                 <div class="set-row"><div class="grow"><div class="t">Acceptance</div><div class="d2">Memory stays flat over a 4-hour session with the same workload; the fix is verified on Windows as well as this device.</div></div><span class="badge b-queue">In Tasks</span></div>
-                <div class="set-row"><div class="grow"><div class="t">Phase</div><div class="d2">Queued — waiting to start. The phase view is at the top of this tab&rsquo;s Issues screen.</div></div><button class="btn" type="button" data-nav="g-issues">Go to Issues</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Phase</div><div class="d2">Queued — waiting to start. The phase view is at the top of this page&rsquo;s Issues screen.</div></div><button class="btn" type="button" data-nav="g-issues">Go to Issues</button></div>
               </div>
               <div class="set-group">
                 <h4>Discussion</h4>
@@ -892,7 +890,7 @@
 
             <div class="screen-pane" data-screen="g-settings">
               <p class="h-big">Settings</p>
-              <p class="h-sub">gwt only — these override the device settings in the Your PM tab where they differ.</p>
+              <p class="h-sub">gwt only — these override the device settings on the Your PM page where they differ.</p>
               <div class="set-group">
                 <div class="set-head">Execution policy</div>
                 <div class="set-row">
@@ -939,20 +937,23 @@
               <div class="set-group">
                 <div class="set-head">Close</div>
                 <div class="set-row">
-                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for gwt&rsquo;s agents to shut down first. The project disappears from the tab bar; reopen it from the Start screen.</div></div>
+                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for gwt&rsquo;s agents to shut down first. The project leaves the Open list; reopen it from the Start screen.</div></div>
                   <button class="btn ghost" type="button">Close…</button>
                 </div>
               </div>
             </div>
 
           </div>
+          </div>
         </div>
 
-        <div class="tabgroup" data-group="keibadb">
+        <div class="pagegroup" data-page="keibadb">
+          <div class="pagehead"><span class="urlchip">Page · Project: KeibaDB — URL: /p/&lt;hash&gt;</span><a class="plink" data-openpage="start">&larr; Start screen</a></div>
+          <div class="pagerow">
           <div class="rail">
             <div class="proj-card">
               <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span>
-              <div class="sub">Project tab · Policy: Running</div>
+              <div class="sub">Project page · Policy: Running</div>
             </div>
             <a href="#" data-nav="k-issues" class="on">Issues</a>
             <a href="#" data-nav="k-works">Works</a>
@@ -962,7 +963,7 @@
             <a href="#" data-nav="k-index">Index</a>
             <a href="#" data-nav="k-branches">Branches</a>
             <a href="#" data-nav="k-settings">Settings</a>
-            <div class="foot">Everything in this tab is KeibaDB only.</div>
+            <div class="foot">Everything on this page is KeibaDB only.</div>
           </div>
           <div class="content">
 
@@ -983,7 +984,7 @@
                   <div class="d">Blocked · the import mapping needs your decision</div>
                 </div>
                 <span class="badge b-block">Blocked</span>
-                <button class="btn" type="button" data-opentab="pm" data-openscreen="decide">Open in Decide</button>
+                <button class="btn" type="button" data-openpage="pm" data-openscreen="decide">Open in Decide</button>
               </div>
               <div class="lrow">
                 <div class="grow">
@@ -1114,7 +1115,7 @@
 
             <div class="screen-pane" data-screen="k-settings">
               <p class="h-big">Settings</p>
-              <p class="h-sub">KeibaDB only — these override the device settings in the Your PM tab where they differ.</p>
+              <p class="h-sub">KeibaDB only — these override the device settings on the Your PM page where they differ.</p>
               <div class="set-group">
                 <div class="set-head">Execution policy</div>
                 <div class="set-row">
@@ -1150,20 +1151,23 @@
               <div class="set-group">
                 <div class="set-head">Close</div>
                 <div class="set-row">
-                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for KeibaDB&rsquo;s agents to shut down first. The project disappears from the tab bar; reopen it from the Start screen.</div></div>
+                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for KeibaDB&rsquo;s agents to shut down first. The project leaves the Open list; reopen it from the Start screen.</div></div>
                   <button class="btn ghost" type="button">Close…</button>
                 </div>
               </div>
             </div>
 
           </div>
+          </div>
         </div>
 
-        <div class="tabgroup" data-group="vr">
+        <div class="pagegroup" data-page="vr">
+          <div class="pagehead"><span class="urlchip">Page · Project: <span class="dyn-proj-name">vr-cabin-exposure</span> — URL: /p/&lt;hash&gt;</span><a class="plink" data-openpage="start">&larr; Start screen</a></div>
+          <div class="pagerow">
           <div class="rail">
             <div class="proj-card">
               <span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span>
-              <div class="sub">Project tab · Policy: Running</div>
+              <div class="sub">Project page · Policy: Running</div>
             </div>
             <a href="#" data-nav="v-issues" class="on">Issues</a>
             <a href="#" data-nav="v-works">Works</a>
@@ -1173,7 +1177,7 @@
             <a href="#" data-nav="v-index">Index</a>
             <a href="#" data-nav="v-branches">Branches</a>
             <a href="#" data-nav="v-settings">Settings</a>
-            <div class="foot">Everything in this tab is this project only.</div>
+            <div class="foot">Everything on this page is this project only.</div>
           </div>
           <div class="content">
             <div class="screen-pane on" data-screen="v-issues">
@@ -1247,6 +1251,7 @@
               </div>
             </div>
           </div>
+          </div>
         </div>
 
       </div>
@@ -1307,13 +1312,13 @@
           <div data-cstep="progress" hidden>
             <p class="t" style="font-weight:800" id="cloneProgressLine">Cloning into &lsquo;vr-cabin-exposure&rsquo;...</p>
             <div class="bar" style="margin:12px 0"><i id="cloneBarFill" style="width:0%"></i></div>
-            <p class="rel">The project opens in a new tab when the clone finishes. You can keep working here meanwhile.</p>
+            <p class="rel">The project&rsquo;s page opens in a new browser tab when the clone finishes. You can keep working here meanwhile.</p>
           </div>
           <div data-cstep="done" hidden>
             <p class="t" style="font-weight:800">Cloned <span id="cloneDoneName">vr-cabin-exposure</span></p>
-            <p class="d" style="color:var(--ink2)">The project opened in a new tab at the top of this window.</p>
+            <p class="d" style="color:var(--ink2)">The project&rsquo;s page opened in a new browser tab. In this mock, the button below jumps to that page instead.</p>
             <div class="btnrow">
-              <button class="btn primary" type="button" id="cloneOpenBtn">Go to the new tab</button>
+              <button class="btn primary" type="button" id="cloneOpenBtn">Go to the new project&rsquo;s page</button>
               <button class="btn ghost" type="button" data-clone-close>Stay here</button>
             </div>
           </div>
@@ -1331,13 +1336,13 @@
           </div>
       </div>
     <footer class="doc">
-      <p class="note">このモックで決めたこと／現行への対応：骨格は現行の構造（開始画面 → プロジェクトをタブで開く → その中を見る）を土台にし、見せ方と情報整理だけを整える。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了で別タブが開く）に沿う。Your PM タブに置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面はプロジェクトタブの中だけ）。1画面の主役は1つ：Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（プロジェクト横断）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。</p>
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。Open／Recent から開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。Your PM は独立ページで、置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面は各プロジェクトページの中だけ）。1画面の主役は1つ：Your PM の Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（ページ内切替）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。</p>
     </footer>
   </div>
 
   <script>
   (function () {
-    var groupLabels = { start: "Start", pm: "Your PM", gwt: "gwt", keibadb: "KeibaDB", vr: "vr-cabin-exposure" };
+    var pageLabels = { start: "Start screen", pm: "Your PM", gwt: "gwt", keibadb: "KeibaDB", vr: "vr-cabin-exposure" };
     var screenTitles = {
       home: "Home", ask: "Ask", decide: "Decide", notifications: "Notifications", settings: "Settings",
       "g-issues": "Issues", "g-issue": "Issue #5561", "g-works": "Works", "g-ask": "Ask", "g-agents": "Agents",
@@ -1348,57 +1353,51 @@
       "v-board": "Board", "v-index": "Index", "v-branches": "Branches", "v-settings": "Settings"
     };
     var current = { start: "start", pm: "home", gwt: "g-issues", keibadb: "k-issues", vr: "v-issues" };
-    var activeGroup = "start";
-    function titleFor(g) {
-      if (g === "start") return "Start";
-      return groupLabels[g] + " — " + (screenTitles[current[g]] || "");
+    var activePage = "start";
+    function titleFor(p) {
+      if (p === "start") return "Start screen";
+      return pageLabels[p] + " — " + (screenTitles[current[p]] || "");
     }
     function renderTitle() {
       var t = document.getElementById("appTitle");
-      if (t) t.textContent = titleFor(activeGroup);
+      if (t) t.textContent = titleFor(activePage);
     }
-    function showGroup(g) {
-      activeGroup = g;
-      document.querySelectorAll(".tabgroup").forEach(function (el) {
-        el.classList.toggle("on", el.getAttribute("data-group") === g);
-      });
-      document.querySelectorAll("[data-ptab]").forEach(function (b) {
-        b.classList.toggle("on", b.getAttribute("data-ptab") === g);
+    function showPage(p) {
+      activePage = p;
+      document.querySelectorAll(".pagegroup").forEach(function (el) {
+        el.classList.toggle("on", el.getAttribute("data-page") === p);
       });
       renderTitle();
     }
-    function showScreen(g, name) {
-      current[g] = name;
-      var groupEl = document.querySelector('.tabgroup[data-group="' + g + '"]');
-      if (!groupEl) return;
-      groupEl.querySelectorAll(".screen-pane").forEach(function (p) {
-        p.classList.toggle("on", p.getAttribute("data-screen") === name);
+    function showScreen(p, name) {
+      current[p] = name;
+      var pageEl = document.querySelector('.pagegroup[data-page="' + p + '"]');
+      if (!pageEl) return;
+      pageEl.querySelectorAll(".screen-pane").forEach(function (pane) {
+        pane.classList.toggle("on", pane.getAttribute("data-screen") === name);
       });
       var railName = name === "g-issue" ? "g-issues" : name;
-      groupEl.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
+      pageEl.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
         a.classList.toggle("on", a.getAttribute("data-nav") === railName);
       });
-      if (g === activeGroup) renderTitle();
+      if (p === activePage) renderTitle();
     }
-    function openTab(g, screen) {
-      if (screen) showScreen(g, screen);
-      showGroup(g);
+    function openPage(p, screen) {
+      if (screen) showScreen(p, screen);
+      showPage(p);
     }
-    document.querySelectorAll("[data-ptab]").forEach(function (b) {
-      b.addEventListener("click", function () { showGroup(b.getAttribute("data-ptab")); });
-    });
     document.querySelectorAll("[data-nav]").forEach(function (el) {
       el.addEventListener("click", function (ev) {
         ev.preventDefault();
-        var groupEl = el.closest(".tabgroup");
-        if (!groupEl) return;
-        showScreen(groupEl.getAttribute("data-group"), el.getAttribute("data-nav"));
+        var pageEl = el.closest(".pagegroup");
+        if (!pageEl) return;
+        showScreen(pageEl.getAttribute("data-page"), el.getAttribute("data-nav"));
       });
     });
-    document.querySelectorAll("[data-opentab]").forEach(function (el) {
+    document.querySelectorAll("[data-openpage]").forEach(function (el) {
       el.addEventListener("click", function (ev) {
         ev.preventDefault();
-        openTab(el.getAttribute("data-opentab"), el.getAttribute("data-openscreen"));
+        openPage(el.getAttribute("data-openpage"), el.getAttribute("data-openscreen"));
       });
     });
     document.querySelectorAll("[data-tab]").forEach(function (b) {
@@ -1494,10 +1493,9 @@
         if (pct >= 100) {
           clearInterval(cloneState.timer);
           cloneState.timer = null;
-          groupLabels.vr = name;
+          pageLabels.vr = name;
           document.querySelectorAll(".dyn-proj-name").forEach(function (el) { el.textContent = name; });
           document.getElementById("cloneDoneName").textContent = name;
-          var tab = document.getElementById("vrTab"); if (tab) tab.hidden = false;
           var row = document.getElementById("startVrRow"); if (row) row.hidden = false;
           var notice = document.getElementById("startNotice"); if (notice) notice.hidden = false;
           cloneStep("done");
@@ -1506,9 +1504,9 @@
     });
     document.getElementById("cloneOpenBtn").addEventListener("click", function () {
       closeClone();
-      openTab("vr");
+      openPage("vr");
     });
-    showGroup("start");
+    showPage("start");
   })();
   </script>
 </body>
