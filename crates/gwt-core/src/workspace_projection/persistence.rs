@@ -1340,6 +1340,34 @@ fn merge_committed_legacy_worktree_events_locked(
                 )));
             }
         }
+        if event.is_successor_supersession() {
+            let source = transaction
+                .and_then(|pending| pending.work_items.as_ref())
+                .or(legacy.as_ref())
+                .ok_or_else(|| GwtError::Other("legacy supersession source is missing".into()))?;
+            validate_legacy_supersession_authority(
+                &canonical,
+                source,
+                target,
+                &event,
+                work_event_root,
+            )?;
+            if let Some(snapshot) = seed_snapshot {
+                canonical.work_items.push(snapshot);
+                changed = true;
+            }
+            if !event_already_applied {
+                if canonical.apply_event(event.clone())
+                    == WorkEventApplyOutcome::RejectedSessionConflict
+                {
+                    return Err(GwtError::Other(
+                        "legacy supersession could not be reconciled".into(),
+                    ));
+                }
+                changed = true;
+            }
+            continue;
+        }
         let Some(session_id) = event.agent_session_id.as_deref() else {
             if strict_exact_transaction {
                 return Err(GwtError::Other(format!(
@@ -1450,7 +1478,7 @@ fn merge_committed_legacy_worktree_events_locked(
             "legacy external Workspace migration",
             true,
         )?;
-        validate_session_bound_work_authority_uniqueness(
+        validate_legacy_reconciliation_authority_uniqueness(
             &canonical,
             &event.work_item_id,
             session_id,
@@ -1545,6 +1573,131 @@ fn validate_legacy_reconciliation_snapshot_target(
                 "legacy external Workspace migration event {} conflicts with target Work {} in {source}",
                 event.id, target.id
             )));
+        }
+    }
+    Ok(())
+}
+
+/// A committed structural audit retires historical occupancy without assigning
+/// its launch Session to that history. The resolver has already validated the
+/// exact operation/receipt and holds the canonical and legacy state locks.
+fn validate_legacy_supersession_authority(
+    canonical: &WorkItemsProjection,
+    source: &WorkItemsProjection,
+    target: &WorkItem,
+    event: &WorkEvent,
+    work_event_root: &Path,
+) -> Result<()> {
+    let invalid = || {
+        GwtError::Other(format!(
+            "legacy supersession {} has conflicting structural lineage authority",
+            event.id,
+        ))
+    };
+    if !event.is_successor_supersession() {
+        return Err(invalid());
+    }
+    let parent_id = event.related_work_item_id.as_deref().ok_or_else(invalid)?;
+    let source_target =
+        unique_legacy_reconciliation_target(source, &event.work_item_id, "supersession source")?
+            .ok_or_else(invalid)?;
+    let source_parent =
+        unique_legacy_reconciliation_target(source, parent_id, "supersession source")?
+            .ok_or_else(invalid)?;
+    let canonical_parent =
+        unique_legacy_reconciliation_target(canonical, parent_id, "canonical WorkItems")?;
+    validate_legacy_reconciliation_snapshot_target(source, source_target, "supersession source")?;
+    validate_legacy_reconciliation_snapshot_target(source, source_parent, "supersession source")?;
+    let owners_match = |left: &WorkItem, right: &WorkItem| {
+        left.owner == right.owner
+            || can_upgrade_work_owner(left.owner.as_deref(), right.owner.as_deref())
+            || can_upgrade_work_owner(right.owner.as_deref(), left.owner.as_deref())
+    };
+    if !source_parent.is_terminal()
+        || !source_target.is_terminal()
+        || !unique_legacy_reconciliation_event(source, event, "supersession source")?
+        || !owners_match(target, source_target)
+        || canonical_parent
+            .is_some_and(|parent| !parent.is_terminal() || !owners_match(parent, source_parent))
+    {
+        return Err(invalid());
+    }
+    let container = event.execution_container.as_ref().ok_or_else(invalid)?;
+    if !session_bound_paths_match(container.worktree_path.as_deref(), Some(work_event_root))? {
+        return Err(invalid());
+    }
+    let scope = canonical_work_id(
+        work_event_root,
+        container.branch.as_deref(),
+        Some(work_event_root),
+    )
+    .ok_or_else(invalid)?;
+    let container_matches = |container: &WorkspaceExecutionContainerRef| {
+        canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        )
+        .as_deref()
+            == Some(scope.as_str())
+    };
+    if workspace_group_key_for_item(work_event_root, source_parent) != scope
+        && !source_parent
+            .events
+            .iter()
+            .filter_map(|event| event.execution_container.as_ref())
+            .any(container_matches)
+    {
+        return Err(invalid());
+    }
+    for item in [
+        Some(target),
+        Some(source_target),
+        Some(source_parent),
+        canonical_parent,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if item
+            .execution_containers
+            .iter()
+            .chain(
+                item.events
+                    .iter()
+                    .filter_map(|event| event.execution_container.as_ref()),
+            )
+            .chain(
+                item.duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.container()),
+            )
+            .any(|container| !container_matches(container))
+        {
+            return Err(invalid());
+        }
+    }
+    for item in [target, source_target] {
+        if item
+            .related_work_item_ids
+            .iter()
+            .map(String::as_str)
+            .chain(
+                item.events
+                    .iter()
+                    .filter_map(|event| event.related_work_item_id.as_deref()),
+            )
+            .chain(
+                item.duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.event())
+                    .filter_map(|event| event.related_work_item_id.as_deref()),
+            )
+            .any(|parent| parent != parent_id)
+        {
+            return Err(invalid());
         }
     }
     Ok(())
@@ -1669,7 +1822,7 @@ fn validate_legacy_reconciliation_assigned_targets(
             context,
             true,
         )?;
-        validate_session_bound_work_authority_uniqueness(
+        validate_legacy_reconciliation_authority_uniqueness(
             work_items,
             work_id,
             session_id,
@@ -1679,6 +1832,89 @@ fn validate_legacy_reconciliation_assigned_targets(
         )?;
     }
     Ok(())
+}
+
+/// Keep the strict competing-authority check, excluding only the terminal
+/// ancestry already proven by the normal canonical successor selector.
+fn validate_legacy_reconciliation_authority_uniqueness(
+    work_items: &WorkItemsProjection,
+    target_work_id: &str,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+) -> Result<()> {
+    let mut ancestry = BTreeMap::new();
+    let target = unique_legacy_reconciliation_target(work_items, target_work_id, context)?;
+    let current = canonical_work_id(
+        worktree_identity,
+        Some(branch_identity),
+        Some(worktree_identity),
+    )
+    .and_then(|scope| {
+        current_canonical_work_item(
+            work_items,
+            worktree_identity,
+            &scope,
+            target.and_then(|target| target.owner.as_deref()),
+            Some(&mut ancestry),
+        )
+        .ok()
+        .flatten()
+    });
+    let audited = ancestry.keys().any(|id| {
+        work_items
+            .work_items
+            .iter()
+            .find(|item| &item.id == id)
+            .is_some_and(|item| item.events.iter().any(WorkEvent::is_successor_supersession))
+    });
+    let competing = if current.is_some_and(|current| current.id == target_work_id) && audited {
+        for (child, parent) in &ancestry {
+            let child = unique_legacy_reconciliation_target(work_items, child, context)?
+                .ok_or_else(|| GwtError::Other(format!("{context} successor is missing")))?;
+            let parent_item = unique_legacy_reconciliation_target(work_items, parent, context)?
+                .ok_or_else(|| GwtError::Other(format!("{context} predecessor is missing")))?;
+            if !parent_item.is_terminal()
+                || child.related_work_item_ids.iter().any(|id| id != parent)
+                || child
+                    .events
+                    .iter()
+                    .filter_map(|event| event.related_work_item_id.as_deref())
+                    .any(|id| id != parent)
+                || child
+                    .duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.event())
+                    .filter_map(|event| event.related_work_item_id.as_deref())
+                    .any(|id| id != parent)
+            {
+                return Err(GwtError::Other(format!(
+                    "{context} successor lineage is contradictory"
+                )));
+            }
+        }
+        let mut competing = work_items.clone();
+        competing.work_items.retain(|item| {
+            !ancestry.values().any(|parent| parent == &item.id)
+                || item
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+        });
+        Some(competing)
+    } else {
+        None
+    };
+    validate_session_bound_work_authority_uniqueness(
+        competing.as_ref().unwrap_or(work_items),
+        target_work_id,
+        session_id,
+        branch_identity,
+        worktree_identity,
+        context,
+    )
 }
 
 /// Resolve the split-root paths. Current and WorkItems share the stable project
@@ -6882,7 +7118,7 @@ pub fn current_work_id_for_launch(
         return Ok(None);
     };
     Ok(Some(
-        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner)?
+        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner, None)?
             .map(|item| item.id.clone())
             .unwrap_or(canonical_id),
     ))
@@ -6893,6 +7129,7 @@ fn current_canonical_work_item<'a>(
     project_root: &Path,
     canonical_id: &str,
     launch_owner: Option<&str>,
+    mut ancestry: Option<&mut BTreeMap<String, String>>,
 ) -> Result<Option<&'a WorkItem>> {
     let Some(mut current) = projection
         .work_items
@@ -7009,6 +7246,9 @@ fn current_canonical_work_item<'a>(
         {
             break;
         }
+        if let Some(ancestry) = ancestry.as_mut() {
+            ancestry.insert(successor.id.clone(), current.id.clone());
+        }
         current = successor;
         if launch_owner.is_some() || successor.owner.is_some() || owner_anchor.is_none() {
             authoritative = successor;
@@ -7034,7 +7274,7 @@ pub fn find_work_item_for_container<'a>(
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
     if let Some(current) = canonical_id.as_deref().and_then(|id| {
-        current_canonical_work_item(projection, project_root, id, None)
+        current_canonical_work_item(projection, project_root, id, None, None)
             .ok()
             .flatten()
     }) {
@@ -7065,6 +7305,7 @@ pub fn find_work_item_for_container<'a>(
         projection,
         project_root,
         &workspace_group_key_for_item(project_root, matched),
+        None,
         None,
     )
     .ok()
