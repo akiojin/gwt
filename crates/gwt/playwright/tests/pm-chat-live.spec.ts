@@ -112,7 +112,8 @@ test.describe('PM reports', () => {
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await gotoPmReports(page, undefined, BASE, true);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
-      await expect(pane.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(pane.getByRole('button', { name: 'Home', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeVisible();
       await pane.getByRole('button', { name: 'Chat', exact: true }).click();
       const chat = pane.getByRole('region', { name: 'PM conversation' });
       await expect(chat).toBeVisible();
