@@ -15467,7 +15467,13 @@ fn read_owner_session(
     sessions_dir: &Path,
 ) -> Option<gwt_agent::Session> {
     let id = snapshot.session_id.as_ref()?;
-    if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, id) {
+    if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, id).unwrap_or_else(
+        |error| {
+            tracing::warn!(session_id = %id, error_kind = ?error.kind(), %error,
+            "excluding owner snapshot with unreadable launch recovery receipt");
+            true
+        },
+    ) {
         return None;
     }
     let session = gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()?;

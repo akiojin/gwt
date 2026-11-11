@@ -5022,7 +5022,11 @@ fn durable_session_binding_authorizes_generation(
     let repo_hash =
         crate::index_worker::detect_repo_hash(&context.worktree).map(|value| value.to_string());
     Ok(session.id == session_id
-        && session.worktree_path.exists()
+        && match fs::metadata(&session.worktree_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        }
         && worktree_binding_hash(&session.worktree_path) == context.worktree_binding_hash
         && session.repo_hash == repo_hash
         && binding.schema_version == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
@@ -26897,6 +26901,46 @@ mod tests {
             .expect("post-block verification caller remains authorized"),
             Some(durable),
         );
+    }
+
+    #[test]
+    fn issue_3730_session_worktree_io_error_is_not_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-metadata-error";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        let mut session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .unwrap();
+        let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        let check = |session: &gwt_agent::Session| {
+            durable_session_binding_authorizes_current_generation(
+                &context, &ledger, session_id, session,
+            )
+        };
+        assert!(
+            check(&session).unwrap(),
+            "existing worktree remains authorized"
+        );
+        session.worktree_path = dir.path().join("missing");
+        assert!(
+            !check(&session).unwrap(),
+            "NotFound remains a missing worktree"
+        );
+        session.worktree_path = dir.path().join("unreadable\0worktree");
+        assert_eq!(check(&session).unwrap_err().kind(), ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]

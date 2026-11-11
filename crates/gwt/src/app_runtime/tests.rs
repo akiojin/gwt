@@ -6171,7 +6171,8 @@ fn leave_fresh_execution_activated_before_projection_commit(
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .unwrap());
 }
 
 impl AppRuntime {
@@ -6586,7 +6587,7 @@ impl OwnerFreshLaunchFixture {
 fn assert_owner_fresh_launch_rolled_back(fixture: &OwnerFreshLaunchFixture) {
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let candidate = &fixture.pending.binding.session_id;
-    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate));
+    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate).unwrap());
     assert!(!sessions_dir.join(format!("{candidate}.toml")).exists());
     assert!(!gwt_agent::runtime_state_path(&sessions_dir, candidate).exists());
     assert!(LaunchWizardMemoryCache::load(&sessions_dir)
