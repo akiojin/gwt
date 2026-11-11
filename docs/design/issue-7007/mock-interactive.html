@@ -437,7 +437,7 @@
             <div class="pm-card">
               <div class="who">
                 <span class="pm-ava">PM</span>
-                <div><div class="nm">Your PM</div><div class="sub">One PM for this device</div></div>
+                <div><div class="nm">Your PM</div><div class="sub">One PM for this device — coordinates all projects</div></div>
               </div>
             </div>
             <a href="#" data-nav="home" class="on">Home</a>
@@ -451,7 +451,7 @@
 
             <div class="screen-pane on" data-screen="home">
               <p class="h-big">Home</p>
-              <p class="h-sub">Wednesday, Nov 11 · Your PM is watching all 7 projects. This screen shows only what needs you — the work itself is inside each project&rsquo;s own page.</p>
+              <p class="h-sub">Wednesday, Nov 11 · Your PM is the coordinator for this device: it watches all 7 projects, assigns the work and keeps agents moving — and brings to you only the decisions it can&rsquo;t make itself. Right now, work is moving across the projects and a few decisions are waiting — the most urgent one is directly below. The work itself lives inside each project&rsquo;s own page.</p>
               <p class="h-sec">Open a project</p>
               <div class="btnrow">
                 <button class="btn" type="button" data-openpage="gwt">Open the gwt page</button>
@@ -490,7 +490,7 @@
 
 <div class="screen-pane" data-screen="ask">
               <p class="h-big">Ask your PM</p>
-              <p class="h-sub">One PM for this whole device. Ask once — the PM routes the work to the right project and reports back here.</p>
+              <p class="h-sub">Ask a question or give an instruction — for one project, or for all of them. Your PM routes the work and replies here, in this conversation; if a reply needs your decision, it also appears in Decide.</p>
 <p class="rel" style="margin:-8px 0 14px">Looking for something specific instead? <b>Search</b> finds it across issues, discussions, docs, specs, files, reports and memory — a different door from asking your PM.</p>
               <div class="chat">
                 <div class="msg me"><div class="meta">You · just now</div>Before this machine gets wiped, make sure no unsaved work is left in any project.</div>
@@ -510,7 +510,7 @@
                       </div>
 <div class="screen-pane" data-screen="decide">
               <p class="h-big">Decide</p>
-              <p class="h-sub">5 things are waiting for your decision, across all projects. Your PM won't proceed on these until you choose — everything else keeps moving.</p>
+              <p class="h-sub">These are the decisions your PM is asking you to make: 5 things, across all projects. Your PM won't proceed on them until you choose — everything else keeps moving on its own.</p>
               <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work in 3 projects — save it all?</div><div class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren't committed or pushed. If this device is wiped first, that work is lost.</div></div><span class="rel">waiting 26 min</span><div class="btnrow"><button class="btn amber" type="button">Commit &amp; push all</button><button class="btn" type="button">Review each project</button></div></div>
               <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Approve the plan for “Home &amp; Decide screens” (#7007)?</div><div class="d">The design is done and the groundwork it waited on has landed. Approving restarts implementation right away.</div></div><span class="rel">waiting 1 h</span><div class="btnrow"><button class="btn primary" type="button">Approve &amp; start</button><button class="btn" type="button">Request changes</button></div></div>
               <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Restart a shared service now, or tonight?</div><div class="d">“Retry backoff” (#212) needs a service restart to take effect. Restarting now interrupts one running task for about a minute.</div></div><span class="rel">waiting 18 min</span><div class="btnrow"><button class="btn primary" type="button">Restart now</button><button class="btn" type="button">Schedule for tonight</button></div></div>
@@ -520,7 +520,7 @@
                       </div>
             <div class="screen-pane" data-screen="notifications">
               <p class="h-big">Notifications</p>
-              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Notifications point at things; the things themselves live in Decide or on a project&rsquo;s own page.</p>
+              <p class="h-sub">Reports from your PM: 9 unread, grouped from 98 events since yesterday. Notifications only point at things — decisions are made in Decide, and the work itself lives on each project&rsquo;s own page.</p>
               <p class="h-sec">Needs your decision · 5</p>
               <div class="card amber" style="margin-bottom:18px">
                 <div class="t" style="margin-top:0">5 decisions are waiting — newest: unsaved work in 3 projects</div>
@@ -746,7 +746,7 @@
 
             <div class="screen-pane" data-screen="g-ask">
               <p class="h-big">Ask — gwt</p>
-              <p class="h-sub">Your PM, with its focus pinned to gwt. Reports for gwt are posted here too.</p>
+              <p class="h-sub">The same PM as on the Your PM page, focused on gwt — there is no separate PM per project. Reports for gwt are posted here, and anything that needs your decision also appears in Decide.</p>
               <div class="chat">
                 <div class="msg me"><div><div class="bubble">How is the memory issue (#5561) looking?</div></div></div>
                 <div class="msg"><span class="pm-ava sm">PM</span><div><div class="bubble">It&rsquo;s queued and starts next — the plan is approved and nothing is blocking it. I&rsquo;ll post the memory profile here when the fix lands.</div><div class="route"><span class="rb">Scope: gwt</span></div></div></div>
@@ -1013,7 +1013,7 @@
 
             <div class="screen-pane" data-screen="k-ask">
               <p class="h-big">Ask — KeibaDB</p>
-              <p class="h-sub">Your PM, with its focus pinned to KeibaDB. Reports for KeibaDB are posted here too.</p>
+              <p class="h-sub">The same PM as on the Your PM page, focused on KeibaDB — there is no separate PM per project. Reports for KeibaDB are posted here, and anything that needs your decision also appears in Decide.</p>
               <div class="chat">
                 <div class="msg me"><div><div class="bubble">Is the daily import still stuck?</div></div></div>
                 <div class="msg"><span class="pm-ava sm">PM</span><div><div class="bubble">Yes — the source changed its format, so the mapping is waiting on you in Decide. Once you pick one, I&rsquo;ll restart the import and post the result here.</div><div class="route"><span class="rb">Scope: KeibaDB</span></div></div></div>
@@ -1185,7 +1185,7 @@
             </div>
             <div class="screen-pane" data-screen="v-ask">
               <p class="h-big">Ask</p>
-              <p class="h-sub">Your PM, with its focus pinned to this project.</p>
+              <p class="h-sub">The same PM as on the Your PM page, focused on this project — there is no separate PM per project.</p>
               <div class="chat">
                 <div class="msg"><span class="pm-ava sm">PM</span><div><div class="bubble">Cloned and ready. This is a Unity prototype — I can start by opening the project structure and listing what&rsquo;s already in place, then we pick the first task together.</div><div class="route"><span class="rb">Scope: <span class="dyn-proj-name">vr-cabin-exposure</span></span></div></div></div>
               </div>
@@ -1330,7 +1330,7 @@
           </div>
       </div>
     <footer class="doc">
-      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。Open／Recent から開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。Your PM は独立ページで、置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面は各プロジェクトページの中だけ）。1画面の主役は1つ：Your PM の Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（ページ内切替）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。Custom Agents／Backends は廃止決定（2026-11-12）：Agents 領域の深掘りで両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（Tool は組み込みの検出・Install／Update・自動更新のみが残る）。</p>
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。Open／Recent から開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。Your PM は独立ページで、置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面は各プロジェクトページの中だけ）。1画面の主役は1つ：Your PM の Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（ページ内切替）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。Custom Agents／Backends は廃止決定（2026-11-12）：Agents 領域の深掘りで両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（Tool は組み込みの検出・Install／Update・自動更新のみが残る）。PM の見せ方（2026-11-12 追加）：「PM が分かりにくい」との指摘を受け、Your PM ページ Home の冒頭に PM の役割（端末全体のコーディネータとして全プロジェクトを監視し、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。各面の役割も冒頭の1行に併記した：Ask＝PM への相談・指示（返答は Ask の会話に出て、判断が要る話は Decide にも上がる）、Decide＝PM から判断を求められているもの、Notifications＝PM からの報告。プロジェクトページの Ask は「端末共通の同じ PM が、そのプロジェクトに集中して聞く場」と明記し、プロジェクトごとに別の PM がいる誤解を避けた。</p>
     </footer>
   </div>
 
