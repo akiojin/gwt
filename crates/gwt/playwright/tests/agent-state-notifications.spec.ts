@@ -114,7 +114,7 @@ test("windowless NeedsHuman uses one notification history entry, never the inbox
   await page.screenshot({ path: testInfo.outputPath("needs-human-history.png"), fullPage: true });
 });
 
-test("Issue #5016 AC-HS3: identical Issue Monitor notices aggregate into one counted row", async ({ page }, testInfo) => {
+test("Issue #5016 AC-HS3: identical Issues notices aggregate into one counted row", async ({ page }, testInfo) => {
   const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
   }, detail);
