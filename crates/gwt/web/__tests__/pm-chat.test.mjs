@@ -14,7 +14,7 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
     details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
   details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
 
-function fixture({ tasksDefault = false } = {}) {
+function fixture({ initialView = 'reports' } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [], sent = [];
@@ -22,7 +22,8 @@ function fixture({ tasksDefault = false } = {}) {
   const view = createPmChat({ document, root, sessionId: 'session',
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
-  if (!tasksDefault) view.showReports();
+  if (initialView === 'reports') view.showReports();
+  if (initialView === 'tasks') view.showTasks();
   model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
@@ -44,8 +45,24 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
 
-test('Tasks is the default PM view and preserves the unfinished filter and stable rows', () => {
-  const { root, update, view, model } = fixture({ tasksDefault: true });
+test('Chat is the default PM view and a new session returns to it (AC-3431-CHAT-1, T-CHAT-DEFAULT)', () => {
+  const { root, model, view } = fixture({ initialView: 'chat' });
+  const pressed = label => [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === label).getAttribute('aria-pressed');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, false);
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  assert.equal(root.querySelector('.pm-chat__body').hidden, true);
+  assert.equal(pressed('Chat'), 'true');
+  assert.equal(pressed('Tasks'), 'false');
+  assert.equal(view.isChatVisible(), true, 'the default view polls the conversation');
+  view.showReports();
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(view.isChatVisible(), true, 'a rebound PM session opens on Chat');
+  assert.equal(root.querySelector('.pm-chat__body').hidden, true);
+});
+
+test('Tasks preserves the unfinished filter and stable rows', () => {
+  const { root, update, view, model } = fixture({ initialView: 'tasks' });
   update([report()], null, { request_tasks: taskOverview([
     trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
       wait_reason: 'Waiting for CI', review_required: true }),
@@ -84,7 +101,7 @@ test('Tasks is the default PM view and preserves the unfinished filter and stabl
 });
 
 test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
-  const { root, model, update } = fixture({ tasksDefault: true });
+  const { root, model, update } = fixture({ initialView: 'tasks' });
   update();
   assert.match(root.querySelector('.pm-chat__tasks').textContent, /unavailable/i);
   update([], null, { request_tasks: { ...taskOverview([trackedTask('known')], 7), total: 83 } });
@@ -709,9 +726,9 @@ const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: '
   snapshot: { conversation_id: 'c', availability: 'ready', detail: null, messages, ...extra } });
 
 test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
-  const { root, model, view, update } = fixture({ tasksDefault: true });
+  const { root, model, view, update } = fixture({ initialView: 'tasks' });
   update([report()]);
-  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Tasks remains the default view');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'an explicit Tasks choice hides Chat');
   assert.deepEqual(model.requestPmConversation('pm'), { kind: 'load_pm_conversation', id: 'pm' });
   assert.equal(model.requestPmConversation('missing'), null);
   model.applyPmWindowReceiveEvent(conversation([

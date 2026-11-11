@@ -183,7 +183,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let session = sessionId;
   let disposed = false;
   let logs = false;
-  let activeView = 'tasks';
+  let activeView = 'chat';
   let includeCompleted = false;
   let tasksDigest = '';
   let chatDigest;
@@ -601,7 +601,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     followTail = true;
     digest = '';
     currentDigest = undefined;
-    showTasks();
+    showChat();
   }
   function dispose() {
     disposed = true;
@@ -630,7 +630,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   logButton.addEventListener('click', showLog);
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
-  showTasks();
+  showChat();
   return { update, setSession, showChat, showTasks, showReports, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

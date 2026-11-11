@@ -14,7 +14,7 @@ const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
 const ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? '';
 const SESSION = 'pm-reports-fixture';
 
-async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepTasks = false) {
+async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepDefaultView = false) {
   await gotoLiveGwt(page, base, { enableTestBridge: true, projectKey });
   // PM registration settles after the first workspace projection in this
   // stopped-PM fixture. Read its current projection before testing views.
@@ -26,7 +26,7 @@ async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepT
   // selects its surface without starting an agent.
   await expect(page.locator('#op-pm-entry')).toHaveAttribute('data-pm-state', 'stopped');
   await page.locator('#op-pm-entry').click();
-  if (!keepTasks) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
+  if (!keepDefaultView) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
 }
 
 async function refreshPmReports(page: Page) {
@@ -112,10 +112,12 @@ test.describe('PM reports', () => {
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await gotoPmReports(page, undefined, BASE, true);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
-      await expect(pane.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
-      await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+      // T-CHAT-DEFAULT: opening the PM window shows Chat without any view click.
+      await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(pane.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'false');
       const chat = pane.getByRole('region', { name: 'PM conversation' });
       await expect(chat).toBeVisible();
+      await expect(pane.getByRole('region', { name: 'Request tasks' })).toBeHidden();
       // The real host answers for the stopped fixture PM; it has no native record yet.
       await expect(chat.getByRole('status')).not.toHaveText('Loading PM conversation…', { timeout: 30_000 });
       const id = await pane.getAttribute('data-id');
@@ -1685,6 +1687,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await gotoPmReports(page, undefined, target.url, true);
       const chat = page.locator('.pm-chat');
       const tasksView = chat.getByRole('region', { name: 'Request tasks' });
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       await expect(chat.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
       await expect(tasksView).toBeVisible();
       await expect(tasksView.locator('.pm-chat__task')).toHaveCount(2);
