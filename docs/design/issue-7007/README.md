@@ -125,9 +125,9 @@ User Verification Result: n/a (autonomous)
 Blocked-by: #6943
 
 この依存は **React 画面実装**に適用し、設計作業は完了できる。
-#6943 の基盤の AC-1/AC-2/AC-3/AC-4 相当が配信済みで、store購読・island mount・埋め込み・
+\#6943 の基盤の AC-1/AC-2/AC-3/AC-4 相当が配信済みで、store購読・island mount・埋め込み・
 再現可能buildが使えることを再開時に確認する。基盤のAPI・配置はその配信結果に合わせる。
-#5016 の human summary と通知集約、#3431 の request-task/判断経路は必要能力ごとに配信証跡を確認する。
+\#5016 の human summary と通知集約、#3431 の request-task/判断経路は必要能力ごとに配信証跡を確認する。
 足りなければ当該ownerへ差し戻し、本Issueで互換実装を作らない。
 
 Issue 正本の plan/tasks はこの資料とモックへのリンクを持つ。
