@@ -12150,7 +12150,16 @@ impl AppRuntime {
                 agent_id,
                 model,
                 reasoning,
-            } => self.set_pm_launch_profile_events(context, &agent_id, model, reasoning),
+                codex_speed,
+                fast_mode,
+            } => self.set_pm_launch_profile_events(
+                context,
+                &agent_id,
+                model,
+                reasoning,
+                codex_speed,
+                fast_mode,
+            ),
             FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(context),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(&client_id),
             FrontendEvent::SelectCloneProjectParent => {

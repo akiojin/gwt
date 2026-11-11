@@ -2243,6 +2243,8 @@ struct IssueMonitorLaunchProfileRepr {
     skip_permissions: bool,
     #[serde(default)]
     fast_mode: bool,
+    #[serde(default)]
+    codex_speed: gwt_agent::CodexSpeed,
     /// Pre-#4228 key. Read-only migration input, never written back.
     #[serde(default)]
     codex_fast_mode: bool,
@@ -2276,6 +2278,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
             session_mode: repr.session_mode,
             skip_permissions: repr.skip_permissions,
             fast_mode: repr.fast_mode || legacy_fast_mode,
+            codex_speed: repr.codex_speed,
             runtime_target: repr.runtime_target,
             docker_service: repr.docker_service,
             docker_lifecycle_intent: repr.docker_lifecycle_intent,
@@ -2306,6 +2309,9 @@ pub struct IssueMonitorLaunchProfile {
     /// decide the other's launch.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Explicit Codex speed; old boolean settings intentionally remain Off.
+    #[serde(default)]
+    pub codex_speed: gwt_agent::CodexSpeed,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -2335,6 +2341,7 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             // derived value, and folding it in here is what let a Codex bit
             // decide a Claude profile's Fast Mode.
             fast_mode: config.fast_mode,
+            codex_speed: config.codex_speed,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
@@ -2355,6 +2362,7 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             session_mode: profile.session_mode,
             skip_permissions: profile.skip_permissions,
             fast_mode: profile.fast_mode,
+            codex_speed: profile.codex_speed,
             runtime_target: profile.runtime_target,
             docker_service: profile.docker_service,
             docker_lifecycle_intent: profile.docker_lifecycle_intent,
@@ -2476,7 +2484,7 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 12] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
     "agent_member_id",
     "model",
     "reasoning",
@@ -2484,6 +2492,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 12] = [
     "session_mode",
     "skip_permissions",
     "fast_mode",
+    "codex_speed",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -2637,10 +2646,12 @@ pub fn issue_monitor_launch_profile_summary(profile: &LaunchWizardPreviousProfil
     // Issue #4228 AC-3: both states are spelled out. Showing the segment only
     // when Fast Mode is on is what made a stuck bit indistinguishable from an
     // older gwt that had no Fast Mode at all.
-    let fast_mode = if profile.fast_mode {
-        "fast:on"
-    } else {
-        "fast:off"
+    let fast_mode = match (profile.agent_id.as_str(), profile.codex_speed) {
+        ("codex", gwt_agent::CodexSpeed::Ultrafast) => "speed:ultrafast",
+        ("codex", gwt_agent::CodexSpeed::Fast) => "speed:fast",
+        ("codex", gwt_agent::CodexSpeed::Off) => "speed:off",
+        _ if profile.fast_mode => "fast:on",
+        _ => "fast:off",
     };
     format!(
         "{} / {} / {} / {} / {}",
@@ -4095,6 +4106,8 @@ pub struct IssueMonitorLaunchProfileCandidate {
     /// readable as a field and not only as a substring of `summary`.
     #[serde(default)]
     pub fast_mode: bool,
+    #[serde(default)]
+    pub codex_speed: gwt_agent::CodexSpeed,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12473,6 +12486,7 @@ impl IssueMonitorState {
             // Fast mode is an explicit per-provider opt-in (the wizard maps it
             // onto each CLI's own flag), so a switch must not carry it over.
             profile.fast_mode = false;
+            profile.codex_speed = gwt_agent::CodexSpeed::Off;
         }
         let profile = profile.clone();
         self.launch_profiles =
@@ -14967,6 +14981,7 @@ impl IssueMonitorState {
                     profile.clone(),
                 )),
                 fast_mode: profile.fast_mode,
+                codex_speed: profile.codex_speed,
                 prefer_for: profile.prefer_for.clone(),
                 held_until: now.and_then(|now| {
                     let provider = normalize_issue_monitor_provider(&profile.agent_id)?;
@@ -28775,6 +28790,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -30185,6 +30201,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -30696,6 +30713,7 @@ mod tests {
                 session_mode: Default::default(),
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: gwt_agent::CodexSpeed::Off,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -45823,6 +45841,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_speed_profile_round_trips_and_sparse_updates_preserve_it() {
+        let profile: IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "codex_speed": "ultrafast", "model": "gpt-6-astra"
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&profile).unwrap();
+        assert_eq!(encoded["codex_speed"], "ultrafast");
+        let patch: IssueMonitorLaunchProfilePatch = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "reasoning": "high"
+        }))
+        .unwrap();
+        let (merged, _) = merge_issue_monitor_profiles_set(&[profile], None, &[patch]);
+        assert_eq!(
+            serde_json::to_value(&merged[0]).unwrap()["codex_speed"],
+            "ultrafast"
+        );
+        let legacy: IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "fast_mode": true
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap()["codex_speed"], "off");
+    }
+
+    #[test]
     fn issue_monitor_launch_profile_round_trips_all_launch_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("issue-monitor.json");
@@ -45832,6 +45874,7 @@ mod tests {
             .session_mode(gwt_agent::SessionMode::Resume)
             .skip_permissions(true)
             .fast_mode(true)
+            .codex_speed(gwt_agent::CodexSpeed::Ultrafast)
             .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
             .docker_service("app")
             .docker_lifecycle_intent(gwt_agent::DockerLifecycleIntent::Restart)
@@ -45854,6 +45897,7 @@ mod tests {
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Resume);
         assert!(profile.skip_permissions);
         assert!(profile.fast_mode);
+        assert_eq!(profile.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
         assert_eq!(
             profile.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -45877,6 +45921,7 @@ mod tests {
         assert_eq!(previous.session_mode, gwt_agent::SessionMode::Resume);
         assert!(previous.skip_permissions);
         assert!(previous.fast_mode);
+        assert_eq!(previous.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
         assert_eq!(
             previous.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -46056,7 +46101,7 @@ mod tests {
         assert!(status.launch_profile_candidates[0].fast_mode);
         assert!(status.launch_profile_candidates[0]
             .summary
-            .contains("fast:on"));
+            .contains("speed:off"));
         assert!(!status.launch_profile_candidates[1].fast_mode);
         assert!(status.launch_profile_candidates[1]
             .summary

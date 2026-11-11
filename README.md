@@ -124,9 +124,13 @@ identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
 The embedded frontend requires an operation ID for cleanup requests. Reload older
-open tabs after upgrading. Launch Wizard always skips permission prompts and
-launches with Fast mode off; it reads older saved choices without rewriting them.
-Issues profiles and direct Session resume keep their existing preferences.
+open tabs after upgrading. Launch Wizard always skips permission prompts.
+Agent Settings save model, reasoning and speed defaults for launches: Codex offers
+Off / Fast / Ultrafast, and Claude Code offers its own Fast toggle. Monitor and PM
+profiles can select speed as well. Legacy Codex Fast booleans retain effective Off;
+only an explicit speed selection enables Fast or Ultrafast. Ultrafast requires a
+supported model and eligible plan/workspace; Codex displays a warning when an
+unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
 ## Requirements
 

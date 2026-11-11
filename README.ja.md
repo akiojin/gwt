@@ -119,9 +119,12 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 未作成なら新たに作成しません。
 
 組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
-更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
-Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
-Issues のプロファイルと直接の Session Resume は従来の設定を維持します。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略します。
+Agent Settings でモデル・推論レベル・速度の既定値を保存できます。Codex は Off / Fast / Ultrafast、
+Claude Code は専用の Fast トグルを使い、Monitor と PM の起動プロファイルでも指定できます。
+Codex の旧 Fast bool 設定は実効 Off を維持し、明示的な速度選択でのみ Fast / Ultrafast が有効になります。
+Ultrafast には対応モデルと対象契約・workspace 権限が必要です。非対応の tier が省略される場合は
+Codex の警告が端末に表示されます。[Codex の速度要件](https://learn.chatgpt.com/docs/agent-configuration/speed)も参照してください。
 
 ## 前提
 
