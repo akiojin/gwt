@@ -3697,6 +3697,12 @@ impl OwnerState {
                     match captured {
                         Retirement::Runtime { runtime, cause } => {
                             self.retirements.remove(&(id.clone(), incarnation));
+                            let cause =
+                                if !explicit_stop && matches!(cause, CloseCause::ExplicitStop) {
+                                    CloseCause::ExplicitClose
+                                } else {
+                                    cause
+                                };
                             self.start_close(id, *runtime, cause, reply);
                         }
                         captured => {

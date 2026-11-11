@@ -3794,6 +3794,59 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     );
 }
 
+#[test]
+fn stop_failure_close_retry_removes_the_exact_owner_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let (owner, pane) = pane_control_tests::control_owner_agent(&repo, "agent-1", 42);
+    let mut events = owner.subscribe();
+    let snapshot = gwt::persistence::workspace_state_path(&repo);
+    fs::remove_file(&snapshot).unwrap();
+    fs::create_dir(&snapshot).unwrap();
+    let stopped = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Stop {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ));
+    // Repair the isolated storage before any assertion, so owner drain can
+    // finish even when the deliberately failed STOP has unexpected results.
+    fs::remove_dir(&snapshot).unwrap();
+    assert!(stopped.is_err(), "STOP must retain its failed finalizer");
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        }),
+    )
+    .expect("Close retries the exact failed STOP after storage recovers");
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["canonical_rows"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != "agent-1"),
+        "Close retry must remove the row instead of repeating STOP retention"
+    );
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
+            gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation, .. }
+                if id == pane.id && incarnation == pane.incarnation
+        )),
+        "successful Close retry publishes removal to every connected GUI"
+    );
+}
+
 /// SPEC-2359 W-16 (FR-387): the tab-change ingest trigger is throttled to
 /// once per 30s per project; bootstrap / project-open callers bypass it.
 #[test]
