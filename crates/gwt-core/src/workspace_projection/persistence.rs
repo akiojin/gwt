@@ -1078,10 +1078,38 @@ pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
     operation_id: &str,
     decision: ExternalWorkspaceCommitDecision,
 ) -> Result<ExternalWorkspaceCommitResolution> {
+    resolve_legacy_external_workspace_commit(
+        project_state_root,
+        work_event_root,
+        operation_id,
+        decision,
+        None,
+    )
+}
+
+fn resolve_legacy_external_workspace_commit(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    expected_recovery: Option<&ExternalWorkspaceCommitRecovery>,
+) -> Result<ExternalWorkspaceCommitResolution> {
     validate_external_workspace_operation_id(operation_id)?;
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
     let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    if let Some(expected) = expected_recovery {
+        if expected.current_path != current_path
+            || expected.work_items_path != legacy_work_items_path
+            || expected.project_state_root.as_deref() != Some(project_state_root)
+            || legacy_work_items_path == work_items_path
+            || !session_bound_paths_match(Some(&expected.worktree_path), Some(work_event_root))?
+        {
+            return Err(GwtError::Other(
+                "external workspace recovery legacy path pair changed".into(),
+            ));
+        }
+    }
     if legacy_work_items_path == work_items_path {
         return resolve_workspace_state_external_commit_at(
             &current_path,
@@ -1098,13 +1126,15 @@ pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
     else {
         return Ok(ExternalWorkspaceCommitResolution::Busy);
     };
-    resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
         &current_path,
         &legacy_work_items_path,
         operation_id,
         decision,
         std::slice::from_ref(&work_items_path),
         Some(&work_items_path),
+        None,
+        expected_recovery,
         |transaction| {
             merge_committed_legacy_worktree_events_locked(
                 &current_path,
@@ -2001,6 +2031,10 @@ pub struct ExternalWorkspaceCommitRecovery {
     pub transaction_payload_hash: String,
     pub current_path: PathBuf,
     pub work_items_path: PathBuf,
+    /// Canonical fold destination for a validated pre-split path pair.
+    /// Ordinary canonical snapshots retain their original serialized form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_state_root: Option<PathBuf>,
     pub owner: String,
     pub session_id: String,
     pub worktree_path: PathBuf,
@@ -5597,14 +5631,15 @@ pub fn workspace_state_transaction_is_pending_at(
     current_path: &Path,
     work_items_path: &Path,
 ) -> Result<bool> {
-    Ok(pending_workspace_state_transaction_at(current_path, work_items_path)?.is_some())
+    Ok(pending_workspace_state_transaction_at(current_path, work_items_path, None)?.is_some())
 }
 
 fn pending_workspace_state_transaction_at(
     current_path: &Path,
     work_items_path: &Path,
+    legacy_work_items_path: Option<&Path>,
 ) -> Result<Option<PendingWorkspaceStateTransaction>> {
-    let base_lock_targets = vec![
+    let mut base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
     ];
@@ -5612,6 +5647,12 @@ fn pending_workspace_state_transaction_at(
         pending_workspace_state_transaction_path(current_path),
         pending_workspace_state_transaction_path_for_work_items(work_items_path),
     ];
+    if let Some(legacy) = legacy_work_items_path {
+        base_lock_targets.push(legacy.to_path_buf());
+        marker_paths.push(pending_workspace_state_transaction_path_for_work_items(
+            legacy,
+        ));
+    }
     marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
         &base_lock_targets,
     )?);
@@ -5625,21 +5666,51 @@ fn pending_workspace_state_transaction_at(
 pub fn inspect_workspace_state_external_commit_recovery(
     repo_path: &Path,
 ) -> Result<Option<ExternalWorkspaceCommitRecovery>> {
-    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
-    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    inspect_workspace_state_external_commit_recovery_for_work_event_root(repo_path, repo_path)
+}
+
+/// Inspect canonical or pre-split publication paths for a Session's validated
+/// Project State and exact work-event roots, retaining the actual staged pair.
+pub fn inspect_workspace_state_external_commit_recovery_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+) -> Result<Option<ExternalWorkspaceCommitRecovery>> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
     ensure_supported_workspace_layout(&current_path)?;
     ensure_supported_workspace_layout(&work_items_path)?;
-    let Some(transaction) =
-        pending_workspace_state_transaction_at(&current_path, &work_items_path)?
+    let Some(transaction) = pending_workspace_state_transaction_at(
+        &current_path,
+        &work_items_path,
+        Some(&legacy_work_items_path),
+    )?
     else {
         return Ok(None);
     };
-    if transaction.current_path != current_path || transaction.work_items_path != work_items_path {
-        return Err(GwtError::Other(
+    let pair_mismatch = || match transaction.external_commit.as_ref() {
+        Some(external) => GwtError::ExternalWorkspacePathPairMismatch {
+            operation_id: external.operation_id.clone(),
+        },
+        None => GwtError::Other(
             "external workspace recovery path pair does not match its project".into(),
-        ));
+        ),
+    };
+    if transaction.current_path != current_path
+        || (transaction.work_items_path != work_items_path
+            && transaction.work_items_path != legacy_work_items_path)
+    {
+        return Err(pair_mismatch());
     }
-    external_workspace_commit_recovery(&transaction).map(Some)
+    let mut recovery = external_workspace_commit_recovery(&transaction)?;
+    if transaction.work_items_path != work_items_path {
+        ensure_supported_workspace_layout(&legacy_work_items_path)?;
+        if !session_bound_paths_match(Some(&recovery.worktree_path), Some(work_event_root))? {
+            return Err(pair_mismatch());
+        }
+        recovery.project_state_root = Some(project_state_root.to_path_buf());
+    }
+    Ok(Some(recovery))
 }
 
 fn external_workspace_commit_recovery(
@@ -5716,6 +5787,7 @@ fn external_workspace_commit_recovery(
         transaction_payload_hash: external_workspace_transaction_payload_hash(transaction)?,
         current_path: transaction.current_path.clone(),
         work_items_path: transaction.work_items_path.clone(),
+        project_state_root: None,
         owner: owner.clone(),
         session_id: session_id.clone(),
         worktree_path: worktree_path.clone(),
@@ -5750,6 +5822,15 @@ pub fn resolve_workspace_state_external_commit_recovery(
             ));
         }
     };
+    if let Some(project_state_root) = recovery.project_state_root.as_deref() {
+        return resolve_legacy_external_workspace_commit(
+            project_state_root,
+            &recovery.worktree_path,
+            &recovery.operation_id,
+            decision,
+            Some(recovery),
+        );
+    }
     let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
         &recovery.current_path,
         &recovery.work_items_path,
@@ -5981,6 +6062,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
                 // A prior cancellation may have persisted its Reject receipt
                 // before marker cleanup. The original undecided audit may retry.
                 observed.resolution = expected.resolution;
+                // Legacy routing was validated before taking the operation
+                // lock; the exact marker pair is checked again above.
+                observed.project_state_root = expected.project_state_root.clone();
                 if observed != *expected {
                     return Err(GwtError::Other(
                         "external workspace recovery payload or launch authority changed".into(),

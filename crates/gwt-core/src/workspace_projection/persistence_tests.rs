@@ -6271,6 +6271,130 @@ fn session_bound_terminalization_rejects_conflicting_current_authority_shadows()
 }
 
 #[test]
+fn external_recovery_snapshot_preserves_legacy_split_pair_and_receipt_reconciliation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().unwrap();
+    for committed in [false, true] {
+        let label = if committed {
+            "typed-committed"
+        } else {
+            "typed-cancelled"
+        };
+        let legacy = t812_prepare_legacy_external_resume(&temp.path().join(label), label, None);
+        let target = &legacy.fixture.target;
+        let marker = pending_workspace_state_transaction_path(&legacy.fixture.current_path);
+        let before = fs::read(&marker).unwrap();
+        let canonical_before = fs::read(&legacy.fixture.work_items_path).unwrap();
+        let transaction: PendingWorkspaceStateTransaction =
+            serde_json::from_slice(&before).unwrap();
+        if !committed {
+            // A pre-split transaction remains discoverable from its legacy
+            // WorkItems marker even without a current/coordinator copy.
+            fs::remove_file(&marker).unwrap();
+            fs::remove_file(
+                pending_workspace_state_transaction_coordinator_path(&transaction).unwrap(),
+            )
+            .unwrap();
+        }
+        if committed {
+            persist_external_workspace_commit_receipt(
+                &legacy.fixture.current_path,
+                &legacy.legacy_work_items_path,
+                &legacy.operation_id,
+                &transaction,
+                ExternalWorkspaceCommitResolution::Committed,
+            )
+            .unwrap();
+        }
+        let recovery = inspect_workspace_state_external_commit_recovery_for_work_event_root(
+            &target.project_state_root,
+            &target.work_event_root,
+        )
+        .unwrap()
+        .unwrap();
+        if !committed {
+            assert!(!marker.exists(), "inspection must remain read-only");
+            write_workspace_state_transaction_markers(&transaction, false).unwrap();
+        }
+        assert_eq!(recovery.current_path, legacy.fixture.current_path);
+        assert_eq!(recovery.work_items_path, legacy.legacy_work_items_path);
+        assert_eq!(
+            recovery.project_state_root.as_ref(),
+            Some(&target.project_state_root)
+        );
+        assert_eq!(
+            recovery.resolution,
+            committed.then_some(ExternalWorkspaceCommitResolution::Committed)
+        );
+        assert!(matches!(
+            inspect_workspace_state_external_commit_recovery_for_work_event_root(
+                &target.project_state_root,
+                &temp.path().join("foreign-root"),
+            ),
+            Err(GwtError::ExternalWorkspacePathPairMismatch { .. })
+        ));
+        assert_eq!(fs::read(&marker).unwrap(), before);
+        let mut foreign = recovery.clone();
+        foreign.work_items_path = legacy.fixture.work_items_path.clone();
+        assert!(resolve_workspace_state_external_commit_recovery(&foreign).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), before);
+        let expected = if committed {
+            ExternalWorkspaceCommitResolution::Committed
+        } else {
+            ExternalWorkspaceCommitResolution::Rejected
+        };
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&recovery).unwrap(),
+            expected
+        );
+        if committed {
+            // Receipt-only retries must still fold legacy events into canonical WorkItems.
+            let mut canonical =
+                load_workspace_work_items_from_path(&legacy.fixture.work_items_path)
+                    .unwrap()
+                    .unwrap();
+            for item in &mut canonical.work_items {
+                item.events
+                    .retain(|event| event.id != legacy.resume_event_id);
+            }
+            save_workspace_work_items_projection_to_path(
+                &legacy.fixture.work_items_path,
+                &canonical,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&recovery).unwrap(),
+            expected
+        );
+        if committed {
+            let canonical = load_workspace_work_items_from_path(&legacy.fixture.work_items_path)
+                .unwrap()
+                .unwrap();
+            assert!(canonical
+                .work_items
+                .iter()
+                .flat_map(|item| &item.events)
+                .any(|event| event.id == legacy.resume_event_id));
+            assert_eq!(
+                t812_read_events(&legacy.fixture.events_path)
+                    .iter()
+                    .filter(|event| event.id == legacy.resume_event_id)
+                    .count(),
+                1
+            );
+        } else {
+            assert_eq!(
+                fs::read(&legacy.fixture.work_items_path).unwrap(),
+                canonical_before
+            );
+        }
+    }
+}
+
+#[test]
 fn legacy_external_fold_rejects_terminal_authority_shadows_and_keeps_reconciliation_pending() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
