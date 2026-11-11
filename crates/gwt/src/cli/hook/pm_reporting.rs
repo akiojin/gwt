@@ -936,6 +936,77 @@ mod tests {
     }
 
     #[test]
+    fn unbound_human_answers_are_saved_as_display_only_qa_without_authority() {
+        // Issue #6950: a question that arrives mid-work or after its response
+        // deadline has no current human turn. Its answer must still reach
+        // Reports, but it must never mint instruction authority.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
+        let repo = home.path().join("repo");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let post = |original: &str, authorize: bool| {
+            let mut instruction = instruction_capture();
+            instruction.original = original.into();
+            if authorize {
+                instruction.authorizations = vec![gwt_core::pm_authorization::OperationIntent {
+                    operation: "update.settings.set".into(),
+                    params: serde_json::json!({"auto_apply_updates":true}),
+                }];
+            }
+            crate::cli::pm::PmCommand::ReportPost {
+                project_root: None,
+                kind: gwt_core::pm_report::PmReportKind::Qa,
+                question: Some(original.into()),
+                body: "回答しました".into(),
+                instruction: Some(instruction),
+            }
+        };
+        // Expired request: no recorded human turn at all.
+        crate::cli::pm::run(
+            &mut env,
+            post("期限切れの依頼は？", false),
+            &mut String::new(),
+        )
+        .unwrap();
+        // Mid-work question: the current turn belongs to another prompt.
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+        let mut output = String::new();
+        crate::cli::pm::run(&mut env, post("作業中の質問は？", false), &mut output).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(saved["report"]["kind"], "qa");
+        assert!(saved.get("instruction").is_none());
+        assert!(
+            crate::cli::pm::run(&mut env, post("作業中の承認は？", true), &mut String::new())
+                .is_err(),
+            "an unbound answer never carries authorizations"
+        );
+        let questions: Vec<_> = gwt_core::pm_report::load_reports(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|report| report.kind == gwt_core::pm_report::PmReportKind::Qa)
+            .filter_map(|report| report.question)
+            .collect();
+        assert_eq!(questions, ["期限切れの依頼は？", "作業中の質問は？"]);
+        assert!(gwt_core::user_instruction::load(&repo).unwrap().is_empty());
+        assert!(
+            matches!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::StopBlock { .. }
+            ),
+            "an unbound answer does not settle the current human turn"
+        );
+    }
+
+    #[test]
     fn human_qa_response_loss_retries_one_joined_capture_after_acknowledgement() {
         let _env = gwt_core::test_support::env_lock()
             .lock()

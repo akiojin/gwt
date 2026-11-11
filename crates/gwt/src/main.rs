@@ -2420,6 +2420,7 @@ enum UserEvent {
         reports: Vec<gwt::protocol::PmReportView>,
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
+        current_error: Option<String>,
     },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -11649,7 +11650,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error }) => {
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error, current_error }) => {
                 clients.dispatch(app.pm_reports_loaded_events(client_id, BackendEvent::PmReports {
                     id: window_id,
                     session_id: Some(session_id),
@@ -11659,6 +11660,7 @@ fn main() -> std::io::Result<()> {
                     reports,
                     current,
                     error,
+                    current_error,
                 }));
             }
             Event::UserEvent(UserEvent::ProjectObservationInvalidationCompleted(completed)) => {

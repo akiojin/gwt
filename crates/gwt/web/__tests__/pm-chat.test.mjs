@@ -27,11 +27,12 @@ function fixture({ tasksDefault = false } = {}) {
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
   let revision = 0;
-  const update = (reports = [], error = null, current = null) => {
+  const update = (reports = [], error = null, current = null, current_error = undefined) => {
     const request = model.requestPmReports('pm');
     const event = { kind: 'pm_reports', id: 'pm', request_id: request.request_id,
       version: { epoch: 'fixture', revision: ++revision }, snapshot: request.version === null,
-      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current };
+      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
+      ...(current_error === undefined ? {} : { current_error }) };
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
@@ -84,6 +85,22 @@ test('Home is the default PM view; Tasks preserves the unfinished filter and sta
   view.showTasks();
   assert.equal(filter.getAttribute('aria-pressed'), 'true');
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('A current-card failure keeps the last explanation but never hides newly saved reports (#6950)', () => {
+  const { root, model, update } = fixture();
+  const confirmed = { status: { items: [{ kind: 'waiting', text: 'Watching CI', started_at: '2026-10-13T09:00:00Z' }], next_trigger: 'CI result' }, request_tasks: taskOverview() };
+  update([report('one')], null, confirmed);
+  const before = model.readPmWindowState().windows.pm.current;
+  update([report('one'), report('two')], null, { request_tasks: taskOverview() }, 'PM current status could not be loaded');
+  const state = model.readPmWindowState().windows.pm;
+  assert.deepEqual(state.reports.map(item => item.id), ['one', 'two'], 'saved reports are displayed');
+  assert.equal(state.current, before, 'the last confirmed explanation is kept');
+  assert.equal(root.querySelectorAll('.pm-chat__body [data-report-id]').length, 2);
+  assert.match(root.querySelector('.pm-chat__body').textContent, /PM current status could not be loaded/);
+  update([report('three')], 'Unreadable reports', { request_tasks: taskOverview() });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['one', 'two'],
+    'only a reports failure keeps the last confirmed list');
 });
 
 test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {

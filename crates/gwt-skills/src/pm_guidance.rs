@@ -597,6 +597,14 @@ Approved existing operations:
   naming Issue numbers created, changed, or launched. If none were taken,
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
+- A user question or instruction that arrived while you were working, or whose
+  response deadline has passed, still gets its Q&A report. Post it with the
+  same `instruction` object and no `authorizations`; with no current human turn
+  to bind, it is saved as a display-only Q&A that grants no authority.
+- Never let a report disappear silently. When `pm.report.post` fails, read
+  `pm.report.list`; if the report is absent, retry once with the same payload,
+  and if it still fails, tell the user in the conversation that the report was
+  not saved and why.
 - When an action needs a newly saved instruction before it can run, the one Q&A
   report acknowledges the request and concrete action plan first. Save its
   `instruction.authorizations`, obtain the instruction ID, then perform the
