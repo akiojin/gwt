@@ -153,7 +153,20 @@ fn publish_work_event_containers_repair(
         })
         .collect::<Vec<_>>();
     let [anchor] = anchors.as_slice() else {
-        return Err(refuse("ambiguous or missing absolute container anchor"));
+        let candidates = anchors
+            .iter()
+            .map(|container| {
+                format!(
+                    "branch={}, worktree_path={}",
+                    container.branch.as_deref().unwrap_or("<missing>"),
+                    container.worktree_path.as_deref().unwrap().display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(refuse(&format!(
+            "ambiguous or missing absolute container anchor; candidates: [{candidates}]"
+        )));
     };
     if anchor.branch.as_deref().is_none_or(str::is_empty)
         || target.execution_containers.iter().any(|container| {
@@ -2224,6 +2237,10 @@ mod tests {
         target
             .execution_containers
             .push(target.execution_containers[0].clone());
+        let anchor_path = target.execution_containers[0]
+            .worktree_path
+            .clone()
+            .unwrap();
         std::fs::write(&works, serde_json::to_vec_pretty(&projection).unwrap()).unwrap();
         let duplicated = std::fs::read(&works).unwrap();
         let error =
@@ -2232,6 +2249,11 @@ mod tests {
         assert!(error
             .to_string()
             .contains("ambiguous or missing absolute container anchor"));
+        assert!(error.to_string().contains("work/issue-3590"), "{error}");
+        assert!(
+            error.to_string().contains(anchor_path.to_str().unwrap()),
+            "{error}"
+        );
         assert_eq!(std::fs::read(works).unwrap(), duplicated);
     }
 

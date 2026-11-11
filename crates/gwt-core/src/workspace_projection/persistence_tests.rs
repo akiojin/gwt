@@ -15910,6 +15910,90 @@ fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
 }
 
 #[test]
+fn issue_7033_pr_metadata_uses_local_anchor_with_portable_and_other_host_containers() {
+    let _env_lock = lock_test_env();
+    struct RestoreCwd(PathBuf);
+    impl Drop for RestoreCwd {
+        fn drop(&mut self) {
+            // test-hygiene: allow-unlocked-env enclosing test holds lock_test_env through restoration
+            std::env::set_current_dir(&self.0).unwrap();
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let _cwd = RestoreCwd(std::env::current_dir().unwrap());
+    // test-hygiene: allow-unlocked-env lock_test_env serializes process environment changes
+    std::env::set_current_dir(tmp.path()).unwrap();
+    let works = tmp.path().join("works.json");
+    let events = gwt_repo_local_work_events_dir(tmp.path());
+    let now = Utc::now();
+    let local = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-7033".into()),
+        worktree_path: Some(std::env::current_dir().unwrap()),
+        pr_number: Some(7034),
+        pr_url: Some("https://example.test/pull/7034".into()),
+        pr_state: Some("MERGED".into()),
+    };
+    let mut projection = WorkItemsProjection::empty(now);
+    for (id, path) in [
+        ("local", local.worktree_path.clone().unwrap()),
+        ("portable", PathBuf::from(".")),
+        ("other-host", tmp.path().join("other-host/work/issue-7033")),
+    ] {
+        let mut event = WorkEvent::new(WorkEventKind::Start, "delivery-work", now);
+        event.id = id.into();
+        event.owner = Some("Issue #7033".into());
+        event.agent_session_id = Some("delivery-session".into());
+        let mut container = local.clone();
+        container.worktree_path = Some(path);
+        container.pr_state = Some("OPEN".into());
+        event.execution_container = Some(container);
+        projection.apply_event(event);
+    }
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, "delivery-work", now));
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let before = projection.work_items[0].clone();
+    record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "Issue #7033",
+        "delivery-session",
+        &local,
+    )
+    .expect("portable alias and another host must not block delivered PR metadata");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = &saved.work_items[0];
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+    assert_eq!(item.execution_containers.len(), 3);
+    assert!(item.execution_containers.contains(&local));
+    for container in before.execution_containers.iter().skip(1) {
+        assert!(item.execution_containers.contains(container));
+    }
+    assert!(record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "Issue #7033",
+        "foreign-session",
+        &local,
+    )
+    .is_err());
+    let mut duplicate = item.clone();
+    duplicate.id = "duplicate-work".into();
+    let mut ambiguous = saved;
+    ambiguous.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
+    assert!(record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "Issue #7033",
+        "delivery-session",
+        &local,
+    )
+    .is_err());
+}
+
+#[test]
 fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container() {
     let tmp = tempfile::tempdir().unwrap();
     let works = tmp.path().join("works.json");
