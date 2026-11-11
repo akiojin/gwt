@@ -2703,6 +2703,8 @@ pub(crate) struct OwnerAgentAdmissionInput<'a> {
     pub host_project_roots: &'a [PathBuf],
     pub snapshot: crate::IssueMonitorWindowSnapshot,
     pub snapshot_tabs: std::collections::BTreeSet<String>,
+    pub runtime_handles:
+        &'a std::collections::HashMap<String, std::sync::Arc<gwt_terminal::PtyHandle>>,
     pub known_names: &'a std::collections::HashSet<String>,
     pub metadata: OwnerLaunchMetadata,
     pub is_continue_work: bool,
@@ -2829,18 +2831,33 @@ pub(crate) fn prepare_owner_agent_admission(
         {
             return Err(format!("Issues active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"));
         }
+        // A terminal policy status can precede physical tree cleanup. Count
+        // that exact retained PTY for admission without rewriting the original
+        // diagnostic/claim snapshot or replacing the shared host census.
+        let mut capacity_snapshot = input.snapshot.clone();
+        for window in &mut capacity_snapshot.windows {
+            if !window.review_dispatch
+                && matches!(
+                    window.status,
+                    crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
+                )
+                && input
+                    .runtime_handles
+                    .get(&window.window_id)
+                    .is_some_and(|handle| !handle.tree_exit_confirmed())
+            {
+                window.status = crate::WindowProcessStatus::Running;
+            }
+        }
         if let Some(started) = crate::process::host_process_start_time(std::process::id()) {
             monitor.record_window_snapshot_from_host(
-                input.snapshot.clone(),
+                capacity_snapshot,
                 std::process::id(),
                 started,
                 input.snapshot_tabs.clone(),
             );
         } else {
-            monitor.record_window_snapshot_for_tabs(
-                input.snapshot.clone(),
-                input.snapshot_tabs.clone(),
-            );
+            monitor.record_window_snapshot_for_tabs(capacity_snapshot, input.snapshot_tabs.clone());
         }
         if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
             return Err(format!(
@@ -4205,6 +4222,7 @@ mod owner_admission_tests {
                         windows: Vec::new(),
                     },
                     snapshot_tabs: std::collections::BTreeSet::from(["tab".into()]),
+                    runtime_handles: &std::collections::HashMap::new(),
                     known_names: &HashSet::new(),
                     metadata: OwnerLaunchMetadata {
                         launch_feedback_context: Some(LaunchFeedbackContext {
