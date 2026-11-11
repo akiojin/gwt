@@ -163,6 +163,69 @@ test("Status strip labels each provider and removes symbol-only usage shorthand"
   assert.doesNotMatch(strip.textContent, /[⬡◇]/);
 });
 
+test("Codex full subscription distinguishes available credits from exhausted credits", async () => {
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document } = parseHTML("<button id='op-strip-usage'></button>");
+  const account = { provider: "codex", state: { kind: "ok" }, limit_reached: false,
+    windows: [{ kind: "weekly", used_percent: 100 }],
+    credits: { has_credits: true, unlimited: false, balance: 37669.9 } };
+  const strip = document.getElementById("op-strip-usage");
+  applyProviderUsage(document, { accounts: [account] });
+  assert.match(strip.textContent, /CX.*Using credits.*37,669\.9/);
+  assert.doesNotMatch(strip.getAttribute("aria-label"), /limit reached/);
+  assert.equal(strip.querySelector("[data-provider]").dataset.limit, undefined);
+  assert.match(componentsCss, /\.op-usage-sum--credits\s*\{[^}]*inline-size:\s*auto;/s);
+  assert.match(componentsCss, /\.op-usage-sum--credits\s*\{[^}]*white-space:\s*normal;/s);
+  account.credits.has_credits = false;
+  applyProviderUsage(document, { accounts: [account] });
+  assert.match(strip.getAttribute("aria-label"), /limit reached/);
+  assert.equal(strip.querySelector("[data-provider]").dataset.limit, "true");
+  delete account.credits;
+  applyProviderUsage(document, { accounts: [account] });
+  assert.equal(strip.querySelector("[data-provider]").textContent, "CX 100%");
+  assert.equal(strip.querySelector("[data-provider]").dataset.limit, undefined);
+});
+
+test("Codex popover derives credit pace only from distinct same-account observations", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  try {
+    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const update = (balance, fetched_at, account_id = "account-a", state = { kind: "ok" }) => {
+      surface.applyProviderUsageUi({ accounts: [{ provider: "codex", account_id, fetched_at, state,
+        limit_reached: false, windows: [{ kind: "weekly", used_percent: 100 }],
+        credits: { has_credits: true, unlimited: false, balance } }], sessions: [], consumption: [] });
+    };
+    update(100, "2031-01-02T10:00:00Z");
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+    const card = () => document.querySelector('.op-usage-card[data-provider="codex"]');
+    assert.match(card().textContent, /Using credits.*100 credits/);
+    assert.doesNotMatch(card().textContent, /\/hour|Limit reached/);
+    update(90, "2031-01-02T10:30:00Z");
+    assert.match(card().textContent, /90 credits.*20 credits\/hour/);
+    update(90, "2031-01-02T10:30:00Z", "account-a", { kind: "stale", age_secs: 420 });
+    assert.match(card().textContent, /stale 7m/);
+    assert.match(card().textContent, /20 credits\/hour/);
+    update(80, "2031-01-02T11:00:00Z", "account-b");
+    assert.doesNotMatch(card().textContent, /\/hour/);
+    update(120, "2031-01-02T11:30:00Z", "account-b");
+    assert.doesNotMatch(card().textContent, /\/hour/);
+    update(null, "2031-01-02T12:00:00Z", "account-b");
+    assert.match(card().textContent, /— credits/);
+    assert.doesNotMatch(card().textContent, /\/hour/);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
 test("Status strip summarizes the provider window nearest its limit", async () => {
   const { applyProviderUsage } = await importOperatorShell();
   const { document } = parseHTML(

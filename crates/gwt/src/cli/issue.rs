@@ -13016,6 +13016,7 @@ mod tests {
                 account_label: None,
                 plan: Some("pro".to_string()),
                 extra_usage: None,
+                credits: None,
                 windows: vec![gwt_core::usage::UsageWindow::new(
                     gwt_core::usage::WindowKind::Weekly,
                     100.0,

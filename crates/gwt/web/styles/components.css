@@ -5092,6 +5092,15 @@ button.workspace-board-ref:focus-visible {
   max-inline-size: 100%;
 }
 
+.op-usage-sum--credits {
+  flex: 0 1 auto;
+  inline-size: auto;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .op-usage-model {
   white-space: nowrap;
   color: var(--color-status-strip-fg);

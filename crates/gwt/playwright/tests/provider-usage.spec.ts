@@ -288,6 +288,75 @@ test.describe("Provider usage status summary", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("Codex credits distinguish usable full quota and show observed credit pace", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    const account = { provider: "codex", account_id: "credits-fixture", state: { kind: "ok" },
+      fetched_at: "2031-01-02T10:00:00Z", limit_reached: false,
+      windows: [{ kind: "weekly", used_percent: 100 }],
+      credits: { has_credits: true, unlimited: false, balance: 37679.9 } };
+    await emitProviderUsage(page, [{ ...account, credits: undefined }]);
+    await expect(strip).toContainText("CX 100%");
+    await page.screenshot({ path: info.outputPath("codex-credits-before.png"), fullPage: true });
+    await emitProviderUsage(page, [account]);
+    await expect(strip).toContainText("CX Using credits · 37,679.9 credits");
+    await strip.focus();
+    await expect(strip).toBeFocused();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    await expect(popover).toContainText("Balance: 37,679.9 credits");
+    await expect(popover).not.toContainText("credits/hour");
+    await expect(popover).not.toContainText("Limit reached");
+    account.fetched_at = "2031-01-02T10:30:00Z";
+    account.credits.balance = 37669.9;
+    await emitProviderUsage(page, [account]);
+    await expect(popover).toContainText("37,669.9 credits · 20 credits/hour (observed)");
+    for (const width of [1440, 360]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(strip).toContainText("Using credits · 37,669.9 credits");
+      const layout = await strip.evaluate(element => {
+        const chip = element.querySelector<HTMLElement>('[data-provider="codex"]')!;
+        const box = chip.getBoundingClientRect();
+        return { clipped: chip.scrollWidth > chip.clientWidth + 1,
+          outside: box.left < 0 || box.right > innerWidth || box.bottom > innerHeight,
+          overflow: document.documentElement.scrollWidth > innerWidth + 1 };
+      });
+      expect(layout).toEqual({ clipped: false, outside: false, overflow: false });
+      await strip.focus();
+      await strip.press("ArrowDown");
+      await expect(popover).toBeVisible();
+      await expect(popover).toBeFocused();
+      await expect(popover.locator("[data-codex-credits]")).toBeInViewport();
+      const popupBox = (await popover.boundingBox())!;
+      expect(popupBox.x).toBeGreaterThanOrEqual(0);
+      expect(popupBox.x + popupBox.width).toBeLessThanOrEqual(width + 1);
+      expect(popupBox.y).toBeGreaterThanOrEqual(0);
+      expect(popupBox.y + popupBox.height).toBeLessThanOrEqual(900);
+      await page.screenshot({ path: info.outputPath(`codex-credits-${width}.png`), fullPage: true });
+    }
+    await emitProviderUsage(page, [{ ...account, state: { kind: "stale", age_secs: 420 } }]);
+    await expect(strip).toContainText("stale");
+    await expect(popover).toContainText("stale 7m");
+    await emitProviderUsage(page, [{ ...account, credits: { has_credits: true, unlimited: true, balance: null } }]);
+    await expect(strip).toContainText("Using credits · unlimited");
+    await expect(popover).not.toContainText("credits/hour");
+    await emitProviderUsage(page, [{ ...account, credits: { has_credits: false, unlimited: false, balance: 0 } }]);
+    await expect(strip).toHaveAttribute("aria-label", /limit reached/);
+    await expect(popover).toContainText("Limit reached");
+    await emitProviderUsage(page, [{ ...account, credits: undefined }]);
+    await expect(strip).toContainText("CX 100%");
+    await expect(popover.locator("[data-codex-credits]")).toHaveCount(0);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    expect(errors).toEqual([]);
+  });
+
   test("shows Claude Fable weekly and enabled usage credits (SPEC #2970 Phase 8)", async ({
     page,
   }, testInfo) => {
