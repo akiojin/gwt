@@ -1205,6 +1205,13 @@ fn merge_committed_legacy_worktree_events_locked(
             .cmp(&right.updated_at)
             .then_with(|| left.id.cmp(&right.id))
     });
+    if candidates.iter().any(WorkEvent::is_successor_supersession) {
+        let source = transaction
+            .and_then(|pending| pending.work_items.as_ref())
+            .or(legacy.as_ref())
+            .ok_or_else(|| GwtError::Other("legacy supersession source is missing".into()))?;
+        order_legacy_supersession_candidates(&mut candidates, source, work_event_root)?;
+    }
 
     let mut candidate_ids = HashMap::<String, WorkEvent>::new();
     let mut changed = canonical_was_missing;
@@ -1359,6 +1366,11 @@ fn merge_committed_legacy_worktree_events_locked(
                 work_event_root,
             )?;
             if let Some(snapshot) = seed_snapshot {
+                validate_legacy_reconciliation_snapshot_insert(
+                    &canonical,
+                    &snapshot,
+                    "legacy supersession target recovery",
+                )?;
                 canonical.work_items.push(snapshot);
                 changed = true;
             }
@@ -1449,6 +1461,11 @@ fn merge_committed_legacy_worktree_events_locked(
             false,
         )?;
         if let Some(snapshot) = seed_snapshot {
+            validate_legacy_reconciliation_snapshot_insert(
+                &canonical,
+                &snapshot,
+                "legacy external Workspace target recovery",
+            )?;
             canonical.work_items.push(snapshot);
             changed = true;
         }
@@ -1579,6 +1596,101 @@ fn validate_legacy_reconciliation_snapshot_target(
                 "legacy external Workspace migration event {} conflicts with target Work {} in {source}",
                 event.id, target.id
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Importing a whole snapshot also imports its historical event identities and
+/// authoritative Session refs, beyond the one event being reconciled.
+fn validate_legacy_reconciliation_snapshot_insert(
+    canonical: &WorkItemsProjection,
+    snapshot: &WorkItem,
+    context: &str,
+) -> Result<()> {
+    for event in &snapshot.events {
+        unique_legacy_reconciliation_event(canonical, event, context)?;
+    }
+    if snapshot.agents.iter().any(|agent| {
+        canonical.work_items.iter().any(|other| {
+            other.id != snapshot.id
+                && other
+                    .agents
+                    .iter()
+                    .any(|existing| existing.session_id == agent.session_id)
+        })
+    }) {
+        return Err(GwtError::Other(format!(
+            "{context} Session is attached to multiple Works"
+        )));
+    }
+    Ok(())
+}
+
+/// Fresh activation emits parent-to-child structural audits and Start at the
+/// same instant. Receipts retain no event order, so recover that order from the
+/// existing canonical lineage selector rather than UUIDs or source row order.
+fn order_legacy_supersession_candidates(
+    candidates: &mut [WorkEvent],
+    source: &WorkItemsProjection,
+    work_event_root: &Path,
+) -> Result<()> {
+    let mut ordered_scopes = HashSet::new();
+    for audit in candidates
+        .iter()
+        .filter(|event| event.is_successor_supersession())
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let Some(container) = audit.execution_container.as_ref() else {
+            continue;
+        };
+        let Some(scope) = canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        ) else {
+            continue;
+        };
+        if !ordered_scopes.insert((audit.updated_at, scope.clone())) {
+            continue;
+        }
+        let mut ancestry = Vec::new();
+        current_canonical_work_item(source, work_event_root, &scope, None, Some(&mut ancestry))?;
+        validate_legacy_successor_edges(source, &ancestry, "legacy supersession event order")?;
+        let mut ordered = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.updated_at == audit.updated_at
+                    && (event.is_successor_supersession() || event.kind == WorkEventKind::Start)
+                    && event.execution_container.as_ref().is_some_and(|container| {
+                        canonical_work_id(
+                            work_event_root,
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                        )
+                        .as_deref()
+                            == Some(scope.as_str())
+                    })
+            })
+            .filter_map(|(index, event)| {
+                ancestry
+                    .iter()
+                    .position(|(child, parent)| {
+                        child == &event.work_item_id
+                            && event.related_work_item_id.as_deref() == Some(parent.as_str())
+                    })
+                    .map(|rank| (index, rank, event.clone()))
+            })
+            .collect::<Vec<_>>();
+        let indices = ordered
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, rank, _)| *rank);
+        for (index, (_, _, event)) in indices.into_iter().zip(ordered) {
+            candidates[index] = event;
         }
     }
     Ok(())
@@ -1737,7 +1849,7 @@ fn materialize_legacy_supersession_ancestors(
     source_prefix
         .work_items
         .retain(|item| item.id != event.work_item_id);
-    let mut source_edges = BTreeMap::new();
+    let mut source_edges = Vec::new();
     let selected = current_canonical_work_item(
         &source_prefix,
         work_event_root,
@@ -1745,14 +1857,15 @@ fn materialize_legacy_supersession_ancestors(
         None,
         Some(&mut source_edges),
     )?;
-    if !selected.is_some_and(|item| item.id == parent) && !source_edges.contains_key(parent) {
+    if !selected.is_some_and(|item| item.id == parent)
+        && !source_edges.iter().any(|(child, _)| child == parent)
+    {
         return Err(invalid());
     }
     validate_legacy_successor_edges(&source_prefix, &source_edges, context)?;
     let ids = source_edges
-        .keys()
-        .chain(source_edges.values())
-        .map(String::as_str)
+        .iter()
+        .flat_map(|(child, parent)| [child.as_str(), parent.as_str()])
         .chain(std::iter::once(parent))
         .collect::<std::collections::BTreeSet<_>>();
     let mut merged = canonical.clone();
@@ -1801,11 +1914,12 @@ fn materialize_legacy_supersession_ancestors(
             }
         }
         if existing.is_none() {
+            validate_legacy_reconciliation_snapshot_insert(&merged, snapshot, context)?;
             merged.work_items.push(snapshot.clone());
             changed = true;
         }
     }
-    let mut merged_edges = BTreeMap::new();
+    let mut merged_edges = Vec::new();
     let selected = current_canonical_work_item(
         &merged,
         work_event_root,
@@ -1814,15 +1928,13 @@ fn materialize_legacy_supersession_ancestors(
         Some(&mut merged_edges),
     )?;
     if !selected.is_some_and(|item| item.id == parent)
-        && !merged_edges.contains_key(parent)
-        && !merged_edges.values().any(|id| id == parent)
+        && !merged_edges
+            .iter()
+            .any(|(child, ancestor)| child == parent || ancestor == parent)
     {
         return Err(invalid());
     }
-    if source_edges
-        .iter()
-        .any(|(child, parent)| merged_edges.get(child) != Some(parent))
-    {
+    if source_edges.iter().any(|edge| !merged_edges.contains(edge)) {
         return Err(invalid());
     }
     validate_legacy_successor_edges(&merged, &source_edges, context)?;
@@ -1973,7 +2085,7 @@ fn validate_legacy_reconciliation_authority_uniqueness(
     worktree_identity: &Path,
     context: &str,
 ) -> Result<()> {
-    let mut ancestry = BTreeMap::new();
+    let mut ancestry = Vec::new();
     let target = unique_legacy_reconciliation_target(work_items, target_work_id, context)?;
     let current = canonical_work_id(
         worktree_identity,
@@ -1991,7 +2103,7 @@ fn validate_legacy_reconciliation_authority_uniqueness(
         .ok()
         .flatten()
     });
-    let audited = ancestry.keys().any(|id| {
+    let audited = ancestry.iter().any(|(id, _)| {
         work_items
             .work_items
             .iter()
@@ -2002,7 +2114,7 @@ fn validate_legacy_reconciliation_authority_uniqueness(
         validate_legacy_successor_edges(work_items, &ancestry, context)?;
         let mut competing = work_items.clone();
         competing.work_items.retain(|item| {
-            !ancestry.values().any(|parent| parent == &item.id)
+            !ancestry.iter().any(|(_, parent)| parent == &item.id)
                 || item
                     .agents
                     .iter()
@@ -2024,7 +2136,7 @@ fn validate_legacy_reconciliation_authority_uniqueness(
 
 fn validate_legacy_successor_edges(
     work_items: &WorkItemsProjection,
-    ancestry: &BTreeMap<String, String>,
+    ancestry: &[(String, String)],
     context: &str,
 ) -> Result<()> {
     for (child, parent) in ancestry {
@@ -7344,7 +7456,7 @@ fn current_canonical_work_item<'a>(
     project_root: &Path,
     canonical_id: &str,
     launch_owner: Option<&str>,
-    mut ancestry: Option<&mut BTreeMap<String, String>>,
+    mut ancestry: Option<&mut Vec<(String, String)>>,
 ) -> Result<Option<&'a WorkItem>> {
     let Some(mut current) = projection
         .work_items
@@ -7462,7 +7574,7 @@ fn current_canonical_work_item<'a>(
             break;
         }
         if let Some(ancestry) = ancestry.as_mut() {
-            ancestry.insert(successor.id.clone(), current.id.clone());
+            ancestry.push((successor.id.clone(), current.id.clone()));
         }
         current = successor;
         if launch_owner.is_some() || successor.owner.is_some() || owner_anchor.is_none() {
