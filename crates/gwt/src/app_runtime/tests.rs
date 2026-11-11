@@ -7876,6 +7876,7 @@ fn owner_monitor_fresh_fixture(
         delivery,
         prepty_failure,
         gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
     )
 }
 
@@ -7885,6 +7886,7 @@ fn owner_monitor_fresh_fixture_with_control_budget(
     delivery: bool,
     prepty_failure: bool,
     control_budget: Duration,
+    configure: impl FnOnce(&mut gwt_agent::LaunchConfig),
 ) -> OwnerFreshLaunchFixture {
     let (root, owner, delivery_id) = owner_monitor_fixture_with_prefs(
         temp,
@@ -7927,10 +7929,13 @@ fn owner_monitor_fresh_fixture_with_control_budget(
                 .unwrap();
         }
         let mut command = owner_fresh_agent_command(&owner, &repo, choice, None);
-        let gwt::project_runtime::events::OwnerCommand::LaunchAgent { metadata, .. } = &mut command
+        let gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            config, metadata, ..
+        } = &mut command
         else {
             unreachable!()
         };
+        configure(config);
         let mut feedback = issue_monitor_feedback(2359);
         feedback.issue_monitor_delivery_id = delivery_id;
         feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);

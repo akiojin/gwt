@@ -16,6 +16,8 @@
 //! second liveness definition.
 
 mod ancestry;
+#[cfg(unix)]
+pub(crate) mod verification_source;
 pub mod windows_recovery;
 
 fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
@@ -184,7 +186,8 @@ pub fn is_descendant_of(pid: u32, ancestor: u32) -> Result<bool, sysinfo::Error>
 }
 
 /// Runtime callers include the exact process, ordinary descendants, and a
-/// Windows recovery worker positively linked by its original caller's Job.
+/// Windows recovery worker linked by its caller's Job, or a daemon verification
+/// command authenticated by its original caller's local broker.
 pub fn is_runtime_descendant_of(pid: u32, ancestor: u32) -> bool {
     checked_runtime_descendant_of(pid, ancestor, windows_recovery::capture_source())
         .unwrap_or(false)
@@ -202,6 +205,10 @@ pub fn checked_runtime_descendant_of(
     }
     if pid == ancestor || is_descendant_of(pid, ancestor).map_err(std::io::Error::other)? {
         return Ok(true);
+    }
+    #[cfg(unix)]
+    if let Some(source) = verification_source::capture_source() {
+        return verification_source::checked_descendant_of(pid, ancestor, source);
     }
     match source {
         Some(source) => windows_recovery::checked_recovered_descendant_of(pid, ancestor, source),
