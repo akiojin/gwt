@@ -9682,7 +9682,27 @@ impl AppRuntime {
             idle_kind,
             "closing an idle agent window released by Issues daemon"
         );
-        self.close_window_after_issue_monitor_finalize_events(window_id)
+        // Issue #7035 AC-2: with a native project owner connected, the daemon's
+        // canvas names panes in the owner namespace, not by their GUI alias.
+        let alias = if self.window_lookup.contains_key(window_id) {
+            Some(window_id.to_string())
+        } else {
+            self.runtimes
+                .iter()
+                .find(|(_, runtime)| runtime.owner_pane_id == window_id)
+                .map(|(alias, _)| alias.clone())
+        };
+        let Some(alias) = alias else {
+            tracing::warn!(
+                target: "gwt.pane.teardown",
+                window_id,
+                ?issue_number,
+                idle_kind,
+                "Issues daemon idle close names no window known to this GUI"
+            );
+            return Vec::new();
+        };
+        self.close_window_after_issue_monitor_finalize_events(&alias)
     }
 
     fn issue_monitor_snapshot_events_for(

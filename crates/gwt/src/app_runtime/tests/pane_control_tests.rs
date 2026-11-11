@@ -1978,6 +1978,53 @@ fn close_finalizer_falls_back_when_blocking_spawner_fails() {
     }
 }
 
+/// Issue #7035 AC-2: the daemon names panes in the owner namespace
+/// (`{project_key}::project-pane-…`). Its idle close must resolve the GUI
+/// alias and tear the pane down instead of silently no-op'ing.
+#[test]
+fn daemon_idle_close_by_owner_pane_id_closes_the_gui_alias() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-1",
+        project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let window_id = "tab-project::agent-1".to_string();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let owner_pane_id = runtime.runtimes[&window_id].owner_pane_id.clone();
+    assert_ne!(
+        owner_pane_id, window_id,
+        "fixture must separate the namespaces"
+    );
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
+
+    assert!(!runtime
+        .issue_monitor_idle_pane_close_events(
+            &owner_pane_id,
+            Some(2970),
+            "review_verdict_published"
+        )
+        .is_empty());
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while pty.try_wait().expect("probe child").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "an owner-namespace idle close must reap the review PTY"
+        );
+        // test-hygiene: allow-short-duration bounded OS child-exit polling; the detached child has no exit notification in this fixture
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn close_finalizer_queues_on_process_worker_when_both_schedulers_fail() {
     let temp = tempdir().expect("tempdir");
