@@ -12352,6 +12352,7 @@ mod tests {
         );
         let mut completion = loop {
             match receiver
+                // test-hygiene: allow-wall-clock-deadline Hang guard for the real dispatch completion, not an elapsed-time assertion.
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap()
             {
