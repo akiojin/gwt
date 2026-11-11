@@ -1281,6 +1281,8 @@ pub fn pm_status_from_launch_prefs(
         configured_agent_id: configured.agent_id,
         configured_model: configured.model,
         configured_reasoning: configured.reasoning,
+        configured_codex_speed: configured.codex_speed,
+        configured_fast_mode: configured.fast_mode,
         running_agent_id: running_profile
             .as_ref()
             .map(|profile| profile.agent_id.clone()),
@@ -1308,11 +1310,15 @@ fn pm_running_profile_at(sessions_dir: &Path, registration: &PmRegistration) -> 
     let session_path = sessions_dir.join(format!("{}.toml", registration.session_id));
     gwt_agent::Session::load(&session_path)
         .map(|session| {
+            let codex_speed = Some(session.codex_speed());
+            let fast_mode = Some(session.fast_mode_enabled());
             PmLaunchProfile {
                 agent_id: session.agent_id.command().to_string(),
                 model: session.model,
                 reasoning: session.reasoning_level,
                 version: session.tool_version,
+                codex_speed,
+                fast_mode,
             }
             .normalized()
         })

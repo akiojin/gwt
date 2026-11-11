@@ -2902,6 +2902,7 @@ fn issue6682_owner_status_is_shared_with_hub_when_gui_inventory_lags() {
         1,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3178,6 +3179,7 @@ fn issue6682_unconfirmed_stop_retains_views_and_reconciliation_intent() {
         1,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3689,6 +3691,7 @@ fn issue6682_owner_health_failure_keeps_cached_running_work_unknown() {
         1,
         Some(identity),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3705,6 +3708,7 @@ fn issue6682_owner_health_failure_keeps_cached_running_work_unknown() {
         2,
         None,
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Degraded,
             detail: Some("owner connection lost".into()),
@@ -3754,6 +3758,7 @@ fn issue6682_continued_work_stays_observed_running_after_last_view_detaches() {
         1,
         Some(identity),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3876,6 +3881,7 @@ fn issue6682_reopened_running_work_becomes_selection_pending_on_raw_detach() {
         1,
         Some(identity),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,

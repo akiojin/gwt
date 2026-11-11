@@ -62,10 +62,13 @@ the generic matrix in this skill. The matrix here is the fallback frame.
 
 | Mode | When to use | Scope |
 |---|---|---|
-| `--mode quick` (default) | TDD loop, narrow check during implementation | Only surfaces touched by uncommitted / working-tree changes; the narrowest representative command per runner (e.g. single-package test invocation). Skip heavy integration / E2E / visual unless the diff explicitly touches them. |
-| `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation ([references/surface-taxonomy.md](surface-taxonomy.md)). A human handoff is required only on explicit owner request (see below). |
+| `--mode full` (default) | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation ([references/surface-taxonomy.md](surface-taxonomy.md)). A human handoff is required only on explicit owner request (see below). |
 | `--mode pre-pr` | gwt-manage-pr before PR create / update | Use the approved CI-backed local subset when the project supports it; otherwise use the `full` matrix. Keep acceptance tests, checks absent from required CI, and all existing automated visual gates plus explicitly requested human checks. |
 | `--headed` (flag) | Manual UI / design verification | When supplied alongside any mode that runs a browser-based test runner (Playwright / Cypress / Selenium / WinAppDriver / Unity Editor headed), launch the runner in headed mode so the user can watch. Default is headless to match CI. |
+
+For narrow TDD checks, run the relevant test command directly. Canonical
+`verify.plan` accepts only `full` (the default) and `pre-pr`; register and run
+the complete selected matrix before delivery.
 
 Additional flag:
 

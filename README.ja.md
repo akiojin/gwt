@@ -119,9 +119,12 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 未作成なら新たに作成しません。
 
 組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
-更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
-Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
-Issues のプロファイルと直接の Session Resume は従来の設定を維持します。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略します。
+Agent Settings でモデル・推論レベル・速度の既定値を保存できます。Codex は Off / Fast / Ultrafast、
+Claude Code は専用の Fast トグルを使い、Monitor と PM の起動プロファイルでも指定できます。
+Codex の旧 Fast bool 設定は実効 Off を維持し、明示的な速度選択でのみ Fast / Ultrafast が有効になります。
+Ultrafast には対応モデルと対象契約・workspace 権限が必要です。非対応の tier が省略される場合は
+Codex の警告が端末に表示されます。[Codex の速度要件](https://learn.chatgpt.com/docs/agent-configuration/speed)も参照してください。
 
 ## 前提
 
@@ -561,6 +564,14 @@ managed hook とプロジェクト runtime の委譲は `gwtd` を使います�
 daemon を強制終了しません。明示的な JSON `daemon.start` は停止するまで常駐し、
 既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
 endpoint を確認できます。
+
+owner のヘルスチェックが連続してタイムアウトすると、通常の接続障害とは区別して
+**Wedged** と表示します。GWT はスタックサンプル（macOS）、直近の terminal-delivery
+警告、CPU の観測値を `~/.gwt/logs/owner-recovery/<pid>-<id>/` へ自動保存します。
+Project のステータス欄にある **Restart daemon…** から内容を確認して再起動できます。
+診断保存後に SIGTERM を送り、猶予期間内に終了しなければ SIGKILL を送ります。
+同じ daemon が所有する全 agent（他プロジェクトの agent を含む）が停止し、未保存の
+ターミナル作業を失う可能性があります。確認なしで daemon を強制終了することはありません。
 
 Hub の **終了待ちプロジェクト** には既知のプロジェクトの daemon 状態を表示します。
 **再確認** で更新し、**終了を再試行** で失敗した終了処理を再試行できます。対象は

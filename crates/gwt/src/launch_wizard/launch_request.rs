@@ -87,6 +87,8 @@ impl LaunchWizardState {
             .permission_launch_source(self.permission_launch_source())
             .skip_permissions(self.effective_skip_permissions());
 
+        builder = builder.codex_speed(self.codex_speed);
+
         if self.fast_mode_enabled_for_current_agent() {
             builder = builder.fast_mode(true);
         }
@@ -847,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_legacy_fast_mode_is_hidden_and_disabled() {
+    fn claude_explicit_fast_mode_is_visible_and_applied() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -867,17 +869,17 @@ mod tests {
 
         let view = state.view();
         assert_eq!(view.selected_agent_id, "claude");
-        assert!(!view.show_fast_mode);
-        assert!(!view.fast_mode);
+        assert!(view.show_fast_mode);
+        assert!(view.fast_mode);
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "off"));
+            .any(|item| item.label == "Fast mode" && item.value == "on"));
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-        assert!(!config.fast_mode);
-        assert!(!config
+        assert!(config.fast_mode);
+        assert!(config
             .args
             .windows(2)
             .any(|pair| pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")));
