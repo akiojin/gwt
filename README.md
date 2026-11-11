@@ -2114,7 +2114,9 @@ available from the same toolbar.
 The PM window's **Chat** view shows the PM conversation as chat bubbles: your
 messages on the right and PM replies on the left, with PM Markdown (headings,
 lists, tables, and code) formatted. It reads the PM session's own conversation
-record and omits tool calls, hook notes, and automatic prompts. Type a message in
+record and omits tool calls, hook notes, and automatic prompts. When PM sends
+several messages in one turn, only the latest stays open; the earlier ones fold
+into an **N earlier messages** line you can expand. Type a message in
 the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
 line). Your text stays in the box until delivery is confirmed, and the reason is
 shown if it could not be sent. Use **Execution log** to attach images.

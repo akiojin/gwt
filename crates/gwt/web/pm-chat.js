@@ -195,6 +195,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let scrollTop = 0;
   let followTail = true;
   const expandedReports = new Set();
+  const expandedChatGroups = new Set();
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -369,7 +370,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     chatDigest = nextDigest;
     const following = chatLog.scrollHeight - chatLog.clientHeight - chatLog.scrollTop <= 32;
     const messages = conversation?.availability === 'ready' ? conversation.messages : [];
-    chatLog.replaceChildren(...messages.map(message => {
+    const bubbleFor = message => {
       const user = message.role === 'user';
       const bubble = element('article', `pm-chat__bubble pm-chat__bubble--${user ? 'user' : 'assistant'}`);
       bubble.dataset.messageId = message.id;
@@ -377,7 +378,31 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       bubble.setAttribute('aria-label', user ? 'You' : 'PM');
       bubble.append(renderUiContent(document, message.content, 'pm-chat__text'));
       return bubble;
-    }));
+    };
+    // Within one PM turn only the latest PM message stays open; the earlier ones fold
+    // behind a disclosure keyed by the turn's first message. The open state is read from
+    // the DOM at render time because the toggle event fires asynchronously.
+    for (const group of chatLog.querySelectorAll('details.pm-chat__collapsed')) {
+      if (group.open) expandedChatGroups.add(group.dataset.groupKey); else expandedChatGroups.delete(group.dataset.groupKey);
+    }
+    const nodes = [];
+    for (let start = 0; start < messages.length;) {
+      let end = start + 1;
+      if (messages[start].role !== 'user') while (end < messages.length && messages[end].role !== 'user') end += 1;
+      const earlier = messages.slice(start, end - 1);
+      if (earlier.length) {
+        const key = earlier[0].id;
+        const group = element('details', 'pm-chat__collapsed');
+        group.dataset.groupKey = key;
+        group.open = expandedChatGroups.has(key);
+        group.append(element('summary', 'pm-chat__collapsed-summary',
+          `${earlier.length} earlier message${earlier.length === 1 ? '' : 's'}`), ...earlier.map(bubbleFor));
+        nodes.push(group);
+      }
+      nodes.push(bubbleFor(messages[end - 1]));
+      start = end;
+    }
+    chatLog.replaceChildren(...nodes);
     chatNotice.textContent = !conversation ? 'Loading PM conversation…'
       : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
@@ -564,6 +589,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     taskList.replaceChildren();
     tasksDigest = '';
     chatDigest = undefined;
+    expandedChatGroups.clear();
     chatLog.replaceChildren();
     draft.value = '';
     renderComposer(null);
