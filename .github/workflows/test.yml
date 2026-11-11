@@ -1164,7 +1164,6 @@ jobs:
         run: |
           bash scripts/check-frontend-build.sh
           node --test crates/gwt/web-react/__tests__/use-store-selector.test.mjs scripts/check-frontend-build.test.mjs
-          node --experimental-loader ./crates/gwt/web-react/__tests__/jsx-loader.mjs --test crates/gwt/web-react/__tests__/task-home.test.mjs
         timeout-minutes: 5
       - name: Run frontend unit tests
         env:
