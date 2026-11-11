@@ -3810,8 +3810,17 @@ pub fn try_fetch_open_pr_numbers_by_branch_for_monitor(
 
 fn try_fetch_open_pr_numbers_by_branch_with<F>(
     repo_path: &Path,
-    mut run_gh: F,
+    run_gh: F,
 ) -> Result<std::collections::HashMap<String, u64>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    Ok(open_pr_numbers_by_branch(&try_fetch_open_pr_rows_with(
+        repo_path, run_gh,
+    )?))
+}
+
+fn try_fetch_open_pr_rows_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<serde_json::Value>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
@@ -3827,7 +3836,7 @@ where
         }
     })
     .map_err(|error| GwtError::Git(format!("gh api pulls open inventory: {error}")))?;
-    Ok(open_pr_numbers_by_branch(&pages.rows))
+    Ok(pages.rows)
 }
 
 fn open_pr_numbers_by_branch(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
@@ -3873,6 +3882,23 @@ pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
 /// Checked variant used by deadline-integral scans.
 pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+/// Discovery for a held review reuses the same open-pulls pages as the
+/// Monitor inventory. Explicit scans stay live. Actual review dispatch must
+/// still use [`try_fetch_pr_head_sha`] rather than this bounded discovery.
+pub fn try_fetch_pr_head_sha_for_monitor(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    if crate::gh_rest::monitor_read_max_age_secs().is_none() {
+        return try_fetch_pr_head_sha(repo_path, number);
+    }
+    let rows = try_fetch_open_pr_rows_with(repo_path, run_cached_list_command)?;
+    Ok(rows
+        .iter()
+        .find(|row| row.get("number").and_then(serde_json::Value::as_u64) == Some(number))
+        .and_then(|row| row.pointer("/head/sha"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string))
 }
 
 /// Fresh lifecycle evidence for Issues' launch decision, without
