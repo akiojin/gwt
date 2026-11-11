@@ -294,6 +294,10 @@ pub enum OwnerCommand {
         id: String,
         incarnation: u64,
     },
+    Stop {
+        id: String,
+        incarnation: u64,
+    },
 }
 
 /// Read-only screen captured after the exact runtime's output reader joined.
@@ -386,6 +390,8 @@ pub enum OwnerEvent {
         id: String,
         incarnation: u64,
         error: Option<String>,
+        #[serde(default)]
+        explicit_stop: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_screen: Option<OwnerFinalScreen>,
     },

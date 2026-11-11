@@ -354,6 +354,7 @@ pub(crate) struct AgentPrepared {
 #[derive(Clone, Copy)]
 pub(crate) enum CloseCause {
     ExplicitClose,
+    ExplicitStop,
     NaturalExit,
     DiagnosticExit,
     PmGenericCrash,
@@ -362,7 +363,9 @@ pub(crate) enum CloseCause {
 impl CloseCause {
     fn restore_policy(self) -> Option<bool> {
         match self {
-            Self::ExplicitClose | Self::NaturalExit | Self::DiagnosticExit => Some(false),
+            Self::ExplicitClose | Self::ExplicitStop | Self::NaturalExit | Self::DiagnosticExit => {
+                Some(false)
+            }
             Self::PmGenericCrash | Self::GuiLifetime => None,
         }
     }
@@ -622,6 +625,12 @@ pub(crate) enum OwnerMessage {
         runtime: Box<WindowRuntime>,
         cause: CloseCause,
         result: Result<(), String>,
+    },
+    CloseAfterStop {
+        id: String,
+        incarnation: u64,
+        result: OwnerReply,
+        reply: oneshot::Sender<OwnerReply>,
     },
     Retired {
         id: String,
@@ -1763,6 +1772,7 @@ impl OwnerState {
                             request.command,
                             OwnerCommand::Health
                                 | OwnerCommand::Close { .. }
+                                | OwnerCommand::Stop { .. }
                                 | OwnerCommand::PendingCancelExact { .. }
                         ) =>
                 {
@@ -1844,11 +1854,20 @@ impl OwnerState {
                         }
                     }
                     if result.is_ok() {
-                        if let Retirement::SwitchStoppedWindow { proof, .. } = &captured {
+                        let removed_session = match &captured {
+                            Retirement::SwitchStoppedWindow { proof, .. } => {
+                                Some(proof.session_id.clone())
+                            }
+                            Retirement::StoppedWindow(capture) if capture.expected.is_none() => {
+                                capture.cleanup.expected_session_id.clone()
+                            }
+                            _ => None,
+                        };
+                        if let Some(session_id) = removed_session {
                             let _ = self.events.send(OwnerEvent::WindowRemoved {
                                 id: id.clone(),
                                 incarnation,
-                                session_id: Some(proof.session_id.clone()),
+                                session_id: Some(session_id),
                             });
                         }
                     }
@@ -1895,6 +1914,28 @@ impl OwnerState {
                     cause,
                     result,
                 } => self.closed(id, incarnation, runtime, cause, result),
+                OwnerMessage::CloseAfterStop {
+                    id,
+                    incarnation,
+                    result,
+                    reply,
+                } => {
+                    self.input_jobs = self.input_jobs.saturating_sub(1);
+                    if result
+                        .as_ref()
+                        .is_ok_and(|receipt| receipt["explicit_stop"] == true)
+                    {
+                        self.request(
+                            OwnerRequest {
+                                project_key: self.project_key.clone(),
+                                command: OwnerCommand::Close { id, incarnation },
+                            },
+                            reply,
+                        );
+                    } else {
+                        let _ = reply.send(result);
+                    }
+                }
                 OwnerMessage::ExitDrained {
                     id,
                     incarnation,
@@ -3218,6 +3259,7 @@ impl OwnerState {
                 | OwnerCommand::RestoreSavedSession { .. }
                 | OwnerCommand::ContinueWork { .. }
                 | OwnerCommand::Close { .. }
+                | OwnerCommand::Stop { .. }
                 | OwnerCommand::CloseStoppedSession { .. }
         ) {
             let issues = match &request.command {
@@ -3580,6 +3622,7 @@ impl OwnerState {
             }
             return;
         }
+        let explicit_stop = matches!(&request.command, OwnerCommand::Stop { .. });
         let result = match request.command {
             OwnerCommand::PromoteStandalone => {
                 self.gui_presence.promote();
@@ -3611,16 +3654,39 @@ impl OwnerState {
                 "reconciliation":self.retirements.keys().map(|(id,incarnation)| json!({"id":id,"incarnation":incarnation})).collect::<Vec<_>>(),
             })),
 
-            OwnerCommand::Close { id, incarnation } => {
+            OwnerCommand::Close { id, incarnation } | OwnerCommand::Stop { id, incarnation } => {
                 if self
                     .closing
                     .get(&id)
                     .is_some_and(|closing| closing.incarnation == incarnation)
                 {
-                    self.close_replies
-                        .entry((id, incarnation))
-                        .or_default()
-                        .push(reply);
+                    if explicit_stop {
+                        self.close_replies
+                            .entry((id, incarnation))
+                            .or_default()
+                            .push(reply);
+                    } else {
+                        // Close must still remove the row when a preceding STOP
+                        // is currently draining the same physical incarnation.
+                        let (completed, receive) = oneshot::channel();
+                        self.close_replies
+                            .entry((id.clone(), incarnation))
+                            .or_default()
+                            .push(completed);
+                        let sender = self.sender.clone();
+                        self.input_jobs += 1;
+                        spawn_owner_worker(move || {
+                            let result = receive.blocking_recv().unwrap_or_else(|_| {
+                                Err("owner stopped before close acknowledgement".into())
+                            });
+                            let _ = sender.send(OwnerMessage::CloseAfterStop {
+                                id,
+                                incarnation,
+                                result,
+                                reply,
+                            });
+                        });
+                    }
                     return;
                 }
                 if let Some(captured) = self
@@ -3644,10 +3710,27 @@ impl OwnerState {
                     .get(&id)
                     .is_some_and(|runtime| runtime.incarnation == incarnation)
                 {
+                    if !explicit_stop {
+                        if let Some(capture) = self.stopped_window_close_capture(&id, incarnation) {
+                            self.start_retirement(
+                                id,
+                                incarnation,
+                                Retirement::StoppedWindow(Box::new(capture)),
+                                Some(reply),
+                                None,
+                            );
+                            return;
+                        }
+                    }
                     Err("pane incarnation mismatch".into())
                 } else {
                     let runtime = self.runtimes.remove(&id).expect("validated exact pane");
-                    self.start_close(id, runtime, CloseCause::ExplicitClose, reply);
+                    let cause = if explicit_stop {
+                        CloseCause::ExplicitStop
+                    } else {
+                        CloseCause::ExplicitClose
+                    };
+                    self.start_close(id, runtime, cause, reply);
                     return;
                 }
             }
@@ -7457,6 +7540,7 @@ impl OwnerState {
                 id: id.clone(),
                 incarnation,
                 error: result.as_ref().err().cloned(),
+                explicit_stop: matches!(cause, CloseCause::ExplicitStop),
                 final_screen,
             });
             if result.is_err() {
@@ -7469,7 +7553,20 @@ impl OwnerState {
             } else {
                 self.retirements.remove(&(id.clone(), incarnation));
             }
-            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle}))
+            if result.is_ok() && matches!(cause, CloseCause::ExplicitStop) {
+                for operation in self
+                    .agent_operations
+                    .values_mut()
+                    .filter(|operation| operation.id == id && operation.incarnation == incarnation)
+                {
+                    if let Some(Ok(receipt)) = operation.result.as_mut() {
+                        receipt["closed"] = json!(true);
+                        receipt["explicit_stop"] = json!(true);
+                        receipt["status"] = json!(crate::WindowProcessStatus::Stopped);
+                    }
+                }
+            }
+            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle,"explicit_stop":matches!(cause, CloseCause::ExplicitStop)}))
         };
         for reply in self
             .close_replies
@@ -8942,6 +9039,64 @@ impl OwnerState {
             let _ = sender.send(OwnerMessage::OwnerLayoutCommitted { result, reply });
         });
     }
+    fn stopped_window_close_capture(
+        &self,
+        id: &str,
+        incarnation: u64,
+    ) -> Option<super::agent_dispatch::StoppedWindowRetirement> {
+        if self.runtimes.contains_key(id)
+            || self.pending.contains_key(id)
+            || self.closing.contains_key(id)
+            || self
+                .retirements
+                .keys()
+                .any(|(candidate, _)| candidate == id)
+            || self
+                .agent_operations
+                .values()
+                .any(|operation| operation.id == id && operation.incarnation > incarnation)
+        {
+            return None;
+        }
+        let operation = self.agent_operations.values().find(|operation| {
+            operation.id == id
+                && operation.incarnation == incarnation
+                && !operation.current.load(Ordering::Acquire)
+                && operation.result.as_ref().is_some_and(|result| {
+                    result.as_ref().is_ok_and(|receipt| {
+                        receipt["closed"] == true && receipt["explicit_stop"] == true
+                    })
+                })
+        })?;
+        let session_id = operation.session_id.as_ref()?;
+        let raw = id.strip_prefix(&format!("{}::", self.project_key))?;
+        let row = self
+            .registry_projection
+            .windows
+            .iter()
+            .find(|row| row.id == raw)?;
+        if row.session_id.as_ref() != Some(session_id)
+            || row.status != crate::WindowProcessStatus::Stopped
+            || row.persist
+        {
+            return None;
+        }
+        Some(super::agent_dispatch::StoppedWindowRetirement {
+            sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+            // The exact successful STOP already committed Session/Work and
+            // reaped its tree. This retirement removes only that retained row.
+            expected: None,
+            cleanup: super::agent_dispatch::OwnedWindowRecordCleanup {
+                registry: self.agent_registry.as_ref().ok()?.clone(),
+                registry_path: crate::persistence::workspace_state_path(&self.root),
+                root: self.root.clone(),
+                project_key: self.project_key.clone(),
+                canonical_id: id.into(),
+                expected_session_id: Some(session_id.clone()),
+            },
+        })
+    }
+
     fn close_stopped_owner_session(
         &mut self,
         session_id: String,
@@ -11748,7 +11903,12 @@ pub(crate) fn close_runtime(
             .join()
             .map_err(|_| "status worker panicked".to_string())?;
     }
-    if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
+    if matches!(cause, CloseCause::ExplicitStop) {
+        if let Some(cleanup) = runtime.registry_cleanup.as_ref() {
+            cleanup.retain_stopped()?;
+            runtime.registry_cleanup = None;
+        }
+    } else if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
         if let Some(cleanup) = runtime.registry_cleanup.as_ref() {
             cleanup.finish()?;
             runtime.registry_cleanup = None;
@@ -11891,7 +12051,7 @@ pub(crate) fn close_runtime(
     if let Some(agent) = runtime.agent.as_ref() {
         let pm_cause = match cause {
             CloseCause::PmGenericCrash => super::pm_delivery::PmLifecycleCause::Crash,
-            CloseCause::ExplicitClose | CloseCause::NaturalExit => {
+            CloseCause::ExplicitClose | CloseCause::ExplicitStop | CloseCause::NaturalExit => {
                 super::pm_delivery::PmLifecycleCause::Deregister
             }
             CloseCause::DiagnosticExit

@@ -190,6 +190,101 @@ test.describe("Issue #6767 final quota output (isolated checkout)", () => {
   });
 });
 
+test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
+  test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  test("keeps the stopped transcript until app restart without restoring the agent", async ({ page }, info) => {
+    test.setTimeout(240_000);
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (/^https?:$/.test(location.protocol)) localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const sessionId = launch.gwt_session_id!;
+      const pane = await liveCodexWindow(page, sessionId);
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
+      const transcript = page.locator(".xterm-screen:visible");
+      await expect(transcript).toBeVisible();
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pane.id, data: "GWT_FIXTURE_PING\r" });
+      await expect.poll(async () => (await transcript.innerText()).split("GWT_FAKE_PROVIDER_READY").length,
+        { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toHaveCount(0);
+
+      await sendLiveGwtEvent(page, { kind: "stop_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).find(entry => entry.id === pane.id),
+        { timeout: 60_000 }).toMatchObject({ session_id: sessionId, status: "stopped" });
+      await expect(transcript).toContainText(`GWT_FAKE_PROVIDER_READY ${launch.provider_session_id}`);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toHaveCount(0);
+      await expect(page.locator(".works-full-meta")).toContainText("Stopped");
+      await expect.poll(() => sessionRecord(fixture.home, sessionId), { timeout: 30_000 })
+        .toMatch(/^restore_window_on_startup\s*=\s*false/m);
+      expect(tomlString(await sessionRecord(fixture.home, sessionId), "status")).toBe("Stopped");
+      await attachScreenshot(page, info, `stopped-transcript-${theme}`);
+
+      // Repeated STOP is harmless and cannot remove the retained window.
+      await sendLiveGwtEvent(page, { kind: "stop_window", id: pane.id });
+      await expect(transcript).toContainText("GWT_FAKE_PROVIDER_READY");
+      await page.goto("about:blank");
+      await fixture.restart({ coldOwnerDrain: true });
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      // An absent initial snapshot must not look like an empty restored workspace.
+      await expect.poll(() => page.evaluate(() => {
+        const messages = (window as any).__gwtPlaywrightMessages ?? [];
+        const project = location.pathname.split("/")[2];
+        const state = messages.findLast((entry: any) => entry.payload.kind === "workspace_state");
+        const activity = messages.map(({ payload }: any) => payload.kind === "local_agent_activity"
+          ? payload.activity : payload.projection?.local_agent_activity)
+          .findLast((snapshot: any) => snapshot?.project_key === project && snapshot.host_id);
+        return state?.payload.workspace.tabs?.some((tab: any) => tab.project_key === project)
+          && activity?.agents?.length === 0;
+      }), { timeout: 60_000, message: "cold owner hydrated the workspace and live census" }).toBe(true);
+      await expect.poll(() => codexWindows(page)).toEqual([]);
+      expect(await fixture.launches()).toHaveLength(1);
+      expect(await sessionRecord(fixture.home, sessionId)).not.toBe("");
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await attachScreenshot(page, info, `stopped-not-restored-${theme}`);
+      expect(errors, "console/page errors across STOP retention and cold restart").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+  test("explicit Close removes a previously stopped agent", async ({ page }, info) => {
+    test.setTimeout(180_000);
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (/^https?:$/.test(location.protocol)) localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const sessionId = (await fixture.launches())[0].gwt_session_id!;
+      const pane = await liveCodexWindow(page, sessionId);
+      await sendLiveGwtEvent(page, { kind: "stop_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).find(entry => entry.id === pane.id),
+        { timeout: 60_000 }).toMatchObject({ status: "stopped" });
+      await sendLiveGwtEvent(page, { kind: "close_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).some(entry => entry.id === pane.id)).toBe(false);
+      await attachScreenshot(page, info, `stopped-closed-${theme}`);
+      expect(errors, "console/page errors across STOP then Close").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+});
+
 test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // The fixture spawns this checkout's target/debug/gwt, which the embedded
   // CI Playwright job does not build.
