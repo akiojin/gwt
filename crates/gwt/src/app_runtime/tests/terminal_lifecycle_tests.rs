@@ -3030,6 +3030,8 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
 
 #[test]
 fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_scan() {
+    // This verifies successful reconciliation, not elapsed disk I/O time.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     for (case, version) in [env!("CARGO_PKG_VERSION"), "0.1.0"].into_iter().enumerate() {

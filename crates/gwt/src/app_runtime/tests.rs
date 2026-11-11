@@ -1571,11 +1571,13 @@ pub(super) fn owner_fixture_block_on<T: Send>(
 ) -> T {
     let home = gwt_core::test_support::gwt_home_override();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let clock = gwt_core::operation_deadline::ScopedOperationClock::current();
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let _home = home.as_ref().map(ScopedGwtHome::set);
+                let _clock = clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
