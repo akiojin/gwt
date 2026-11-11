@@ -134,12 +134,6 @@ export function createToastStack({
     }
   }
 
-  /**
-   * Render and insert one toast. `notice` = { level, title, message?,
-   * dismissible? (default true) }. Returns the item element, or null when not
-   * mounted. The DOM order (title, dismiss, message) matches the shared CSS
-   * grid (title | dismiss on row 1, message spanning row 2).
-   */
   // Whole-card activation (jump-to-window / jump-to-project / jump-to-entry):
   // the item becomes a keyboard-operable button that runs the handler then
   // dismisses itself — unless the region opted out (history keeps its rows).
@@ -161,6 +155,12 @@ export function createToastStack({
     });
   }
 
+  /**
+   * Render and insert one toast. `notice` = { level, title, message?,
+   * dismissible? (default true) }. Returns the item element, or null when not
+   * mounted. The DOM order (title, dismiss, message) matches the shared CSS
+   * grid (title | dismiss on row 1, message spanning row 2).
+   */
   function push(notice) {
     if (!list) {
       return null;
