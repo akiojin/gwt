@@ -36,6 +36,9 @@ Issues, SPECs, search, and Board context rather than from branch management.
   Missing limits show `—`; cached readings are marked `stale`. Hover for shared
   account limits, reset times, and enabled Usage credits with utilization,
   used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
+  When Codex's subscription quota is full and credits remain, USAGE shows
+  `Using credits` and the balance. The popover shows the observed credits/hour
+  after two readings from the same account; an initial reading has no rate.
 
 ## Install
 
