@@ -2003,7 +2003,7 @@ impl OwnerState {
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            tracing::warn!(%error, window_id = %id, "owner Monitor failure is unconfirmed");
+                            tracing::warn!(%error, window_id = %id, "owner Monitor notification is unconfirmed");
                         }
                     }
                 }
