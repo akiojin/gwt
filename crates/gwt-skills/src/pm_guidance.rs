@@ -2688,6 +2688,8 @@ a quiet queue or a handed-off PR alone does not finish the PM role.
 ## References
 
 Choose the reference for the current action; read only the relevant sections.
+Read references and project memory by absolute path (the file-read tool or
+`cat <absolute path>`); do not `cd` into them.
 
 - At startup or before an authority decision: [Role, boundaries, and user instructions](references/role-and-boundaries.md).
 - For request intake, Issue ownership, queue order, or launches: [Intake and priority](references/intake-and-priority.md).
@@ -2896,6 +2898,10 @@ mod tests {
             assert!(
                 root.contains("## Completion"),
                 "completion must be visible at entry"
+            );
+            assert!(
+                root.contains("do not `cd` into them"),
+                "Issue #6989: references are read by absolute path"
             );
             assert!(
                 root.len() <= 2500,
