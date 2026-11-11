@@ -139,6 +139,30 @@ test.describe('PM reports', () => {
       expect(assistantBox.x).toBeLessThan(chatBox.x + 40);
       expect(userBox.y).toBeLessThan(assistantBox.y);
       expect(await pane.locator('.pm-chat__transcript').textContent()).not.toContain('Ship');
+      // T-CHAT-INPUT: the composer submits through the real host's pane input path.
+      await page.evaluate(() => {
+        const sent: any[] = (window as any).__gwtChatSent = [];
+        for (const socket of (window as any).__gwtPlaywrightSockets as WebSocket[]) {
+          const original = socket.send.bind(socket);
+          socket.send = (data: any) => { const message = JSON.parse(String(data)); if (message.kind === 'pane_send_input') sent.push(message); original(data); };
+        }
+      });
+      const composer = chat.getByRole('form', { name: 'Message PM' });
+      const draft = composer.getByRole('textbox', { name: 'Message to PM' });
+      await expect(composer.getByRole('button', { name: 'Send' })).toBeDisabled();
+      await draft.fill('Plan #3431');
+      await draft.press('Shift+Enter');
+      await draft.pressSequentially('next');
+      await draft.press('Enter');
+      await expect.poll(() => page.evaluate(() => (window as any).__gwtChatSent)).toEqual([
+        { kind: 'pane_send_input', session_id: SESSION, text: 'Plan #3431\nnext\r' }]);
+      // The fixture PM has no live runtime, so the real host refuses and the draft is kept.
+      await expect(composer.locator('.pm-chat__composer-status')).toHaveText(/^Not sent: .+[^.]\. Your message is kept\.$/, { timeout: 30_000 });
+      await expect(draft).toHaveValue('Plan #3431\nnext');
+      await expect(composer.getByRole('button', { name: 'Send' })).toBeEnabled();
+      const composerBox = (await composer.boundingBox())!;
+      expect(composerBox.y + composerBox.height).toBeLessThanOrEqual(chatBox.y + chatBox.height + 1);
+      expect(composerBox.y).toBeGreaterThan(assistantBox.y);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const screenshot = info.outputPath(`chat-view-${theme}.png`);
       await pane.screenshot({ path: screenshot });

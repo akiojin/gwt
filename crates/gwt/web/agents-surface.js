@@ -3,7 +3,7 @@ const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const hours = value => finite(value) ? `${Math.round(value / 3600 * 10) / 10}h` : "—";
 const activityPresentation = state => JSON.stringify([state.count, (state.agents || []).map(agent =>
-  [agent.window_id, agent.session_id, agent.runtime_incarnation, agent.issue_number, agent.is_pm])
+  [agent.window_id, agent.session_id, agent.runtime_incarnation, agent.issue_number, agent.is_pm, agent.review_dispatch, agent.agent_name])
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
@@ -14,7 +14,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
     <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
-    <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
+    <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
   if (executionModel) {
@@ -81,6 +81,25 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     // catalog hydration and whichever project tab is currently selected.
     return (activityModel.read().agents || []).find(assignment => !assignment.is_pm
       && assignment.session_id === member.assignment.session_id) || null;
+  }
+  // Issue #7035 AC-1: review windows hold max_active slots without a roster
+  // member, so they are listed from the same child census Busy reads.
+  const liveReviews = () => (activityModel.read().agents || []).filter(assignment => !assignment.is_pm && assignment.review_dispatch);
+  function renderReviews() {
+    const host = element.querySelector(".roster-reviews"), reviews = liveReviews();
+    host.replaceChildren(...reviews.map(review => {
+      const row = document.createElement("article"); row.className = "roster-row roster-review"; row.setAttribute("role", "listitem");
+      row.dataset.reviewSessionId = review.session_id;
+      const who = document.createElement("div"), name = document.createElement("h3"), purpose = document.createElement("span"), state = document.createElement("span");
+      who.className = "roster-who"; purpose.className = "roster-purpose"; state.className = "roster-state";
+      name.textContent = review.agent_name || "Reviewer";
+      purpose.textContent = review.issue_number ? `Review · Issue #${review.issue_number}` : "Review"; purpose.title = purpose.textContent;
+      state.textContent = `Reviewing${review.issue_number ? ` #${review.issue_number}` : ""}`;
+      who.append(name, purpose); row.append(avatar({ name: name.textContent }), who, state);
+      return row;
+    }));
+    host.hidden = reviews.length === 0;
+    return reviews.length;
   }
   function workTitle(assignment) {
     const app = windowCatalogModel.read().catalog.appState, activity = activityModel.read();
@@ -439,7 +458,8 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
     element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
     const limit = element.querySelector(".roster-capacity-limit"); limit.hidden = !finite(roster.recommended_capacity); limit.style.left = `${(roster.recommended_capacity || 0) / scale * 100}%`;
-    element.querySelector(".roster-capacity-note").textContent = `Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
+    const reviewCount = renderReviews();
+    element.querySelector(".roster-capacity-note").textContent = `Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length + reviewCount)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
     element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || enabledCount <= 1;
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
     const list = element.querySelector(".roster-list"), memberIds = new Set(members.map(member => member.member_id));

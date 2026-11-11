@@ -2128,6 +2128,12 @@ pub struct LocalAgentActivityAgentView {
     pub is_pm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_task: Option<String>,
+    /// Issue #7035 AC-1: an independent review window holds an Issues slot
+    /// without a roster member, so the Agents surface lists it separately.
+    #[serde(default)]
+    pub review_dispatch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

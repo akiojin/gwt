@@ -6239,6 +6239,15 @@ fn record_workspace_pr_metadata_for_execution_at(
                 continue;
             }
             for existing in &item.execution_containers {
+                // Portable event paths have source-root provenance, not reader-CWD
+                // authority. Only an absolute anchor can receive Session metadata.
+                if !existing
+                    .worktree_path
+                    .as_deref()
+                    .is_some_and(Path::is_absolute)
+                {
+                    continue;
+                }
                 if canonical_session_bound_branch(existing.branch.as_deref().unwrap_or_default())
                     == canonical_session_bound_branch(
                         container.branch.as_deref().unwrap_or_default(),
@@ -6253,18 +6262,6 @@ fn record_workspace_pr_metadata_for_execution_at(
             }
         }
         let [(index, existing)] = matches.as_slice() else {
-            if let Some((index, _)) = matches.first() {
-                if matches.iter().all(|(candidate, _)| candidate == index)
-                    && matches.iter().any(|(_, container)| {
-                        container.worktree_path.as_deref() == Some(Path::new("."))
-                    })
-                {
-                    return Err(GwtError::Other(format!(
-                        "PR metadata target Work {} has ambiguous container aliases; inspect workspace.work_repair params.work_id=\"{}\" (dry-run by default; params.dry_run=false applies accepted-source repair)",
-                        projection.work_items[*index].id, projection.work_items[*index].id
-                    )));
-                }
-            }
             return Err(refusal());
         };
         let item = &projection.work_items[*index];

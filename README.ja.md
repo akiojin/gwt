@@ -29,8 +29,9 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
-  有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
+- **Provider usage** — USAGE に Claude の Fable / Opus の週次枠を同時表示します。
+  未提供の枠は `—`、古い取得値は `stale` と表示します。ホバーすると共通の
+  アカウント枠・リセット時刻や、有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
   Claude アカウント枠は Settings → Usage & Limits で有効化してください。
 
 ## インストール
@@ -1929,8 +1930,9 @@ PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲
 
 PM ウィンドウの **Chat** は PM との会話をチャット形式で表示します。自分の発言は右、PM の応答は
 左のバブルに並び、PM の Markdown（見出し・箇条書き・表・コード）を整形します。PM セッション自身の
-会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。現在は閲覧専用のため、
-PM への入力には **Execution log** を使います。
+会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。下部の入力欄から
+PM へテキストを送れます（Enter で送信、Shift+Enter で改行）。届いたことが確認できるまで入力内容は残り、
+送れなかった場合は理由を表示します。画像の添付には **Execution log** を使います。
 
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、

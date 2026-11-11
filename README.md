@@ -32,9 +32,10 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — hover over USAGE for account limits, including Claude's
-  Fable weekly limit and enabled Usage credits with utilization, used/limit,
-  and currency. Enable Claude account usage in Settings → Usage & Limits.
+- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
+  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
+  account limits, reset times, and enabled Usage credits with utilization,
+  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
 
 ## Install
 
@@ -2113,8 +2114,10 @@ available from the same toolbar.
 The PM window's **Chat** view shows the PM conversation as chat bubbles: your
 messages on the right and PM replies on the left, with PM Markdown (headings,
 lists, tables, and code) formatted. It reads the PM session's own conversation
-record and omits tool calls, hook notes, and automatic prompts. It is read-only
-in this release; use **Execution log** to talk with PM.
+record and omits tool calls, hook notes, and automatic prompts. Type a message in
+the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
+line). Your text stays in the box until delivery is confirmed, and the reason is
+shown if it could not be sent. Use **Execution log** to attach images.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from

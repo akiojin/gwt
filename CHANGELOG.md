@@ -1,6 +1,58 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.160.0] - 2026-11-11
+
+### Bug Fixes
+
+- **runtime:** Preserve interrupted state through transient overlays
+- **monitor:** Daemon の idle close を owner pane id から GUI 窓へ解決する
+- **agents:** 実行枠を使うレビュー窓を Agents 画面に表示し Busy に数える
+- **usage:** Usage 非表示時の既存レイアウトを維持
+- **workspace:** 複数ホストの portable alias を実行先の権限から除外
+- **git:** ブランチのマージ判定キャッシュが base ごとの lineage を保持するようにする
+- **issue-monitor:** Retry interrupted bound idle implementations
+- **issue-monitor:** Retire exact exited panes after retry commits
+- **issue-monitor:** Preserve failure publication diagnostics
+- **launch:** Wait for in-flight workspace finalizers
+
+### Features
+
+- **usage:** Claude のモデル別週次使用量を常時表示
+- **ui:** 同一内容の通知を 1 行に集約する
+- **pm:** PM チャットに入力欄を追加し PM へテキストを送れるようにする
+
+### Miscellaneous Tasks
+
+- **work:** RECEIPT-OPCLK の Work 終端イベントを記録する
+- **work:** Record interrupted precedence successor delivery
+- **work:** Reconcile provider usage delivery evidence
+- **work:** Record provider usage scope settlement
+- **work:** PR #6967 の関連付けを記録
+- **work:** Record dependency gate pull request
+- **work:** Record notification aggregation delivery PR
+- **work:** Link issue-6924 regression evidence to PR 7024
+- **work:** Record issue-6924 delivery continuation
+- **work:** Link issue-6924 delivery to PR 7024
+- **work:** Issue #6877 の Work イベントを記録する
+- **work:** Issue #6877 完了世代の Work イベントを記録する
+- **work:** Record #4131 AC-4 resume scenario start
+
+### Testing
+
+- **github:** 送信前の期限失効テストを同値期限で決定化する
+- **monitor:** Idle close 回帰テストの壁時計待機を理由付きで宣言する
+- **ui:** Recovery Center の CSS 検査範囲を限定
+- **usage:** テーマ初期化をアプリ origin に限定
+- **usage:** 通知付きレイアウトを実イベントで検証
+- **ui:** 通知集約 E2E の名称を Issues に揃える
+- **monitor:** Keep expired settings clock through scan commit
+
+### Ci
+
+- **frontend:** Gate dependency licenses and production advisories
+- **frontend:** Allow headroom for the full WebView E2E suite
+
 ## [9.159.0] - 2026-11-11
 
 ### Bug Fixes
