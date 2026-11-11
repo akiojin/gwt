@@ -598,6 +598,15 @@ An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.
 
+Repeated owner health timeouts show **Wedged**, distinct from an ordinary
+connection failure. GWT automatically saves stack samples (on macOS), recent
+terminal-delivery warnings, and CPU observations under
+`~/.gwt/logs/owner-recovery/<pid>-<id>/`. Choose **Restart daemon…** in the
+Project status strip to review and confirm recovery: diagnostics are saved
+before SIGTERM, with SIGKILL after a grace period if needed. Restarting stops
+all agents hosted by that daemon, including agents in other projects; unsaved
+terminal work may be lost. GWT never kills a wedged daemon without confirmation.
+
 The Hub's **終了待ちプロジェクト** section observes daemons for known projects.
 Choose **再確認** to refresh their status. **終了を再試行** retries an exact failed
 shutdown only after verifying that the GUI-managed owner is draining and no GUI

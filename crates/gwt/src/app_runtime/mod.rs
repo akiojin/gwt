@@ -11576,6 +11576,7 @@ impl AppRuntime {
             // These operations target the authenticated project connection.
             FrontendEvent::CreateWindow { .. }
             | FrontendEvent::RetryWorkspaceStateLoad
+            | FrontendEvent::RestartWedgedOwner { .. }
             | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
             | FrontendEvent::RunWorkspaceCleanup { .. }
             | FrontendEvent::CycleFocus { .. }
@@ -12074,6 +12075,49 @@ impl AppRuntime {
                         status: self.project_execution_status(context, operation_id.as_deref()),
                     },
                 )]
+            }
+            FrontendEvent::RestartWedgedOwner {
+                confirmed,
+                recovery_id,
+            } => {
+                let key = context.project_key.to_string();
+                let wedged = self
+                    .project_state(context)
+                    .and_then(|state| state.project_owner_health.as_ref())
+                    .is_some_and(|health| {
+                        health.state == gwt::protocol::ProjectOwnerHealthState::Wedged
+                            && health.recovery_id.as_deref() == Some(recovery_id.as_str())
+                    });
+                if !confirmed || !wedged {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
+                            notification_transition_id: None,
+                            level: "error".into(),
+                            message:
+                                "Owner restart requires confirmation of the current wedged owner"
+                                    .into(),
+                            issue_number: None,
+                        },
+                    )];
+                }
+                let supervisor = self.daemon_supervisor.clone();
+                let root = context.project_root.clone();
+                let proxy = self.proxy.for_project(context.clone());
+                self.blocking_tasks.spawn(move || {
+                    let result = gwt::daemon_subscriber::restart_wedged_owner(&key, confirmed, &recovery_id)
+                        .and_then(|()| supervisor.ensure_running(&root).map(|_| ()));
+                    let (level, message) = match result {
+                        Ok(()) => ("info", "Daemon stopped after saving diagnostics; reconnecting to its replacement".to_string()),
+                        Err(error) => ("error", format!("Daemon restart: {error}")),
+                    };
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(client_id, BackendEvent::IssueMonitorToast {
+                        notification_transition: None, notification_transition_id: None,
+                        level: level.into(), message, issue_number: None,
+                    })]));
+                });
+                Vec::new()
             }
             FrontendEvent::RetryWorkspaceStateLoad => {
                 spawn_workspace_projection_reload(
