@@ -44,13 +44,16 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
 
-test('Tasks is the default PM view and preserves the unfinished filter and stable rows', () => {
+test('Home is the default PM view; Tasks preserves the unfinished filter and stable rows', () => {
   const { root, update, view, model } = fixture({ tasksDefault: true });
   update([report()], null, { request_tasks: taskOverview([
     trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
       wait_reason: 'Waiting for CI', review_required: true }),
     trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
   ]) });
+  assert.ok(root.querySelector('.task-home'), 'a Home surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true, 'Home is the entry view');
+  view.showTasks();
   const tasks = root.querySelector('.pm-chat__tasks');
   assert.ok(tasks, 'a separate Tasks surface exists');
   assert.equal(tasks.hidden, false);
@@ -250,7 +253,7 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   const { root, update, copied } = fixture();
   update([report()]);
   assert.equal(root.querySelector('[role="log"]').getAttribute('aria-label'), 'PM reports');
-  assert.equal(root.querySelector('h1').textContent, 'Update');
+  assert.equal(root.querySelector('.pm-chat__transcript h1').textContent, 'Update');
   assert.equal(root.querySelector('article strong').textContent, 'Ready');
   assert.equal(root.querySelector('li').textContent, 'checked');
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
@@ -711,7 +714,7 @@ const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: '
 test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
   const { root, model, view, update } = fixture({ tasksDefault: true });
   update([report()]);
-  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Tasks remains the default view');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Home remains the default view');
   assert.deepEqual(model.requestPmConversation('pm'), { kind: 'load_pm_conversation', id: 'pm' });
   assert.equal(model.requestPmConversation('missing'), null);
   model.applyPmWindowReceiveEvent(conversation([
@@ -734,6 +737,38 @@ test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-
   assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 1, 'Reports stay report-only');
   view.showReports();
   assert.equal(chat.hidden, true);
+});
+
+test('Chat collapses earlier PM messages of one turn behind an N messages disclosure (T-CHAT-COLLAPSE)', () => {
+  const { root, model, view } = fixture();
+  view.showChat();
+  const chat = root.querySelector('.pm-chat__chat');
+  const turn = [
+    { id: 'u1', role: 'user', text: 'Status?' },
+    { id: 'a1', role: 'assistant', text: 'Checking the queue.' },
+    { id: 'a2', role: 'assistant', text: 'Reading CI.' },
+    { id: 'a3', role: 'assistant', text: 'All green.' },
+    { id: 'u2', role: 'user', text: 'Thanks' },
+    { id: 'a4', role: 'assistant', text: 'You are welcome.' },
+  ];
+  model.applyPmWindowReceiveEvent(conversation(turn));
+  const log = chat.querySelector('.pm-chat__conversation');
+  const order = () => [...log.children].map(node => node.tagName === 'DETAILS'
+    ? `group:${[...node.querySelectorAll('.pm-chat__bubble')].map(bubble => bubble.dataset.messageId).join(',')}`
+    : node.dataset.messageId);
+  assert.deepEqual(order(), ['u1', 'group:a1,a2', 'a3', 'u2', 'a4'], 'only the latest PM message of a turn stays open');
+  const group = log.querySelector('details.pm-chat__collapsed');
+  assert.equal(group.open, false);
+  assert.equal(group.querySelector('summary').textContent, '2 earlier messages');
+  group.open = true;
+  model.applyPmWindowReceiveEvent(conversation([...turn.slice(0, 4), { id: 'a5', role: 'assistant', text: 'Merged.' }, ...turn.slice(4)]));
+  assert.deepEqual(order(), ['u1', 'group:a1,a2,a3', 'a5', 'u2', 'a4']);
+  const regrown = log.querySelector('details.pm-chat__collapsed');
+  assert.equal(regrown.open, true, 'an expanded group stays expanded across snapshots');
+  assert.equal(regrown.querySelector('summary').textContent, '3 earlier messages');
+  model.applyPmWindowReceiveEvent(conversation([turn[0], turn[1], turn[4], { id: 'a6', role: 'assistant', text: 'Done.' }, { id: 'a7', role: 'assistant', text: 'Bye.' }]));
+  assert.deepEqual(order(), ['u1', 'a1', 'u2', 'group:a6', 'a7']);
+  assert.equal(log.querySelector('details.pm-chat__collapsed summary').textContent, '1 earlier message');
 });
 
 test('Chat rejects stale sessions and explains unavailable conversations', () => {
@@ -829,7 +864,7 @@ test('Chat composer is Operator-styled and stays below the scrolling conversatio
   assert.match(rule('pm-chat__chat'), /display:\s*flex/);
   assert.match(rule('pm-chat__conversation'), /overflow-y:\s*auto/);
   assert.match(rule('pm-chat__composer'), /border-top:\s*1px solid var\(--color-border\)/);
-  for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status']) {
+  for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status', 'pm-chat__collapsed', 'pm-chat__collapsed-summary']) {
     assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
   }
 });

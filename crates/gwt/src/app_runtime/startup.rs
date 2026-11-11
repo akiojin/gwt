@@ -2485,7 +2485,13 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
-        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id) {
+        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%session_id, error_kind = ?error.kind(), %error,
+                "excluding restored Session with unreadable launch recovery receipt");
+                true
+            })
+        {
             return None;
         }
         gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)

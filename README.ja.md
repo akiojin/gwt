@@ -119,9 +119,12 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 未作成なら新たに作成しません。
 
 組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
-更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
-Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
-Issues のプロファイルと直接の Session Resume は従来の設定を維持します。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略します。
+Agent Settings でモデル・推論レベル・速度の既定値を保存できます。Codex は Off / Fast / Ultrafast、
+Claude Code は専用の Fast トグルを使い、Monitor と PM の起動プロファイルでも指定できます。
+Codex の旧 Fast bool 設定は実効 Off を維持し、明示的な速度選択でのみ Fast / Ultrafast が有効になります。
+Ultrafast には対応モデルと対象契約・workspace 権限が必要です。非対応の tier が省略される場合は
+Codex の警告が端末に表示されます。[Codex の速度要件](https://learn.chatgpt.com/docs/agent-configuration/speed)も参照してください。
 
 ## 前提
 
@@ -562,6 +565,14 @@ daemon を強制終了しません。明示的な JSON `daemon.start` は停止�
 既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
 endpoint を確認できます。
 
+owner のヘルスチェックが連続してタイムアウトすると、通常の接続障害とは区別して
+**Wedged** と表示します。GWT はスタックサンプル（macOS）、直近の terminal-delivery
+警告、CPU の観測値を `~/.gwt/logs/owner-recovery/<pid>-<id>/` へ自動保存します。
+Project のステータス欄にある **Restart daemon…** から内容を確認して再起動できます。
+診断保存後に SIGTERM を送り、猶予期間内に終了しなければ SIGKILL を送ります。
+同じ daemon が所有する全 agent（他プロジェクトの agent を含む）が停止し、未保存の
+ターミナル作業を失う可能性があります。確認なしで daemon を強制終了することはありません。
+
 Hub の **終了待ちプロジェクト** には既知のプロジェクトの daemon 状態を表示します。
 **再確認** で更新し、**終了を再試行** で失敗した終了処理を再試行できます。対象は
 認証済みで終了処理中の GUI 管理 daemon に限り、GUI が接続していないことを確認します。
@@ -682,6 +693,14 @@ Queued には `auto-refill` などの追加元も表示されます。
 保守用の `issue.monitor.queue.remove` に `all_terminals:true` を指定すると、このマシンの
 project store に保存された全端末のキューから `numbers` を外し、自動補充の手動除外も記録します。
 省略時はこのホストだけが対象です。別マシンの独立した project store は変更しません。
+
+macOS では CLI と Monitor が `scutil --get LocalHostName` をホスト ID として使用し、
+取得できない場合は `whoami::hostname` にフォールバックします。他 OS は `whoami::hostname` を使います。
+ID はプロセスごとに一度取得するため、マシン名の変更後は gwt を再起動してください。
+`issue.monitor.status` の `caller_host_identity` で ID・取得元・ネットワーク上のホスト名と異なる理由を確認できます。
+旧ホストのキューを復旧するには、`issue.monitor.queue.adopt` に `{"terminal":"old-host"}` を渡します。
+未実行の項目を自ホストへ移し、旧スケジュール予約を解放して再計画します。
+claim 取得中・起動中・実行中の作業は既存の所有者に残し、他のホストのキューは変更しません。
 
 前提 Issue の完了を待つには、Issue 本文に `Blocked-by: #123 #456` のような行を追加します。
 Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号を
@@ -1930,7 +1949,9 @@ PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲
 
 PM ウィンドウの **Chat** は PM との会話をチャット形式で表示します。自分の発言は右、PM の応答は
 左のバブルに並び、PM の Markdown（見出し・箇条書き・表・コード）を整形します。PM セッション自身の
-会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。下部の入力欄から
+会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。1 回のターンで PM が
+複数のメッセージを送った場合は最新の 1 件だけを開き、それ以前は **N earlier messages** に折りたたみます
+（クリックで展開）。下部の入力欄から
 PM へテキストを送れます（Enter で送信、Shift+Enter で改行）。届いたことが確認できるまで入力内容は残り、
 送れなかった場合は理由を表示します。画像の添付には **Execution log** を使います。
 

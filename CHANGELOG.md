@@ -1,6 +1,72 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.161.0] - 2026-11-11
+
+### Bug Fixes
+
+- **monitor:** Stabilize host names and expose retired queue adoption
+- **monitor:** Resolve hostname probe through shared process adapter
+- **monitor:** Clear recovered queue exclusions during adoption
+- **gui:** Register task-home in Playwright routes and align mock naming for #7007
+- **launch:** Revalidate owner admission after prefs updates
+- **launch:** Preserve transient retries across daemon rebases
+- **runtime:** Classify exits after final PTY output drains
+- **monitor:** Hook 前の review 起動失敗を即時記録する
+- **launch:** Preserve recovery and session metadata errors
+- **index:** Keep health probes from creating missing stores
+- **pm:** PM セッションの cd 境界を pm/ 全体にして reference 読み込みを通す
+- **gwtd:** Detect wedged owners and confirm daemon recovery
+- **e2e:** Headed Playwright の Chromium を画面外で起動してフォーカス奪取を抑える
+- **feedback:** Windows の送信 worker を生成時点で kill-on-close Job に所属させる
+- **verify:** Align supported modes and expose safe mode diagnostics
+- **issue-monitor:** Preserve merged continuation across stale reloads
+
+### Documentation
+
+- **readme:** PM チャットの応答折りたたみを説明する
+- **gui:** Add task-centered GUI design and mocks for #7007
+- **ui:** Plan task-centered GUI for issue 7007
+- Escape issue refs at line starts in the #7007 design readme
+
+### Features
+
+- **pm:** PM チャットで同一ターンの過去の PM 応答を折りたたむ
+- **gui:** Add task-centered Home surface for #7007
+- **launch:** Add explicit Codex speed and agent defaults
+
+### Miscellaneous Tasks
+
+- **work:** PM チャット入力欄の配信完了を記録する
+- **work:** PM チャット折りたたみ slice の Work イベントを記録する
+- **work:** Link issue 7040 delivery to PR 7054
+- **work:** Issue #6877 Reviewing gate スライスの Work イベントを記録する
+- **work:** Record Issue #7016 PR delivery metadata
+- **work:** Record issue 6979 delivery handoff
+- **work:** Issue #6989 の Work イベントを記録する
+- **work:** Issue #6989 の後継世代 Work イベントを記録する
+- **work:** Issue #7030 の PR 配信情報を記録
+- **work:** Record Issue #6992 delivery pull request
+- **work:** Issue #6977 の Work イベントを記録する
+- **work:** Record Issue #6962 delivery pull request
+
+### Performance
+
+- **monitor:** Reviewing gate の gh readback を 1 本に束ね CI 待ちの再読を抑える
+- **index:** Issue世代の未変更recordを共有poolで再利用する
+
+### Testing
+
+- **monitor:** Include host diagnostics in status contract
+- **launch:** Monitor の速度表示とテスト宣言を更新
+- **gwtd:** Await owner readiness before health transitions
+
+### Ci
+
+- Hold off wiring the task-home test into test.yml for #7007
+- **test:** Bound embedded E2E runs by theme
+- Wire task-home test into test.yml for #7007
+
 ## [9.160.0] - 2026-11-11
 
 ### Bug Fixes

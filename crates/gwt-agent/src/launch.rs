@@ -28,6 +28,17 @@ use crate::{
 /// cannot be confused with gwt's own logging filter.
 pub const CODEX_FILE_LOG_FILTER: &str = "codex_core=info,codex_tui=info";
 
+/// Explicit Codex service tier selection. Legacy fast-mode booleans do not
+/// populate this setting, preserving their existing effective Off behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSpeed {
+    #[default]
+    Off,
+    Fast,
+    Ultrafast,
+}
+
 /// Build the Claude Code `--settings` inline JSON for session-level toggles.
 ///
 /// Both `fastMode` and `ultracode` ride the single `--settings` channel
@@ -482,10 +493,10 @@ pub struct LaunchConfig {
     pub predecessor_session_id: Option<String>,
     pub skip_permissions: bool,
     pub fast_mode: bool,
-    /// Legacy Codex-only compatibility field. New callers should use
-    /// `fast_mode`; this remains populated for persisted/session consumers
-    /// that still distinguish Codex's service-tier implementation.
+    /// Legacy Codex-only compatibility field. Explicit Codex selections use
+    /// `codex_speed`; this bool alone retains its effective Off behavior.
     pub codex_fast_mode: bool,
+    pub codex_speed: CodexSpeed,
     pub runtime_target: LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: DockerLifecycleIntent,
@@ -592,6 +603,7 @@ pub struct AgentLaunchBuilder {
     base_branch: Option<String>,
     model: Option<String>,
     fast_mode: bool,
+    codex_speed: CodexSpeed,
     skip_permissions: bool,
     /// Issue #4543: the permission preference the launch *source* carried, as
     /// a tri-state. `None` means the source stored nothing at all, which the
@@ -651,6 +663,7 @@ impl AgentLaunchBuilder {
             base_branch: None,
             model: None,
             fast_mode: false,
+            codex_speed: CodexSpeed::Off,
             skip_permissions: false,
             requested_skip_permissions: None,
             permission_launch_source: PermissionLaunchSource::Unspecified,
@@ -750,6 +763,11 @@ impl AgentLaunchBuilder {
 
     pub fn fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = enabled;
+        self
+    }
+
+    pub fn codex_speed(mut self, speed: CodexSpeed) -> Self {
+        self.codex_speed = speed;
         self
     }
 
@@ -1060,6 +1078,11 @@ impl AgentLaunchBuilder {
         let predecessor_session_id = self.predecessor_session_id.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
+        let codex_speed = if matches!(self.agent_id, AgentId::Codex) {
+            self.codex_speed
+        } else {
+            CodexSpeed::Off
+        };
         // Issue #4543 AC-6: the shared validator runs on the materialized argv
         // and environment, so a provider builder that silently stopped
         // emitting its skip flag is caught here rather than at a prompt nobody
@@ -1092,6 +1115,7 @@ impl AgentLaunchBuilder {
             skip_permissions,
             fast_mode,
             codex_fast_mode,
+            codex_speed,
             runtime_target: self.runtime_target,
             docker_service: self.docker_service,
             docker_lifecycle_intent: self.docker_lifecycle_intent,
@@ -1306,6 +1330,20 @@ impl AgentLaunchBuilder {
 
         if let Some(ref model) = self.model {
             args.push(format!("--model={model}"));
+        }
+
+        let speed_config = match self.codex_speed {
+            CodexSpeed::Off => None,
+            CodexSpeed::Fast => Some(("fast", "fast_mode")),
+            CodexSpeed::Ultrafast => Some(("ultrafast", "ultrafast_mode")),
+        };
+        if let Some((tier, feature)) = speed_config {
+            args.extend([
+                "-c".to_string(),
+                format!("service_tier={tier}"),
+                "-c".to_string(),
+                format!("features.{feature}=true"),
+            ]);
         }
 
         // Issue #4108: migrate Astra's legacy efforts and omit unsupported
@@ -2044,6 +2082,44 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
+    }
+
+    #[test]
+    fn explicit_codex_speed_sets_tier_and_feature_without_migrating_legacy_bool() {
+        for (speed, tier, feature) in [
+            (CodexSpeed::Fast, "fast", "fast_mode"),
+            (CodexSpeed::Ultrafast, "ultrafast", "ultrafast_mode"),
+        ] {
+            let config = AgentLaunchBuilder::new(AgentId::Codex)
+                .codex_speed(speed)
+                .build();
+            assert_eq!(config.codex_speed, speed);
+            for value in [
+                format!("service_tier={tier}"),
+                format!("features.{feature}=true"),
+            ] {
+                assert!(config
+                    .args
+                    .windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == value));
+            }
+        }
+        let legacy = AgentLaunchBuilder::new(AgentId::Codex)
+            .fast_mode(true)
+            .build();
+        assert_eq!(legacy.codex_speed, CodexSpeed::Off);
+        assert!(!legacy
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("service_tier=")));
+        let claude = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .codex_speed(CodexSpeed::Ultrafast)
+            .build();
+        assert_eq!(claude.codex_speed, CodexSpeed::Off);
+        assert!(!claude
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("service_tier=")));
     }
 
     #[test]

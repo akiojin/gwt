@@ -4482,6 +4482,9 @@ fn apply_routine_issue_monitor_control(
                     None => crate::IssueMonitorFailureClass::Unknown,
                     _ => unreachable!("other typed failures are handled above"),
                 };
+                if monitor.record_review_window_failed_at(&window_id, &message, now) {
+                    return true;
+                }
                 if let Some(issue_number) =
                     issue_number.or_else(|| monitor.launched_window_issue(&window_id))
                 {
@@ -10297,6 +10300,93 @@ mod agent_failure_source_contract_tests {
     }
 
     #[test]
+    fn issue_4923_review_failure_control_resolves_unbound_window_and_counts_once() {
+        for snapshot_first in [false, true] {
+            let mut monitor = monitor_with_launch("review-claim", "tab-1::implementation");
+            monitor.set_autonomous_mode(true);
+            monitor.record_candidate(
+                serde_json::from_value(serde_json::json!({
+                    "number": 42, "title": "Review launch", "labels": [], "state": "open"
+                }))
+                .unwrap(),
+            );
+            monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+            monitor.begin_review(42, 99, "abc123");
+            let snapshot = |status| crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab-1".into(),
+                observed_at: "2026-07-02T00:00:01Z".into(),
+                windows: vec![crate::IssueMonitorWindowObservation {
+                    monitor_owned: false,
+                    window_id: "tab-1::review".into(),
+                    issue_number: Some(42),
+                    review_dispatch: true,
+                    status,
+                    hold_reason: None,
+                    last_output_at: None,
+                    session_id: None,
+                }],
+            };
+            monitor.record_window_snapshot(snapshot(if snapshot_first {
+                crate::WindowState::Error
+            } else {
+                crate::WindowState::Running
+            }));
+            // Use the GUI's actual fenced notification, with no Issue hint or binding.
+            let control = decode_issue_monitor_control(
+                crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    crate::project_runtime::runtime_events::issue_monitor_agent_failed_from_launch_payload(
+                        "tab-1::review",
+                        "Process exited with status 1",
+                        &crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Unbound,
+                        None,
+                    ),
+                    std::process::id() + 1,
+                ),
+            ).expect("production review failure decodes");
+            assert_eq!(
+                super::try_apply_issue_monitor_control(
+                    &mut monitor,
+                    control,
+                    "2026-07-02T00:00:02Z"
+                ),
+                Some(true)
+            );
+            assert!(
+                monitor
+                    .autonomous_record(42)
+                    .unwrap()
+                    .review_attempts
+                    .is_some(),
+                "the notification must record the failure before another snapshot"
+            );
+            monitor.record_window_snapshot(snapshot(crate::WindowState::Error));
+            let record = monitor.autonomous_record(42).unwrap();
+            assert_eq!(
+                record
+                    .review_attempts
+                    .as_ref()
+                    .expect("review failure recorded")
+                    .count,
+                1
+            );
+            assert_eq!(record.attempts, 0, "the implementation did not fail");
+            let error = monitor
+                .inbox_item(42)
+                .unwrap()
+                .error_message
+                .as_deref()
+                .unwrap();
+            assert!(error.contains("launch failure"), "{error}");
+            assert!(!error.contains("PTY handoff complete") && !error.contains("never appeared"));
+            assert_eq!(
+                monitor.launched_window_id(42).as_deref(),
+                Some("tab-1::implementation")
+            );
+        }
+    }
+
+    #[test]
     fn agent_failed_from_launch_decoder_requires_captured_source() {
         let notification = serde_json::json!({
             "window_id": "tab-1::agent-42",
@@ -13263,6 +13353,7 @@ exit 0
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -17741,6 +17832,7 @@ exit 0
                 session_mode: Default::default(),
                 skip_permissions: false,
                 fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -27618,6 +27710,7 @@ exit 1
                 session_mode: Default::default(),
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),

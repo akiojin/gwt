@@ -125,12 +125,22 @@ test.describe('PM reports', () => {
         socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ kind: 'pm_conversation', id, session_id: session,
           snapshot: { conversation_id: 'chat-fixture', availability: 'ready', detail: null, messages: [
             { id: 'u1', role: 'user', text: 'Ship <b>it</b>?' },
+            { id: 'a0', role: 'assistant', text: 'Checking the queue.', text_html: '<p>Checking the queue.</p>' },
             { id: 'a1', role: 'assistant', text: '# Plan', text_html: '<h1>Plan</h1><ul><li>Verify</li></ul><table><thead><tr><th>Check</th></tr></thead><tbody><tr><td>CI</td></tr></tbody></table><pre><code>cargo test</code></pre>' },
           ] } }) }));
       }, { id, session: SESSION });
       const user = chat.locator('.pm-chat__bubble--user');
-      const assistant = chat.locator('.pm-chat__bubble--assistant');
+      const assistant = chat.locator('.pm-chat__conversation > .pm-chat__bubble--assistant');
       await expect(user).toHaveText('Ship <b>it</b>?');
+      // T-CHAT-COLLAPSE: the earlier PM message of the turn folds behind a disclosure.
+      const earlier = chat.locator('details.pm-chat__collapsed');
+      const folded = earlier.locator('.pm-chat__bubble--assistant');
+      await expect(earlier.locator('summary')).toHaveText('1 earlier message');
+      await expect(folded).toBeHidden();
+      await earlier.locator('summary').click();
+      await expect(folded).toHaveText('Checking the queue.');
+      await expect(folded).toBeVisible();
+      expect((await earlier.boundingBox())!.y).toBeLessThan((await assistant.boundingBox())!.y);
       await expect(user.locator('b')).toHaveCount(0);
       await expect(assistant.getByRole('heading', { name: 'Plan' })).toBeVisible();
       await expect(assistant.locator('table')).toBeVisible();
