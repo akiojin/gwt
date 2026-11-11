@@ -1,15 +1,13 @@
 <!doctype html>
 <html lang="ja">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="data:," />
-    <title>gwt 全画面刷新モック（対話型）</title>
-    <style>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gwt 全画面刷新モック（対話型）</title>
+<style>
       button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) { min-height: 2rem; }
         </style>
-    <style>
+<style>
       :root{
         --bg:#f2f3f5; --panel:#ffffff; --panel2:#e9ebee; --ink:#1b1e24; --ink2:#4c5462; --ink3:#7c8594;
         --line:#d8dce2; --line2:#c3c9d2;
@@ -292,53 +290,210 @@
       [data-nav]{cursor:pointer}
       .projrow:hover{border-color:var(--line2)}
     </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <header class="doc">
-        <p class="doc-kicker">gwt GUI Redesign — Interactive Mock</p>
-        <h1>対話型モック — 触って画面遷移を確認する版</h1>
-        <p class="lead">静的モック（mock-full-refresh.html）の <strong>After 案だけ</strong>を、アプリのように画面切り替えできる形に再構成したものです。左レールの項目で画面が切り替わり、<strong>Home のプロジェクト行 → Project</strong>、<strong>Issues の「Open issue」→ Issue 詳細</strong>、<strong>Settings の4タブ</strong>の導線が実際に動きます。それ以外のボタンは見た目のみです。内容・数値・用語（TASK／Tool・Agent の2分化、利用量は既定表示、Board は Project 面内、オーナー決定 Q1〜Q7）は静的モックと同一です。</p>
-      </header>
+<style>
+      /* ---------- v2 tab skeleton additions ---------- */
+      .mock{position:relative}
+      [hidden]{display:none!important}
+      .tabbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px 10px;border-bottom:1px solid var(--line);background:var(--panel2)}
+      .ptab{font:inherit;font-size:13px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink2);border-radius:9px;padding:8px 13px;cursor:pointer;min-height:36px;display:inline-flex;align-items:center;gap:7px}
+      .ptab:hover{color:var(--ink)}
+      .ptab.on{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent)}
+      .ptab .cnt{background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px}
+      .ptab .pdot{width:8px;height:8px;border-radius:50%;display:block;flex:none}
+      .ptab .tabx{color:var(--ink3);font-weight:400;font-size:14px;line-height:1}
+      .ptab .home-ico{font-size:15px;line-height:1}
+      .tabgroup{display:none;flex:1;min-width:0}
+      .tabgroup.on{display:flex}
+      .start-wrap{flex:1;padding:24px 28px 28px;min-width:0}
+      @media (max-width:640px){.start-wrap{padding:16px}}
+      .proj-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--gray-soft)}
+      .proj-card .sub{font-size:11.5px;color:var(--ink2);margin-top:5px;line-height:1.4}
+      .lrow{display:flex;align-items:center;gap:10px;padding:12px 2px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+      .lrow:last-child{border-bottom:none}
+      .lrow .grow{flex:1;min-width:180px}
+      .lrow .t{font-weight:700;line-height:1.4}
+      .lrow .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+      .plink{color:var(--accent-ink);font-weight:800;cursor:pointer;text-decoration:none}
+      .plink:hover{text-decoration:underline}
+      .hero{border:1px solid var(--amber);background:var(--amber-soft);border-radius:12px;padding:18px 20px}
+      .hero .t{font-size:16.5px;font-weight:800;line-height:1.45;margin:7px 0 5px}
+      .hero .d{color:var(--ink2);font-size:13.5px;line-height:1.6;margin:0 0 13px}
+      .countline{font-size:13.5px;color:var(--ink2)}
+      .countline b{color:var(--ink)}
+      .field{font:inherit;font-size:13.5px;padding:9px 11px;border:1px solid var(--line2);border-radius:8px;background:var(--panel);color:var(--ink)}
+      .f-label{font-size:12.5px;font-weight:700;color:var(--ink2);display:block;margin:0 0 5px}
+      .notice{background:var(--accent-soft);border:1px solid var(--line);border-radius:10px;padding:11px 14px;margin:16px 0 4px;font-size:13.5px}
+      details.pathform{margin:2px 0 6px}
+      details.pathform summary{cursor:pointer;font-weight:700;color:var(--accent-ink);font-size:13.5px;width:fit-content}
+      .post{padding:11px 2px;border-bottom:1px solid var(--line)}
+      .post:last-child{border-bottom:none}
+      .post .meta{font-size:11.8px;font-weight:800;color:var(--ink2);margin-bottom:2px}
+      .post .body{font-size:13.5px;line-height:1.55}
+      .post .body .d{color:var(--ink2);font-size:12.8px}
+      /* clone modal */
+      .clone-backdrop{position:absolute;inset:0;background:color-mix(in srgb,var(--ink) 42%,transparent);display:flex;align-items:flex-start;justify-content:center;padding:36px 16px;z-index:50;overflow:auto}
+      .clone-dialog{background:var(--panel);border:1px solid var(--line2);border-radius:14px;box-shadow:var(--shadow);width:600px;max-width:100%;padding:20px 22px}
+      .clone-dialog h3{margin:0;font-size:17px;font-weight:800}
+      .clone-dialog .sub{color:var(--ink2);font-size:13px;margin:3px 0 0}
+      .clone-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
+      .clone-head .grow{flex:1}
+      .repo-row{display:block;width:100%;text-align:left;font:inherit;border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;color:var(--ink)}
+      .repo-row:hover{border-color:var(--line2)}
+      .repo-row.sel{border-color:var(--accent);background:var(--accent-soft)}
+      .repo-row .rt{font-weight:800;display:block}
+      .repo-row .rd{font-size:12.5px;color:var(--ink2);display:block}
+      .repo-row .rm{font-size:11.8px;color:var(--ink3);display:block}
+      [data-opentab]{cursor:pointer}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="doc">
+      <h1>gwt 全画面刷新モック — 対話型</h1>
+      <p class="lead">刷新案を、現行アプリと同じ骨格で触れる形に組み直したモックです。起点は<strong>開始画面（現行の Hub）</strong>で、タブバーの左端に固定され、プロジェクト一覧・最近・開く・GitHub から clone の導線が集まります（clone は検索→保存先→進捗→完了で新しいプロジェクトタブが開くまで動きます）。プロジェクトは<strong>別タブ</strong>で開き、タブの中はそのプロジェクトの情報だけです。<strong>Your PM タブ</strong>には判断待ち（Decide）と件数レベルの要約だけを置き、作業面（Issues／Works 等）の横断版は置きません。1画面＝1文脈、主役は1つ、階層は3層まで、を原則に要素を絞っています（2026-11-12、実際に触った本人のフィードバックを受けて改修）。</p>
+    </header>
+    <div class="mock" id="app">
+      <div class="mock-head">
+        <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
+        <span><b>gwt</b> — <span id="appTitle">Start</span></span>
+      </div>
+      <div class="tabbar">
+        <button class="ptab on" type="button" data-ptab="start"><span class="home-ico" aria-hidden="true">⌂</span> Start</button>
+        <button class="ptab" type="button" data-ptab="pm">Your PM <span class="cnt">5</span></button>
+        <button class="ptab" type="button" data-ptab="gwt"><i class="pdot" style="background:#0f766e"></i>gwt <span class="tabx" aria-hidden="true">×</span></button>
+        <button class="ptab" type="button" data-ptab="keibadb"><i class="pdot" style="background:#be123c"></i>KeibaDB <span class="tabx" aria-hidden="true">×</span></button>
+        <button class="ptab" type="button" data-ptab="vr" id="vrTab" hidden><i class="pdot" style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span> <span class="tabx" aria-hidden="true">×</span></button>
+      </div>
+      <div class="mock-body">
 
-      <div class="mock" id="app" style="margin-top:26px">
-        <div class="mock-head"><span class="dots"><i></i><i></i><i></i></span><span class="mock-title"><b>gwt</b> — <span id="appTitle">Home</span></span></div>
-        <div class="mock-body">
-          <div class="rail"><div class="pm-card"><div class="who"><span class="pm-ava">PM</span><div><div class="nm">Your PM</div><div class="sub">One PM for this device · watching 7 projects</div></div></div><button class="ctx-switch" type="button">Context: All projects<small>Focus on one project — the PM stays the same</small></button></div><a href="#" data-nav="home" class="on">Home</a><a href="#" data-nav="ask" class="">Ask</a><a href="#" data-nav="progress" class="">Progress</a><a href="#" data-nav="tasks" class="">Tasks</a><a href="#" data-nav="issues" class="">Issues</a><a href="#" data-nav="decide" class="">Decide<span class="cnt">5</span></a><a href="#" data-nav="log" class="">Log</a><a href="#" data-nav="works" class="">Works</a><a href="#" data-nav="agents" class="">Agents</a><a href="#" data-nav="notifications" class="">Notifications<span class="cnt gray">9</span></a><a href="#" data-nav="project" class="">Project</a><a href="#" data-nav="settings" class="">Settings</a><div class="foot">Ask once in Ask — work itself stays inside each project.</div></div>
-          <div class="content" id="appContent">
-          <div class="screen-pane on" data-screen="home">
-              <p class="h-big">Good afternoon. Here's where everything stands.</p>
-              <p class="h-sub">Wednesday, Nov 11 · Updated just now · Your PM is watching all 7 projects on this device.</p>
-              <div class="stat-row">
-                <div class="stat"><div class="num">9</div><div class="lab">Running now, across 7 projects</div></div>
-                <div class="stat warn"><div class="num">5</div><div class="lab">Waiting for your decision</div></div>
-                <div class="stat bad"><div class="num">3</div><div class="lab">Blocked and needing help</div></div>
-                <div class="stat"><div class="num">12</div><div class="lab">Finished today</div></div>
+        <div class="tabgroup on" data-group="start">
+          <div class="start-wrap">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+              <p class="h-big" style="font-size:26px">gwt</p>
+              <span class="badge b-done">v9.161.0</span>
+            </div>
+            <p class="h-sub">Projects on this device. Open a project to work in it — each project opens in its own tab, and this start screen is always here.</p>
+            <div class="btnrow" style="margin-bottom:6px">
+              <button class="btn primary" type="button">Open Folder…</button>
+              <button class="btn" type="button" data-clone-open>Clone from GitHub…</button>
+            </div>
+            <details class="pathform">
+              <summary>Enter folder path…</summary>
+              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="Full folder path" aria-label="Project folder path">
+                <button class="btn" type="button">Open path</button>
               </div>
-              <p class="h-sec">Needs your decision first</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">gwt, llmlb and KeibaDB have changes that aren't committed or pushed yet.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn amber" type="button">Review</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Plan ready: “Home &amp; Decide screens” (#7007)</div><div class="d">Approve it and implementation restarts.</div></div><span class="badge b-wait">Waiting for you</span><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">A task has run 3 h 40 m with no progress</div><div class="d">Stop it, or let it keep running?</div></div><span class="badge b-wait">Waiting for you</span><button class="btn" type="button">Open</button></div>
-              <p class="rel">See all 5 in <b>Decide</b> →</p>
-              <p class="h-sec">Blocked</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Checks are failing on a change (#7047)</div><div class="d">4 checks failing for 2 h. A fix is being prepared; nothing needed from you yet.</div></div><span class="badge b-block">Blocked</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import can't read the source file (#121)</div><div class="d">The file format changed. Your call is waiting in Decide.</div></div><span class="badge b-block">Blocked</span></div>
-              <p class="rel">+ 1 more blocked: event-magazine (publishing) — see Progress</p>
-<div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><span class="badge b-wait">Update</span><div class="grow"><div class="t">gwt update ready — version 9.162.0</div><div class="d">Applying restarts gwt. Your running work is drained first — agents are stopped safely and their sessions are kept — and the update is applied after the restart.</div></div><div class="btnrow"><button class="btn amber" type="button">Restart &amp; apply</button><button class="btn ghost" type="button">Later</button></div></div>
-              <p class="h-sec">Projects</p>
-              <div class="projgrid">
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="meta">Policy: Running · 4 running · 1 blocked · 9 waiting to start</span></div>
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="meta">Policy: Running · 2 running · 3 waiting to start</span></div>
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="meta">Policy: Running · 1 running · 1 blocked · 2 waiting</span></div>
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="meta">Policy: Running · 1 running · 1 waiting to start</span></div>
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="meta">Policy: Running · 1 running · 1 blocked · 2 waiting</span></div>
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="meta idle">Policy: Waiting · Idle · 1 waiting to start</span></div>
-                <div class="projrow" data-nav="project" role="button" tabindex="0" title="Open this project"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="meta idle">Policy: Stopped · Idle · nothing waiting</span><button class="btn" type="button">Open project</button></div>
-<p class="h-sec">Open a project</p>
-<div class="rowitem"><div class="grow"><div class="t">Open, clone, or close a project</div><div class="d">Recently opened: gwt · llmlb · KeibaDB. “Open project” on a row above enters that project&rsquo;s own screen — its issues, works, agents, board and settings in one place. Closing a project waits for its agents to shut down first.</div></div><div class="btnrow"><button class="btn" type="button">Open…</button><button class="btn" type="button">Clone from GitHub</button></div></div>
+            </details>
+            <div class="notice" id="startNotice" hidden>Opened <b class="dyn-proj-name">vr-cabin-exposure</b>. <a class="plink" data-opentab="vr">Open in a new tab</a></div>
+            <p class="h-sec">Open</p>
+            <div>
+              <div class="lrow">
+                <a class="plink" data-opentab="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                <span class="badge b-done">Ready</span>
+                <div class="grow"><div class="d">Project · gwt: Running · Saved choice: Continue</div></div>
+                <button class="btn ghost" type="button">Close Project</button>
               </div>
-                      </div>
-          <div class="screen-pane" data-screen="ask">
+              <div class="lrow">
+                <a class="plink" data-opentab="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                <span class="badge b-done">Ready</span>
+                <div class="grow"><div class="d">Project · KeibaDB: Running · Saved choice: Continue</div></div>
+                <button class="btn ghost" type="button">Close Project</button>
+              </div>
+              <div class="lrow" id="startVrRow" hidden>
+                <a class="plink" data-opentab="vr"><span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span></a>
+                <span class="badge b-done">Ready</span>
+                <div class="grow"><div class="d">Project · <span class="dyn-proj-name">vr-cabin-exposure</span>: Running · Saved choice: Continue</div></div>
+                <button class="btn ghost" type="button">Close Project</button>
+              </div>
+            </div>
+            <p class="h-sec">Recent</p>
+            <div>
+              <div class="lrow">
+                <span class="ptag"><i style="background:#2563eb"></i>llmlb</span>
+                <div class="grow"><div class="d">Project · llmlb: Running · Saved choice: Continue</div></div>
+              </div>
+              <div class="lrow">
+                <span class="ptag"><i style="background:#c2410c"></i>event-magazine</span>
+                <div class="grow"><div class="d">Project · event-magazine: Running · Saved choice: Continue</div></div>
+              </div>
+              <div class="lrow">
+                <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
+                <div class="grow"><div class="d">Project · unity-cli: Running · Saved choice: Continue</div></div>
+              </div>
+              <div class="lrow">
+                <span class="ptag"><i style="background:#a16207"></i>155-Demi</span>
+                <div class="grow"><div class="d">Project · 155-Demi: Waiting · Saved choice: Continue</div></div>
+              </div>
+              <div class="lrow">
+                <span class="ptag"><i style="background:#475569"></i>160-Idina</span>
+                <div class="grow"><div class="d">Project · 160-Idina: Stopped · Saved choice: Stop</div></div>
+              </div>
+            </div>
+            <p class="h-sec">Projects awaiting shutdown</p>
+            <div class="lrow">
+              <span class="d">No projects awaiting shutdown</span>
+              <button class="btn ghost" type="button" style="margin-left:auto">Refresh</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabgroup" data-group="pm">
+          <div class="rail">
+            <div class="pm-card">
+              <div class="who">
+                <span class="pm-ava">PM</span>
+                <div><div class="nm">Your PM</div><div class="sub">One PM for this device</div></div>
+              </div>
+            </div>
+            <a href="#" data-nav="home" class="on">Home</a>
+            <a href="#" data-nav="ask">Ask</a>
+            <a href="#" data-nav="decide">Decide<span class="cnt">5</span></a>
+            <a href="#" data-nav="notifications">Notifications<span class="cnt gray">9</span></a>
+            <a href="#" data-nav="settings">Settings</a>
+            <div class="foot">Decisions and counts live here. The work itself lives in each project&rsquo;s tab.</div>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane on" data-screen="home">
+              <p class="h-big">Home</p>
+              <p class="h-sub">Wednesday, Nov 11 · Your PM is watching all 7 projects. This screen shows only what needs you — the work itself is inside each project&rsquo;s tab.</p>
+              <p class="h-sec">Open a project</p>
+              <div class="btnrow">
+                <button class="btn" type="button" data-opentab="gwt">Open gwt in its tab</button>
+                <button class="btn" type="button" data-opentab="keibadb">Open KeibaDB in its tab</button>
+                <button class="btn ghost" type="button" data-opentab="start">Go to the Start screen</button>
+              </div>
+              <p class="h-sec">The one thing waiting for you</p>
+              <div class="hero">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <span class="ptag"><i style="background:#1b1e24"></i>All projects</span>
+                  <span class="rel">waiting 26 min</span>
+                </div>
+                <div class="t">Unsaved work in 3 projects — save it all?</div>
+                <p class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren&rsquo;t committed or pushed. If this device is wiped first, that work is lost. <b>Commit &amp; push all</b> saves everything now. <b>Review in Decide first</b> lets you check each project before anything is saved.</p>
+                <div class="btnrow">
+                  <button class="btn amber" type="button">Commit &amp; push all</button>
+                  <button class="btn" type="button" data-opentab="pm" data-openscreen="decide">Review in Decide first</button>
+                </div>
+              </div>
+              <p class="rel" style="margin-top:10px">+ 4 more decisions are waiting — <a class="plink" data-nav="decide">open Decide</a> to work through them.</p>
+              <p class="h-sec">Right now, in counts</p>
+              <p class="countline"><b>9</b> running · <b>3</b> blocked · <b>12</b> finished today · <b>5</b> waiting for your decision — across 7 projects.</p>
+              <p class="h-sec">App</p>
+              <div class="lrow">
+                <span class="badge b-wait">Update</span>
+                <div class="grow">
+                  <div class="t">gwt update ready — version 9.162.0</div>
+                  <div class="d">Applying restarts gwt after running work is drained safely.</div>
+                </div>
+                <div class="btnrow">
+                  <button class="btn amber" type="button">Restart &amp; apply</button>
+                  <button class="btn ghost" type="button">Later</button>
+                </div>
+              </div>
+            </div>
+
+<div class="screen-pane" data-screen="ask">
               <p class="h-big">Ask your PM</p>
               <p class="h-sub">One PM for this whole device. Ask once — the PM routes the work to the right project and reports back here.</p>
 <p class="rel" style="margin:-8px 0 14px">Looking for something specific instead? <b>Search</b> finds it across issues, discussions, docs, specs, files, reports and memory — a different door from asking your PM.</p>
@@ -358,96 +513,7 @@
                 <div class="send"><span class="rel">If you don't pick a project, the PM suggests one from what you write — and shows you the choice.</span><button class="btn primary" type="button">Send</button></div>
               </div>
                       </div>
-          <div class="screen-pane" data-screen="progress">
-              <p class="h-big">Progress</p>
-              <p class="h-sub">How tasks are flowing across all 7 projects, right now.</p>
-              <div class="cols">
-                <div class="col"><h4>Waiting to start <span class="n">18</span></h4>
-                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Waiting 6 days — oldest in this column</div></div>
-                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">Request log search (#219)</div><div class="d">Waiting 2 h</div></div>
-                  <div class="mini"><div class="d">+ 16 more</div></div>
-                </div>
-                <div class="col"><h4>In progress <span class="n">9</span></h4>
-                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Shared state model (#7048)</div><div class="d">Running 42 min</div></div>
-                  <div class="mini"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">Race result import (#130)</div><div class="d">Running 47 min</div></div>
-                  <div class="mini"><div class="d">+ 7 more</div></div>
-                </div>
-                <div class="col"><h4>Blocked <span class="n">3</span></h4>
-                  <div class="mini stuck"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="t">Daily import (#121)</div><div class="d">Source format changed · blocked 48 min</div></div>
-                  <div class="mini stuck"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Checks failing (#7047)</div><div class="d">Blocked 2 h</div></div>
-                  <div class="mini"><div class="d">+ 1 more</div></div>
-                </div>
-                <div class="col"><h4>Waiting for you <span class="n">5</span></h4>
-                  <div class="mini mine"><span class="ptag"><i style="background:#1b1e24"></i>All</span><div class="t">Unsaved work in 3 projects</div><div class="d">Waiting 26 min</div></div>
-                  <div class="mini mine"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Plan ready (#7007)</div><div class="d">Waiting 1 h</div></div>
-                  <div class="mini"><div class="d">+ 3 more in Decide</div></div>
-                </div>
-                <div class="col"><h4>Done today <span class="n">12</span></h4>
-                  <div class="mini"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="t">Settings sections (#7039)</div><div class="d">Finished 2 min ago</div></div>
-                  <div class="mini"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="t">Health check endpoint (#205)</div><div class="d">Finished 8 min ago</div></div>
-                  <div class="mini"><div class="d">+ 10 more in Log</div></div>
-                </div>
-              </div>
-              <p class="h-sec">By project</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="bar"><i style="width:31%"></i></div><div class="d">Policy: Running · 4 running · 1 blocked · 2 waiting for you · 9 waiting to start · 5 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="bar"><i style="width:22%"></i></div><div class="d">Policy: Running · 2 running · 1 waiting for you · 3 waiting to start · 3 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="bar"><i style="width:14%"></i></div><div class="d">Policy: Running · 1 running · 1 blocked · 2 waiting to start · 2 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="bar"><i style="width:11%" class="red"></i></div><div class="d">Policy: Running · 1 running · 1 blocked · 1 waiting for you · 2 waiting to start · 1 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="bar"><i style="width:8%"></i></div><div class="d">Policy: Running · 1 running · 1 waiting for you · 1 waiting to start · 1 finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="d idle">Policy: Waiting · Idle · 1 waiting to start · nothing finished today</div></div><button class="btn" type="button">Open project</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d idle">Policy: Stopped · Idle · nothing waiting</div></div><button class="btn" type="button">Open project</button></div>
-                      </div>
-          <div class="screen-pane" data-screen="tasks">
-              <p class="h-big">Tasks</p>
-              <p class="h-sub">Every task on this device, across all projects. Filter to focus the PM's context on one project.</p>
-              <div class="chips">
-                <button class="chip on" type="button">All projects</button>
-                <button class="chip" type="button">gwt</button>
-                <button class="chip" type="button">llmlb</button>
-                <button class="chip" type="button">event-magazine</button>
-                <button class="chip" type="button">unity-cli</button>
-                <button class="chip" type="button">155-Demi</button>
-                <button class="chip" type="button">KeibaDB</button>
-                <button class="chip" type="button">160-Idina</button>
-                <button class="chip" type="button">Status: All ▾</button>
-              </div>
-              <p class="h-sec">Waiting for your decision · 5</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work found in 3 projects</div><div class="d">Commit &amp; push, or review each project first.</div></div><span class="badge b-wait">Waiting for you</span><span class="rel">26 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Plan ready: “Home &amp; Decide screens” (#7007)</div><div class="d">Approve to restart implementation.</div></div><span class="badge b-wait">Waiting for you</span><span class="rel">1 h</span></div>
-              <p class="rel">+ 3 more waiting — all of them are in Decide</p>
-              <p class="h-sec">In progress · 9</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Shared state model for the new screens (#7048)</div><div class="d">Codex · started 12:04 · last activity 2 min ago</div></div><span class="badge b-run">Running</span><span class="rel">42 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Home &amp; Decide screens (#7007)</div><div class="d">Claude Code · started 11:34 · last activity just now</div></div><span class="badge b-run">Running</span><span class="rel">1 h 12 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Race result import — new data format (#130)</div><div class="d">Claude Code · started 11:59 · last activity 5 min ago</div></div><span class="badge b-run">Running</span><span class="rel">47 min</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Token usage panel (#208)</div><div class="d">Claude Code · started 12:13 · last activity 1 min ago</div></div><span class="badge b-run">Running</span><span class="rel">33 min</span></div>
-              <p class="h-sec">Blocked · 3</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Checks failing on a change (#7047)</div><div class="d">4 checks failing. A fix is being prepared automatically.</div></div><span class="badge b-block">Blocked</span><span class="rel">2 h</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Publishing is blocked — deploy key expired (#88)</div><div class="d">Needs a new key from you; steps are in Decide.</div></div><span class="badge b-block">Blocked</span><span class="rel">59 min</span></div>
-              <p class="h-sec">Waiting to start · 18</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Waiting 6 days — the PM suggests starting this next on gwt.</div></div><span class="badge b-queue">Waiting</span><button class="btn" type="button">Start now</button><button class="btn ghost" type="button">Move up</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="t">Character select screen polish (#31)</div><div class="d">Waiting 2 days. This project's only task.</div></div><span class="badge b-queue">Waiting</span><button class="btn" type="button">Start now</button><button class="btn ghost" type="button">Move up</button></div>
-                      </div>
-          <div class="screen-pane" data-screen="issues">
-              <p class="h-big">Issues</p>
-              <p class="h-sub">Every issue in every project — 221 open in total. When your PM picks one up, it also appears in Tasks as work in motion.</p>
-              <div class="chips">
-                <button class="chip on" type="button">All projects</button>
-                <button class="chip" type="button">gwt · 132</button>
-                <button class="chip" type="button">llmlb · 24</button>
-                <button class="chip" type="button">event-magazine · 31</button>
-                <button class="chip" type="button">unity-cli · 9</button>
-                <button class="chip" type="button">155-Demi · 6</button>
-                <button class="chip" type="button">KeibaDB · 14</button>
-                <button class="chip" type="button">160-Idina · 5</button>
-                <button class="chip" type="button">State: Open ▾</button>
-              </div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Memory grows during long sessions (#5561)</div><div class="d">Bug · reported 6 days ago · already picked up — waiting to start in Tasks</div></div><span class="badge b-queue">In Tasks</span><button class="btn" type="button" data-nav="issue">Open issue</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import fails on the new source format (#121)</div><div class="d">Bug · reported yesterday · picked up — blocked, and waiting for your decision</div></div><span class="badge b-block">In Tasks · blocked</span><button class="btn" type="button" data-nav="issue">Open issue</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Support streaming responses (#230)</div><div class="d">Feature request · reported 3 days ago · not picked up yet — your PM suggests taking it next week</div></div><span class="badge b-done">Not started</span><button class="btn primary" type="button">Make it a task</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Dark mode for article pages (#102)</div><div class="d">Feature request · reported last week · not picked up yet</div></div><span class="badge b-done">Not started</span><button class="btn primary" type="button">Make it a task</button></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="t">Fix the typo on the about page (#7)</div><div class="d">Closed 2 days ago — kept here as part of the record</div></div><span class="badge b-done">Closed</span><button class="btn" type="button" data-nav="issue">Open issue</button></div>
-                      </div>
-          <div class="screen-pane" data-screen="decide">
+<div class="screen-pane" data-screen="decide">
               <p class="h-big">Decide</p>
               <p class="h-sub">5 things are waiting for your decision, across all projects. Your PM won't proceed on these until you choose — everything else keeps moving.</p>
               <div class="rowitem"><span class="ptag"><i style="background:#1b1e24"></i>All projects</span><div class="grow"><div class="t">Unsaved work in 3 projects — save it all?</div><div class="d">gwt (2 tasks), llmlb (1) and KeibaDB (1) have changes that aren't committed or pushed. If this device is wiped first, that work is lost.</div></div><span class="rel">waiting 26 min</span><div class="btnrow"><button class="btn amber" type="button">Commit &amp; push all</button><button class="btn" type="button">Review each project</button></div></div>
@@ -457,81 +523,38 @@
               <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">The import file format changed — update the mapping?</div><div class="d">Daily import (#121) is paused. Updating the mapping takes about 20 min of agent time; pausing keeps results stale until tomorrow.</div></div><span class="rel">waiting 48 min</span><div class="btnrow"><button class="btn primary" type="button">Update the mapping</button><button class="btn" type="button">Pause imports</button></div></div>
               <p class="rel">When this list is empty, your PM is running everything on its own.</p>
                       </div>
-          <div class="screen-pane" data-screen="log">
-              <p class="h-big">Log</p>
-              <p class="h-sub">What was decided and what finished — one timeline for the whole device. Times are shown in your timezone; hover any entry for the exact time.</p>
-              <div class="tl">
-                <div class="tl-item done"><div class="when">2 min ago · 12:44</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">Task finished — “Settings: per-project sections” (#7039), merged.</span></div>
-                <div class="tl-item"><div class="when">9 min ago · 12:37</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">Task started — “Photo upload size limit” (#96).</span></div>
-                <div class="tl-item"><div class="when">15 min ago · 12:31</div><span class="ptag"><i style="background:#0f766e"></i>gwt</span> <span class="what">Task started — “Status bar in plain words” (#7044).</span></div>
-                <div class="tl-item"><div class="when">18 min ago · 12:28</div><span class="ptag"><i style="background:#2563eb"></i>llmlb</span> <span class="what">Task started — “Retry backoff for upstream timeouts” (#212), routed from your request in Ask.</span></div>
-                <div class="tl-item dec"><div class="when">34 min ago · 12:12</div><span class="badge b-wait">Your decision</span> <span class="what">You set this week's priority: gwt's React migration (#6943) before new features.</span></div>
-                <div class="tl-item err"><div class="when">48 min ago · 11:58</div><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> <span class="what">Import blocked — the source file format changed (#121). Waiting in Decide.</span></div>
-                <div class="tl-item err"><div class="when">59 min ago · 11:47</div><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span> <span class="what">Publishing blocked — the deploy key expired (#88).</span></div>
-                <div class="tl-item dec"><div class="when">1 h ago · 11:20</div><span class="badge b-done">PM report</span> <span class="what">Late-morning report posted: progress on all 7 projects, 3 items flagged for your decision.</span></div>
-                <div class="tl-item"><div class="when">3 h 40 min ago · 09:06</div><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> <span class="what">Task started — “Reconnect after sleep” (#41). No activity in the last hour; flagged in Decide.</span></div>
-              </div>
-                      </div>
-          <div class="screen-pane" data-screen="works">
-              <p class="h-big">Works</p>
-              <p class="h-sub">9 sessions are working right now, across 5 of the 7 projects. Each session's work stays inside its own project.</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Shared state model for the new screens (#7048)</div><div class="d">Codex · Host · running 42 min · last activity 2 min ago · Changes so far: 6 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">Home &amp; Decide screens (#7007)</div><div class="d">Claude Code · running 1 h 12 min · last activity just now · Changes so far: 11 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Race result import — new data format (#130)</div><div class="d">Claude Code · Docker · service agent-dev · running 47 min · last activity 5 min ago · Changes so far: 4 files · Checks: 1 failing, being fixed</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="t">Token usage panel (#208)</div><div class="d">Claude Code · running 33 min · last activity 1 min ago · Changes so far: 3 files · Checks: passing</div></div><span class="badge b-run">Running</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Pause</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="t">Reconnect after sleep (#41)</div><div class="d">Codex · running 3 h 40 min · <b>no activity for 1 h</b> · Your call is waiting in Decide</div></div><span class="badge b-wait">Running · quiet</span><div class="btnrow"><button class="btn" type="button">Open session</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <p class="rel">+ 4 more sessions (gwt ×2 · llmlb ×1 · event-magazine ×1) — same layout.</p>
-                      </div>
-          <div class="screen-pane" data-screen="agents">
-              <p class="h-big">Agents</p>
-              <p class="h-sub">9 working · 1 available · 1 needs your attention. Agents are registered by name and tool, and are reused across issues. Capacity: 11 of 12 agents enabled (1 resting). Your PM assigns agents to projects. Usage is shown by default.</p>
-              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">H</span><div class="grow"><div class="t">Haruto</div><div class="d">Codex · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> Shared state model (#7048) · running 42 min</div><div class="use"><span class="pct">Weekly 64%</span><span class="bar"><i style="width:64%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">Y</span><div class="grow"><div class="t">Yui</div><div class="d">Claude Code · <span class="ptag"><i style="background:#0f766e"></i>gwt</span> Home &amp; Decide screens (#7007) · running 1 h 12 min</div><div class="use"><span class="pct">Weekly 31%</span><span class="bar"><i style="width:31%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#c2410c">S</span><div class="grow"><div class="t">Sora</div><div class="d">Claude Code · <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span> Race result import (#130) · running 47 min</div><div class="use"><span class="pct">Weekly 31%</span><span class="bar"><i style="width:31%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-run">Working</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#2563eb">R</span><div class="grow"><div class="t">Ren</div><div class="d">Codex · <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span> Reconnect after sleep (#41) · running 3 h 40 min · no activity for 1 h</div><div class="use"><span class="pct">Weekly 64%</span><span class="bar"><i style="width:64%"></i></span><span>resets Fri 18:00 · per account — usage is shared by all sessions on this account</span></div></div><span class="badge b-wait">Working · quiet</span><button class="btn ghost" type="button">Pause</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#475569">A</span><div class="grow"><div class="t">Aoi</div><div class="d">Codex tool · Signed out — this agent can't take work until you sign in to the tool again.</div></div><span class="badge b-block">Needs sign-in</span><button class="btn" type="button">Sign in again</button></div>
-              <div class="rowitem"><span class="pm-ava" style="background:#475569">M</span><div class="grow"><div class="t">Mio</div><div class="d">Claude Code · Available — your PM will assign the next task that fits.</div></div><span class="badge b-done">Available</span></div>
-              <p class="rel">+ 5 more working agents (gwt ×2 · llmlb ×2 · event-magazine ×1) — same layout. Select an agent to open its detail: rename, rest, reassign it to another issue or switch it to the next issue by hand, and its record (assigned issues · landed · active time · tokens), as today. Usage lines are shown for every agent by default.</p>
-                      </div>
-          <div class="screen-pane" data-screen="project">
-              <p class="h-big">Project: gwt</p>
-              <p class="h-sub">Context fixed to gwt — everything below is this project only. Your PM is the same PM; only its focus is pinned here. <b>Back to all projects</b> returns to the cross-project screens.</p>
-              <div class="stat-row">
-                <div class="stat"><div class="num">4</div><div class="lab">Running in gwt</div></div>
-                <div class="stat bad"><div class="num">1</div><div class="lab">Blocked</div></div>
-                <div class="stat warn"><div class="num">2</div><div class="lab">Waiting for your decision</div></div>
-                <div class="stat"><div class="num">132</div><div class="lab">Open issues in gwt</div></div>
-              </div>
-              <div class="rowitem"><div class="grow"><div class="t">Execution policy — Running</div><div class="d">Saved choice: Continue. This project keeps running, and starts again after a gwt restart. Switch the saved choice to Stop to park the project: no new work starts, running work is left to finish, and the choice is remembered. The state shown here (Running / Waiting / Stopped) is the project&rsquo;s actual state, not just the saved choice.</div></div><div class="btnrow"><button class="btn" type="button">Continue</button><button class="btn ghost" type="button">Stop</button></div></div>
-              <p class="h-sec">This project, in one place</p>
-              <div class="rowitem"><div class="grow"><div class="t">Issues — phase view</div><div class="d">This project&rsquo;s issues as a phase board: Backlog / Queued / Planning / Implementation / Review / Done, with queue actions and the issue detail drawer.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Works &amp; terminals</div><div class="d">Sessions running for gwt, with their terminals. Resume a past session, or start fresh.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Ask — scoped to gwt</div><div class="d">The same PM chat, with the scope pinned to this project. Reports for gwt land here too.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Agents on gwt</div><div class="d">The roster working on this project — the same agents as the cross-project Agents screen, filtered to gwt.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Board — state &amp; conversation, gwt only</div><div class="d">This project&rsquo;s board, in full: the state columns (Waiting for you / Blocked / In progress / Waiting to start, sorted by how long each card has waited) and the conversation log — posts, reply threads, @mentions, history paging, destinations (For you / General / Broadcast) and agent Focus / Resume. Decisions, blocked notes and handoffs shared from other machines via GitHub Discussions (#4833, decided and shipped) also arrive here. Board destinations are per project and shared with the team — projects never mix, and there is no cross-project board.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Agent board — Plan / Active / Blocked / Done</div><div class="d">Agent windows as cards on progress lanes; drag a card to move it, launch an agent into a lane. It opens as its own screen — windows are not placed side by side.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Branches</div><div class="d">Branch list with safe cleanup: protected branches, the current HEAD and branches gwt doesn&rsquo;t manage can&rsquo;t be deleted; remote deletion and forced worktree removal are confirmed step by step.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Search this project</div><div class="d">Semantic search across this project&rsquo;s issues, discussions, docs, specs, files, reports and memory.</div></div><button class="btn" type="button">Search</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Project settings</div><div class="d">Only what differs from the device settings: issue execution (Monitoring / Auto-refill / Allowed labels), this project&rsquo;s PM setup, Hooks, index health, and the execution policy.</div></div><button class="btn" type="button">Open</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Close this project</div><div class="d">Closing waits for the project&rsquo;s agents to shut down; if shutdown stalls, you can retry from here. A one-time move to the bare + worktree layout, when offered, runs from here too.</div></div><button class="btn ghost" type="button">Close…</button></div>
-              <p class="rel">Mission briefing for this project appears at the top of this screen when the PM starts work here.</p>
-                      </div>
-          <div class="screen-pane" data-screen="notifications">
+            <div class="screen-pane" data-screen="notifications">
               <p class="h-big">Notifications</p>
-              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Repeats are folded into one line each.</p>
+              <p class="h-sub">9 unread — grouped from 98 events since yesterday. Notifications point at things; the things themselves live in Decide or in a project&rsquo;s tab.</p>
               <p class="h-sec">Needs your decision · 5</p>
-              <div class="rowitem" style="border-color:var(--amber);background:var(--amber-soft)"><div class="grow"><div class="t">5 decisions are waiting — newest: unsaved work in 3 projects</div><div class="d">Decisions live in Decide; notifications only point at them.</div></div><button class="btn amber" type="button">Open Decide</button></div>
+              <div class="card amber" style="margin-bottom:18px">
+                <div class="t" style="margin-top:0">5 decisions are waiting — newest: unsaved work in 3 projects</div>
+                <div class="btnrow" style="margin-top:8px"><button class="btn amber" type="button" data-nav="decide">Open Decide</button></div>
+              </div>
               <p class="h-sec">Blocked · 2 new</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">Daily import blocked — source format changed (#121)</div><div class="d">48 min ago · also waiting in Decide</div></div><span class="badge b-block">Blocked</span></div>
-              <div class="rowitem"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="t">Publishing blocked — deploy key expired (#88)</div><div class="d">59 min ago</div></div><span class="badge b-block">Blocked</span></div>
-              <p class="h-sec">Finished · 4 new since you last looked</p>
-              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">“Settings: per-project sections” (#7039) finished and merged</div><div class="d">2 min ago · newest of the 4 — everything finished is collected in Log</div></div><span class="badge b-done">Done</span></div>
-              <p class="h-sec">Status updates · grouped</p>
-              <div class="rowitem"><div class="grow"><div class="t">Steering updates on gwt — 14 similar events</div><div class="d">Folded into one line · last one 9 min ago · nothing needs you here</div></div><button class="btn ghost" type="button">Expand</button></div>
-              <div class="rowitem"><div class="grow"><div class="t">Progress notes from running tasks — 73 events</div><div class="d">Folded · details are in Log</div></div><span class="badge b-done">Read</span><button class="btn ghost" type="button">Expand</button></div>
-              <div class="btnrow"><button class="btn" type="button">Mark all as read</button><button class="btn ghost" type="button">Notification settings</button></div>
-                      </div>
-          <div class="screen-pane" data-screen="settings">
+              <div class="lrow">
+                <span class="badge b-block">Blocked</span>
+                <div class="grow">
+                  <div class="t">KeibaDB — the daily import stopped</div>
+                  <div class="d">The source file format changed, and the mapping decision is waiting in Decide.</div>
+                </div>
+                <button class="btn" type="button" data-opentab="pm" data-openscreen="decide">Open in Decide</button>
+              </div>
+              <div class="lrow">
+                <span class="badge b-block">Blocked</span>
+                <div class="grow">
+                  <div class="t">event-magazine — a screenshot check keeps failing</div>
+                  <div class="d">This one doesn&rsquo;t need you; your PM already restarted the check on a second machine.</div>
+                </div>
+              </div>
+              <p class="h-sec">Finished</p>
+              <p class="countline">4 tasks finished since you last looked — newest: &ldquo;Settings: per-project sections&rdquo; (#7039) in gwt, 2 min ago.</p>
+              <div class="btnrow" style="margin-top:14px">
+                <button class="btn ghost" type="button">Mark all as read</button>
+              </div>
+            </div>
+
+<div class="screen-pane" data-screen="settings">
               <p class="h-big">Settings</p>
               <p class="h-sub">Settings for your PM apply to the whole device. Project settings only override them where a project truly differs.</p>
 <div class="chips" role="group" aria-label="Settings tabs"><button class="chip on" type="button" data-tab="yourpm">Your PM</button><button class="chip" type="button" data-tab="tools">Tools</button><button class="chip" type="button" data-tab="launch">Launch</button><button class="chip" type="button" data-tab="projects">Projects</button></div>
@@ -542,7 +565,6 @@
                 <p class="d">One PM watches all 7 projects. These settings shape how it takes requests, routes work and reports back.</p>
                 <div class="set-row"><div class="grow"><div class="t">Route tasks to projects automatically</div><div class="d2">The PM suggests a project from each request in Ask, and always shows you the choice.</div></div><span class="switch" role="img" aria-label="On"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">Bring decisions to me as they appear</div><div class="d2">Off means decisions are batched into the morning and evening reports instead.</div></div><span class="switch" role="img" aria-label="On"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Daily summary</div><div class="d2">Posted to Log and Notifications at 9:00 and 18:00.</div></div><button class="btn" type="button">9:00 / 18:00 ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Quiet hours</div><div class="d2">Only blocked work and decisions interrupt you between 23:00 and 7:00.</div></div><span class="switch" role="img" aria-label="On"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">App updates — gwt itself</div><div class="d2">Current version 9.161.0. gwt checks for updates itself; tools have their own update setting, in the Tools tab.</div></div><button class="btn" type="button">Check now</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Apply updates automatically (auto-apply)</div><div class="d2">When an update is ready, running work is drained first — agents are stopped safely — then gwt restarts and applies it. You can cancel an automatic update before it applies.</div></div><span class="switch" role="img" aria-label="On"></span></div>
@@ -552,7 +574,6 @@
                 <h4>Performance &amp; system — this device</h4>
                 <p class="d">How much of this device gwt may use, and small system behaviors. Set once; rarely changed.</p>
                 <div class="set-row"><div class="grow"><div class="t">Resource preset</div><div class="d2">Agent process priority, CPU limit per agent, build parallelism per agent, and isolating agent process trees.</div></div><button class="btn" type="button">Balanced ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Output language</div><div class="d2">Language of reports and other narrative output. The interface itself stays in English.</div></div><button class="btn" type="button">Japanese ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Launch gwt at login</div><div class="d2">Start gwt when you sign in to this device.</div></div><span class="switch off" role="img" aria-label="Off"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">Works output lines</div><div class="d2">How many output lines a work session shows (3–10).</div></div><button class="btn" type="button">6 ▾</button></div>
               </div>
@@ -572,7 +593,6 @@
                 <h4>Custom Tools &amp; backends</h4>
                 <p class="d">Register your own command-line tools, and override how a built-in tool connects (backend profiles). Each custom tool has its own environment variables.</p>
                 <div class="set-row"><div class="grow"><div class="t">Custom tools</div><div class="d2">External CLI tools you registered yourself — add, edit, or remove. Agents can then be registered with them, like built-in tools.</div></div><button class="btn" type="button">Manage</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Environment variables — per custom tool</div><div class="d2">Add or remove env rows for a custom tool; saved with the tool&rsquo;s definition.</div></div><button class="btn" type="button">Edit</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Tool backends</div><div class="d2">Backend override profiles for Claude Code and Codex — where the tool actually connects.</div></div><button class="btn" type="button">Manage</button></div>
               </div>
 </div>
@@ -581,10 +601,6 @@
                 <h4>Launch — how agents start</h4>
                 <p class="d">Launch profiles (candidates), one per agent. Each profile fixes the agent, its tool, model and runtime; starting work uses the profile recorded for that work, and automatic launches use the tier settings. Launching itself happens in the Launch Wizard. Projects can override these profiles as a difference, below.</p>
                 <div class="set-row"><div class="grow"><div class="t">1. Haruto — Codex · gpt-6-sol · reasoning xhigh</div><div class="d2">Runtime: Host · Session mode: Normal · Prefer for: implementation</div></div><button class="btn" type="button">Edit</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Runtime — Haruto</div><div class="d2">Where this agent runs. Choosing Docker enables the Docker service choice and disables the Windows shell.</div></div><button class="btn" type="button">Host ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Docker service — Haruto</div><div class="d2">Only applies when the runtime is Docker.</div></div><button class="btn" type="button">Auto ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Skip permissions — Haruto</div><div class="d2">Skip tool permission prompts for this agent's sessions.</div></div><span class="switch off" role="img" aria-label="Off"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">Fast mode — Haruto</div><div class="d2">Prefer faster responses where the tool supports it.</div></div><span class="switch" role="img" aria-label="On"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">2. Yui — Claude Code · Auto · reasoning default</div><div class="d2">Runtime: Docker · service agent-dev · Session mode: Normal</div></div><button class="btn" type="button">Edit</button></div>
                 <div class="set-row"><div class="grow"><div class="t">3. Sora — Claude Code · Auto · reasoning default</div><div class="d2">Runtime: Host · Session mode: Normal · Prefer for: data imports</div></div><button class="btn" type="button">Edit</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Manage launch profiles</div><div class="d2">Add a profile, reorder the pool, or remove one — the profiles above are the pool itself, not just examples.</div></div><button class="btn" type="button">Add profile</button></div>
@@ -594,7 +610,7 @@
 <div class="set-group">
                 <h4>Projects</h4>
                 <p class="d">Each project inherits the device settings above. Only the differences are listed.</p>
-                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">2 differences: reports go to the team channel · React work has priority this week</div></div><button class="btn" type="button">Open</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">2 differences: reports go to the team channel · React work has priority this week</div></div><button class="btn" type="button" data-opentab="gwt" data-openscreen="g-settings">Open in its tab</button></div>
                 <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d2">1 difference: service restarts need your decision</div></div><button class="btn" type="button">Open</button></div>
                 <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">1 difference: imports run at 6:00 daily</div></div><button class="btn" type="button">Open</button></div>
                 <div class="set-row"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d2">No differences — using device settings as-is</div></div></div>
@@ -617,15 +633,72 @@
               </div>
 </div>
           </div>
-          <div class="screen-pane" data-screen="issue">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="issues">&larr; Back to Issues</button><button class="btn ghost" type="button" data-nav="tasks">See it in Tasks</button></div>
+          </div>
+        </div>
+
+        <div class="tabgroup" data-group="gwt">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#0f766e"></i>gwt</span>
+              <div class="sub">Project tab · Policy: Running</div>
+            </div>
+            <a href="#" data-nav="g-issues" class="on">Issues</a>
+            <a href="#" data-nav="g-works">Works</a>
+            <a href="#" data-nav="g-ask">Ask</a>
+            <a href="#" data-nav="g-agents">Agents</a>
+            <a href="#" data-nav="g-board">Board</a>
+            <a href="#" data-nav="g-index">Index</a>
+            <a href="#" data-nav="g-branches">Branches</a>
+            <a href="#" data-nav="g-settings">Settings</a>
+            <div class="foot">Everything in this tab is gwt only.</div>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane on" data-screen="g-issues">
+              <p class="h-big">Issues</p>
+              <p class="h-sub">gwt · 132 open. Your PM picks work up from here; picked-up issues run as sessions in Works.</p>
+              <p class="countline" style="margin-bottom:8px">Phases — Backlog <b>118</b> · Queued <b>3</b> · Planning <b>1</b> · Implementation <b>2</b> · Review <b>1</b> · Done today <b>5</b></p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Memory grows during long sessions (#5561)</div>
+                  <div class="d">Bug · reported 6 days ago · picked up — waiting to start</div>
+                </div>
+                <span class="badge b-queue">Waiting to start</span>
+                <button class="btn" type="button" data-nav="g-issue">Open issue</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Shared state model for the new screens (#7048)</div>
+                  <div class="d">Implementation · Haruto is working on it</div>
+                </div>
+                <span class="badge b-run">Running</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Home &amp; Decide screens for the refresh (#7007)</div>
+                  <div class="d">Implementation · Yui is working on it</div>
+                </div>
+                <span class="badge b-run">Running</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Checks failing on a change (#7047)</div>
+                  <div class="d">Review · 4 checks failing — a fix is being prepared</div>
+                </div>
+                <span class="badge b-block">Blocked</span>
+              </div>
+              <p class="rel" style="margin-top:12px">+ 128 more issues in gwt — same layout.</p>
+            </div>
+
+<div class="screen-pane" data-screen="g-issue">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-issues">&larr; Back to Issues</button></div>
               <p class="h-big">Memory grows during long sessions</p>
               <p class="h-sub">Issue #5561 · <b>gwt</b> · Bug · reported 6 days ago · Picked up by your PM — waiting to start in Tasks.</p>
               <div class="set-group">
                 <h4>Goal</h4>
                 <p class="d">Stop the GUI&rsquo;s memory from growing during long sessions (about 0.85 GB to 2.7 GB over roughly 4 hours) so gwt can stay open all day without a restart.</p>
                 <div class="set-row"><div class="grow"><div class="t">Acceptance</div><div class="d2">Memory stays flat over a 4-hour session with the same workload; the fix is verified on Windows as well as this device.</div></div><span class="badge b-queue">In Tasks</span></div>
-                <div class="set-row"><div class="grow"><div class="t">Phase</div><div class="d2">Queued — waiting to start. The phase board for gwt lives in Project.</div></div><button class="btn" type="button" data-nav="project">Open Project</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Phase</div><div class="d2">Queued — waiting to start. The phase view is at the top of this tab&rsquo;s Issues screen.</div></div><button class="btn" type="button" data-nav="g-issues">Go to Issues</button></div>
               </div>
               <div class="set-group">
                 <h4>Discussion</h4>
@@ -650,11 +723,605 @@
                 <div class="set-row"><div class="grow"><div class="t">Progress summary</div><div class="d2">Your PM will keep a short running summary here as work moves — the same words that appear in Log.</div></div></div>
               </div>
           </div>
+            <div class="screen-pane" data-screen="g-works">
+              <p class="h-big">Works</p>
+              <p class="h-sub">Sessions working on gwt right now. Open a session to see its terminal.</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Shared state model for the new screens (#7048)</div>
+                  <div class="d">Codex · Haruto · running 42 min · last activity 2 min ago</div>
+                </div>
+                <span class="badge b-run">Running</span>
+                <button class="btn" type="button">Open session</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Home &amp; Decide screens for the refresh (#7007)</div>
+                  <div class="d">Claude Code · Yui · running 1 h 12 min · last activity just now</div>
+                </div>
+                <span class="badge b-run">Running</span>
+                <button class="btn" type="button">Open session</button>
+              </div>
+              <p class="h-sec">Past sessions</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Resume a past session</div>
+                  <div class="d">Pick up an earlier session where it left off, or start fresh from the same task.</div>
+                </div>
+                <button class="btn" type="button">Choose session…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-ask">
+              <p class="h-big">Ask — gwt</p>
+              <p class="h-sub">Your PM, with its focus pinned to gwt. Reports for gwt are posted here too.</p>
+              <div class="chat">
+                <div class="msg me"><div><div class="bubble">How is the memory issue (#5561) looking?</div></div></div>
+                <div class="msg"><span class="pm-ava sm">PM</span><div><div class="bubble">It&rsquo;s queued and starts next — the plan is approved and nothing is blocking it. I&rsquo;ll post the memory profile here when the fix lands.</div><div class="route"><span class="rb">Scope: gwt</span></div></div></div>
+              </div>
+              <div class="composer">
+                <div class="chips"><span class="chip on">Scope: gwt</span></div>
+                <div class="row"><textarea class="ta" rows="2" placeholder="Ask about gwt…"></textarea><button class="btn primary" type="button">Send</button></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-agents">
+              <p class="h-big">Agents</p>
+              <p class="h-sub">Who is working on gwt, with what. Usage is shown per agent by default — the same accounts are shared across projects.</p>
+              <div class="rowitem">
+                <span class="ava" style="background:#2563eb">H</span>
+                <div class="grow">
+                  <div class="t">Haruto <span class="rel">· Codex (Tool)</span></div>
+                  <div class="d">Working on: #7048, shared state model · 42 min so far</div>
+                  <div class="use"><div class="bar"><i style="width:64%"></i></div><span class="u">Codex account — Weekly 64% used · resets Fri 18:00</span></div>
+                </div>
+                <span class="badge b-run">Working</span>
+                <button class="btn ghost" type="button">Pause</button>
+              </div>
+              <div class="rowitem">
+                <span class="ava" style="background:#c2410c">Y</span>
+                <div class="grow">
+                  <div class="t">Yui <span class="rel">· Claude Code (Tool)</span></div>
+                  <div class="d">Working on: #7007, Home &amp; Decide screens · 1 h 12 min so far</div>
+                  <div class="use"><div class="bar"><i style="width:31%"></i></div><span class="u">Claude account — Weekly 31% used · resets Fri 18:00</span></div>
+                </div>
+                <span class="badge b-run">Working</span>
+                <button class="btn ghost" type="button">Pause</button>
+              </div>
+              <p class="rel" style="margin-top:14px">Open a member for rename, rest, handover, manual Reassign / Switch and the member&rsquo;s work record.</p>
+            </div>
+
+            <div class="screen-pane" data-screen="g-board">
+              <p class="h-big">Board</p>
+              <p class="h-sub">gwt&rsquo;s board — state and conversation for this project only. There is no cross-project board.</p>
+              <p class="countline" style="margin-bottom:6px">Waiting for you <b>2</b> · Blocked <b>1</b> · In progress <b>4</b> · Waiting to start <b>9</b></p>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">For you</span><span class="chip">General</span><span class="chip">Broadcast</span>
+              </div>
+              <div class="post">
+                <div class="meta">Your PM · <span class="badge b-run">Decision</span> · 12:12</div>
+                <div class="body">Decision: Settings sections ship as one PR (#7039).</div>
+              </div>
+              <div class="post">
+                <div class="meta">Haruto · <span class="badge b-block">Blocked</span> · 12:03</div>
+                <div class="body">Blocked on #7047: 4 checks failing on the state-model change.</div>
+              </div>
+              <div class="post">
+                <div class="meta">Handoff · <span class="badge b-plan">From another machine · GitHub Discussions</span> · 11:48</div>
+                <div class="body">The Windows session finished its #7047 fix attempt — details are in the issue.
+                  <div class="d">Arrives here because decisions, blocked notes and handoffs are shared between machines via GitHub Discussions (#4833, decided and shipped). Status and claims stay on the machine that made them.</div>
+                </div>
+              </div>
+              <p class="rel" style="margin-top:12px">Board provider: Local — posts stay on this device. Changing the provider (Slack / Teams) is a device setting, in Your PM → Settings.</p>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="Post to gwt&rsquo;s board…">
+                <button class="btn" type="button">Post</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-index">
+              <p class="h-big">Index</p>
+              <p class="h-sub">Search inside gwt — issues, SPECs, board, discussions, work, reports and memory. Files and docs are searched per worktree.</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:220px" type="text" value="memory growth long session" aria-label="Search gwt">
+                <button class="btn primary" type="button">Search</button>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">Semantic</span><span class="chip">All terms</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Memory grows during long sessions (#5561)</div>
+                  <div class="d">Issue · 96% match · matched: memory, growth, session</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-issue">Open issue</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Long-session memory profile — report</div>
+                  <div class="d">Report · 88% match · matched: memory, session</div>
+                </div>
+              </div>
+              <p class="h-sec">Index health</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">All 9 scopes ready</div>
+                  <div class="d">12,480 documents · last repair 2 days ago</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-settings">Open in Settings</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-branches">
+              <p class="h-big">Branches</p>
+              <p class="h-sub">Branches in gwt. Work branches belong to sessions; the protected branch can&rsquo;t be deleted.</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">develop</div>
+                  <div class="d">Updated 12:44 · in sync with origin</div>
+                </div>
+                <span class="badge b-done">Current</span>
+                <span class="badge b-plan">Protected</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-7048</div>
+                  <div class="d">Haruto&rsquo;s session · updated 2 min ago</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-7007</div>
+                  <div class="d">Yui&rsquo;s session · updated just now</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-5561</div>
+                  <div class="d">Waiting to start</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">chore/old-cleanup</div>
+                  <div class="d">No activity for 30 days — safe to clean up</div>
+                </div>
+                <button class="btn ghost" type="button">Clean up…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-settings">
+              <p class="h-big">Settings</p>
+              <p class="h-sub">gwt only — these override the device settings in the Your PM tab where they differ.</p>
+              <div class="set-group">
+                <div class="set-head">Execution policy</div>
+                <div class="set-row">
+                  <div class="grow">
+                    <div class="t">This project keeps running across a gwt restart</div>
+                    <div class="d2">State: Running · Saved choice: Continue. Stopping waits for this project&rsquo;s agents to shut down first.</div>
+                  </div>
+                  <button class="btn ghost" type="button">Stop this project</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Running the work</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Monitoring</div><div class="d2">Your PM watches this project and restarts stuck agents. Turn it off to leave the project alone.</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Auto-refill</div><div class="d2">When a task finishes, the next queued issue for gwt starts on its own.</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Allowed labels</div><div class="d2">Issues with these labels may start without asking: bug, docs.</div></div>
+                  <button class="btn" type="button">Edit labels</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Project Manager &amp; hooks</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Project Manager for gwt</div><div class="d2">Tool, model, instructions and usage limits for this project&rsquo;s PM.</div></div>
+                  <button class="btn" type="button">Open</button>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Hooks</div><div class="d2">Run a script when this project&rsquo;s state changes — start, finish, blocked and more.</div></div>
+                  <button class="btn" type="button">Open</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Project index</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Index health</div><div class="d2">All 9 scopes ready · 12,480 documents · last repair 2 days ago.</div></div>
+                  <button class="btn" type="button">Rebuild</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Close</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for gwt&rsquo;s agents to shut down first. The project disappears from the tab bar; reopen it from the Start screen.</div></div>
+                  <button class="btn ghost" type="button">Close…</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="tabgroup" data-group="keibadb">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span>
+              <div class="sub">Project tab · Policy: Running</div>
+            </div>
+            <a href="#" data-nav="k-issues" class="on">Issues</a>
+            <a href="#" data-nav="k-works">Works</a>
+            <a href="#" data-nav="k-ask">Ask</a>
+            <a href="#" data-nav="k-agents">Agents</a>
+            <a href="#" data-nav="k-board">Board</a>
+            <a href="#" data-nav="k-index">Index</a>
+            <a href="#" data-nav="k-branches">Branches</a>
+            <a href="#" data-nav="k-settings">Settings</a>
+            <div class="foot">Everything in this tab is KeibaDB only.</div>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane on" data-screen="k-issues">
+              <p class="h-big">Issues</p>
+              <p class="h-sub">KeibaDB · 14 open. Your PM picks work up from here; picked-up issues run as sessions in Works.</p>
+              <p class="countline" style="margin-bottom:8px">Phases — Backlog <b>9</b> · Queued <b>1</b> · Implementation <b>1</b> · Review <b>0</b> · Done today <b>1</b></p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Race result import — 2026-11-11 (#130)</div>
+                  <div class="d">Implementation · Sora is working on it</div>
+                </div>
+                <span class="badge b-run">Running</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Daily import stopped — source format changed (#121)</div>
+                  <div class="d">Blocked · the import mapping needs your decision</div>
+                </div>
+                <span class="badge b-block">Blocked</span>
+                <button class="btn" type="button" data-opentab="pm" data-openscreen="decide">Open in Decide</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Support the new JRA-VAN export format (#98)</div>
+                  <div class="d">Not started · picked up — waiting to start</div>
+                </div>
+                <span class="badge b-queue">Waiting to start</span>
+              </div>
+              <p class="rel" style="margin-top:12px">+ 11 more issues in KeibaDB — same layout.</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-works">
+              <p class="h-big">Works</p>
+              <p class="h-sub">Sessions working on KeibaDB right now. Open a session to see its terminal.</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Race result import — 2026-11-11 (#130)</div>
+                  <div class="d">Claude Code · Sora · running 25 min · last activity 4 min ago</div>
+                </div>
+                <span class="badge b-run">Running</span>
+                <button class="btn" type="button">Open session</button>
+              </div>
+              <p class="h-sec">Past sessions</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Resume a past session</div>
+                  <div class="d">Pick up an earlier session where it left off, or start fresh from the same task.</div>
+                </div>
+                <button class="btn" type="button">Choose session…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-ask">
+              <p class="h-big">Ask — KeibaDB</p>
+              <p class="h-sub">Your PM, with its focus pinned to KeibaDB. Reports for KeibaDB are posted here too.</p>
+              <div class="chat">
+                <div class="msg me"><div><div class="bubble">Is the daily import still stuck?</div></div></div>
+                <div class="msg"><span class="pm-ava sm">PM</span><div><div class="bubble">Yes — the source changed its format, so the mapping is waiting on you in Decide. Once you pick one, I&rsquo;ll restart the import and post the result here.</div><div class="route"><span class="rb">Scope: KeibaDB</span></div></div></div>
+              </div>
+              <div class="composer">
+                <div class="chips"><span class="chip on">Scope: KeibaDB</span></div>
+                <div class="row"><textarea class="ta" rows="2" placeholder="Ask about KeibaDB…"></textarea><button class="btn primary" type="button">Send</button></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-agents">
+              <p class="h-big">Agents</p>
+              <p class="h-sub">Who is working on KeibaDB, with what. Usage is shown per agent by default — the same accounts are shared across projects.</p>
+              <div class="rowitem">
+                <span class="ava" style="background:#475569">S</span>
+                <div class="grow">
+                  <div class="t">Sora <span class="rel">· Claude Code (Tool)</span></div>
+                  <div class="d">Working on: #130, race result import · 25 min so far</div>
+                  <div class="use"><div class="bar"><i style="width:31%"></i></div><span class="u">Claude account — Weekly 31% used · resets Fri 18:00</span></div>
+                </div>
+                <span class="badge b-run">Working</span>
+                <button class="btn ghost" type="button">Pause</button>
+              </div>
+              <p class="rel" style="margin-top:14px">Open a member for rename, rest, handover, manual Reassign / Switch and the member&rsquo;s work record.</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-board">
+              <p class="h-big">Board</p>
+              <p class="h-sub">KeibaDB&rsquo;s board — state and conversation for this project only. There is no cross-project board.</p>
+              <p class="countline" style="margin-bottom:6px">Waiting for you <b>1</b> · Blocked <b>1</b> · In progress <b>1</b> · Waiting to start <b>2</b></p>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">For you</span><span class="chip">General</span><span class="chip">Broadcast</span>
+              </div>
+              <div class="post">
+                <div class="meta">Sora · <span class="badge b-block">Blocked</span> · 11:32</div>
+                <div class="body">Blocked on #121: the daily import stopped — the source file format changed.</div>
+              </div>
+              <div class="post">
+                <div class="meta">Your PM · <span class="badge b-run">Decision</span> · 11:40</div>
+                <div class="body">A decision is waiting in Decide: update the import mapping, or pause imports until the format settles.</div>
+              </div>
+              <p class="rel" style="margin-top:12px">Board provider: Local — posts stay on this device. Decisions, blocked notes and handoffs also travel to other machines via GitHub Discussions (#4833).</p>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="Post to KeibaDB&rsquo;s board…">
+                <button class="btn" type="button">Post</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-index">
+              <p class="h-big">Index</p>
+              <p class="h-sub">Search inside KeibaDB — issues, SPECs, board, discussions, work, reports and memory. Files and docs are searched per worktree.</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:220px" type="text" value="import format" aria-label="Search KeibaDB">
+                <button class="btn primary" type="button">Search</button>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">Semantic</span><span class="chip">All terms</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">Import mapping — source format v3</div>
+                  <div class="d">Document · 91% match · matched: import, format</div>
+                </div>
+              </div>
+              <p class="h-sec">Index health</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">All 9 scopes ready</div>
+                  <div class="d">640 documents · last repair 4 days ago</div>
+                </div>
+                <button class="btn" type="button" data-nav="k-settings">Open in Settings</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-branches">
+              <p class="h-big">Branches</p>
+              <p class="h-sub">Branches in KeibaDB. Work branches belong to sessions; the protected branch can&rsquo;t be deleted.</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">main</div>
+                  <div class="d">Updated 11:55 · in sync with origin</div>
+                </div>
+                <span class="badge b-done">Current</span>
+                <span class="badge b-plan">Protected</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-130</div>
+                  <div class="d">Sora&rsquo;s session · updated 4 min ago</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-settings">
+              <p class="h-big">Settings</p>
+              <p class="h-sub">KeibaDB only — these override the device settings in the Your PM tab where they differ.</p>
+              <div class="set-group">
+                <div class="set-head">Execution policy</div>
+                <div class="set-row">
+                  <div class="grow">
+                    <div class="t">This project keeps running across a gwt restart</div>
+                    <div class="d2">State: Running · Saved choice: Continue. Stopping waits for this project&rsquo;s agents to shut down first.</div>
+                  </div>
+                  <button class="btn ghost" type="button">Stop this project</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Running the work</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Daily import</div><div class="d2">Runs at 6:00 — the import itself is a scheduled job, not an agent session.</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Monitoring</div><div class="d2">Your PM watches this project and restarts stuck agents. Turn it off to leave the project alone.</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Auto-refill</div><div class="d2">When a task finishes, the next queued issue for KeibaDB starts on its own.</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Project index</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Index health</div><div class="d2">All 9 scopes ready · 640 documents · last repair 4 days ago.</div></div>
+                  <button class="btn" type="button">Rebuild</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Close</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for KeibaDB&rsquo;s agents to shut down first. The project disappears from the tab bar; reopen it from the Start screen.</div></div>
+                  <button class="btn ghost" type="button">Close…</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="tabgroup" data-group="vr">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span>
+              <div class="sub">Project tab · Policy: Running</div>
+            </div>
+            <a href="#" data-nav="v-issues" class="on">Issues</a>
+            <a href="#" data-nav="v-works">Works</a>
+            <a href="#" data-nav="v-ask">Ask</a>
+            <a href="#" data-nav="v-agents">Agents</a>
+            <a href="#" data-nav="v-board">Board</a>
+            <a href="#" data-nav="v-index">Index</a>
+            <a href="#" data-nav="v-branches">Branches</a>
+            <a href="#" data-nav="v-settings">Settings</a>
+            <div class="foot">Everything in this tab is this project only.</div>
+          </div>
+          <div class="content">
+            <div class="screen-pane on" data-screen="v-issues">
+              <p class="h-big">Issues</p>
+              <p class="h-sub"><span class="dyn-proj-name">vr-cabin-exposure</span> · no issues yet. This project was just cloned — your PM has indexed the repository and is ready when you are.</p>
+              <div class="btnrow"><button class="btn" type="button" data-nav="v-ask">Ask your PM what to do first</button></div>
+            </div>
+            <div class="screen-pane" data-screen="v-works">
+              <p class="h-big">Works</p>
+              <p class="h-sub">No sessions yet — nothing is running in this project.</p>
+            </div>
+            <div class="screen-pane" data-screen="v-ask">
+              <p class="h-big">Ask</p>
+              <p class="h-sub">Your PM, with its focus pinned to this project.</p>
+              <div class="chat">
+                <div class="msg"><span class="pm-ava sm">PM</span><div><div class="bubble">Cloned and ready. This is a Unity prototype — I can start by opening the project structure and listing what&rsquo;s already in place, then we pick the first task together.</div><div class="route"><span class="rb">Scope: <span class="dyn-proj-name">vr-cabin-exposure</span></span></div></div></div>
+              </div>
+              <div class="composer">
+                <div class="chips"><span class="chip on">Scope: this project</span></div>
+                <div class="row"><textarea class="ta" rows="2" placeholder="Ask about this project…"></textarea><button class="btn primary" type="button">Send</button></div>
+              </div>
+            </div>
+            <div class="screen-pane" data-screen="v-agents">
+              <p class="h-big">Agents</p>
+              <p class="h-sub">No agents assigned yet — your PM assigns agents when work starts.</p>
+            </div>
+            <div class="screen-pane" data-screen="v-board">
+              <p class="h-big">Board</p>
+              <p class="h-sub">Nothing posted yet. Decisions, blocked notes and handoffs for this project will appear here.</p>
+            </div>
+            <div class="screen-pane" data-screen="v-index">
+              <p class="h-big">Index</p>
+              <p class="h-sub">Search inside this project — issues, SPECs, board, discussions, work, reports and memory. Files and docs are searched per worktree.</p>
+              <p class="countline">Indexing… all 9 scopes · files are indexed per worktree.</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="Search this project" aria-label="Search this project">
+                <button class="btn primary" type="button">Search</button>
+              </div>
+            </div>
+            <div class="screen-pane" data-screen="v-branches">
+              <p class="h-big">Branches</p>
+              <p class="h-sub">Branches in this project.</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">main</div>
+                  <div class="d">Just cloned · in sync with origin</div>
+                </div>
+                <span class="badge b-done">Current</span>
+                <span class="badge b-plan">Protected</span>
+              </div>
+            </div>
+            <div class="screen-pane" data-screen="v-settings">
+              <p class="h-big">Settings</p>
+              <p class="h-sub">This project only — using the device settings as-is.</p>
+              <div class="set-group">
+                <div class="set-head">Execution policy</div>
+                <div class="set-row">
+                  <div class="grow">
+                    <div class="t">This project keeps running across a gwt restart</div>
+                    <div class="d2">State: Running · Saved choice: Continue.</div>
+                  </div>
+                  <button class="btn ghost" type="button">Stop this project</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">Close</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">Close this project</div><div class="d2">Closing waits for this project&rsquo;s agents to shut down first. Reopen it from the Start screen.</div></div>
+                  <button class="btn ghost" type="button">Close…</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="clone-backdrop" id="cloneModal" hidden>
+        <div class="clone-dialog" role="dialog" aria-label="Clone Project">
+          <div class="clone-head">
+            <div class="grow">
+              <h3>Clone Project</h3>
+              <p class="sub">Create a new gwt project from a GitHub repository.</p>
+            </div>
+            <button class="btn ghost" type="button" data-clone-close>Close</button>
+          </div>
+          <div data-cstep="form">
+            <div class="chips" style="margin-bottom:12px">
+              <span class="chip on" data-cmode="search">Search</span>
+              <span class="chip" data-cmode="url">URL</span>
+            </div>
+            <div id="cloneSearchArea">
+              <label class="f-label" for="cloneSearchInput">Repository search</label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:200px" id="cloneSearchInput" type="text" placeholder="owner/name or keywords" value="vr-cabin">
+                <button class="btn" type="button" id="cloneSearchBtn">Search</button>
+              </div>
+              <div id="cloneResults">
+                <div class="rel" id="cloneEmpty" style="padding:4px 2px">No repositories selected</div>
+                <div class="rel" id="cloneSearching" hidden style="padding:4px 2px">Searching repositories...</div>
+                <div id="cloneRepoList" hidden>
+                  <button class="repo-row" type="button" data-repo="akiojin/vr-cabin-exposure" data-name="vr-cabin-exposure">
+                    <span class="rt">akiojin/vr-cabin-exposure</span>
+                    <span class="rd">VR cabin exposure therapy — Unity prototype</span>
+                    <span class="rm">private | default: main | updated 2 days ago</span>
+                  </button>
+                  <button class="repo-row" type="button" data-repo="cloud-creative-studios/shared-ui-kit" data-name="shared-ui-kit">
+                    <span class="rt">cloud-creative-studios/shared-ui-kit</span>
+                    <span class="rd">Shared UI components for studio projects</span>
+                    <span class="rm">private | default: main | updated last week</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div id="cloneUrlArea" hidden>
+              <label class="f-label" for="cloneUrlInput">Repository URL</label>
+              <input class="field" style="width:100%" id="cloneUrlInput" type="text" placeholder="https://github.com/owner/repo.git or git@github.com:owner/repo.git">
+            </div>
+            <div style="margin-top:14px">
+              <label class="f-label" for="cloneParentInput">Destination parent</label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:200px" id="cloneParentInput" type="text" value="~/Projects">
+                <button class="btn" type="button">Choose Folder...</button>
+              </div>
+            </div>
+            <div class="btnrow" style="margin-top:16px">
+              <button class="btn ghost" type="button" data-clone-close>Cancel</button>
+              <button class="btn primary" type="button" id="cloneStart" disabled>Clone</button>
+            </div>
+          </div>
+          <div data-cstep="progress" hidden>
+            <p class="t" style="font-weight:800" id="cloneProgressLine">Cloning into &lsquo;vr-cabin-exposure&rsquo;...</p>
+            <div class="bar" style="margin:12px 0"><i id="cloneBarFill" style="width:0%"></i></div>
+            <p class="rel">The project opens in a new tab when the clone finishes. You can keep working here meanwhile.</p>
+          </div>
+          <div data-cstep="done" hidden>
+            <p class="t" style="font-weight:800">Cloned <span id="cloneDoneName">vr-cabin-exposure</span></p>
+            <p class="d" style="color:var(--ink2)">The project opened in a new tab at the top of this window.</p>
+            <div class="btnrow">
+              <button class="btn primary" type="button" id="cloneOpenBtn">Go to the new tab</button>
+              <button class="btn ghost" type="button" data-clone-close>Stay here</button>
+            </div>
           </div>
         </div>
       </div>
-      <div class="app-status">
-        <div class="statusbar">
+    </div>
+    <div class="app-status">
+<div class="statusbar">
             <span class="dot"></span>
             <span><b>Your PM</b> is watching all 7 projects</span>
             <span class="sep"></span><span><b>9</b> running</span>
@@ -663,60 +1330,186 @@
             <span class="r">Updated just now</span>
           </div>
       </div>
+    <footer class="doc">
+      <p class="note">このモックで決めたこと／現行への対応：骨格は現行の構造（開始画面 → プロジェクトをタブで開く → その中を見る）を土台にし、見せ方と情報整理だけを整える。開始画面＝現行 Hub の再現（gwt ロゴ＋バージョン、Open Folder…／Clone from GitHub…／フォルダパスで開く、Open・Recent の一覧と実行ポリシー状態行、Projects awaiting shutdown）。clone は開始画面の一導線で、project-clone-modal.js の実フロー（検索／URL 切替、候補選択、Destination parent、進捗、完了で別タブが開く）に沿う。Your PM タブに置くのは Decide と件数レベルの要約だけ——横断の Progress／Tasks／Log は置かない（作業面はプロジェクトタブの中だけ）。1画面の主役は1つ：Home は「次にすべきこと1件」を大きく出し、残りは件数で Decide へ送る。Settings は Your PM／Tools／Launch／Projects の4タブ（プロジェクト横断）。利用量はエージェントにアカウント単位で既定表示。#4833：Board の共有先は provider が担い、Discussions は decision／blocked／handoff の受け渡し経路。Board はプロジェクト単位（Q7）。Q4（Hub は Home に統合）は、開始画面を開始点として独立させ Your PM と分離する形に調整した。</p>
+    </footer>
+  </div>
 
-      <footer class="doc">
-        <h3>このモックについて</h3>
-        <p>表示しているのは刷新後の姿（After）のみで、Before は含みません。画面構成・情報設計・言葉づかいの正は静的モック（mock-full-refresh.html）と Issue #7007 のオーナー決定です。ステータスバーは全画面共通で、画面を切り替えても下部に残ります。</p>
-      </footer>
-    </div>
-
-    <script>
-      // Interactive mock: rail navigation switches the visible screen.
-      (function () {
-        var titles = {
-          home: "Home", ask: "Ask", progress: "Progress", tasks: "Tasks",
-          issues: "Issues", issue: "Issue #5561", decide: "Decide", log: "Log",
-          works: "Works", agents: "Agents", project: "Project \u2014 gwt",
-          notifications: "Notifications", settings: "Settings"
-        };
-        function show(name) {
-          document.querySelectorAll(".screen-pane").forEach(function (p) {
-            p.classList.toggle("on", p.getAttribute("data-screen") === name);
-          });
-          var railName = name === "issue" ? "issues" : name;
-          document.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
-            a.classList.toggle("on", a.getAttribute("data-nav") === railName);
-          });
-          var t = document.getElementById("appTitle");
-          if (t) t.textContent = titles[name] || name;
+  <script>
+  (function () {
+    var groupLabels = { start: "Start", pm: "Your PM", gwt: "gwt", keibadb: "KeibaDB", vr: "vr-cabin-exposure" };
+    var screenTitles = {
+      home: "Home", ask: "Ask", decide: "Decide", notifications: "Notifications", settings: "Settings",
+      "g-issues": "Issues", "g-issue": "Issue #5561", "g-works": "Works", "g-ask": "Ask", "g-agents": "Agents",
+      "g-board": "Board", "g-index": "Index", "g-branches": "Branches", "g-settings": "Settings",
+      "k-issues": "Issues", "k-works": "Works", "k-ask": "Ask", "k-agents": "Agents",
+      "k-board": "Board", "k-index": "Index", "k-branches": "Branches", "k-settings": "Settings",
+      "v-issues": "Issues", "v-works": "Works", "v-ask": "Ask", "v-agents": "Agents",
+      "v-board": "Board", "v-index": "Index", "v-branches": "Branches", "v-settings": "Settings"
+    };
+    var current = { start: "start", pm: "home", gwt: "g-issues", keibadb: "k-issues", vr: "v-issues" };
+    var activeGroup = "start";
+    function titleFor(g) {
+      if (g === "start") return "Start";
+      return groupLabels[g] + " — " + (screenTitles[current[g]] || "");
+    }
+    function renderTitle() {
+      var t = document.getElementById("appTitle");
+      if (t) t.textContent = titleFor(activeGroup);
+    }
+    function showGroup(g) {
+      activeGroup = g;
+      document.querySelectorAll(".tabgroup").forEach(function (el) {
+        el.classList.toggle("on", el.getAttribute("data-group") === g);
+      });
+      document.querySelectorAll("[data-ptab]").forEach(function (b) {
+        b.classList.toggle("on", b.getAttribute("data-ptab") === g);
+      });
+      renderTitle();
+    }
+    function showScreen(g, name) {
+      current[g] = name;
+      var groupEl = document.querySelector('.tabgroup[data-group="' + g + '"]');
+      if (!groupEl) return;
+      groupEl.querySelectorAll(".screen-pane").forEach(function (p) {
+        p.classList.toggle("on", p.getAttribute("data-screen") === name);
+      });
+      var railName = name === "g-issue" ? "g-issues" : name;
+      groupEl.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
+        a.classList.toggle("on", a.getAttribute("data-nav") === railName);
+      });
+      if (g === activeGroup) renderTitle();
+    }
+    function openTab(g, screen) {
+      if (screen) showScreen(g, screen);
+      showGroup(g);
+    }
+    document.querySelectorAll("[data-ptab]").forEach(function (b) {
+      b.addEventListener("click", function () { showGroup(b.getAttribute("data-ptab")); });
+    });
+    document.querySelectorAll("[data-nav]").forEach(function (el) {
+      el.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        var groupEl = el.closest(".tabgroup");
+        if (!groupEl) return;
+        showScreen(groupEl.getAttribute("data-group"), el.getAttribute("data-nav"));
+      });
+    });
+    document.querySelectorAll("[data-opentab]").forEach(function (el) {
+      el.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        openTab(el.getAttribute("data-opentab"), el.getAttribute("data-openscreen"));
+      });
+    });
+    document.querySelectorAll("[data-tab]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var scope = b.closest(".screen-pane");
+        if (!scope) return;
+        scope.querySelectorAll("[data-tab]").forEach(function (x) { x.classList.toggle("on", x === b); });
+        var target = b.getAttribute("data-tab");
+        scope.querySelectorAll(".set-pane").forEach(function (p) {
+          p.classList.toggle("on", p.getAttribute("data-pane") === target);
+        });
+      });
+    });
+    /* ----- Clone flow (from the Start screen) ----- */
+    var modal = document.getElementById("cloneModal");
+    var cloneState = { mode: "search", repo: "", name: "", searching: false, timer: null };
+    function cloneStep(name) {
+      modal.querySelectorAll("[data-cstep]").forEach(function (s) {
+        s.hidden = s.getAttribute("data-cstep") !== name;
+      });
+    }
+    function openClone() { modal.hidden = false; cloneStep("form"); }
+    function closeClone() {
+      modal.hidden = true;
+      if (cloneState.timer) { clearInterval(cloneState.timer); cloneState.timer = null; }
+    }
+    document.querySelectorAll("[data-clone-open]").forEach(function (b) {
+      b.addEventListener("click", function () { openClone(); });
+    });
+    modal.querySelectorAll("[data-clone-close]").forEach(function (b) {
+      b.addEventListener("click", closeClone);
+    });
+    modal.querySelectorAll("[data-cmode]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        cloneState.mode = b.getAttribute("data-cmode");
+        modal.querySelectorAll("[data-cmode]").forEach(function (x) { x.classList.toggle("on", x === b); });
+        document.getElementById("cloneSearchArea").hidden = cloneState.mode !== "search";
+        document.getElementById("cloneUrlArea").hidden = cloneState.mode !== "url";
+        updateCloneStart();
+      });
+    });
+    var startBtn = document.getElementById("cloneStart");
+    var parentInput = document.getElementById("cloneParentInput");
+    var urlInput = document.getElementById("cloneUrlInput");
+    function updateCloneStart() {
+      var ready = cloneState.mode === "search" ? cloneState.repo !== "" : urlInput.value.trim() !== "";
+      startBtn.disabled = !(ready && parentInput.value.trim() !== "");
+    }
+    urlInput.addEventListener("input", updateCloneStart);
+    parentInput.addEventListener("input", updateCloneStart);
+    var searchBtn = document.getElementById("cloneSearchBtn");
+    searchBtn.addEventListener("click", function () {
+      if (cloneState.searching) return;
+      cloneState.searching = true;
+      searchBtn.textContent = "Searching...";
+      document.getElementById("cloneEmpty").hidden = true;
+      document.getElementById("cloneRepoList").hidden = true;
+      document.getElementById("cloneSearching").hidden = false;
+      setTimeout(function () {
+        cloneState.searching = false;
+        searchBtn.textContent = "Search";
+        document.getElementById("cloneSearching").hidden = true;
+        document.getElementById("cloneRepoList").hidden = false;
+      }, 350);
+    });
+    modal.querySelectorAll(".repo-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        modal.querySelectorAll(".repo-row").forEach(function (r) { r.classList.toggle("sel", r === row); });
+        cloneState.repo = row.getAttribute("data-repo");
+        cloneState.name = row.getAttribute("data-name");
+        updateCloneStart();
+      });
+    });
+    function repoName() {
+      if (cloneState.mode === "search") return cloneState.name;
+      var v = urlInput.value.trim().replace(/\.git$/, "");
+      var parts = v.split(/[\/:]/).filter(function (s) { return s !== ""; });
+      return parts.length ? parts[parts.length - 1] : "project";
+    }
+    startBtn.addEventListener("click", function () {
+      cloneStep("progress");
+      var name = repoName();
+      var lines = ["Cloning into '" + name + "'...", "Receiving objects: 100%", "Resolving deltas...", "Checking out files..."];
+      var bar = document.getElementById("cloneBarFill");
+      var lineEl = document.getElementById("cloneProgressLine");
+      var pct = 0;
+      lineEl.textContent = lines[0];
+      bar.style.width = "0%";
+      cloneState.timer = setInterval(function () {
+        pct += 25;
+        bar.style.width = pct + "%";
+        lineEl.textContent = lines[Math.min(lines.length - 1, Math.floor(pct / 34))];
+        if (pct >= 100) {
+          clearInterval(cloneState.timer);
+          cloneState.timer = null;
+          groupLabels.vr = name;
+          document.querySelectorAll(".dyn-proj-name").forEach(function (el) { el.textContent = name; });
+          document.getElementById("cloneDoneName").textContent = name;
+          var tab = document.getElementById("vrTab"); if (tab) tab.hidden = false;
+          var row = document.getElementById("startVrRow"); if (row) row.hidden = false;
+          var notice = document.getElementById("startNotice"); if (notice) notice.hidden = false;
+          cloneStep("done");
         }
-        document.querySelectorAll("[data-nav]").forEach(function (el) {
-          el.addEventListener("click", function (ev) {
-            ev.preventDefault();
-            show(el.getAttribute("data-nav"));
-          });
-          el.addEventListener("keydown", function (ev) {
-            if (ev.key === "Enter" && el.getAttribute("role") === "button") {
-              ev.preventDefault();
-              show(el.getAttribute("data-nav"));
-            }
-          });
-        });
-        // Settings tabs (Your PM / Tools / Launch / Projects).
-        document.querySelectorAll("[data-tab]").forEach(function (b) {
-          b.addEventListener("click", function () {
-            var name = b.getAttribute("data-tab");
-            document.querySelectorAll("[data-tab]").forEach(function (x) {
-              x.classList.toggle("on", x === b);
-            });
-            document.querySelectorAll(".set-pane").forEach(function (p) {
-              p.classList.toggle("on", p.getAttribute("data-pane") === name);
-            });
-          });
-        });
-        show("home");
-      })();
-    </script>
-
-  </body>
+      }, 300);
+    });
+    document.getElementById("cloneOpenBtn").addEventListener("click", function () {
+      closeClone();
+      openTab("vr");
+    });
+    showGroup("start");
+  })();
+  </script>
+</body>
 </html>
