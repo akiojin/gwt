@@ -40,6 +40,49 @@ static NEXT_OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 
+/// Grok's normal root composer owns the visible cursor and advertises its
+/// mode shortcut. Blocking permission/question/edit surfaces replace that
+/// footer, even when they reuse a prompt widget. Pin: xai-org/grok-build
+/// 2bdd1d6, views/agent.rs:781-829 and app/agent_view/render.rs:201-317.
+fn grok_prompt_composer_ready(screen: &vt100::Screen) -> bool {
+    if screen.hide_cursor() {
+        return false;
+    }
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let lines: Vec<_> = screen.rows(0, screen.size().1).collect();
+    let Some(footer_row) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    if footer_row <= usize::from(cursor_row) {
+        return false;
+    }
+    let footer: Vec<_> = lines[footer_row].split_whitespace().collect();
+    if !footer.windows(2).any(|pair| pair == ["Shift+Tab", "mode"]) {
+        return false;
+    }
+    // Do not borrow a historical prompt above the current input block. A
+    // blank separation or an unrecognizable layout requires fresh evidence.
+    let cursor_row = usize::from(cursor_row);
+    let block_start = lines[..=cursor_row]
+        .iter()
+        .rposition(|line| line.trim().is_empty())
+        .map_or(0, |row| row + 1);
+    if block_start > cursor_row {
+        return false;
+    }
+    let Some(prompt_offset) = lines[block_start..=cursor_row].iter().rposition(|line| {
+        let prompt = line.trim_start();
+        prompt == "❯" || prompt.starts_with("❯ ") || prompt == ">" || prompt.starts_with("> ")
+    }) else {
+        return false;
+    };
+    let prompt_row = block_start + prompt_offset;
+    // The upstream prefix is two display columns (also on legacy ConHost).
+    let prompt = &lines[prompt_row];
+    let prefix_col = prompt.chars().take_while(|ch| ch.is_whitespace()).count() + 2;
+    prompt_row < cursor_row || usize::from(cursor_col) >= prefix_col
+}
+
 #[derive(Default)]
 struct TerminalCallbacks {
     cursor_report: Option<CursorPositionReport>,
@@ -524,6 +567,11 @@ impl Pane {
                 self.incomplete_output_tail.clear();
             }
         }
+        self.pty.set_grok_prompt_composer_ready(
+            self.incomplete_output_tail.is_empty()
+                && self.cursor_query_prefix.is_empty()
+                && grok_prompt_composer_ready(self.parser.screen()),
+        );
     }
 
     /// At physical EOF an unfinished candidate cannot become a handled query.
@@ -719,6 +767,8 @@ impl Pane {
     /// `resize_parser_preserving_state` regressions inside the parser.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let started = std::time::Instant::now();
+        // Require a fresh child redraw after changing the observed geometry.
+        self.pty.set_grok_prompt_composer_ready(false);
         self.pty.resize(cols, rows)?;
         self.snapshot_cache.take();
         let pty_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -975,6 +1025,51 @@ mod tests {
 
         pane.process_bytes(b"\x1b[?2004h");
         assert!(pty.bracketed_paste_enabled());
+        let _ = pane.kill();
+    }
+
+    #[test]
+    fn grok_composer_readiness_uses_current_cursor_and_normal_footer() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("grok-composer-input", sleep_command("60"));
+        let pty = pane.shared_pty();
+        assert!(pty.ensure_grok_prompt_input_ready().is_err());
+        // These are the native prefix and root footer, including legacy
+        // ConHost's ASCII prefix. A quoted prompt in history is insufficient.
+        for prefix in ["❯", ">"] {
+            pane.process_bytes(
+                format!(
+                    "\x1b[2J\x1b[H\x1b[21;1H{prefix} \x1b[24;1HShift+Tab mode\x1b[21;3H\x1b[?25h"
+                )
+                .as_bytes(),
+            );
+            assert!(
+                pty.ensure_grok_prompt_input_ready().is_ok(),
+                "idle {prefix}"
+            );
+            pane.process_bytes(
+                b"\x1b[24;1HEnter queue  Shift+Enter/Alt+Enter newline  Shift+Tab mode\x1b[21;3H",
+            );
+            assert!(
+                pty.ensure_grok_prompt_input_ready().is_ok(),
+                "Working {prefix}"
+            );
+        }
+        pane.process_bytes(b"\x1b[2J\x1b[H1. Yes, always allow\x1b[24;1H1/2 select  Ctrl+O always-approve\x1b[?25l");
+        assert!(pty.ensure_grok_prompt_input_ready().is_err());
+        pty.write_input(b"\x1b").expect("ordinary recovery input");
+        pane.process_bytes(
+            "\x1b[2J\x1b[H❯ pattern\x1b[24;1HEnter save  Esc cancel\x1b[1;10H\x1b[?25h".as_bytes(),
+        );
+        assert!(
+            pty.ensure_grok_prompt_input_ready().is_err(),
+            "pattern editor"
+        );
+        pane.process_bytes("\x1b[2J\x1b[H❯ historical prompt\x1b[24;1HShift+Tab mode\x1b[23;1Hunknown surface\x1b[?25h".as_bytes());
+        assert!(
+            pty.ensure_grok_prompt_input_ready().is_err(),
+            "cursor outside composer"
+        );
         let _ = pane.kill();
     }
 

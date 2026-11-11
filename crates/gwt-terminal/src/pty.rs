@@ -624,6 +624,9 @@ pub struct PtyHandle {
     /// Issue #5839: published by the parsed active screen. Protected prompt
     /// injection must not feed Codex's Transcript/Find input surface.
     transcript_overlay: AtomicBool,
+    /// Positive evidence from the current parsed screen, consulted only for
+    /// Grok PM delivery. Unknown and blocking surfaces are never prompt-ready.
+    grok_prompt_composer_ready: AtomicBool,
     /// Published only after bounded confirmation that the captured tree exited.
     tree_exit_confirmed: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -924,6 +927,7 @@ impl PtyHandle {
             startup_cursor_report_sent: AtomicBool::new(false),
             bracketed_paste: AtomicBool::new(false),
             transcript_overlay: AtomicBool::new(false),
+            grok_prompt_composer_ready: AtomicBool::new(false),
             tree_exit_confirmed: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
@@ -946,6 +950,24 @@ impl PtyHandle {
 
     pub(crate) fn set_transcript_overlay(&self, visible: bool) {
         self.transcript_overlay.store(visible, Ordering::Release);
+    }
+
+    pub(crate) fn set_grok_prompt_composer_ready(&self, ready: bool) {
+        self.grok_prompt_composer_ready
+            .store(ready, Ordering::Release);
+    }
+
+    /// Protected Grok delivery must never type into a permission card. Raw
+    /// human input deliberately does not use this provider-specific guard.
+    pub fn ensure_grok_prompt_input_ready(&self) -> Result<(), TerminalError> {
+        if !self.grok_prompt_composer_ready.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details:
+                    "Grok composer is not confirmed ready; focus the normal prompt before sending"
+                        .into(),
+            });
+        }
+        Ok(())
     }
 
     fn ensure_prompt_input_ready(&self) -> Result<(), TerminalError> {

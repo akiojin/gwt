@@ -11101,6 +11101,7 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     for submits_before_expiry in [0, 1] {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let prepared = pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: "2026-11-06T00:00:00Z".into(),
             status: Status::Prepared,
@@ -12629,6 +12630,7 @@ fn assert_pm_delivery_refused(
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
         let hash = gwt::pm_registry::pm_delivery_prompt_sha256("do not deliver to the PM");
         let receipt = gwt::pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: Utc::now().to_rfc3339(),
             status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,

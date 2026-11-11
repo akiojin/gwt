@@ -1,5 +1,10 @@
 use super::*;
 
+// Native root composer: pager views/agent.rs:781-829, glyphs.rs:15-25.
+const GROK_COMPOSER: &str =
+    "\x1b[2J\x1b[H\x1b[21;1H❯ \x1b[24;1HShift+Tab mode  Ctrl+K commands\x1b[21;3H\x1b[?25h";
+const GROK_PERMISSION: &str = "\x1b[2J\x1b[HRun command?\r\n1. Yes, and don't ask again for anything\r\n2. No\x1b[24;1H1/2 select  Tab next option  Ctrl+O always-approve  Ctrl+C cancel\x1b[?25l";
+
 // Every resource below is captured from the canonical actor. This fixture
 // observes real writer entries and never installs a GUI writer or Session.
 pub(super) struct PmDeliveryFixture {
@@ -61,6 +66,13 @@ fn pm_delivery_owner_fixture_for_agent(
         target.status
     );
     assert_eq!(target.session.as_ref().unwrap().agent_id, agent_id);
+    if agent_id == gwt_agent::AgentId::GrokBuild {
+        target
+            .pane
+            .lock()
+            .unwrap()
+            .process_bytes(GROK_COMPOSER.as_bytes());
+    }
     PmDeliveryFixture {
         repo,
         owner,
@@ -230,10 +242,164 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     assert_pm_send_waits_for_exact_target_hook_ack(gwt_agent::AgentId::Codex);
 }
 
-/// Issue #3706 AC-3: Grok uses the same exact UserPromptSubmit receipt contract.
+/// Issue #3706 AC-3: Grok waits for its exact accepted-turn receipt.
 #[test]
 fn issue_3706_grok_pm_send_waits_for_exact_target_hook_ack() {
     assert_pm_send_waits_for_exact_target_hook_ack(gwt_agent::AgentId::GrokBuild);
+}
+
+#[test]
+fn issue_3706_grok_pm_send_refuses_permission_and_unknown_surfaces_before_body() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
+    // Upstream Options mode has its own shortcut footer and owns Enter.
+    for surface in ["\x1b[2J\x1b[Hunknown surface\x1b[21;3H", GROK_PERMISSION] {
+        fixture
+            .target
+            .pane
+            .lock()
+            .unwrap()
+            .process_bytes(surface.as_bytes());
+        let operation = uuid::Uuid::new_v4().to_string();
+        let (responder, result, cancellation) =
+            AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+        fixture.send(
+            "unsafe-surface".into(),
+            &operation,
+            &fixture.target.id,
+            "a PM notification must not approve anything\r",
+            Some(responder),
+        );
+        assert!(matches!(result.blocking_recv().unwrap(),
+            BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+                if status == "failed" && reason.contains("Grok composer")));
+        assert!(
+            !cancellation.cancel(),
+            "surface refusal precedes body mutation"
+        );
+        assert!(fixture
+            .target
+            .writer
+            .as_ref()
+            .unwrap()
+            .pm_delivery_replay
+            .lock()
+            .unwrap()
+            .is_none());
+    }
+    // Ordinary keys remain available for a human to recover the focused card.
+    fixture
+        .target
+        .pty
+        .write_input(b"\x1b")
+        .expect("raw recovery input");
+}
+
+#[test]
+fn issue_3706_grok_permission_appearing_after_body_blocks_submit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
+    let target = &fixture.target;
+    let reservation = Arc::clone(&target.pty).reserve_input_transaction().unwrap();
+    let mut writes = Vec::new();
+    let outcome = gwt::project_runtime::agent_dispatch::drive_verified_pane_submit(
+        "PM notification\r",
+        false,
+        2,
+        |bytes| {
+            reservation
+                .write_input_authorized(bytes, |commit| {
+                    target.pty.ensure_grok_prompt_input_ready()?;
+                    commit(&mut || {})
+                })
+                .map_err(|error| error.to_string())?;
+            writes.push(bytes.to_vec());
+            Ok(())
+        },
+        |_| {
+            // The driver's settle boundary orders this transition; no timer
+            // or scheduler assumption is needed to place the card before CR.
+            target
+                .pane
+                .lock()
+                .unwrap()
+                .process_bytes(GROK_PERMISSION.as_bytes());
+        },
+        || Ok(false),
+    );
+    drop(reservation);
+    assert!(outcome.is_err_and(|error| error.contains("Grok composer")));
+    assert_eq!(writes, [b"PM notification".to_vec()]);
+}
+
+#[test]
+fn issue_3706_grok_submit_recovery_refuses_a_focused_permission_card() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
+    let operation = uuid::Uuid::new_v4().to_string();
+    let text = "notification with a dropped submission\r";
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+    fixture.send(
+        "first".into(),
+        &operation,
+        &fixture.target.id,
+        text,
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, .. } if status == "unconfirmed"));
+    assert!(fixture
+        .target
+        .writer
+        .as_ref()
+        .unwrap()
+        .pm_delivery_replay
+        .lock()
+        .unwrap()
+        .is_some());
+    fixture
+        .target
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(GROK_PERMISSION.as_bytes());
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send(
+        "recovery".into(),
+        &operation,
+        &fixture.target.id,
+        text,
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "unconfirmed" && reason.contains("Grok composer")));
+    assert!(
+        !cancellation.cancel(),
+        "recovery cannot commit CR to a permission card"
+    );
 }
 
 fn assert_pm_send_waits_for_exact_target_hook_ack(agent_id: gwt_agent::AgentId) {
@@ -647,6 +813,7 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
         operation_id: operation_id.into(),
         recorded_at: "2026-10-22T00:00:00Z".into(),
         status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+        grok_prompt: None,
         principal_session_id: pm_session_id.clone(),
         target_window_id: target.into(),
         target_session_id: target_session_id.clone(),
@@ -727,6 +894,7 @@ fn authenticated_pm_send_replays_verified_receipt_without_a_live_target() {
         operation_id: operation_id.to_string(),
         recorded_at: "2026-08-13T00:00:00Z".to_string(),
         status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+        grok_prompt: None,
         principal_session_id: pm_session_id.clone(),
         target_window_id: target_window.to_string(),
         target_session_id: target_session_id.clone(),

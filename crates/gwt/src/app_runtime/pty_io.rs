@@ -1265,6 +1265,7 @@ mod submit_split_tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &pm_registry::PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.into(),
                 recorded_at: "2026-08-13T00:00:00Z".into(),
                 status: PmDeliveryReceiptStatus::Prepared,

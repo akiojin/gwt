@@ -628,6 +628,13 @@ pub fn authenticated_pm_pane_send_input_events(
                 })
         },
     );
+    let target_is_grok = panes.iter().any(|pane| {
+        pane.window.id == window_id
+            && pane
+                .active
+                .as_ref()
+                .is_some_and(|session| session.agent_id == "grok")
+    });
     let expected_entry = if target_is_live_agent {
         writers
             .read()
@@ -716,6 +723,7 @@ pub fn authenticated_pm_pane_send_input_events(
                         recorded_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                        grok_prompt: None,
                         principal_session_id: principal_session_id.clone(),
                         target_window_id: worker_window_id.clone(),
                         target_session_id: target_session_id.clone(),
@@ -771,6 +779,9 @@ pub fn authenticated_pm_pane_send_input_events(
                 |bytes| {
                     let written = reservation
                         .write_input_authorized(bytes, |commit| {
+                            if target_is_grok {
+                                expected_pty.ensure_grok_prompt_input_ready()?;
+                            }
                             if Instant::now() >= deadline
                                 || worker_responder
                                     .as_ref()
@@ -846,6 +857,11 @@ pub fn authenticated_pm_pane_send_input_events(
                                 }
                             };
                             reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                // Recheck after the body/submit settle and at
+                                // every retry, including submit-only recovery.
+                                if target_is_grok {
+                                    expected_pty.ensure_grok_prompt_input_ready()?;
+                                }
                                 commit(&mut mark_attempted)
                             })
                         })
