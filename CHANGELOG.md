@@ -1,6 +1,40 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.161.1] - 2026-11-11
+
+### Bug Fixes
+
+- **execution:** Recover prepared fences across owner kind drift
+- **execution:** Add audited PM repair for absent fenced sessions
+- **runtime:** Retain explicitly stopped agent windows
+- **runtime:** Honor close when retrying a failed stop
+- **pane:** Tear down closed runtimes after writer removal
+- **monitor:** 再割当先メンバー自身の起動不可理由を exclusion_reason に名指しする
+- **pm:** Reports の保存済み項目が表示から欠落しないようにし、作業中・期限切れの質問への回答も Q&A として残す
+- **update:** Reclaim stopped executions during update drain
+- **monitor:** Preserve live PTY capacity at final admission
+- **tray:** Drain managed owners on explicit quit
+- **tray:** Cover quit before startup ownership
+- **tray:** Scope quit delivery to its GUI instance
+
+### Miscellaneous Tasks
+
+- **work:** Record PR #7074 delivery metadata
+- **work:** Record issue 6955 delivery pull request
+- **work:** Record issue 7027 delivery work events
+- **work:** Record Issue #7072 delivery PR
+- **work:** Record Issue #6946 delivery pull request
+
+### Performance
+
+- **monitor:** Reuse pull inventory for held review heads
+
+### Testing
+
+- **pane:** Document dispatch completion hang guard
+- **tray:** Exercise Quit after a real GUI disconnect
+
 ## [9.161.0] - 2026-11-11
 
 ### Bug Fixes
