@@ -1180,7 +1180,8 @@ jobs:
       # Embedded-frontend specs stub WebSocket + serve crates/gwt/web via
       # page.route, so they run without a live gwt. live-gwt specs self-skip
       # when GWT_PLAYWRIGHT_BASE_URL is unset.
-      - name: Run WebView E2E (embedded Playwright specs)
+      # Keep each existing theme within its own test budget as the suite grows.
+      - name: Run WebView E2E (chromium-dark)
         # Keep Git/Rust-based regressions on the hosted runner. Only browser
         # specs need this image's baked-in browsers and OS dependencies.
         run: |
@@ -1189,7 +1190,17 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
-            bash scripts/run-visual-tests.sh
+            bash scripts/run-visual-tests.sh --project=chromium-dark
+        timeout-minutes: 15
+      - name: Run WebView E2E (chromium-light)
+        if: ${{ !cancelled() }}
+        run: |
+          version="$(tr -d '[:space:]' < scripts/playwright-version.txt)"
+          docker run --rm --ipc=host \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
+            --workdir /workspace --env CI=true \
+            "mcr.microsoft.com/playwright:v${version}-noble" \
+            bash scripts/run-visual-tests.sh --project=chromium-light
         timeout-minutes: 15
 
   report-post-merge-failure:
