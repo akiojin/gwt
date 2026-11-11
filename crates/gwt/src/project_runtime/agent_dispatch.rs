@@ -616,7 +616,10 @@ pub fn authenticated_pm_pane_send_input_events(
                             let exact_prompt_ack =
                                 matches!(target_preset, WindowPreset::Claude | WindowPreset::Codex)
                                     || (*target_preset == WindowPreset::Agent
-                                        && matches!(session.agent_id.as_str(), "claude" | "codex"));
+                                        && matches!(
+                                            session.agent_id.as_str(),
+                                            "claude" | "codex" | "grok"
+                                        ));
                             exact_prompt_ack
                                 && session.window_id == window_id
                                 && session.tab_id == *target_tab_id

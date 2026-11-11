@@ -11,13 +11,20 @@ pub(super) struct PmDeliveryFixture {
 }
 
 pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
+    pm_delivery_owner_fixture_for_agent(temp, gwt_agent::AgentId::Codex)
+}
+
+fn pm_delivery_owner_fixture_for_agent(
+    temp: &Path,
+    agent_id: gwt_agent::AgentId,
+) -> PmDeliveryFixture {
     use super::pane_control_tests::{
         control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
     };
     let repo = temp.join("project");
     super::pane_control_tests::control_init_repo(&repo);
     seed_owner_fixture_roster(&repo, 8);
-    configure_owner_fixture_tools(&repo, &["pane-contract-fixture", "codex"]);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture", agent_id.command()]);
     let (owner, pm) = control_owner_agent(&repo, "pm", 42);
     control_register_pm(&repo, &pm);
     let runner = temp.join(if cfg!(windows) {
@@ -34,7 +41,7 @@ pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
     #[cfg(windows)]
     fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"while ($null -ne [Console]::ReadLine()) {}\"\r\n").unwrap();
     let location = control_launch_config(&repo, 43);
-    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
         .working_dir(location.working_dir.unwrap())
         .branch(location.branch.unwrap())
         .base_branch(location.base_branch.unwrap())
@@ -53,10 +60,7 @@ pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
         "positive PM delivery begins after the actual provider SessionStart: {:?}",
         target.status
     );
-    assert_eq!(
-        target.session.as_ref().unwrap().agent_id,
-        gwt_agent::AgentId::Codex
-    );
+    assert_eq!(target.session.as_ref().unwrap().agent_id, agent_id);
     PmDeliveryFixture {
         repo,
         owner,
@@ -223,6 +227,16 @@ fn transcript_overlay_reports_failed_pane_and_pm_ack_without_staging_body() {
 /// authorized injection path.
 #[test]
 fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
+    assert_pm_send_waits_for_exact_target_hook_ack(gwt_agent::AgentId::Codex);
+}
+
+/// Issue #3706 AC-3: Grok uses the same exact UserPromptSubmit receipt contract.
+#[test]
+fn issue_3706_grok_pm_send_waits_for_exact_target_hook_ack() {
+    assert_pm_send_waits_for_exact_target_hook_ack(gwt_agent::AgentId::GrokBuild);
+}
+
+fn assert_pm_send_waits_for_exact_target_hook_ack(agent_id: gwt_agent::AgentId) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -230,7 +244,7 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _owner_home = ScopedGwtHome::set(temp.path());
-    let fixture = pm_delivery_owner_fixture(temp.path());
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id);
     let repo = fixture.repo.clone();
     let target_window = fixture.target.id.clone();
     let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
