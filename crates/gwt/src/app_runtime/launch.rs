@@ -38,7 +38,6 @@ pub(super) use gwt::session_launch::{
 };
 
 use super::agent_maintenance;
-use super::continuation::durable_launch_recovery_exists;
 use super::{
     active_agent_session_matches_work, combined_window_id, normalize_branch_name,
     ActiveAgentSession, AgentKanbanLaunchTarget, AppRuntime, LaunchFeedbackContext,
@@ -211,9 +210,8 @@ impl AppRuntime {
     /// the main thread ever performing the session-directory scan.
     pub(crate) fn apply_refreshed_launch_wizard_sessions(
         &mut self,
-        mut sessions: Vec<gwt_agent::Session>,
+        sessions: Vec<gwt_agent::Session>,
     ) {
-        sessions.retain(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id));
         self.launch_wizard_cache.replace_sessions(sessions);
     }
 

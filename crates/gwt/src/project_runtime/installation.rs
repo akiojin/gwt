@@ -1235,7 +1235,13 @@ pub fn install_agent_launch(
             ));
         }
     }
-    let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id) {
+    let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id)
+        .map_err(|error| {
+            format!(
+                "launch recovery probe failed for Session {session_id} ({:?}): {error}",
+                error.kind()
+            )
+        })? {
         None
     } else {
         gwt_agent::Session::load_and_migrate(&input.sessions_dir.join(format!("{session_id}.toml")))
