@@ -11795,7 +11795,7 @@ impl IssueMonitorState {
         }
         let canvas = self
             .monitor_canvas_windows()
-            .filter(|window| !window.review_dispatch)
+            .filter(|window| !window.review_dispatch && idle_window_is_alive(window.status))
             .filter_map(|window| {
                 window
                     .issue_number
@@ -35533,8 +35533,8 @@ mod tests {
         );
         assert_eq!(
             monitor.active_count(),
-            2,
-            "AC-8: the retained duplicate and the working pane both occupy the canvas"
+            1,
+            "Issue #7072: only the working pane reserves capacity after duplicate stop"
         );
         monitor.record_window_snapshot(pane_snapshot(
             &observed_at,
@@ -35547,7 +35547,7 @@ mod tests {
         assert_eq!(
             monitor.active_count(),
             1,
-            "closing the duplicate frees its slot"
+            "closing the diagnostic does not change live capacity"
         );
     }
 
@@ -42098,12 +42098,14 @@ mod tests {
         });
         assert_eq!(
             monitor.active_count(),
-            3,
-            "retained Error/Stopped panes still occupy the canvas"
+            1,
+            "Issue #7072: retained diagnostics do not reserve execution capacity"
         );
-        assert!(monitor
-            .next_launch_request("2026-10-06T00:00:01Z")
-            .is_none());
+        assert!(
+            monitor.has_monitor_pane_for_issue(42),
+            "diagnostics still prevent duplicate panes"
+        );
+        assert_eq!(monitor.occupied_slot_count(), 1);
         monitor.record_monitor_runtime_counts(
             101,
             1001,
@@ -42112,8 +42114,8 @@ mod tests {
         );
         assert_eq!(
             monitor.active_count(),
-            3,
-            "canvas and PTY census describe the same panes"
+            2,
+            "Issue #7072: actual PTY processes still reserve capacity"
         );
     }
 
@@ -42191,7 +42193,7 @@ mod tests {
             vec![live_pane_observation(
                 "tab-1::retained",
                 42,
-                WindowState::Error,
+                WindowState::Running,
             )],
         ));
         let mut state = serde_json::to_value(&monitor).unwrap();
@@ -42362,8 +42364,8 @@ mod tests {
         monitor.set_max_active_agents(1);
         assert_eq!(
             monitor.active_count(),
-            2,
-            "the reservation is for a new pane"
+            1,
+            "Issue #7072: only the pending reservation consumes capacity"
         );
         assert!(!monitor.claim_launch_delivery(
             42,
@@ -42473,7 +42475,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_known_local_tabs_count_retained_panes_and_park_new_candidates() {
+    fn monitor_known_local_tabs_count_live_panes_and_park_new_candidates() {
         let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_window_snapshot(pane_snapshot(
             "2026-10-06T00:00:00Z",
@@ -42488,23 +42490,23 @@ mod tests {
         let anchor_only: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
         assert_eq!(
             anchor_only.active_count(),
-            1,
-            "legacy observations retain anchor-only scope"
+            0,
+            "Issue #7072: the anchor's error diagnostic consumes no capacity"
         );
         state["window_snapshot_tabs"] = serde_json::json!(["tab-1", "tab-2"]);
         let known_tabs: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
         assert_eq!(
             known_tabs.active_count(),
-            3,
-            "positive local tab scope survives unknown host identity"
+            1,
+            "positive local tab scope counts the starting pane with unknown host identity"
         );
         state["window_snapshot_host"] = serde_json::json!([101, 1001]);
         let mut monitor: IssueMonitorState = serde_json::from_value(state).unwrap();
         monitor.set_source_repository(Some(("example", "project")));
         assert_eq!(
             monitor.active_count(),
-            3,
-            "known local tabs share one Monitor budget"
+            1,
+            "known local tabs share one live-process budget"
         );
         scan_queued_candidates(&mut monitor, &[issue(44)], "2026-10-06T00:00:01Z");
         assert_eq!(
@@ -54397,7 +54399,7 @@ mod tests {
             IDLE_NOW,
         );
         assert_eq!(outcome.pane_closes, vec!["tab-1::old"]);
-        assert_eq!(monitor.active_issue_numbers(), vec![42, 42]);
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
         assert_eq!(
             monitor.launched_window_id(42).as_deref(),
             Some("tab-1::successor")
@@ -55175,8 +55177,8 @@ mod tests {
         assert!(!monitor.active_launches.contains(&4740));
         assert_eq!(
             monitor.active_count(),
-            1,
-            "the retained finished pane occupies a slot"
+            0,
+            "Issue #7072: the retained finished pane does not occupy a slot"
         );
         assert_eq!(
             monitor.inbox_item(4740).map(|item| item.state),
@@ -55190,7 +55192,7 @@ mod tests {
         assert_eq!(
             monitor.active_count(),
             0,
-            "removing the finished pane frees its slot"
+            "removing the diagnostic leaves capacity unchanged"
         );
     }
 

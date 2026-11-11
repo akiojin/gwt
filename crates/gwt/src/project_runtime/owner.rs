@@ -5514,6 +5514,11 @@ impl OwnerState {
             },
         );
         let snapshot = self.owner_monitor_window_snapshot(&id);
+        let runtime_handles = self
+            .runtimes
+            .iter()
+            .map(|(id, runtime)| (id.clone(), runtime.pty.clone()))
+            .collect();
         let snapshot_tabs: std::collections::BTreeSet<String> = snapshot
             .windows
             .iter()
@@ -5836,6 +5841,7 @@ impl OwnerState {
                             host_project_roots: &host_project_roots,
                             snapshot,
                             snapshot_tabs,
+                            runtime_handles: &runtime_handles,
                             known_names: &known_names,
                             metadata: *metadata,
                             is_continue_work: input.is_continue_work,
