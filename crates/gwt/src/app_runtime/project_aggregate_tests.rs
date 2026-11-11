@@ -107,6 +107,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         2,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -197,6 +198,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
                 2,
                 None,
                 ProjectOwnerHealthView {
+                    recovery_id: None,
                     project_key: context.project_key.to_string(),
                     state: ProjectOwnerHealthState::Degraded,
                     detail: Some("fixture reconnect".into()),
@@ -213,6 +215,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
             3,
             Some(identity),
             ProjectOwnerHealthView {
+                recovery_id: None,
                 project_key: context.project_key.to_string(),
                 state: ProjectOwnerHealthState::Healthy,
                 detail: None,
@@ -255,6 +258,7 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
         2,
         None,
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Degraded,
             detail: None,
@@ -779,6 +783,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     let a = runtime.project_context("a").unwrap();
     let b = runtime.project_context("b").unwrap();
     let health = gwt::protocol::ProjectOwnerHealthView {
+        recovery_id: None,
         project_key: a.project_key.to_string(),
         state: gwt::protocol::ProjectOwnerHealthState::Degraded,
         detail: Some("Project connection lost".into()),
@@ -1146,5 +1151,60 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             .handle_project_owner_event(&a, 2, &identity, output(7))
             .is_empty(),
         "closed ProjectContext generation"
+    );
+}
+
+#[test]
+fn wedged_owner_restart_requires_current_project_observation_and_confirmation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let a = runtime.project_context("a").unwrap();
+    let b = runtime.project_context("b").unwrap();
+    let (spawner, queued) = super::BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.handle_project_owner_health(
+        &a,
+        1,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: Some("current".into()),
+            project_key: a.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Wedged,
+            detail: None,
+        },
+    );
+    for (context, confirmed, recovery_id) in [
+        (&a, false, "current"),
+        (&a, true, "old"),
+        (&b, true, "current"),
+    ] {
+        let events = runtime.handle_frontend_event_for_project(
+            context,
+            "client".into(),
+            FrontendEvent::RestartWedgedOwner {
+                confirmed,
+                recovery_id: recovery_id.into(),
+            },
+        );
+        assert!(!events.is_empty(), "refusal is visible");
+        assert!(
+            queued.lock().unwrap().is_empty(),
+            "no process worker may start"
+        );
+    }
+    let events = runtime.handle_frontend_event_for_project(
+        &a,
+        "client".into(),
+        FrontendEvent::RestartWedgedOwner {
+            confirmed: true,
+            recovery_id: "current".into(),
+        },
+    );
+    assert!(events.is_empty());
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "only the exact confirmed project starts recovery"
     );
 }

@@ -1305,12 +1305,16 @@ class SearchWorkerTests(unittest.TestCase):
         fake_chroma = mock.Mock()
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
-            store = Path(tmp) / "memory.gen" / "gen-active"
-            store.mkdir(parents=True)
-            with runner._search_worker_read_clients():
-                client, _ = runner._open_chroma_collection(store, runner.V2_MEMORY_COLLECTION)
-                runner._close_chroma_client(client)
-                client.close.assert_called_once()
+            for store, name in (
+                (Path(tmp) / "memory.gen" / "gen-active", runner.V2_MEMORY_COLLECTION),
+                (runner._issue_record_pool(Path(tmp) / "issues"), runner.V2_ISSUES_COLLECTION),
+            ):
+                store.mkdir(parents=True)
+                fake_chroma.reset_mock()
+                with runner._search_worker_read_clients():
+                    client, _ = runner._open_chroma_collection(store, name)
+                    runner._close_chroma_client(client)
+                    client.close.assert_called_once()
 
     def test_worker_transport_failure_remains_retryable(self):
         args = argparse.Namespace(action="search-multi", qos=None,

@@ -32,9 +32,10 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — hover over USAGE for account limits, including Claude's
-  Fable weekly limit and enabled Usage credits with utilization, used/limit,
-  and currency. Enable Claude account usage in Settings → Usage & Limits.
+- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
+  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
+  account limits, reset times, and enabled Usage credits with utilization,
+  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
 
 ## Install
 
@@ -123,9 +124,13 @@ identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
 The embedded frontend requires an operation ID for cleanup requests. Reload older
-open tabs after upgrading. Launch Wizard always skips permission prompts and
-launches with Fast mode off; it reads older saved choices without rewriting them.
-Issues profiles and direct Session resume keep their existing preferences.
+open tabs after upgrading. Launch Wizard always skips permission prompts.
+Agent Settings save model, reasoning and speed defaults for launches: Codex offers
+Off / Fast / Ultrafast, and Claude Code offers its own Fast toggle. Monitor and PM
+profiles can select speed as well. Legacy Codex Fast booleans retain effective Off;
+only an explicit speed selection enables Fast or Ultrafast. Ultrafast requires a
+supported model and eligible plan/workspace; Codex displays a warning when an
+unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
 ## Requirements
 
@@ -210,7 +215,9 @@ the tray menu:
 - **Open Project…** — opens the Hub and starts its folder picker directly.
 - **Clone from GitHub…** — opens the Hub with its Clone Project dialog.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
-  PTY children down in order.
+  GUI-managed project daemons and their PTY children down, including background
+  Continue work. A daemon shared with another connected GUI or started
+  independently remains running.
 
 Project browser tabs show agent RUN / BLOCK counts in their titles and a
 status favicon. BLOCK includes waiting, stopped, and error states; shell
@@ -597,6 +604,15 @@ An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.
 
+Repeated owner health timeouts show **Wedged**, distinct from an ordinary
+connection failure. GWT automatically saves stack samples (on macOS), recent
+terminal-delivery warnings, and CPU observations under
+`~/.gwt/logs/owner-recovery/<pid>-<id>/`. Choose **Restart daemon…** in the
+Project status strip to review and confirm recovery: diagnostics are saved
+before SIGTERM, with SIGKILL after a grace period if needed. Restarting stops
+all agents hosted by that daemon, including agents in other projects; unsaved
+terminal work may be lost. GWT never kills a wedged daemon without confirmation.
+
 The Hub's **終了待ちプロジェクト** section observes daemons for known projects.
 Choose **再確認** to refresh their status. **終了を再試行** retries an exact failed
 shutdown only after verifying that the GUI-managed owner is draining and no GUI
@@ -728,6 +744,16 @@ For maintenance, `issue.monitor.queue.remove` with `all_terminals:true` removes
 the requested `numbers` from every terminal queue saved in this machine's project
 store and preserves their manual auto-refill exclusions. Omit the option to affect
 only this host. It does not change another machine's independent project store.
+
+On macOS, CLI and Monitor use `scutil --get LocalHostName` for the host ID,
+falling back to `whoami::hostname` when unavailable; other platforms use
+`whoami::hostname`. The ID is cached once per process, so restart gwt after
+renaming the machine. `issue.monitor.status` includes `caller_host_identity`
+with the ID, its source, and the reason when the network hostname differs.
+To recover a retired host's queued work, call `issue.monitor.queue.adopt` with
+`{"terminal":"old-host"}`. It moves pending entries to this host and releases
+their old schedule reservations for replanning; work already claiming, launching,
+or running stays with its existing owner. Other host queues are left alone.
 
 Active cards have an agent process observed on this terminal. The Active badge
 counts agents, including PM, and separately shows distinct Issue and PM counts;
@@ -2113,8 +2139,12 @@ available from the same toolbar.
 The PM window's **Chat** view shows the PM conversation as chat bubbles: your
 messages on the right and PM replies on the left, with PM Markdown (headings,
 lists, tables, and code) formatted. It reads the PM session's own conversation
-record and omits tool calls, hook notes, and automatic prompts. It is read-only
-in this release; use **Execution log** to talk with PM.
+record and omits tool calls, hook notes, and automatic prompts. When PM sends
+several messages in one turn, only the latest stays open; the earlier ones fold
+into an **N earlier messages** line you can expand. Type a message in
+the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
+line). Your text stays in the box until delivery is confirmed, and the reason is
+shown if it could not be sent. Use **Execution log** to attach images.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from

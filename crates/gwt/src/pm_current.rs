@@ -390,7 +390,7 @@ mod tests {
         // PM status and request tracking are independent durable sources.
         std::fs::write(status_path(&repo), "broken PM status").unwrap();
         let (unrelated_error, data) = reader.poll(&repo, None, Some(&updated)).unwrap();
-        assert!(data.error.is_some());
+        assert!(data.error.is_none() && data.current_error.is_some());
         assert_eq!(
             serde_json::to_value(data.current).unwrap()["request_tasks"]["state"],
             "ready"

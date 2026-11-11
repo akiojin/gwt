@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -9,6 +9,62 @@ test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
+
+  test("Issue #6996 five submissions immediately after GUI restart do not report finalizer waits as errors", async ({ page }, info) => {
+    test.setTimeout(360_000);
+    const issueNumbers = [43, 44, 45, 46, 47];
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      additionalIssueNumbers: issueNumbers.slice(1),
+      terminalConvergence: true,
+      monitorPreferences: { enabled: false, max_active_agents: 5 },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const ledgerRows = async () => {
+      const directory = join(fixture.home, ".gwt/logs/errors");
+      const files = (await readdir(directory).catch(() => [])).filter(file => /^errors\..*\.jsonl$/.test(file));
+      return (await Promise.all(files.map(file => readFile(join(directory, file), "utf8"))))
+        .flatMap(bytes => bytes.split("\n").filter(Boolean).map(line => JSON.parse(line)));
+    };
+    try {
+      expect(fixture.fixtureOperation("issue.monitor.config.set", { max_active: 5 }).ok).toBe(true);
+      const previousPid = fixture.ownedPid;
+      await fixture.restart();
+      expect(fixture.ownedPid).not.toBe(previousPid);
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('[data-surface="issues"]').click();
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: issueNumbers });
+      await page.getByRole("group", { name: "Issues controls", exact: true })
+        .getByRole("button", { name: "Start", exact: true }).click();
+      await expect.poll(async () => (await fixture.launchIssues()).sort((a, b) => a - b),
+        { timeout: 180_000, message: "all five real provider handoffs after restart" }).toEqual(issueNumbers);
+      await expect.poll(async () => {
+        const prefs = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+        return issueNumbers.filter(number => prefs.launch_confirmations?.[number]?.window_id);
+      }, { timeout: 60_000 }).toEqual(issueNumbers);
+      const failures = (await ledgerRows()).filter(row => row.kind === "launch_failure"
+        && /workspace operation .*is in flight|workspace finalizer .*timed out/.test(row.message));
+      expect(failures, "no finalizer waiting messages in the real error ledger").toEqual([]);
+      const waitToasts = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .filter(({ payload }: any) => payload.kind === "issue_monitor_toast" && payload.level === "error"
+          && /workspace operation .*is in flight/.test(payload.message)));
+      expect(waitToasts).toEqual([]);
+      const evidence = info.outputPath("issue-6996-post-restart.json");
+      await writeFile(evidence, JSON.stringify({ theme, previousPid, pid: fixture.ownedPid, issueNumbers,
+        launches: await fixture.launches(), finalizerFailures: failures, errorToasts: waitToasts }, null, 2));
+      await info.attach("issue-6996-post-restart", { path: evidence, contentType: "application/json" });
+      const screenshot = info.outputPath(`issue-6996-${theme}.png`);
+      await page.screenshot({ path: screenshot });
+      await info.attach(`issue-6996-${theme}`, { path: screenshot, contentType: "image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including shutdown").toEqual([]);
+  });
 
   for (const savedLimit of [0, 2]) test(`Issue #6922 Start refills the queue on its first scan with saved limit ${savedLimit}`, async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, {

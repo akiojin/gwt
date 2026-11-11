@@ -1,6 +1,158 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.161.1] - 2026-11-11
+
+### Bug Fixes
+
+- **execution:** Recover prepared fences across owner kind drift
+- **execution:** Add audited PM repair for absent fenced sessions
+- **runtime:** Retain explicitly stopped agent windows
+- **runtime:** Honor close when retrying a failed stop
+- **pane:** Tear down closed runtimes after writer removal
+- **monitor:** 再割当先メンバー自身の起動不可理由を exclusion_reason に名指しする
+- **pm:** Reports の保存済み項目が表示から欠落しないようにし、作業中・期限切れの質問への回答も Q&A として残す
+- **update:** Reclaim stopped executions during update drain
+- **monitor:** Preserve live PTY capacity at final admission
+- **tray:** Drain managed owners on explicit quit
+- **tray:** Cover quit before startup ownership
+- **tray:** Scope quit delivery to its GUI instance
+
+### Miscellaneous Tasks
+
+- **work:** Record PR #7074 delivery metadata
+- **work:** Record issue 6955 delivery pull request
+- **work:** Record issue 7027 delivery work events
+- **work:** Record Issue #7072 delivery PR
+- **work:** Record Issue #6946 delivery pull request
+
+### Performance
+
+- **monitor:** Reuse pull inventory for held review heads
+
+### Testing
+
+- **pane:** Document dispatch completion hang guard
+- **tray:** Exercise Quit after a real GUI disconnect
+
+## [9.161.0] - 2026-11-11
+
+### Bug Fixes
+
+- **monitor:** Stabilize host names and expose retired queue adoption
+- **monitor:** Resolve hostname probe through shared process adapter
+- **monitor:** Clear recovered queue exclusions during adoption
+- **gui:** Register task-home in Playwright routes and align mock naming for #7007
+- **launch:** Revalidate owner admission after prefs updates
+- **launch:** Preserve transient retries across daemon rebases
+- **runtime:** Classify exits after final PTY output drains
+- **monitor:** Hook 前の review 起動失敗を即時記録する
+- **launch:** Preserve recovery and session metadata errors
+- **index:** Keep health probes from creating missing stores
+- **pm:** PM セッションの cd 境界を pm/ 全体にして reference 読み込みを通す
+- **gwtd:** Detect wedged owners and confirm daemon recovery
+- **e2e:** Headed Playwright の Chromium を画面外で起動してフォーカス奪取を抑える
+- **feedback:** Windows の送信 worker を生成時点で kill-on-close Job に所属させる
+- **verify:** Align supported modes and expose safe mode diagnostics
+- **issue-monitor:** Preserve merged continuation across stale reloads
+
+### Documentation
+
+- **readme:** PM チャットの応答折りたたみを説明する
+- **gui:** Add task-centered GUI design and mocks for #7007
+- **ui:** Plan task-centered GUI for issue 7007
+- Escape issue refs at line starts in the #7007 design readme
+
+### Features
+
+- **pm:** PM チャットで同一ターンの過去の PM 応答を折りたたむ
+- **gui:** Add task-centered Home surface for #7007
+- **launch:** Add explicit Codex speed and agent defaults
+
+### Miscellaneous Tasks
+
+- **work:** PM チャット入力欄の配信完了を記録する
+- **work:** PM チャット折りたたみ slice の Work イベントを記録する
+- **work:** Link issue 7040 delivery to PR 7054
+- **work:** Issue #6877 Reviewing gate スライスの Work イベントを記録する
+- **work:** Record Issue #7016 PR delivery metadata
+- **work:** Record issue 6979 delivery handoff
+- **work:** Issue #6989 の Work イベントを記録する
+- **work:** Issue #6989 の後継世代 Work イベントを記録する
+- **work:** Issue #7030 の PR 配信情報を記録
+- **work:** Record Issue #6992 delivery pull request
+- **work:** Issue #6977 の Work イベントを記録する
+- **work:** Record Issue #6962 delivery pull request
+
+### Performance
+
+- **monitor:** Reviewing gate の gh readback を 1 本に束ね CI 待ちの再読を抑える
+- **index:** Issue世代の未変更recordを共有poolで再利用する
+
+### Testing
+
+- **monitor:** Include host diagnostics in status contract
+- **launch:** Monitor の速度表示とテスト宣言を更新
+- **gwtd:** Await owner readiness before health transitions
+
+### Ci
+
+- Hold off wiring the task-home test into test.yml for #7007
+- **test:** Bound embedded E2E runs by theme
+- Wire task-home test into test.yml for #7007
+
+## [9.160.0] - 2026-11-11
+
+### Bug Fixes
+
+- **runtime:** Preserve interrupted state through transient overlays
+- **monitor:** Daemon の idle close を owner pane id から GUI 窓へ解決する
+- **agents:** 実行枠を使うレビュー窓を Agents 画面に表示し Busy に数える
+- **usage:** Usage 非表示時の既存レイアウトを維持
+- **workspace:** 複数ホストの portable alias を実行先の権限から除外
+- **git:** ブランチのマージ判定キャッシュが base ごとの lineage を保持するようにする
+- **issue-monitor:** Retry interrupted bound idle implementations
+- **issue-monitor:** Retire exact exited panes after retry commits
+- **issue-monitor:** Preserve failure publication diagnostics
+- **launch:** Wait for in-flight workspace finalizers
+
+### Features
+
+- **usage:** Claude のモデル別週次使用量を常時表示
+- **ui:** 同一内容の通知を 1 行に集約する
+- **pm:** PM チャットに入力欄を追加し PM へテキストを送れるようにする
+
+### Miscellaneous Tasks
+
+- **work:** RECEIPT-OPCLK の Work 終端イベントを記録する
+- **work:** Record interrupted precedence successor delivery
+- **work:** Reconcile provider usage delivery evidence
+- **work:** Record provider usage scope settlement
+- **work:** PR #6967 の関連付けを記録
+- **work:** Record dependency gate pull request
+- **work:** Record notification aggregation delivery PR
+- **work:** Link issue-6924 regression evidence to PR 7024
+- **work:** Record issue-6924 delivery continuation
+- **work:** Link issue-6924 delivery to PR 7024
+- **work:** Issue #6877 の Work イベントを記録する
+- **work:** Issue #6877 完了世代の Work イベントを記録する
+- **work:** Record #4131 AC-4 resume scenario start
+
+### Testing
+
+- **github:** 送信前の期限失効テストを同値期限で決定化する
+- **monitor:** Idle close 回帰テストの壁時計待機を理由付きで宣言する
+- **ui:** Recovery Center の CSS 検査範囲を限定
+- **usage:** テーマ初期化をアプリ origin に限定
+- **usage:** 通知付きレイアウトを実イベントで検証
+- **ui:** 通知集約 E2E の名称を Issues に揃える
+- **monitor:** Keep expired settings clock through scan commit
+
+### Ci
+
+- **frontend:** Gate dependency licenses and production advisories
+- **frontend:** Allow headroom for the full WebView E2E suite
+
 ## [9.159.0] - 2026-11-11
 
 ### Bug Fixes

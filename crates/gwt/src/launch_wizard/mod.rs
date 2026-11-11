@@ -443,6 +443,7 @@ pub struct LaunchWizardView {
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_fast_mode: bool,
+    pub show_codex_speed: bool,
     /// SPEC-3152: render the Hermes launch-options section (provider / model /
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
@@ -502,6 +503,7 @@ pub struct LaunchWizardView {
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
     pub fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
@@ -534,6 +536,7 @@ pub struct QuickStartEntry {
     pub live_window_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
@@ -549,6 +552,7 @@ pub struct LaunchWizardPreviousProfile {
     /// Issue #4228: Fast Mode for `agent_id`. The wizard restores it only onto
     /// that same agent, so a Codex opt-in can never decide a Claude launch.
     pub fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
@@ -602,6 +606,32 @@ impl LaunchWizardPreviousProfiles {
         self
     }
 
+    /// Agent Settings override model/reasoning/speed defaults; session runtime
+    /// and exact Resume inputs remain owned by their existing paths.
+    pub fn with_agent_defaults(
+        mut self,
+        profiles: impl IntoIterator<Item = LaunchWizardPreviousProfile>,
+    ) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        for profile in profiles {
+            if !seen.insert(profile.agent_id.clone()) {
+                continue;
+            }
+            if self.default_agent_id.is_none() {
+                self.default_agent_id = Some(profile.agent_id.clone());
+            }
+            if let Some(existing) = self.by_agent.get_mut(&profile.agent_id) {
+                existing.model = profile.model;
+                existing.reasoning = profile.reasoning;
+                existing.fast_mode = profile.fast_mode;
+                existing.codex_speed = profile.codex_speed;
+            } else {
+                self.by_agent.insert(profile.agent_id.clone(), profile);
+            }
+        }
+        self
+    }
+
     pub fn preferred_agent_id(&self) -> Option<&str> {
         self.default_agent_id.as_deref()
     }
@@ -634,6 +664,7 @@ struct AgentLaunchDraft {
     resume_session_id: Option<String>,
     skip_permissions: bool,
     codex_fast_mode: bool,
+    codex_speed: gwt_agent::CodexSpeed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1152,6 +1183,9 @@ pub enum LaunchWizardAction {
     SetFastMode {
         enabled: bool,
     },
+    SetCodexSpeed {
+        speed: gwt_agent::CodexSpeed,
+    },
     SetCodexFastMode {
         enabled: bool,
     },
@@ -1229,6 +1263,7 @@ pub struct LaunchWizardState {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     /// SPEC-3152: Hermes-specific launch options. Free-text fields map to
     /// `--provider` / `--profile` / `--toolsets` / `--skills` / `--max-turns`;
     /// `hermes_safe_mode` maps to `--safe-mode`. Only consumed for the Hermes

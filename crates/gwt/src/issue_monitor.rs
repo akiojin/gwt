@@ -409,6 +409,27 @@ pub struct MergedIssueSettlement {
     pub settled_at: String,
 }
 
+impl MergedIssueSettlement {
+    fn matches_unmet_acceptance_failure(&self, message: &str) -> bool {
+        let unmet = match &self.action {
+            MergedIssueSettlementAction::UnmetAcceptance { unmet }
+            | MergedIssueSettlementAction::ContinueWork { unmet }
+            | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+            _ => return false,
+        };
+        let detail = if unmet.is_empty() {
+            "acceptance criteria block missing".to_string()
+        } else {
+            unmet.join(", ")
+        };
+        message
+            == format!(
+                "PR #{} merged with unmet acceptance criteria: {detail}",
+                self.pr_number
+            )
+    }
+}
+
 /// Issue #3917: decide what settling a merged delivery does for `issue`.
 ///
 /// Pure and syntactic: Issue #5126 forbids substituting PR prose or delegation
@@ -2243,6 +2264,8 @@ struct IssueMonitorLaunchProfileRepr {
     skip_permissions: bool,
     #[serde(default)]
     fast_mode: bool,
+    #[serde(default)]
+    codex_speed: gwt_agent::CodexSpeed,
     /// Pre-#4228 key. Read-only migration input, never written back.
     #[serde(default)]
     codex_fast_mode: bool,
@@ -2276,6 +2299,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
             session_mode: repr.session_mode,
             skip_permissions: repr.skip_permissions,
             fast_mode: repr.fast_mode || legacy_fast_mode,
+            codex_speed: repr.codex_speed,
             runtime_target: repr.runtime_target,
             docker_service: repr.docker_service,
             docker_lifecycle_intent: repr.docker_lifecycle_intent,
@@ -2306,6 +2330,9 @@ pub struct IssueMonitorLaunchProfile {
     /// decide the other's launch.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Explicit Codex speed; old boolean settings intentionally remain Off.
+    #[serde(default)]
+    pub codex_speed: gwt_agent::CodexSpeed,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -2335,6 +2362,7 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             // derived value, and folding it in here is what let a Codex bit
             // decide a Claude profile's Fast Mode.
             fast_mode: config.fast_mode,
+            codex_speed: config.codex_speed,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
@@ -2355,6 +2383,7 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             session_mode: profile.session_mode,
             skip_permissions: profile.skip_permissions,
             fast_mode: profile.fast_mode,
+            codex_speed: profile.codex_speed,
             runtime_target: profile.runtime_target,
             docker_service: profile.docker_service,
             docker_lifecycle_intent: profile.docker_lifecycle_intent,
@@ -2476,7 +2505,7 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 12] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
     "agent_member_id",
     "model",
     "reasoning",
@@ -2484,6 +2513,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 12] = [
     "session_mode",
     "skip_permissions",
     "fast_mode",
+    "codex_speed",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -2637,10 +2667,12 @@ pub fn issue_monitor_launch_profile_summary(profile: &LaunchWizardPreviousProfil
     // Issue #4228 AC-3: both states are spelled out. Showing the segment only
     // when Fast Mode is on is what made a stuck bit indistinguishable from an
     // older gwt that had no Fast Mode at all.
-    let fast_mode = if profile.fast_mode {
-        "fast:on"
-    } else {
-        "fast:off"
+    let fast_mode = match (profile.agent_id.as_str(), profile.codex_speed) {
+        ("codex", gwt_agent::CodexSpeed::Ultrafast) => "speed:ultrafast",
+        ("codex", gwt_agent::CodexSpeed::Fast) => "speed:fast",
+        ("codex", gwt_agent::CodexSpeed::Off) => "speed:off",
+        _ if profile.fast_mode => "fast:on",
+        _ => "fast:off",
     };
     format!(
         "{} / {} / {} / {} / {}",
@@ -4095,6 +4127,8 @@ pub struct IssueMonitorLaunchProfileCandidate {
     /// readable as a field and not only as a substring of `summary`.
     #[serde(default)]
     pub fast_mode: bool,
+    #[serde(default)]
+    pub codex_speed: gwt_agent::CodexSpeed,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9963,12 +9997,15 @@ impl IssueMonitorState {
             .iter_mut()
             .find(|item| item.issue.number == issue_number)
         {
-            item.error_message = Some(message);
+            item.error_message = Some(message.clone());
         }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
         }
+        // A resident daemon unions in-flight state during rebase. Persist the
+        // release so it cannot resurrect this reservation from an older scan.
+        self.fence_relaunch_preserving_attempts(issue_number, &message, now, false);
     }
 
     /// SPEC #3200 T-043/FR-029: whether `issue_number` may relaunch now. `true`
@@ -11758,7 +11795,7 @@ impl IssueMonitorState {
         }
         let canvas = self
             .monitor_canvas_windows()
-            .filter(|window| !window.review_dispatch)
+            .filter(|window| !window.review_dispatch && idle_window_is_alive(window.status))
             .filter_map(|window| {
                 window
                     .issue_number
@@ -12470,6 +12507,7 @@ impl IssueMonitorState {
             // Fast mode is an explicit per-provider opt-in (the wizard maps it
             // onto each CLI's own flag), so a switch must not carry it over.
             profile.fast_mode = false;
+            profile.codex_speed = gwt_agent::CodexSpeed::Off;
         }
         let profile = profile.clone();
         self.launch_profiles =
@@ -13862,13 +13900,49 @@ impl IssueMonitorState {
     ) {
         for failed in &disk.failed_issues {
             let issue_number = failed.issue_number;
+            let newer_release = self
+                .released_failures
+                .get(&issue_number)
+                .filter(|release| release.release_version > disk.failure_release_version);
+            // A continuation supersedes this exact earlier merge verdict, even
+            // when the stale writer still carries its NeedsHuman companion.
+            let superseded_merge_park = newer_release.is_some()
+                && self
+                    .merged_issue_settlements
+                    .get(&issue_number)
+                    .is_some_and(|current| {
+                        current.matches_unmet_acceptance_failure(&failed.message)
+                                && disk.merged_issue_settlements.iter().any(|prior| {
+                                    prior.issue_number == issue_number
+                                        && prior.pr_number == current.pr_number
+                                        && prior.merge_sha == current.merge_sha
+                                        && match (&current.action, &prior.action) {
+                                            (
+                                                MergedIssueSettlementAction::ContinueWork { unmet }
+                                                | MergedIssueSettlementAction::AwaitMeasurement {
+                                                    unmet,
+                                                },
+                                                MergedIssueSettlementAction::UnmetAcceptance {
+                                                    unmet: prior_unmet,
+                                                }
+                                                | MergedIssueSettlementAction::ContinueWork {
+                                                    unmet: prior_unmet,
+                                                }
+                                                | MergedIssueSettlementAction::AwaitMeasurement {
+                                                    unmet: prior_unmet,
+                                                },
+                                            ) => unmet == prior_unmet,
+                                            _ => false,
+                                        }
+                                })
+                    });
             if failed.message.trim().is_empty()
+                || superseded_merge_park
                 // Suppress only the exact automatically released failure.
                 // A lower disk watermark can also carry a concurrent terminal
                 // decision that supersedes an uncommitted local retry.
-                || (self.released_failures.get(&issue_number).is_some_and(|release| {
-                    release.release_version > disk.failure_release_version
-                        && release.retry_record.as_ref().is_some_and(|record| {
+                || (newer_release.is_some_and(|release| {
+                    release.retry_record.as_ref().is_some_and(|record| {
                             record.last_failure_message.as_deref() == Some(failed.message.as_str())
                         })
                 }) && !disk.autonomous_records.iter().any(|record| {
@@ -14964,6 +15038,7 @@ impl IssueMonitorState {
                     profile.clone(),
                 )),
                 fast_mode: profile.fast_mode,
+                codex_speed: profile.codex_speed,
                 prefer_for: profile.prefer_for.clone(),
                 held_until: now.and_then(|now| {
                     let provider = normalize_issue_monitor_provider(&profile.agent_id)?;
@@ -18081,7 +18156,7 @@ impl IssueMonitorState {
     }
 
     /// Issue #4117: keep the review ledger in step with the canvas. A review
-    /// window observed alive for an Issue still awaiting its verdict is adopted
+    /// window observed for an Issue still awaiting its verdict is adopted
     /// (the daemon restarted and forgot the dispatch) or bound to its ledger
     /// entry; an entry whose window left this tab's canvas, or that never
     /// appeared within [`REVIEW_WINDOW_SPAWN_GRACE_SECS`], is dropped so it
@@ -18092,7 +18167,19 @@ impl IssueMonitorState {
         project_tabs: &BTreeSet<String>,
     ) {
         let now = snapshot.observed_at.as_str();
-        for observed in &snapshot.windows {
+        // Bind live reviews first: an older dead pane must not claim the
+        // reservation and make the current live pane look like a duplicate.
+        for observed in snapshot
+            .windows
+            .iter()
+            .filter(|window| idle_window_is_alive(window.status))
+            .chain(
+                snapshot
+                    .windows
+                    .iter()
+                    .filter(|window| !idle_window_is_alive(window.status)),
+            )
+        {
             if !observed.review_dispatch
                 || !issue_monitor_qualified_window_id(&observed.window_id)
                     .is_some_and(|(tab, _)| project_tabs.contains(tab))
@@ -18111,7 +18198,7 @@ impl IssueMonitorState {
             }
             match self.review_windows.get_mut(&issue_number) {
                 Some(window) => {
-                    if window.window_id.is_none() && idle_window_is_alive(observed.status) {
+                    if window.window_id.is_none() {
                         window.window_id = Some(observed.window_id.clone());
                         tracing::info!(
                             issue = issue_number,
@@ -18159,9 +18246,6 @@ impl IssueMonitorState {
                         }
                         continue;
                     }
-                    if !idle_window_is_alive(observed.status) {
-                        continue;
-                    }
                     let Some(pr_number) = record.pr_number else {
                         continue;
                     };
@@ -18204,7 +18288,7 @@ impl IssueMonitorState {
                                 Some(observed) => (
                                     false,
                                     Some(format!(
-                                        "review window {window_id} exited without a verdict ({:?})",
+                                        "review window launch failure: {window_id} exited without a verdict ({:?})",
                                         observed.status
                                     )),
                                 ),
@@ -18562,38 +18646,6 @@ impl IssueMonitorState {
             self.label_excluded_issues.remove(&issue_number);
         }
         let mut existing = self.inbox_item(issue_number).cloned();
-        // Upgrade only the old merged-acceptance park, never an actual user
-        // decision or an operator stop recorded after that settlement.
-        if self.autonomous_mode
-            && existing.as_ref().is_some_and(|item| {
-                item.state == MonitorInboxState::NeedsHuman
-                    && item.error_message.as_deref().is_some_and(|message| {
-                        message.starts_with("PR #")
-                            && message.contains("merged with unmet acceptance criteria:")
-                    })
-            })
-        {
-            if let Some(settlement) = self
-                .merged_issue_settlements
-                .get(&issue_number)
-                .cloned()
-                .filter(|settlement| {
-                    matches!(
-                        settlement.action,
-                        MergedIssueSettlementAction::UnmetAcceptance { .. }
-                    )
-                })
-            {
-                self.record_merged_issue_settlement(
-                    issue_number,
-                    settlement.pr_number,
-                    settlement.merge_sha,
-                    settlement.action,
-                    &format_rfc3339_utc(chrono::Utc::now()),
-                );
-                existing = self.inbox_item(issue_number).cloned();
-            }
-        }
         let exclusion = issue_monitor_candidate_exclusion(&issue, self.source_repository)
             .or_else(|| {
                 (!allowed).then(|| {
@@ -18799,6 +18851,68 @@ impl IssueMonitorState {
             );
         }
         self.upsert_inbox(item);
+        // Reclassify the exact old merge park using the incoming live body.
+        // This also repairs cold snapshots whose continuation fence was lost.
+        if state == MonitorInboxState::NeedsHuman
+            && self.autonomous_mode
+            && self
+                .inbox_item(issue_number)
+                .is_some_and(|item| item.issue.state == IssueMonitorIssueState::Open)
+            && !self.issue_is_closed(issue_number)
+            && !self.active_launches.contains(&issue_number)
+            && !self.launched_windows.contains_key(&issue_number)
+            && !self.process_held_issues.contains(&issue_number)
+            && !self.has_monitor_pane_for_issue(issue_number)
+            && !self
+                .pending_launches
+                .iter()
+                .any(|launch| launch.issue_number == issue_number)
+            && !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|launch| launch.issue_number == issue_number)
+        {
+            if let Some(settlement) = self
+                .merged_issue_settlements
+                .get(&issue_number)
+                .filter(|settlement| {
+                    self.failed_issues
+                        .get(&issue_number)
+                        .is_some_and(|message| settlement.matches_unmet_acceptance_failure(message))
+                })
+                .cloned()
+            {
+                let unmet = match settlement.action {
+                    MergedIssueSettlementAction::UnmetAcceptance { unmet }
+                    | MergedIssueSettlementAction::ContinueWork { unmet }
+                    | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+                    _ => unreachable!("matched an acceptance failure"),
+                };
+                self.record_merged_issue_settlement(
+                    issue_number,
+                    settlement.pr_number,
+                    settlement.merge_sha,
+                    MergedIssueSettlementAction::UnmetAcceptance { unmet },
+                    &format_rfc3339_utc(chrono::Utc::now()),
+                );
+                // Continuation may restore retired SPEC queue membership;
+                // retain exclusions that still apply after that restoration.
+                if let Some((excluded, reason)) = exclusion.as_ref().filter(|(excluded, _)| {
+                    *excluded != MonitorInboxState::Skipped
+                        || !allowed
+                        || !self.terminal_queue_contains(issue_number)
+                }) {
+                    if let Some(item) = self
+                        .inbox
+                        .iter_mut()
+                        .find(|item| item.issue.number == issue_number)
+                    {
+                        item.state = *excluded;
+                        item.exclusion_reason = Some(reason.clone());
+                    }
+                }
+            }
+        }
         self.enforce_measurement_waits();
         let state = self
             .inbox_item(issue_number)
@@ -19286,24 +19400,67 @@ impl IssueMonitorState {
     }
 
     pub fn adopt_terminal_queue(&mut self, terminal: &str, now: &str) -> usize {
-        let Some(orphan) = self.terminal_queues.remove(terminal) else {
+        let host = crate::process::current_hostname();
+        if terminal == host {
+            return 0;
+        }
+        let Some(orphan) = self.terminal_queues.get(terminal) else {
             return 0;
         };
-        let host = crate::process::current_hostname();
+        let prefs = self.prefs();
+        let movable: BTreeSet<_> = orphan
+            .entries
+            .iter()
+            .filter(|entry| {
+                !prefs.scheduled_issue_in_flight(entry.number)
+                    && !prefs.scheduled_issue_has_pending_claim(entry.number)
+            })
+            .map(|entry| entry.number)
+            .collect();
+        let releases_schedule = self
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .any(|entry| entry.host_id == terminal && movable.contains(&entry.issue_number));
+        let Some(revision) = self
+            .agent_issue_schedule
+            .revision
+            .checked_add(u64::from(releases_schedule))
+        else {
+            return 0;
+        };
+        if let Some(excluded) = self.terminal_queue_exclusions.get_mut(&host) {
+            excluded.retain(|number| !movable.contains(number));
+        }
+        let mut orphan = self
+            .terminal_queues
+            .remove(terminal)
+            .expect("source queue exists");
         let queue = self.terminal_queues.entry(host).or_default();
         let mut adopted = 0;
-        for entry in orphan.entries {
+        orphan.entries.retain(|entry| {
+            if !movable.contains(&entry.number) {
+                return true;
+            }
             if !queue
                 .entries
                 .iter()
                 .any(|existing| existing.number == entry.number)
             {
                 self.terminal_queue_retirements.remove(&entry.number);
-                queue.entries.push(entry);
+                queue.entries.push(entry.clone());
                 adopted += 1;
             }
+            false
+        });
+        queue.last_seen_at = Some(now.into());
+        if !orphan.entries.is_empty() {
+            self.terminal_queues.insert(terminal.into(), orphan);
         }
-        queue.last_seen_at = Some(now.to_string());
+        self.agent_issue_schedule
+            .reservations
+            .retain(|entry| entry.host_id != terminal || !movable.contains(&entry.issue_number));
+        self.agent_issue_schedule.revision = revision;
         adopted
     }
 
@@ -21854,6 +22011,54 @@ impl IssueMonitorState {
                 (owner != issue_number && issue_monitor_window_ids_match(bound, window_id))
                     .then_some(owner)
             })
+    }
+
+    /// Handle review termination without spending the implementation's attempt
+    /// budget. A duplicate/late review notification is still handled here.
+    pub(crate) fn record_review_window_failed_at(
+        &mut self,
+        window_id: &str,
+        message: &str,
+        now: &str,
+    ) -> bool {
+        // Keep the implementation-only lookup used by launch source fencing.
+        if self.launched_window_issue(window_id).is_some() {
+            return false;
+        }
+        let issue_number = self
+            .review_windows
+            .iter()
+            .find_map(|(issue, window)| {
+                window.window_id.as_deref().and_then(|bound| {
+                    issue_monitor_window_ids_match(bound, window_id).then_some(*issue)
+                })
+            })
+            .or_else(|| {
+                self.monitor_canvas_windows()
+                    .find(|window| {
+                        window.review_dispatch
+                            && issue_monitor_window_ids_match(&window.window_id, window_id)
+                    })
+                    .and_then(|window| window.issue_number)
+            });
+        let Some(issue_number) = issue_number else {
+            return false;
+        };
+        if !self
+            .idle_pane_closes_requested
+            .iter()
+            .any(|closed| issue_monitor_window_ids_match(closed, window_id))
+        {
+            self.record_review_failure(
+                issue_number,
+                format!(
+                    "review window launch failure: {}",
+                    review_failure_message(message.to_string())
+                ),
+                now,
+            );
+        }
+        true
     }
 
     /// Reverse-lookup the Issue associated with a launched agent `window_id`.
@@ -26441,7 +26646,21 @@ impl IssueMonitorState {
             );
             return;
         }
-        if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
+        // Issue #4131: launch ACK can leave an Idle record. The exact bound
+        // implementation's exit still owns an autonomous retry; its stored
+        // phase must not strand it after releasing the slot. Keep unbound
+        // failures and non-opted-in Issues on their existing paths.
+        let bound_idle_implementation = bound_window_failure
+            && self.active_launches.contains(&issue_number)
+            && self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::Idle)
+            && self
+                .inbox_item(issue_number)
+                .is_some_and(|item| self.is_autonomous_two_stage_candidate(&item.issue));
+        if self.autonomous_mode
+            && (self.is_autonomous_in_flight(issue_number) || bound_idle_implementation)
+        {
             // Issue #4161 AC-6: the retry ladder keeps retrying past its own
             // attempt cap, so a launch that is refused deterministically —
             // every attempt failing with the identical message — is retried on
@@ -28658,6 +28877,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -30068,6 +30288,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -30579,6 +30800,7 @@ mod tests {
                 session_mode: Default::default(),
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: gwt_agent::CodexSpeed::Off,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -35311,8 +35533,8 @@ mod tests {
         );
         assert_eq!(
             monitor.active_count(),
-            2,
-            "AC-8: the retained duplicate and the working pane both occupy the canvas"
+            1,
+            "Issue #7072: only the working pane reserves capacity after duplicate stop"
         );
         monitor.record_window_snapshot(pane_snapshot(
             &observed_at,
@@ -35325,7 +35547,7 @@ mod tests {
         assert_eq!(
             monitor.active_count(),
             1,
-            "closing the duplicate frees its slot"
+            "closing the diagnostic does not change live capacity"
         );
     }
 
@@ -41876,12 +42098,14 @@ mod tests {
         });
         assert_eq!(
             monitor.active_count(),
-            3,
-            "retained Error/Stopped panes still occupy the canvas"
+            1,
+            "Issue #7072: retained diagnostics do not reserve execution capacity"
         );
-        assert!(monitor
-            .next_launch_request("2026-10-06T00:00:01Z")
-            .is_none());
+        assert!(
+            monitor.has_monitor_pane_for_issue(42),
+            "diagnostics still prevent duplicate panes"
+        );
+        assert_eq!(monitor.occupied_slot_count(), 1);
         monitor.record_monitor_runtime_counts(
             101,
             1001,
@@ -41890,8 +42114,8 @@ mod tests {
         );
         assert_eq!(
             monitor.active_count(),
-            3,
-            "canvas and PTY census describe the same panes"
+            2,
+            "Issue #7072: actual PTY processes still reserve capacity"
         );
     }
 
@@ -41969,7 +42193,7 @@ mod tests {
             vec![live_pane_observation(
                 "tab-1::retained",
                 42,
-                WindowState::Error,
+                WindowState::Running,
             )],
         ));
         let mut state = serde_json::to_value(&monitor).unwrap();
@@ -42140,8 +42364,8 @@ mod tests {
         monitor.set_max_active_agents(1);
         assert_eq!(
             monitor.active_count(),
-            2,
-            "the reservation is for a new pane"
+            1,
+            "Issue #7072: only the pending reservation consumes capacity"
         );
         assert!(!monitor.claim_launch_delivery(
             42,
@@ -42251,7 +42475,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_known_local_tabs_count_retained_panes_and_park_new_candidates() {
+    fn monitor_known_local_tabs_count_live_panes_and_park_new_candidates() {
         let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_window_snapshot(pane_snapshot(
             "2026-10-06T00:00:00Z",
@@ -42266,23 +42490,23 @@ mod tests {
         let anchor_only: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
         assert_eq!(
             anchor_only.active_count(),
-            1,
-            "legacy observations retain anchor-only scope"
+            0,
+            "Issue #7072: the anchor's error diagnostic consumes no capacity"
         );
         state["window_snapshot_tabs"] = serde_json::json!(["tab-1", "tab-2"]);
         let known_tabs: IssueMonitorState = serde_json::from_value(state.clone()).unwrap();
         assert_eq!(
             known_tabs.active_count(),
-            3,
-            "positive local tab scope survives unknown host identity"
+            1,
+            "positive local tab scope counts the starting pane with unknown host identity"
         );
         state["window_snapshot_host"] = serde_json::json!([101, 1001]);
         let mut monitor: IssueMonitorState = serde_json::from_value(state).unwrap();
         monitor.set_source_repository(Some(("example", "project")));
         assert_eq!(
             monitor.active_count(),
-            3,
-            "known local tabs share one Monitor budget"
+            1,
+            "known local tabs share one live-process budget"
         );
         scan_queued_candidates(&mut monitor, &[issue(44)], "2026-10-06T00:00:01Z");
         assert_eq!(
@@ -45706,6 +45930,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_speed_profile_round_trips_and_sparse_updates_preserve_it() {
+        let profile: IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "codex_speed": "ultrafast", "model": "gpt-6-astra"
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&profile).unwrap();
+        assert_eq!(encoded["codex_speed"], "ultrafast");
+        let patch: IssueMonitorLaunchProfilePatch = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "reasoning": "high"
+        }))
+        .unwrap();
+        let (merged, _) = merge_issue_monitor_profiles_set(&[profile], None, &[patch]);
+        assert_eq!(
+            serde_json::to_value(&merged[0]).unwrap()["codex_speed"],
+            "ultrafast"
+        );
+        let legacy: IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "fast_mode": true
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap()["codex_speed"], "off");
+    }
+
+    #[test]
     fn issue_monitor_launch_profile_round_trips_all_launch_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("issue-monitor.json");
@@ -45715,6 +45963,7 @@ mod tests {
             .session_mode(gwt_agent::SessionMode::Resume)
             .skip_permissions(true)
             .fast_mode(true)
+            .codex_speed(gwt_agent::CodexSpeed::Ultrafast)
             .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
             .docker_service("app")
             .docker_lifecycle_intent(gwt_agent::DockerLifecycleIntent::Restart)
@@ -45737,6 +45986,7 @@ mod tests {
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Resume);
         assert!(profile.skip_permissions);
         assert!(profile.fast_mode);
+        assert_eq!(profile.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
         assert_eq!(
             profile.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -45760,6 +46010,7 @@ mod tests {
         assert_eq!(previous.session_mode, gwt_agent::SessionMode::Resume);
         assert!(previous.skip_permissions);
         assert!(previous.fast_mode);
+        assert_eq!(previous.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
         assert_eq!(
             previous.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -45939,7 +46190,7 @@ mod tests {
         assert!(status.launch_profile_candidates[0].fast_mode);
         assert!(status.launch_profile_candidates[0]
             .summary
-            .contains("fast:on"));
+            .contains("speed:off"));
         assert!(!status.launch_profile_candidates[1].fast_mode);
         assert!(status.launch_profile_candidates[1]
             .summary
@@ -49151,6 +49402,48 @@ mod tests {
     }
 
     #[test]
+    fn adopting_renamed_host_queue_releases_schedule_but_preserves_in_flight_work() {
+        let now = "2026-11-11T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let host = crate::process::current_hostname();
+        monitor.terminal_queue_push(&[7, 8], "operator", now);
+        let queue = monitor.terminal_queues.remove(&host).unwrap();
+        monitor.terminal_queues.insert("old-host".into(), queue);
+        for number in [7, 8] {
+            monitor
+                .agent_issue_schedule
+                .reservations
+                .push(AgentIssueReservation {
+                    host_id: "old-host".into(),
+                    agent_member_id: "member".into(),
+                    issue_number: number,
+                    reason: AgentScheduleReason::QueueOrder,
+                });
+        }
+        monitor.pending_launch_deliveries.push_back(
+            serde_json::from_value(serde_json::json!({
+                "agent_member_id":"member", "delivery_id":"delivery-8", "issue_number":8,
+                "branch_name":"work/issue-8", "linked_issue_kind":"issue",
+                "claim_id":"claim-8", "created_at":now, "materialized_window_id":"tab::pane"
+            }))
+            .unwrap(),
+        );
+        monitor
+            .terminal_queue_exclusions
+            .insert(host.clone(), BTreeSet::from([7, 8, 99]));
+        assert_eq!(monitor.adopt_terminal_queue("old-host", now), 1);
+        assert_eq!(
+            monitor.terminal_queue_exclusions[&host],
+            BTreeSet::from([8, 99])
+        );
+        assert_eq!(monitor.terminal_queues["old-host"].entries[0].number, 8);
+        assert_eq!(monitor.terminal_queues[&host].entries[0].number, 7);
+        assert_eq!(monitor.agent_issue_schedule.reservations.len(), 1);
+        assert_eq!(monitor.agent_issue_schedule.reservations[0].issue_number, 8);
+        assert_eq!(monitor.agent_issue_schedule.revision, 1);
+    }
+
+    #[test]
     fn adopting_orphan_queue_merges_without_duplicate_issue_numbers() {
         let now = "2026-09-10T00:02:00Z";
         let host = crate::process::current_hostname();
@@ -51774,6 +52067,8 @@ mod tests {
             },
             "2026-09-01T01:00:00Z",
         );
+        monitor.autonomous_record_mut(42).attempts = 2;
+        let stale_park = monitor.prefs();
         let mut stopped = monitor.clone();
         stopped.adopt_stopped_terminal_state(42, "operator decision");
         for state in [&mut monitor, &mut stopped] {
@@ -51788,6 +52083,34 @@ mod tests {
             stopped.inbox_item(42).unwrap().state,
             MonitorInboxState::NeedsHuman
         );
+        for rebase in [
+            IssueMonitorState::rebase_gui_observer_prefs
+                as fn(&mut IssueMonitorState, &IssueMonitorPrefs),
+            IssueMonitorState::rebase_daemon_driver_prefs,
+        ] {
+            let mut continued = monitor.clone();
+            rebase(&mut continued, &stale_park);
+            assert!(
+                continued.released_failures.contains_key(&42),
+                "the old merge park must not erase the newer continuation fence"
+            );
+            assert!(!continued.agent_status().needs_human.contains(&42));
+            assert_eq!(continued.attempt_count(42), 2);
+        }
+
+        // Deployed snapshots already lost the fence while retaining ContinueWork.
+        let mut broken = stale_park;
+        broken.autonomous_mode = true;
+        broken.merged_issue_settlements = monitor.prefs().merged_issue_settlements;
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), broken.clone());
+        cold.record_candidate(candidate);
+        cold.rebase_daemon_driver_prefs(&broken);
+        assert_eq!(
+            cold.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!cold.agent_status().needs_human.contains(&42));
+        assert_eq!(cold.attempt_count(42), 2);
     }
 
     #[test]
@@ -53259,6 +53582,47 @@ mod tests {
         monitor
     }
 
+    #[test]
+    fn issue_4131_bound_idle_implementation_exit_retries_after_reload() {
+        let monitor = autonomous_launched_cohort(&[(4131, "tab-1::implementation")]);
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.record_candidate(auto_issue(
+            4131,
+            "## Acceptance Criteria\n- [ ] AC-1: resume\n",
+        ));
+        assert_eq!(
+            monitor.autonomous_record(4131).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+
+        monitor.record_agent_window_issue_failed_classified_at(
+            4131,
+            "tab-1::implementation",
+            "Process exited with status 1",
+            IssueMonitorFailureClass::Agent,
+            "2026-11-10T16:15:25Z",
+        );
+
+        assert_eq!(
+            monitor.inbox_item(4131).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.queued_issue_numbers().contains(&4131));
+        assert!(monitor.active_issue_numbers().is_empty());
+        assert_eq!(monitor.attempt_count(4131), 1);
+        assert_eq!(
+            monitor
+                .autonomous_record(4131)
+                .unwrap()
+                .retry_not_before
+                .as_deref(),
+            Some("2026-11-10T16:16:25Z")
+        );
+        assert!(monitor.prefs().failed_issues.is_empty());
+    }
+
     fn idle_kind_of(monitor: &IssueMonitorState, window_id: &str) -> Option<IssueMonitorIdleKind> {
         monitor
             .idle_windows()
@@ -54035,7 +54399,7 @@ mod tests {
             IDLE_NOW,
         );
         assert_eq!(outcome.pane_closes, vec!["tab-1::old"]);
-        assert_eq!(monitor.active_issue_numbers(), vec![42, 42]);
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
         assert_eq!(
             monitor.launched_window_id(42).as_deref(),
             Some("tab-1::successor")
@@ -54813,8 +55177,8 @@ mod tests {
         assert!(!monitor.active_launches.contains(&4740));
         assert_eq!(
             monitor.active_count(),
-            1,
-            "the retained finished pane occupies a slot"
+            0,
+            "Issue #7072: the retained finished pane does not occupy a slot"
         );
         assert_eq!(
             monitor.inbox_item(4740).map(|item| item.state),
@@ -54828,7 +55192,7 @@ mod tests {
         assert_eq!(
             monitor.active_count(),
             0,
-            "removing the finished pane frees its slot"
+            "removing the diagnostic leaves capacity unchanged"
         );
     }
 
@@ -56107,6 +56471,84 @@ mod tests {
                 .autonomous_record(41)
                 .and_then(|record| record.reviewed_sha.clone()),
             Some("sha-410-v2".to_string())
+        );
+    }
+
+    #[test]
+    fn issue_4923_live_review_wins_over_an_older_dead_pane() {
+        for dispatched in [false, true] {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(3);
+            if dispatched {
+                monitor
+                    .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+                    .unwrap();
+                monitor.take_pending_review_dispatches();
+            } else {
+                monitor.begin_review(41, 410, "sha-410");
+            }
+            monitor.record_window_snapshot(idle_snapshot(
+                "2026-09-07T04:00:01Z",
+                vec![
+                    idle_observation("tab-1::review-old", Some(41), WindowState::Error, true),
+                    idle_observation(
+                        "tab-1::review-current",
+                        Some(41),
+                        WindowState::Running,
+                        true,
+                    ),
+                ],
+            ));
+            assert!(monitor.record_review_window_failed_at(
+                "tab-1::review-old",
+                "Process exited with status 1",
+                "2026-09-07T04:00:02Z",
+            ));
+            assert_eq!(
+                monitor.review_windows()[0].window_id.as_deref(),
+                Some("tab-1::review-current")
+            );
+            assert!(review_attempts_of(&monitor, 41).is_none());
+            assert!(monitor.inbox_item(41).unwrap().error_message.is_none());
+            assert!(monitor
+                .take_pending_idle_pane_closes()
+                .iter()
+                .all(|close| close.window_id != "tab-1::review-current"));
+        }
+    }
+
+    #[test]
+    fn issue_4923_first_dead_review_snapshot_reports_launch_failure_without_grace() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+            .expect("dispatch admitted");
+        monitor.take_pending_review_dispatches();
+        let snapshot = idle_snapshot(
+            "2026-09-07T04:00:01Z",
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Error, true),
+            ],
+        );
+        monitor.record_window_snapshot(snapshot.clone());
+        let error = monitor
+            .inbox_item(41)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .unwrap();
+        assert!(error.contains("launch failure"), "{error}");
+        assert!(!error.contains("PTY handoff complete") && !error.contains("never appeared"));
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(review_attempts_of(&monitor, 41).unwrap().count, 1);
+        assert_eq!(monitor.attempt_count(41), 0);
+        monitor.record_window_snapshot(snapshot);
+        assert_eq!(review_attempts_of(&monitor, 41).unwrap().count, 1);
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
         );
     }
 

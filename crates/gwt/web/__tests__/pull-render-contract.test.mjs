@@ -812,7 +812,7 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   const file = 'crates/gwt/web/app.js';
   const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
   const migrated = findings => findings.filter(finding => finding.root === 'receive'
-    && /^\/(pm_reports\|pm_conversation|terminal_output|terminal_snapshot)$/.test(finding.context));
+    && /^\/(pm_reports\|pm_conversation\|pane_send_result|terminal_output|terminal_snapshot)$/.test(finding.context));
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
   const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));

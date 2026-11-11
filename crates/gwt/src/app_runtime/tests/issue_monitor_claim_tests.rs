@@ -249,6 +249,61 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
     );
 }
 
+#[test]
+fn issue_6996_cached_finalizer_timeout_does_not_repeat_error_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let request = super::super::DeferredIssueMonitorLaunch {
+        project_root: repo,
+        issue_number: 6996,
+        linked_issue_kind: LinkedIssueKind::Issue,
+        delivery_id: Some("finalizer-timeout-delivery".into()),
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    };
+    let message = "workspace finalizer fresh-launch-6996 timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline";
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context.clone(),
+                request.clone(),
+                message.into(),
+                None,
+            )
+            .len(),
+        1
+    );
+    for replay in 0..5 {
+        assert!(
+            runtime
+                .schedule_issue_monitor_launch_failure(
+                    context.clone(),
+                    request.clone(),
+                    message.replace("120000ms", &format!("{}ms", 120000 + replay * 5000)),
+                    None,
+                )
+                .is_empty(),
+            "cached timeout keeps recovery state without another error toast"
+        );
+    }
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context,
+                request,
+                message.replace("fresh-launch-6996", "fresh-launch-next"),
+                None,
+            )
+            .len(),
+        1,
+        "a different finalizer still reports its own timeout"
+    );
+}
+
 fn commit_issue_monitor_preparations(
     runtime: &mut AppRuntime,
     queued: &BlockingTestTaskQueue,
@@ -4159,6 +4214,102 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
             "cancel must release every matching project"
         );
     }
+}
+
+#[test]
+fn issue_7072_update_drain_reaps_stopped_holder_without_monitor_scan() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("stopped-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/stopped-owner",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 7072,
+    };
+    let session_id = "update-stopped-holder";
+    seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/stopped-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let mut active = sample_active_agent_session("tab-1", "tab-1::agent-1");
+    active.session_id = session_id.into();
+    active.worktree_path = worktree.clone();
+    runtime
+        .active_agent_sessions
+        .insert(active.window_id.clone(), active);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-11-11T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: since.to_rfc3339(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(false),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // An admitted restore has no live runtime yet and must remain protected.
+    runtime
+        .restore_launch_windows
+        .insert("tab-1::agent-1".into(), Some(session_id.into()));
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(15));
+    assert_eq!(
+        gwt::cli::execution_state::load(&worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Active
+    );
+    runtime.restore_launch_windows.clear();
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(30));
+    assert_eq!(
+        gwt::cli::execution_state::load(&worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Blocked,
+        "the drain worker must reclaim its stopped holder even with Monitor disabled"
+    );
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(45));
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(105));
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::ApplyUpdateDrained { .. }
+        )),
+        "stopped execution and error window must allow graceful update apply"
+    );
 }
 
 #[test]
