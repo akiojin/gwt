@@ -876,6 +876,15 @@ mod project_owner_tests {
 
     #[test]
     fn explicit_quit_subscriber_closes_its_managed_owner_lease() {
+        exercise_explicit_quit(false);
+    }
+
+    #[test]
+    fn explicit_quit_before_project_owner_connection_closes_existing_managed_owner() {
+        exercise_explicit_quit(true);
+    }
+
+    fn exercise_explicit_quit(before_connection: bool) {
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         // A normal socket disconnect must remain resident even after its grace.
@@ -928,9 +937,25 @@ mod project_owner_tests {
             let transport = bound.serve().unwrap();
             let mut residency = transport.residency();
             let (healthy, received) = std::sync::mpsc::channel();
+            let (resolving, entered) = std::sync::mpsc::channel();
+            let (resume, resumed) = std::sync::mpsc::channel();
+            let resumed = std::sync::Mutex::new(resumed);
+            let first = AtomicBool::new(true);
+            let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let resolved_count = resolutions.clone();
             let subscriber = DaemonSubscriber::spawn_project_owner_with_resolver(
                 endpoint.scope.repo_hash.clone(),
-                move || Ok(endpoint.clone()),
+                move || {
+                    resolved_count.fetch_add(1, Ordering::SeqCst);
+                    if before_connection && first.swap(false, Ordering::SeqCst) {
+                        resolving.send(()).unwrap();
+                        gwt_core::test_support::recv_event(
+                            &resumed.lock().unwrap(),
+                            "Quit before owner discovery returns",
+                        );
+                    }
+                    Ok(endpoint.clone())
+                },
                 move |_, _, health| {
                     if health.state == crate::protocol::ProjectOwnerHealthState::Healthy {
                         let _ = healthy.send(());
@@ -939,13 +964,21 @@ mod project_owner_tests {
                 |_, _, _| {},
             );
             tokio::task::spawn_blocking(move || {
-                gwt_core::test_support::recv_event(&received, "authenticated GUI lease");
+                if before_connection {
+                    gwt_core::test_support::recv_event(&entered, "owner discovery checkpoint");
+                } else {
+                    gwt_core::test_support::recv_event(&received, "authenticated GUI lease");
+                }
                 subscriber.request_quit();
+                if before_connection {
+                    resume.send(()).unwrap();
+                }
                 subscriber.stop();
             })
             .await
             .unwrap();
-            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            // test-hygiene: allow-wall-clock-deadline Bounds actual Quit delivery; the channel barrier establishes order, not elapsed time.
+            let drained = tokio::time::timeout(Duration::from_secs(5), async {
                 while !residency.borrow().exit_started {
                     residency
                         .changed()
@@ -953,9 +986,14 @@ mod project_owner_tests {
                         .expect("owner must publish its shutdown");
                 }
             })
-            .await
-            .expect("explicit Quit must drain without reconnect grace");
+            .await;
             transport.shutdown().await;
+            drained.expect("explicit Quit must drain without reconnect grace");
+            assert_eq!(
+                resolutions.load(Ordering::SeqCst),
+                if before_connection { 2 } else { 1 },
+                "only pre-connection Quit needs one additional existing-endpoint resolution"
+            );
         });
     }
 
@@ -1204,6 +1242,7 @@ impl DaemonSubscriber {
             let mut backoff = RETRY_BACKOFF_MIN;
             let mut first = true;
             let mut wedge = OwnerWedgeTracker::default();
+            let mut quit_delivered = false;
             while !stop.load(Ordering::SeqCst) {
                 let connection_id = NEXT_OWNER_CONNECTION.fetch_add(1, Ordering::SeqCst);
                 if first { publish(connection_id, None, State::Connecting, None); first = false; }
@@ -1245,16 +1284,10 @@ impl DaemonSubscriber {
                     };
                     let result = tokio::select! { biased; _ = cancelled => Ok(()), result = session => result };
                     if quit.load(Ordering::SeqCst) {
-                        if let Some(mut stream) = stream {
-                            use futures_util::SinkExt;
-                            use tokio_tungstenite::tungstenite::{Message, protocol::{CloseFrame, frame::coding::CloseCode}};
-                            let close = Message::Close(Some(CloseFrame {
-                                code: CloseCode::Normal,
-                                reason: crate::project_runtime::presence::GUI_QUIT_CLOSE_REASON.into(),
-                            }));
+                        if let Some(stream) = stream {
                             // The send is bounded independently of health polling and GUI cleanup.
-                            match tokio::time::timeout(Duration::from_secs(1), stream.send(close)).await {
-                                Ok(Ok(())) => {},
+                            match tokio::time::timeout(Duration::from_secs(1), close_project_owner_for_quit(stream)).await {
+                                Ok(Ok(())) => quit_delivered = true,
                                 Ok(Err(error)) => tracing::warn!(%error, "GUI Quit lease close failed"),
                                 Err(error) => tracing::warn!(%error, "GUI Quit lease close timed out"),
                             }
@@ -1303,6 +1336,24 @@ impl DaemonSubscriber {
                 });
                 backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
             }
+            if quit.load(Ordering::SeqCst) && !quit_delivered {
+                // Quit may win before the subscriber attaches. Resolve only an
+                // existing owner; never ensure, spawn, scan, or kill a daemon.
+                let result = runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        let endpoint = resolver()?;
+                        if endpoint.scope.repo_hash != project_key {
+                            return Err("Project owner discovery returned another project".to_string());
+                        }
+                        let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
+                        inspect_project_owner(&client, &endpoint).await?;
+                        close_project_owner_for_quit(Box::pin(client.gui_events().await?)).await
+                    }).await
+                });
+                if !matches!(result, Ok(Ok(()))) {
+                    tracing::warn!(?result, "GUI Quit existing-owner fallback was not delivered");
+                }
+            }
         }).expect("project owner subscriber thread spawn");
         Self {
             stop_flag,
@@ -1311,6 +1362,25 @@ impl DaemonSubscriber {
             join_handle: Some(join_handle),
         }
     }
+}
+
+async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
+where
+    S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::{
+        protocol::{frame::coding::CloseCode, CloseFrame},
+        Message,
+    };
+    stream
+        .send(Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: crate::project_runtime::presence::GUI_QUIT_CLOSE_REASON.into(),
+        })))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn inspect_project_owner(

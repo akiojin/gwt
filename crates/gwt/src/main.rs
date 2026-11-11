@@ -2653,6 +2653,22 @@ mod tests {
             .rsplit_once("event_loop.run(move |event, _, control_flow| {")
             .expect("GUI event loop")
             .1;
+        let installed = event_loop
+            .split_once("Ok(Ok(pending)) => {")
+            .unwrap()
+            .1
+            .split_once("Ok(Err(error)) => {")
+            .unwrap()
+            .0;
+        let subscribed = installed.find("board_daemon_subscribers.sync(").unwrap();
+        let owned = installed.find("app = Some(ready);").unwrap();
+        let resume = installed
+            .find("resume_bootstrapped_runtimes()")
+            .expect("Continue resumes without browser readiness");
+        assert!(
+            subscribed < owned && owned < resume,
+            "physical startup restores require installed GUI ownership and its subscriber registry"
+        );
         let startup_stopped = event_loop
             .split_once("Event::UserEvent(UserEvent::StartupStopped) => {")
             .expect("startup cleanup exit")
@@ -10924,6 +10940,7 @@ fn main() -> std::io::Result<()> {
 
                     tray_open.set_text("Open in browser");
                     app = Some(ready);
+                    app.as_mut().expect("installed startup app").resume_bootstrapped_runtimes();
                 }
                 Ok(Err(error)) => {
                     proxy.close();
