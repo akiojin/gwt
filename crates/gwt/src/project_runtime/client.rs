@@ -174,15 +174,27 @@ impl ProjectRuntimeClient {
     /// An authenticated Rust GUI connection owns exactly one residency lease.
     pub async fn gui_events(
         &self,
-    ) -> Result<impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>, String>
-    {
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>
+            + futures_util::Sink<
+                tokio_tungstenite::tungstenite::Message,
+                Error = tokio_tungstenite::tungstenite::Error,
+            >,
+        String,
+    > {
         self.events_with_gui_presence(true).await
     }
     async fn events_with_gui_presence(
         &self,
         gui_presence: bool,
-    ) -> Result<impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>, String>
-    {
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<super::events::OwnerEvent, String>>
+            + futures_util::Sink<
+                tokio_tungstenite::tungstenite::Message,
+                Error = tokio_tungstenite::tungstenite::Error,
+            >,
+        String,
+    > {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let endpoint = self.route.lock().await.endpoint.clone();

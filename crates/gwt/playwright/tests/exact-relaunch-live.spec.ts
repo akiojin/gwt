@@ -198,6 +198,50 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
   test.setTimeout(420_000);
 
+  test("Issue #6946: explicit Quit drains the GUI, managed daemon and live provider", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      await liveCodexWindow(page, launch.gwt_session_id!);
+      const key = new URL(page.url()).pathname.split("/")[2];
+      const directory = join(fixture.home, ".gwt/projects", key, "runtime/daemon");
+      const endpoints = await Promise.all((await readdir(directory)).filter(name => name.endsWith(".json"))
+        .map(async name => JSON.parse(await readFile(join(directory, name), "utf8"))));
+      const endpoint = endpoints.find(endpoint => endpoint.scope?.repo_hash === key && endpoint.project_transport_url);
+      expect(endpoint, "fixture's exact managed daemon").toBeTruthy();
+      const health = await fetch(`${endpoint.project_transport_url}/private/project/command`, {
+        method: "POST", headers: { Authorization: `Bearer ${endpoint.auth_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ project_key: key, command: { type: "health" } }), signal: AbortSignal.timeout(5_000),
+      }).then(response => response.json());
+      expect(health).toMatchObject({ pid: endpoint.pid, startup_intent: "gui_managed", draining: false });
+      expect(health.gui_presence_count).toBeGreaterThanOrEqual(1);
+      await attachScreenshot(page, info, `quit-live-provider-${theme}`);
+      expect(errors, "console/page errors before shutdown").toEqual([]);
+      const pids = [fixture.ownedPid!, endpoint.pid, launch.pid];
+      // Close the browser before intentional server shutdown so reconnect errors
+      // cannot be confused with frontend failures. SIGTERM uses the QuitApp path.
+      await page.close();
+      process.kill(pids[0], "SIGTERM");
+      for (const pid of pids) {
+        await expect.poll(() => {
+          try { process.kill(pid, 0); return true; } catch { return false; }
+        }, { timeout: 20_000, message: `Quit must reap owned PID ${pid}` }).toBe(false);
+      }
+      await info.attach("quit-processes", { body: JSON.stringify({ pids, exited: true }), contentType: "application/json" });
+    } finally {
+      await fixture.stop();
+    }
+  });
+
   test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
     let starts = 0;
     const cleanups: { pid: number; ps_status: number }[] = [];

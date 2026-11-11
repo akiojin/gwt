@@ -51,6 +51,7 @@ enum SubscriptionKind {
 /// down cleanly.
 pub struct DaemonSubscriber {
     stop_flag: Arc<AtomicBool>,
+    quit_requested: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
     join_handle: Option<thread::JoinHandle<()>>,
 }
@@ -140,6 +141,7 @@ impl DaemonSubscriber {
             .expect("daemon subscriber thread spawn");
         Self {
             stop_flag,
+            quit_requested: Arc::new(AtomicBool::new(false)),
             shutdown,
             join_handle: Some(join_handle),
         }
@@ -151,6 +153,13 @@ impl DaemonSubscriber {
         if let Some(handle) = self.join_handle.take() {
             let _ = handle.join();
         }
+    }
+
+    /// Signal explicit application Quit without waiting for other project owners.
+    /// Only project-owner subscribers send this reason on their authenticated lease.
+    pub fn request_quit(&self) {
+        self.quit_requested.store(true, Ordering::SeqCst);
+        self.signal_stop();
     }
 
     fn signal_stop(&self) {
@@ -866,6 +875,91 @@ mod project_owner_tests {
     use super::*;
 
     #[test]
+    fn explicit_quit_subscriber_closes_its_managed_owner_lease() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        // A normal socket disconnect must remain resident even after its grace.
+        // This makes the test depend on explicit Quit reaching the real lease.
+        use gwt_core::project_execution_policy::{self as policy, Choice, ChoiceRequest};
+        policy::choose(
+            home.path(),
+            &ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: Choice::Continue,
+                consent_source_id: uuid::Uuid::new_v4().to_string(),
+                actor: "browser:quit-fixture".into(),
+                authorized_work_lineage: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[100], "operator", "2026-11-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(home.path()),
+            &monitor.prefs(),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let scope = gwt_core::daemon::RuntimeScope::new(
+                "abcdef0123456789",
+                "feedfacecafebeef",
+                home.path().to_path_buf(),
+                gwt_core::daemon::RuntimeTarget::Host,
+            )
+            .unwrap();
+            let mut endpoint = DaemonEndpoint::new(
+                scope,
+                std::process::id(),
+                "unused".into(),
+                "private-quit-test-token".into(),
+                "test".into(),
+            );
+            endpoint.startup_intent = gwt_core::daemon::DaemonStartIntent::GuiManaged;
+            let bound =
+                crate::project_runtime::transport::BoundProjectTransport::bind(&endpoint).unwrap();
+            endpoint.project_transport_url = Some(bound.private_url.clone());
+            let transport = bound.serve().unwrap();
+            let mut residency = transport.residency();
+            let (healthy, received) = std::sync::mpsc::channel();
+            let subscriber = DaemonSubscriber::spawn_project_owner_with_resolver(
+                endpoint.scope.repo_hash.clone(),
+                move || Ok(endpoint.clone()),
+                move |_, _, health| {
+                    if health.state == crate::protocol::ProjectOwnerHealthState::Healthy {
+                        let _ = healthy.send(());
+                    }
+                },
+                |_, _, _| {},
+            );
+            tokio::task::spawn_blocking(move || {
+                gwt_core::test_support::recv_event(&received, "authenticated GUI lease");
+                subscriber.request_quit();
+                subscriber.stop();
+            })
+            .await
+            .unwrap();
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                while !residency.borrow().exit_started {
+                    residency
+                        .changed()
+                        .await
+                        .expect("owner must publish its shutdown");
+                }
+            })
+            .await
+            .expect("explicit Quit must drain without reconnect grace");
+            transport.shutdown().await;
+        });
+    }
+
+    #[test]
     fn project_owner_subscriber_authenticates_identity_and_reports_loss() {
         let _env_lock = gwt_core::test_support::env_lock()
             .lock()
@@ -1093,8 +1187,10 @@ impl DaemonSubscriber {
             + 'static,
     {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_requested = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(Notify::new());
         let stop = stop_flag.clone();
+        let quit = quit_requested.clone();
         let stop_notify = shutdown.clone();
         let on_health: Arc<OwnerHealthCallback> = Arc::new(on_health);
         let on_event: Arc<OwnerEventCallback> = Arc::new(on_event);
@@ -1122,10 +1218,10 @@ impl DaemonSubscriber {
                     if endpoint.scope.repo_hash != project_key { return Err("Project owner discovery returned another project".into()); }
                     observed_endpoint = Some(endpoint.clone());
                     let client = crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
+                    let mut stream = None;
                     let session = async {
                         let identity = inspect_project_owner(&client, &endpoint).await?;
-                        let stream = tokio::time::timeout(OWNER_REQUEST_TIMEOUT, client.gui_events()).await.map_err(|_| "Project event connection timed out".to_string())??;
-                        futures_util::pin_mut!(stream);
+                        stream = Some(Box::pin(tokio::time::timeout(OWNER_REQUEST_TIMEOUT, client.gui_events()).await.map_err(|_| "Project event connection timed out".to_string())??));
                         wedged_owners().lock().unwrap_or_else(|e| e.into_inner()).remove(&project_key);
                         wedge.observe(None, false);
                         publish(connection_id, Some(identity.clone()), State::Healthy, None);
@@ -1134,7 +1230,7 @@ impl DaemonSubscriber {
                         loop {
                             use futures_util::StreamExt;
                             tokio::select! {
-                                event = stream.next() => match event {
+                                event = stream.as_mut().expect("connected owner socket").next() => match event {
                                     Some(Ok(event)) => on_event(connection_id, identity.clone(), event),
                                     Some(Err(error)) => return Err(error),
                                     None => return Err("Project event connection ended".into()),
@@ -1147,7 +1243,24 @@ impl DaemonSubscriber {
                             }
                         }
                     };
-                    tokio::select! { biased; _ = cancelled => Ok(()), result = session => result }
+                    let result = tokio::select! { biased; _ = cancelled => Ok(()), result = session => result };
+                    if quit.load(Ordering::SeqCst) {
+                        if let Some(mut stream) = stream {
+                            use futures_util::SinkExt;
+                            use tokio_tungstenite::tungstenite::{Message, protocol::{CloseFrame, frame::coding::CloseCode}};
+                            let close = Message::Close(Some(CloseFrame {
+                                code: CloseCode::Normal,
+                                reason: crate::project_runtime::presence::GUI_QUIT_CLOSE_REASON.into(),
+                            }));
+                            // The send is bounded independently of health polling and GUI cleanup.
+                            match tokio::time::timeout(Duration::from_secs(1), stream.send(close)).await {
+                                Ok(Ok(())) => {},
+                                Ok(Err(error)) => tracing::warn!(%error, "GUI Quit lease close failed"),
+                                Err(error) => tracing::warn!(%error, "GUI Quit lease close timed out"),
+                            }
+                        }
+                    }
+                    result
                 });
                 if stop.load(Ordering::SeqCst) { break; }
                 if let Err(error) = result {
@@ -1193,6 +1306,7 @@ impl DaemonSubscriber {
         }).expect("project owner subscriber thread spawn");
         Self {
             stop_flag,
+            quit_requested,
             shutdown,
             join_handle: Some(join_handle),
         }

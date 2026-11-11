@@ -215,7 +215,9 @@ the tray menu:
 - **Open Project…** — opens the Hub and starts its folder picker directly.
 - **Clone from GitHub…** — opens the Hub with its Clone Project dialog.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
-  PTY children down in order.
+  GUI-managed project daemons and their PTY children down, including background
+  Continue work. A daemon shared with another connected GUI or started
+  independently remains running.
 
 Project browser tabs show agent RUN / BLOCK counts in their titles and a
 status favicon. BLOCK includes waiting, stopped, and error states; shell

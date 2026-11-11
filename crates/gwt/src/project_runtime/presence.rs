@@ -7,6 +7,7 @@ use std::{
 
 const INITIAL_ATTACH_GRACE: Duration = Duration::from_secs(15);
 const RECONNECT_GRACE: Duration = Duration::from_secs(15);
+pub(crate) const GUI_QUIT_CLOSE_REASON: &str = "gwt-quit";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResidencySnapshot {
@@ -27,6 +28,7 @@ pub(crate) struct GuiPresence {
     intent: DaemonStartIntent,
     connections: HashSet<u64>,
     deadline: Option<Instant>,
+    quit_seen: bool,
 }
 impl GuiPresence {
     pub(crate) fn new(intent: DaemonStartIntent, now: Instant) -> Self {
@@ -34,6 +36,7 @@ impl GuiPresence {
             intent,
             connections: HashSet::new(),
             deadline: (intent == DaemonStartIntent::GuiManaged).then(|| now + INITIAL_ATTACH_GRACE),
+            quit_seen: false,
         }
     }
     pub(crate) fn intent(&self) -> DaemonStartIntent {
@@ -51,9 +54,23 @@ impl GuiPresence {
             self.deadline = Some(now + RECONNECT_GRACE);
         }
     }
+    pub(crate) fn detach_for_quit(&mut self, id: u64, now: Instant) {
+        if self.connections.contains(&id) && self.intent == DaemonStartIntent::GuiManaged {
+            // A GUI's background operation can own another lease and disconnect
+            // after its main subscriber has delivered explicit Quit.
+            self.quit_seen = true;
+        }
+        self.detach(id, now);
+    }
+    pub(crate) fn quit_requested(&self) -> bool {
+        self.quit_seen
+            && self.connections.is_empty()
+            && self.intent == DaemonStartIntent::GuiManaged
+    }
     pub(crate) fn promote(&mut self) {
         self.intent = DaemonStartIntent::Standalone;
         self.deadline = None;
+        self.quit_seen = false;
     }
     pub(crate) fn count(&self) -> usize {
         self.connections.len()
@@ -69,6 +86,35 @@ impl GuiPresence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_quit_drains_only_after_the_last_managed_gui_detaches() {
+        let now = Instant::now();
+        let mut presence = GuiPresence::new(DaemonStartIntent::GuiManaged, now);
+        presence.attach(1);
+        presence.attach(2);
+        presence.detach_for_quit(1, now);
+        assert!(!presence.quit_requested());
+        presence.detach_for_quit(2, now);
+        assert!(presence.quit_requested());
+
+        let mut background_lease = GuiPresence::new(DaemonStartIntent::GuiManaged, now);
+        background_lease.attach(1);
+        background_lease.attach(2);
+        background_lease.detach_for_quit(1, now);
+        assert!(!background_lease.quit_requested());
+        background_lease.detach(2, now);
+        assert!(background_lease.quit_requested());
+
+        let mut standalone = GuiPresence::new(DaemonStartIntent::Standalone, now);
+        standalone.attach(1);
+        standalone.detach_for_quit(1, now);
+        assert!(!standalone.quit_requested());
+        let mut disconnected = GuiPresence::new(DaemonStartIntent::GuiManaged, now);
+        disconnected.attach(1);
+        disconnected.detach(1, now);
+        assert!(!disconnected.quit_requested());
+    }
+
     #[test]
     fn gui_presence_cancels_old_grace_and_standalone_never_expires() {
         let now = Instant::now();

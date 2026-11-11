@@ -677,7 +677,10 @@ pub(crate) enum OwnerMessage {
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
     GuiAttached(oneshot::Sender<Result<u64, String>>),
-    GuiDetached(u64),
+    GuiDetached {
+        id: u64,
+        quit: bool,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -757,8 +760,8 @@ impl OwnerHandle {
             .await
             .map_err(|_| "project owner stopped before GUI attachment".to_string())?
     }
-    pub(crate) fn detach_gui(&self, id: u64) {
-        let _ = self.sender.send(OwnerMessage::GuiDetached(id));
+    pub(crate) fn detach_gui(&self, id: u64, quit: bool) {
+        let _ = self.sender.send(OwnerMessage::GuiDetached { id, quit });
     }
     pub async fn request(&self, request: OwnerRequest) -> OwnerReply {
         let (send, receive) = oneshot::channel();
@@ -1314,8 +1317,8 @@ impl OwnerState {
                 next_project_policy_check = now + std::time::Duration::from_secs(1);
             }
             if !self.stopping
-                && !continue_active
-                && self.gui_presence.expired(std::time::Instant::now())
+                && (self.gui_presence.quit_requested()
+                    || (!continue_active && self.gui_presence.expired(std::time::Instant::now())))
             {
                 self.begin_shutdown(None);
             }
@@ -1754,8 +1757,13 @@ impl OwnerState {
                         }
                     }
                 }
-                OwnerMessage::GuiDetached(id) => {
-                    self.gui_presence.detach(id, std::time::Instant::now())
+                OwnerMessage::GuiDetached { id, quit } => {
+                    if quit {
+                        self.gui_presence
+                            .detach_for_quit(id, std::time::Instant::now());
+                    } else {
+                        self.gui_presence.detach(id, std::time::Instant::now());
+                    }
                 }
                 OwnerMessage::Request(ref request, _)
                     if self.stopping
@@ -2185,7 +2193,7 @@ impl OwnerState {
     fn begin_shutdown(&mut self, reply: Option<oneshot::Sender<()>>) {
         tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
             gui_presence_count = self.gui_presence.count(), retained_cleanups = self.retirements.len(),
-            reason = if reply.is_some() { "shutdown_requested" } else { "gui_presence_expired" },
+            reason = if reply.is_some() { "shutdown_requested" } else if self.gui_presence.quit_requested() { "gui_quit" } else { "gui_presence_expired" },
             "project owner shutdown started");
         self.stopping = true;
         self.pm_wake_permits.cancel_mobile_for_pane(None);
