@@ -345,7 +345,10 @@ fn subscribe_command<E: CliEnv>(
             .await
             .map_err(|err| config_error(format!("daemon connect failed: {err}")))?;
         client
-            .send_frame(&ClientFrame::Subscribe { channels })
+            .send_frame(&ClientFrame::Subscribe {
+                channels,
+                gui_window: false,
+            })
             .await
             .map_err(|err| config_error(format!("subscribe send failed: {err}")))?;
 
