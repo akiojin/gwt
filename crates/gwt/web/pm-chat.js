@@ -119,10 +119,12 @@ export function createPmWindowModel() {
         if (JSON.stringify(conversation) === JSON.stringify(previous.conversation)) return state;
         next = { ...next, conversation };
       } else if (event.kind === 'pane_send_result') {
-        // Results carry no correlation id; only a pending Chat send consumes one. Session
-        // refusals omit the window, which is unambiguous only with one send in flight.
-        const pendingIds = Object.keys(state.windows).filter(id => state.windows[id].chatSend?.status === 'pending');
-        const windowId = event.window_id ?? (pendingIds.length === 1 ? pendingIds[0] : null);
+        // Palette/CLI replies and expired attempts cannot settle a Chat send.
+        // Session refusals omit the window, but still carry the exact request ID.
+        if (!Number.isSafeInteger(event.request_id)) return state;
+        const windowId = Object.keys(state.windows).find(id => state.windows[id].chatSend?.status === 'pending'
+          && state.windows[id].chatSend.sequence === event.request_id
+          && (event.window_id == null || event.window_id === id));
         const pending = state.windows[windowId];
         if (pending?.chatSend?.status !== 'pending') return state;
         const chatSend = { sequence: pending.chatSend.sequence, status: event.ok ? 'sent' : 'failed',
@@ -154,7 +156,7 @@ export function createPmWindowModel() {
     if (!sessionId || !String(text ?? '').trim()) return null;
     const sequence = ++chatSendSequence;
     if (!setChatSend(windowId, current => current?.status !== 'pending', { sequence, status: 'pending', error: null })) return null;
-    return { kind: 'pane_send_input', session_id: sessionId, text: `${text}\r` };
+    return { kind: 'pane_send_input', session_id: sessionId, text: `${text}\r`, request_id: sequence };
   }
   function failPendingChatSend(windowId, error, sequence = null) {
     const current = model.read().windows[windowId]?.chatSend;

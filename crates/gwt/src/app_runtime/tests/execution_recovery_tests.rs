@@ -2910,27 +2910,6 @@ fn owner_monitor_runtime_failure(
         .await
         .unwrap();
     });
-    if from_hook {
-        executor.block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds the existing physical census publication before the hook; launch ACK alone only proves the binding.
-            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-                loop {
-                    owner.wait_monitor_idle().await.unwrap();
-                    let prefs = gwt::load_issue_monitor_prefs(
-                        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
-                    ).unwrap();
-                    if prefs.monitor_runtime_counts
-                        .get(&format!("{}:{}", identity.pid, identity.host_started_at))
-                        .is_some_and(|census| census.counts.get(&42) == Some(&1)
-                            && census.windows.get(&pane.id) == Some(&42))
-                    {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            }).await.expect("the exact live physical pane must be in the authoritative census before its hook error");
-        });
-    }
     let mut subscriber = executor.block_on(async {
         let endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
             .unwrap()
@@ -2952,6 +2931,35 @@ fn owner_monitor_runtime_failure(
         subscriber
     });
     let child_was_live = pane.pty.try_wait().unwrap().is_none();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+    let host_key = format!("{host_pid}:{host_started_at}");
+    executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the exact live pane census before failure; elapsed time is not evidence of physical occupancy.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&host_key)
+                    .is_some_and(|census| {
+                        census.host_pid == host_pid
+                            && census.host_started_at == host_started_at
+                            && census.counts.len() == 1
+                            && census.counts.get(&42) == Some(&1)
+                            && census.windows.len() == 1
+                            && census.windows.get(&pane.id) == Some(&42)
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual live pane must be counted before its failure");
+    });
     if from_hook {
         let mut hook = runtime_hook_state("Error", &pane.session.as_ref().unwrap().id);
         hook.gwt_session_id = Some(pane.session.as_ref().unwrap().id.clone());
@@ -3028,40 +3036,24 @@ fn owner_monitor_runtime_failure(
             }
         }).await
     });
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&root)).unwrap();
+    let failure_occupancy = events.iter().rev().find_map(|event| match &event.event {
+        BackendEvent::IssueMonitorStatus { status } => {
+            Some((status.state.clone(), status.active_count))
+        }
+        _ => None,
+    });
+    let child_live_after_failure = pane.pty.try_wait().unwrap().is_none();
     let actual_status = executor.block_on(owner.command(OwnerCommand::Snapshot {
         id: pane.id.clone(),
         incarnation: pane.incarnation,
     }));
-    let monitor_readback = if !from_hook {
+    if !from_hook {
         assert!(
             pane.pty.try_wait().unwrap().is_some(),
             "the runtime failure has real exit proof"
         );
-        executor.block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds the existing census after actual exit; the failure notification may legitimately precede this physical observation.
-            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-                loop {
-                    owner.wait_monitor_idle().await.unwrap();
-                    let prefs = gwt::load_issue_monitor_prefs(
-                        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
-                    )
-                    .unwrap();
-                    if pane.pty.tree_exit_confirmed()
-                        && prefs
-                            .monitor_runtime_counts
-                            .get(&format!("{}:{}", identity.pid, identity.host_started_at))
-                            .is_some_and(|census| {
-                                !census.counts.contains_key(&42)
-                                    && !census.windows.contains_key(&pane.id)
-                            })
-                    {
-                        break owner_monitor_read(&root, 42);
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-        })
     } else {
         let live = executor
             .block_on(owner.probe(&pane.id, pane.incarnation))
@@ -3075,9 +3067,7 @@ fn owner_monitor_runtime_failure(
             pane.pty.try_wait().unwrap().is_none(),
             "a hook error does not prove physical exit"
         );
-        Ok(owner_monitor_read(&root, 42))
-    };
-    drop(subscriber);
+    }
     match executor.block_on(owner.command(OwnerCommand::Close {
         id: pane.id.clone(),
         incarnation: pane.incarnation,
@@ -3102,6 +3092,32 @@ fn owner_monitor_runtime_failure(
         }
         Err(error) => panic!("exact runtime failure cleanup failed: {error}"),
     }
+    executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Join actual tree exit and the exact empty host census before asserting idle; hook failure alone cannot release physical capacity.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if pane.pty.tree_exit_confirmed()
+                    && prefs
+                        .monitor_runtime_counts
+                        .get(&host_key)
+                        .is_some_and(|census| {
+                            census.host_pid == host_pid
+                                && census.host_started_at == host_started_at
+                                && census.counts.is_empty()
+                                && census.windows.is_empty()
+                        })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual closed pane must leave an empty exact-host census");
+    });
+    let settled_status = owner_monitor_read(&root, 42).status_view();
+    drop(subscriber);
     owner_fixture_block_on(owner.shutdown());
     assert!(
         child_was_live,
@@ -3111,10 +3127,18 @@ fn owner_monitor_runtime_failure(
         received.is_ok(),
         "canonical failure notifications missing: {events:?}; owner={actual_status:?}"
     );
-    let monitor = monitor_readback.expect(
-        "the exact runtime exit must reach the authoritative census before status readback",
-    );
-    (pane.id, events, monitor.prefs(), monitor.status_view())
+    if from_hook {
+        assert!(
+            child_live_after_failure,
+            "a hook error does not prove child exit"
+        );
+        assert_eq!(failure_occupancy, Some(("active".to_string(), 1)));
+        assert!(
+            prefs.launched_issues.is_empty(),
+            "failure releases the logical launch binding"
+        );
+    }
+    (pane.id, events, prefs, settled_status)
 }
 
 #[test]
@@ -3193,7 +3217,8 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let (window_id, events, prefs, _) = owner_monitor_runtime_failure(temp.path(), true);
+    let (window_id, events, prefs, settled_status) =
+        owner_monitor_runtime_failure(temp.path(), true);
 
     let status = events
         .iter()
@@ -3207,6 +3232,8 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
         "the proven live physical pane still consumes capacity"
     );
     assert_eq!(status.active_count, 1);
+    assert_eq!(settled_status.state, "idle");
+    assert_eq!(settled_status.active_count, 0);
     assert_eq!(
         status.last_error.as_deref(),
         Some("issue #42: Stop-block hit an error")

@@ -693,7 +693,7 @@ pub struct WindowRuntime {
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
     pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
-    input_in_flight_reply: Option<ClientId>,
+    input_in_flight_reply: Option<(ClientId, Option<u64>)>,
     pub(crate) pending_input_commands: std::collections::VecDeque<(
         gwt::project_runtime::events::OwnerCommand,
         RemoteRuntimeCommandKind,
@@ -815,7 +815,10 @@ struct PendingRemoteRuntimeCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) enum RemoteRuntimeCommandKind {
-    Input { reply_client: Option<ClientId> },
+    Input {
+        reply_client: Option<ClientId>,
+        request_id: Option<u64>,
+    },
     Resize,
     Stop,
     AttachmentInput(Box<attachments::AttachmentOperation>),
@@ -12460,9 +12463,11 @@ impl AppRuntime {
                 pm_chat::PmRequestTaskOperation::Complete(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
-            FrontendEvent::PaneSendInput { session_id, text } => {
-                self.pane_send_input_events(client_id, &session_id, &text)
-            }
+            FrontendEvent::PaneSendInput {
+                session_id,
+                text,
+                request_id,
+            } => self.pane_send_input_events(client_id, &session_id, &text, request_id),
             FrontendEvent::PmPaneSendInput {
                 operation_id,
                 window_id,

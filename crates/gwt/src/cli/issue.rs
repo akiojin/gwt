@@ -7521,6 +7521,8 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
 #[derive(Default)]
 pub(crate) struct LinkedPrBulkRead {
     chunks: std::collections::VecDeque<LinkedPrReadChunk>,
+    /// Aliases per page; 0 until [`Self::sync_numbers`] sets it.
+    chunk_size: usize,
 }
 
 #[derive(Clone, Default)]
@@ -7533,6 +7535,8 @@ struct LinkedPrReadChunk {
 
 impl LinkedPrBulkRead {
     pub(crate) fn sync_numbers(&mut self, numbers: &[u64], chunk_size: usize) {
+        let chunk_size = chunk_size.clamp(1, LINKED_PR_BULK_CHUNK);
+        self.chunk_size = chunk_size;
         let requested: std::collections::BTreeSet<_> = numbers.iter().copied().collect();
         for chunk in &mut self.chunks {
             chunk.numbers.retain(|number| requested.contains(number));
@@ -7555,7 +7559,7 @@ impl LinkedPrBulkRead {
             .copied()
             .filter(|number| queued.insert(*number))
             .collect();
-        for chunk in missing.chunks(chunk_size.clamp(1, LINKED_PR_BULK_CHUNK)) {
+        for chunk in missing.chunks(chunk_size) {
             self.chunks.push_back(LinkedPrReadChunk {
                 numbers: chunk.to_vec(),
                 ..Default::default()
@@ -7584,9 +7588,28 @@ impl LinkedPrBulkRead {
         mut run: impl FnMut(&str) -> io::Result<String>,
         mut observe: impl FnMut(u64, &[LinkedPrSummary]),
     ) -> io::Result<()> {
-        let Some(original) = self.chunks.pop_front() else {
+        let Some(mut original) = self.chunks.pop_front() else {
             return Ok(());
         };
+        // Issue #6877 AC-2: a partial page fills with the next queued Issues of
+        // the same kind rather than costing one call each. Continuations never
+        // mix with first pages, so a failing deep history cannot starve them.
+        let chunk_size = if self.chunk_size == 0 {
+            LINKED_PR_BULK_CHUNK
+        } else {
+            self.chunk_size
+        };
+        let continuation = !original.cursors.is_empty();
+        for queued in &mut self.chunks {
+            let room = chunk_size.saturating_sub(original.numbers.len());
+            if room == 0 {
+                break;
+            }
+            if queued.cursors.is_empty() != continuation {
+                original.absorb(queued, room);
+            }
+        }
+        self.chunks.retain(|chunk| !chunk.numbers.is_empty());
         // A transport failure must retry with its original cursor and summaries.
         let mut next = original.clone();
         match next.read_page(&mut run, &mut observe) {
@@ -7615,6 +7638,29 @@ impl LinkedPrBulkRead {
 }
 
 impl LinkedPrReadChunk {
+    /// Move up to `room` Issues, with their cursors and partial summaries.
+    fn absorb(&mut self, other: &mut Self, room: usize) {
+        let moved: Vec<u64> = other
+            .numbers
+            .drain(..room.min(other.numbers.len()))
+            .collect();
+        for number in &moved {
+            if let Some(cursor) = other.cursors.remove(number) {
+                self.cursors.insert(*number, cursor);
+            }
+            if let Some(prs) = other.prs_by_issue.remove(number) {
+                self.prs_by_issue.insert(*number, prs);
+            }
+        }
+        let (seen, kept) = std::mem::take(&mut other.seen_cursors)
+            .into_iter()
+            .partition(|(issue, _)| moved.contains(issue));
+        other.seen_cursors = kept;
+        self.seen_cursors
+            .extend::<std::collections::BTreeSet<_>>(seen);
+        self.numbers.extend(moved);
+    }
+
     fn read_page(
         &mut self,
         run: &mut impl FnMut(&str) -> io::Result<String>,
@@ -19210,6 +19256,86 @@ command = "my-agent-cli"
 
         assert!(error.to_string().contains("not found"));
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    /// Issue #6877 AC-2: deep-timeline continuations share one page instead
+    /// of spending a separate `gh` call per leftover Issue.
+    #[test]
+    fn issue_6877_linked_pr_bulk_read_packs_continuations_into_one_page() {
+        let mut pending = LinkedPrBulkRead::default();
+        pending.sync_numbers(&(1..=10).collect::<Vec<_>>(), 5);
+        let mut linked = std::collections::BTreeMap::new();
+        let mut queries = Vec::new();
+        while !pending.is_empty() {
+            assert!(queries.len() < 6, "the read must converge");
+            if queries.len() == 1 {
+                // A later scan queues new first pages between continuations.
+                pending.sync_numbers(&(1..=11).collect::<Vec<_>>(), 5);
+            }
+            pending
+                .read_next_with(
+                    |query| {
+                        queries.push(query.to_owned());
+                        let repository: serde_json::Map<_, _> = (1..=11u64)
+                            .filter(|number| query.contains(&format!("i{number}: issue(")))
+                            .map(|number| {
+                                let deep = matches!(number, 1 | 6);
+                                let continuation = query.contains(&format!(
+                                    "i{number}: issue(number: {number}) {{\n      timelineItems(first: 100, after:"
+                                ));
+                                let nodes = if deep {
+                                    vec![serde_json::json!({
+                                        "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                                        "source": {"__typename": "PullRequest",
+                                            "number": number * 100 + u64::from(continuation), "state": "OPEN"}
+                                    })]
+                                } else {
+                                    vec![]
+                                };
+                                (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                    "nodes": nodes, "pageInfo": {
+                                        "hasNextPage": deep && !continuation,
+                                        "endCursor": format!("c{number}")
+                                    }
+                                }}))
+                            })
+                            .collect();
+                        Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                    },
+                    |number, prs| {
+                        linked.insert(number, prs.to_vec());
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(queries.len(), 4, "first pages plus one packed continuation");
+        let packed = queries
+            .iter()
+            .find(|query| query.contains("after:"))
+            .unwrap();
+        assert!(packed.contains("i1: issue(") && packed.contains("after: \"c1\""));
+        assert!(packed.contains("i6: issue(") && packed.contains("after: \"c6\""));
+        assert!(
+            !packed.contains("i11: issue("),
+            "first pages never wait on a continuation"
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|query| query.contains("after:"))
+                .count(),
+            1
+        );
+        assert_eq!(linked.len(), 11);
+        for number in [1u64, 6] {
+            assert_eq!(
+                linked[&number]
+                    .iter()
+                    .map(|pr| pr.number)
+                    .collect::<Vec<_>>(),
+                vec![number * 100, number * 100 + 1]
+            );
+        }
     }
 
     #[test]

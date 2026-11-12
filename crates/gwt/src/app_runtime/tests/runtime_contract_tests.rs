@@ -909,8 +909,12 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
     );
     assert!(drain_browser_owner_input(&mut runtime).is_empty());
     assert!(probe.pty.ordinary_input_revision().unwrap() > before);
-    let queued =
-        runtime.pane_send_input_to_window_events("client-1".into(), &window_id, "pane input\r");
+    let queued = runtime.pane_send_input_to_window_events(
+        "client-1".into(),
+        &window_id,
+        "pane input\r",
+        None,
+    );
     assert!(queued.is_empty(), "pane input waits for its real owner ACK");
     let pane_send_events = drain_browser_owner_input(&mut runtime);
     assert!(
@@ -1036,7 +1040,7 @@ fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second", "third"] {
         assert!(runtime
-            .pane_send_input_to_window_events(client.into(), &id, client)
+            .pane_send_input_to_window_events(client.into(), &id, client, None)
             .is_empty());
     }
     let context = runtime.test_context();
@@ -1052,6 +1056,7 @@ fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
             incarnation,
             kind: RemoteRuntimeCommandKind::Input {
                 reply_client: input_command_id.map(|_| "first".into()),
+                request_id: None,
             },
             approval_resolution_started: false,
             input_command_id,
@@ -1095,7 +1100,7 @@ fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second", "third"] {
-        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+        runtime.pane_send_input_to_window_events(client.into(), &id, client, None);
     }
     let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
     let completion = RemoteRuntimeCommandCompletion {
@@ -1106,6 +1111,7 @@ fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
         incarnation: runtime.runtimes[&id].incarnation,
         kind: RemoteRuntimeCommandKind::Input {
             reply_client: Some("first".into()),
+            request_id: None,
         },
         approval_resolution_started: false,
         input_command_id: Some(token),
@@ -1140,7 +1146,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second", "third"] {
-        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+        runtime.pane_send_input_to_window_events(client.into(), &id, client, None);
     }
     let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
     let old_completion = RemoteRuntimeCommandCompletion {
@@ -1151,6 +1157,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
         incarnation: runtime.runtimes[&id].incarnation,
         kind: RemoteRuntimeCommandKind::Input {
             reply_client: Some("first".into()),
+            request_id: None,
         },
         approval_resolution_started: false,
         attachment_outcome: None,
@@ -1205,7 +1212,10 @@ fn browser_terminal_final_ack_reconciles_a_newer_input_observation() {
         identity: runtime.runtimes[&id].owner_identity.clone(),
         id: id.clone(),
         incarnation: runtime.runtimes[&id].incarnation,
-        kind: RemoteRuntimeCommandKind::Input { reply_client: None },
+        kind: RemoteRuntimeCommandKind::Input {
+            reply_client: None,
+            request_id: None,
+        },
         approval_resolution_started: false,
         attachment_outcome: None,
         input_command_id,
@@ -1230,7 +1240,7 @@ fn browser_pane_close_reports_pending_send_outcomes_once() {
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second"] {
-        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+        runtime.pane_send_input_to_window_events(client.into(), &id, client, None);
     }
     runtime.queue_window_close_finalizer(&id, None, None, false, None, None);
     let AppEventProxy::Stub(events) = &runtime.proxy else {
@@ -1258,6 +1268,50 @@ fn browser_pane_close_reports_pending_send_outcomes_once() {
 }
 
 #[test]
+fn browser_pane_send_correlates_success_refusal_and_uncertain_input() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let session = probe.session.as_ref().unwrap().id.clone();
+    let request = |session_id: &str, request_id: u64| {
+        serde_json::from_value(serde_json::json!({
+            "kind": "pane_send_input", "session_id": session_id,
+            "text": "hello", "request_id": request_id
+        }))
+        .unwrap()
+    };
+    assert!(runtime
+        .handle_frontend_event("origin".into(), request(&session, 17))
+        .is_empty());
+    let events = drain_browser_owner_input(&mut runtime);
+    assert_eq!(
+        serde_json::to_value(&events[0].event).unwrap()["request_id"],
+        17
+    );
+    let refused = runtime.handle_frontend_event("origin".into(), request("missing", 18));
+    let wire = serde_json::to_value(&refused[0].event).unwrap();
+    assert_eq!(wire["ok"], false);
+    assert_eq!(wire["request_id"], 18);
+    assert!(wire["window_id"].is_null());
+    assert!(runtime
+        .handle_frontend_event("origin".into(), request(&session, 19))
+        .is_empty());
+    assert!(runtime
+        .handle_frontend_event("origin".into(), request(&session, 20))
+        .is_empty());
+    let discarded = runtime.discard_pending_remote_input(&id, "owner disconnected");
+    let wire = serde_json::to_value(&discarded[0].event).unwrap();
+    assert_eq!(wire["ok"], false);
+    assert_eq!(wire["request_id"], 19);
+    assert!(wire["error"].as_str().unwrap().contains("uncertain"));
+    assert_eq!(discarded.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&discarded[1].event).unwrap()["request_id"],
+        20
+    );
+}
+
+#[test]
 fn browser_pane_send_input_requires_the_session_owning_project() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -1265,14 +1319,28 @@ fn browser_pane_send_input_requires_the_session_owning_project() {
     let session_id = &probe.session.as_ref().unwrap().id;
     let b = runtime.test_context().project_key;
     let a = gwt_core::paths::resolve_project_scope(&temp.path().join("foreign")).hash;
-    let refused =
-        runtime.pane_send_input_for_project_events("client-a".into(), &a, session_id, "foreign");
+    let refused = runtime.pane_send_input_for_project_events(
+        "client-a".into(),
+        &a,
+        session_id,
+        "foreign",
+        Some(71),
+    );
     assert!(matches!(
         &refused[0].event,
-        BackendEvent::PaneSendResult { ok: false, .. }
+        BackendEvent::PaneSendResult {
+            ok: false,
+            request_id: Some(71),
+            ..
+        }
     ));
-    let accepted =
-        runtime.pane_send_input_for_project_events("client-b".into(), &b, session_id, "own");
+    let accepted = runtime.pane_send_input_for_project_events(
+        "client-b".into(),
+        &b,
+        session_id,
+        "own",
+        Some(72),
+    );
     assert!(
         accepted.is_empty(),
         "own input is queued to the actual owner"
@@ -1280,7 +1348,11 @@ fn browser_pane_send_input_requires_the_session_owning_project() {
     let accepted = drain_browser_owner_input(&mut runtime);
     assert!(matches!(
         &accepted[0].event,
-        BackendEvent::PaneSendResult { ok: true, .. }
+        BackendEvent::PaneSendResult {
+            ok: true,
+            request_id: Some(72),
+            ..
+        }
     ));
 }
 

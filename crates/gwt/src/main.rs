@@ -4236,6 +4236,7 @@ mod tests {
             gwt::FrontendEvent::PaneSendInput {
                 session_id: "session-b".to_string(),
                 text: "/goal all tests pass\r".to_string(),
+                request_id: None,
             },
         );
         assert_eq!(rejected.len(), 1);
@@ -4245,6 +4246,7 @@ mod tests {
                 ok,
                 window_id,
                 error,
+                ..
             } => {
                 assert!(!ok);
                 assert!(window_id.is_none());
@@ -4260,6 +4262,7 @@ mod tests {
             gwt::FrontendEvent::PaneSendInput {
                 session_id: "session-a".to_string(),
                 text: "/goal all tests pass\r".to_string(),
+                request_id: None,
             },
         );
         assert_eq!(no_runtime.len(), 1);
@@ -4268,6 +4271,7 @@ mod tests {
                 ok,
                 window_id,
                 error,
+                ..
             } => {
                 assert!(!ok);
                 assert_eq!(window_id.as_deref(), Some("tab-1::claude-1"));
@@ -11172,16 +11176,17 @@ fn main() -> std::io::Result<()> {
                 let Some(scope) = clients.scope(&client_id) else {
                     return;
                 };
-                if let FrontendEvent::PaneSendInput { session_id, text } = &event {
+                if let FrontendEvent::PaneSendInput { session_id, text, request_id } = &event {
                     let events = match &scope {
                         app_runtime::ClientScope::Project(key) => app.pane_send_input_for_project_events(
-                            client_id.clone(), key, session_id, text,
+                            client_id.clone(), key, session_id, text, *request_id,
                         ),
                         app_runtime::ClientScope::Hub => vec![OutboundEvent::reply(
                             client_id.clone(), BackendEvent::PaneSendResult {
                                 ok: false,
                                 window_id: None,
                                 error: Some("a project-scoped connection is required".to_string()),
+                                request_id: *request_id,
                             },
                         )],
                     };

@@ -29,7 +29,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     let mut wire = Vec::new();
     for (kind, operation) in [
         (
-            RemoteRuntimeCommandKind::Input { reply_client: None },
+            RemoteRuntimeCommandKind::Input { reply_client: None, request_id: None },
             "input",
         ),
         (RemoteRuntimeCommandKind::Resize, "resize"),
@@ -54,8 +54,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     }
     let ack = runtime.handle_remote_runtime_command_complete(completion(
         RemoteRuntimeCommandKind::Input {
-            reply_client: Some("origin".into()),
-        },
+            reply_client: Some("origin".into()), request_id: None },
     ));
     assert!(matches!(&ack[0].target, DispatchTarget::Client(client) if client == "origin"));
     assert!(matches!(
@@ -132,7 +131,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     assert_eq!(runtime.runtimes[&id].owner_pane_id, pane_id);
     assert_eq!(runtime.runtimes[&id].owner_identity, identity);
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n", None)
         .is_empty());
     let ack = drain_browser_owner_input(&mut runtime);
     assert!(ack
@@ -206,7 +205,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
                 },
             );
         }
-        let events = runtime.pane_send_input_to_window_events("origin".into(), &id, "recover\n");
+        let events = runtime.pane_send_input_to_window_events("origin".into(), &id, "recover\n", Some(74));
         assert!(
             events.is_empty(),
             "owner drift must defer, not refuse: {events:?}"
@@ -228,7 +227,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
                 .iter()
                 .filter(|event| matches!(
                     event.event,
-                    BackendEvent::PaneSendResult { ok: true, .. }
+                    BackendEvent::PaneSendResult { ok: true, request_id: Some(74), .. }
                 ))
                 .count(),
             1
@@ -266,7 +265,7 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
         },
     );
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "expire\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "expire\n", None)
         .is_empty());
     let start = Instant::now();
     assert!(runtime.next_runtime_output_deadline().is_some());
@@ -311,7 +310,7 @@ fn remote_command_recovery_rejects_a_successor_session() {
         .unwrap()
         .project_owner_identity = None;
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "old session input\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "old session input\n", None)
         .is_empty());
     // An owner restart may reuse a pane ID and incarnation for another Session.
     runtime

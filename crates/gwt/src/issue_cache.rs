@@ -268,6 +268,16 @@ pub fn issue_is_open_in_cache(cache_root: &Path, issue_number: u64) -> Option<bo
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ISSUE_SOURCE_FINGERPRINT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_issue_source_fingerprint_scans() -> usize {
+    ISSUE_SOURCE_FINGERPRINT_SCANS.with(|scans| scans.replace(0))
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {
@@ -275,6 +285,8 @@ pub fn issue_cache_source_fingerprint(
         return Ok(None);
     }
 
+    #[cfg(test)]
+    ISSUE_SOURCE_FINGERPRINT_SCANS.with(|scans| scans.set(scans.get() + 1));
     let mut docs = Vec::new();
     let entries = fs::read_dir(cache_root).map_err(|err| err.to_string())?;
     for entry in entries.flatten() {
@@ -688,6 +700,37 @@ pub fn refresh_issue_cache_entry_from_remote(
 fn gh_repo_cwd(repo_path: &Path) -> PathBuf {
     crate::index_worker::resolve_project_index_repo_root(repo_path)
         .unwrap_or_else(|| repo_path.to_path_buf())
+}
+
+/// Whether the indexed Issue source contains any document, without reading body payloads.
+/// Match the fingerprint reader's admission rules so a UUID cannot bypass its empty-source guard.
+pub(crate) fn issue_cache_has_source_documents(cache_root: &Path) -> Result<bool, String> {
+    if !cache_root.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(cache_root)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.parse::<u64>().is_ok())
+        {
+            continue;
+        }
+        let meta = entry.path().join("meta.json");
+        if meta.is_file()
+            && fs::read(meta)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
@@ -2036,6 +2079,22 @@ exit 1\n",
         assert!(
             !issue_cache_refresh_is_stale(&cache_root, Duration::from_secs(60)),
             "fresh refresh metadata should suppress stale refresh",
+        );
+
+        take_issue_source_fingerprint_scans();
+        let outcome = sync_issue_cache_from_remote_if_stale_with_fingerprint(
+            temp.path(),
+            &cache_root,
+            Duration::from_secs(60),
+        )
+        .expect("public fingerprint outcome remains available");
+        assert!(!outcome.refreshed && !outcome.source_changed);
+        assert_eq!(outcome.before, outcome.after);
+        assert_eq!(outcome.after.unwrap().document_count, 0);
+        assert_eq!(
+            take_issue_source_fingerprint_scans(),
+            2,
+            "explicit public fingerprint callers still receive complete before/after snapshots"
         );
 
         let stale_meta = IssueCacheRefreshMeta {

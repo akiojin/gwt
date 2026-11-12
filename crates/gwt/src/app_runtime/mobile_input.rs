@@ -48,7 +48,10 @@ impl AppRuntime {
                                 identity,
                                 id,
                                 incarnation,
-                                kind: super::RemoteRuntimeCommandKind::Input { reply_client: None },
+                                kind: super::RemoteRuntimeCommandKind::Input {
+                                    reply_client: None,
+                                    request_id: None,
+                                },
                                 approval_resolution_started: false,
                                 attachment_outcome: None,
                                 input_command_id: None,
