@@ -217,14 +217,15 @@ export function subscribeIssueMonitorStatus(doc, model) {
   let selected;
   return model.subscribeFrame(state => {
     const summary = state.humanAttention?.summary;
-    if (!selected || selected.status !== state.status || selected.summary !== summary) {
-      selected = { status: state.status, summary };
+    const reviewSummary = state.reviewAttention?.summary;
+    if (!selected || selected.status !== state.status || selected.summary !== summary || selected.reviewSummary !== reviewSummary) {
+      selected = { status: state.status, summary, reviewSummary };
     }
     return selected;
-  }, state => renderIssueMonitorStatus(doc, state.status, state.summary));
+  }, state => renderIssueMonitorStatus(doc, state.status, state.summary, state.reviewSummary));
 }
 
-export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "") {
+export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "", reviewSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
@@ -233,8 +234,8 @@ export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "") {
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary].filter(Boolean).join(". "));
-  cell.setAttribute("title", ["Open Issues", view.title, humanSummary].filter(Boolean).join(" | "));
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary, reviewSummary].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, humanSummary, reviewSummary].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {

@@ -208,6 +208,44 @@ test("needs_human snapshot shares counts and reasons across Issue views", async 
   await expect(detailReason).toHaveCount(0);
 });
 
+test("review holds share counts and reasons across Issue views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const emit = (held: boolean, closed = false) => page.evaluate(({ held, closed }) => {
+    const fixture = window as any;
+    fixture.__otherEmit({ kind: "issue_monitor_inbox", items: [{
+      issue: { number: 4556, title: "Issue 4556", state: closed ? "closed" : "open" },
+      state: "launched",
+    }] });
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: {
+      enabled: true, state: "active", autonomous_issues: held ? [{
+        issue_number: 4556, phase: "implementing", needs_human: false,
+        review_dispatch_hold: { reason: "max_active reached (2/2)", since: "2026-11-12T15:00:00Z" },
+      }] : [],
+    } });
+  }, { held, closed });
+  const pill = page.locator(".knowledge-monitor-pill");
+  const strip = page.locator("#op-strip-issue-monitor");
+  const rowReason = page.locator('.knowledge-row[data-issue-number="4556"] [data-key="reason"]');
+  const detailReason = page.locator('.issue-detail-status [data-key="reason"]');
+  await emit(true);
+  await expect(pill).toHaveAttribute("title", /Review holds 1/);
+  await expect(strip).toHaveAttribute("title", /Review holds 1/);
+  await expect(rowReason).toHaveText("max_active reached (2/2)");
+  await expect(detailReason).toHaveText("max_active reached (2/2)");
+  await page.screenshot({ path: info.outputPath("review-holds-shared-state.png"), fullPage: true });
+  await emit(false);
+  await expect(pill).toHaveAttribute("title", /Review holds 0/);
+  await expect(strip).toHaveAttribute("title", /Review holds 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+  await emit(true, true);
+  await expect(pill).toHaveAttribute("title", /Review holds 0/);
+  await expect(strip).toHaveAttribute("title", /Review holds 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+});
+
 test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {
   await boot(page);
   await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
