@@ -593,15 +593,48 @@ test("owned actual Codex PM renderer profile retains genuine history and compose
   let monitor: Promise<void> | undefined;
   const sentInputs: string[] = [];
   let controlledWire = "", recordControlledWire = false;
-  page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
-    try {
-      const packet = JSON.parse(String(payload));
-      if (packet.kind === "terminal_input" && packet.id === id && typeof packet.data === "string") {
-        sentInputs.push(packet.data);
-        if (recordControlledWire) controlledWire += packet.data;
-      }
-    } catch { /* Ignore unrelated frames without changing traffic. */ }
-  }));
+  let marker = "", diagnosticPhase = "before-control", collectDiagnostics = false;
+  let diagnosticSequence = 0, diagnosticBytes = 0, diagnosticDroppedEvents = 0, diagnosticDroppedBytes = 0;
+  const diagnosticEvents: Record<string, unknown>[] = [];
+  const diagnosticLimits = { events: 1000, bytes: 4 * 1024 * 1024 };
+  const recordDiagnostic = (event: Record<string, unknown>) => {
+    const record = { sequence: ++diagnosticSequence, phase: diagnosticPhase, ...event };
+    const bytes = Buffer.byteLength(JSON.stringify(record)) + 1;
+    const critical = ["buffer-after-task-complete", "native-assistant-markers", "native-turn"].includes(String(event.kind));
+    // Keep critical facts available after bulk traffic fills its reserved share.
+    const eventLimit = critical ? diagnosticLimits.events : diagnosticPhase === "reentry" ? 936 : 640;
+    const byteLimit = diagnosticLimits.bytes - (critical ? 4096 : diagnosticPhase === "reentry" ? 64 * 1024 : 512 * 1024);
+    if (diagnosticEvents.length >= eventLimit || diagnosticBytes + bytes > byteLimit) {
+      diagnosticDroppedEvents++;
+      diagnosticDroppedBytes += bytes;
+      return;
+    }
+    diagnosticBytes += bytes;
+    diagnosticEvents.push(record);
+  };
+  page.on("websocket", socket => {
+    socket.on("framereceived", ({ payload }) => {
+      if (!collectDiagnostics) return;
+      try {
+        const packet = JSON.parse(String(payload));
+        if (packet.id === id && (packet.kind === "terminal_output" || packet.kind === "terminal_snapshot")) {
+          recordDiagnostic({ direction: "received", kind: packet.kind, id, data_base64: packet.data_base64 });
+        }
+      } catch { /* Diagnostic parsing never changes terminal traffic. */ }
+    });
+    socket.on("framesent", ({ payload }) => {
+      try {
+        const packet = JSON.parse(String(payload));
+        if (packet.kind === "terminal_input" && packet.id === id && typeof packet.data === "string") {
+          sentInputs.push(packet.data);
+          if (recordControlledWire) controlledWire += packet.data;
+        }
+        if (collectDiagnostics && packet.kind === "update_terminal_grid" && packet.id === id) {
+          recordDiagnostic({ direction: "sent", kind: packet.kind, id, cols: packet.cols, rows: packet.rows });
+        }
+      } catch { /* Ignore unrelated frames without changing traffic. */ }
+    });
+  });
   const ps = (pid: number, columns: string) => {
     const result = spawnSync("ps", ["-p", String(pid), "-o", columns], { encoding: "utf8" });
     if (result.error) throw result.error;
@@ -856,7 +889,7 @@ exit 67
     await expect.poll(buffer, { timeout: 60_000 }).toContain("Ask Codex");
     const input = pm.locator(".xterm-helper-textarea");
     await input.focus();
-    const marker = `GWT4777${randomBytes(8).toString("hex").toUpperCase()}`;
+    marker = `GWT4777${randomBytes(8).toString("hex").toUpperCase()}`;
     const expectedNumbers = Array.from({ length: 64 }, (_, index) => [String(index + 1).padStart(2, "0")]);
     const numberedLines = (lines: string[]) => lines
       .map(line => [...line.matchAll(new RegExp(`${marker}(\\d{2})(?!\\d)`, "g"))].map(match => match[1]))
@@ -868,11 +901,16 @@ exit 67
     expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
       child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
     expect(ownedNative()).toBe(true);
-    const prompt = `Reply with exactly 64 lines numbered 01 through 64. Each line must contain ${marker} immediately followed by its two-digit number without spaces. Do not use tools.`;
+    // The harness generated this ready renderer control. The complete reserved
+    // notification format classifies it without changing any managed PM hook.
+    const prompt = `<task-notification><task-id>gwt4777-renderer-${marker}</task-id><status>ready</status><summary>Reply with exactly 64 lines numbered 01 through 64. Each line must contain ${marker} immediately followed by its two-digit number without spaces. Do not use tools.</summary></task-notification>`;
+    diagnosticPhase = "controlled-prompt";
+    collectDiagnostics = true;
     recordControlledWire = true;
     await page.keyboard.type(prompt);
     // Submit and leave in one browser task: no asynchronous provider response
     // can reach the visible PM before the Works surface is selected.
+    diagnosticPhase = "submit-and-hide";
     await page.evaluate(id => {
       const textarea = document.querySelector(`.workspace-window[data-id="${id}"] .xterm-helper-textarea:focus`) as HTMLTextAreaElement;
       if (!textarea) throw new Error("owned PM composer is not focused");
@@ -881,6 +919,7 @@ exit 67
       if (!works) throw new Error("Works entry missing");
       works.click();
     }, id);
+    diagnosticPhase = "hidden";
     await expect(page.locator('.works-surface:not(.works-surface--preview)')).toBeVisible();
     await expect.poll(async () => {
       expect(unexpectedTool, "unexpected native tool call").toBe(false);
@@ -908,7 +947,13 @@ exit 67
     const responseLinePattern = new RegExp(`${marker}\\d{2}(?!\\d)`);
     const responseHistory = (state: { lines: string[]; scrollbackLineCount: number }) =>
       state.lines.slice(0, state.scrollbackLineCount).filter(line => responseLinePattern.test(line));
+    const beforeReentry = await logicalBuffer();
+    recordDiagnostic({ kind: "buffer-after-task-complete", id, metrics: await metrics(),
+      scrollbackLineCount: beforeReentry.scrollbackLineCount,
+      markerNumbers: numberedLines(beforeReentry.lines),
+      historyMarkerCount: responseHistory(beforeReentry).length });
     const sequenceBeforeReentry = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+    diagnosticPhase = "reentry";
     await page.locator("#op-pm-entry").click();
     // Returning from Works resizes the native TUI. Its clear-and-repaint can
     // arrive after task_complete and the old composer is still visible until
@@ -1029,6 +1074,32 @@ exit 67
     primaryError = error;
   } finally {
     recordControlledWire = false;
+    diagnosticPhase = "cleanup";
+    if (collectDiagnostics) {
+      try {
+        const markerPattern = new RegExp(`${marker}(\\d{2})(?!\\d)`, "g");
+        for (const row of await rows()) {
+          if (row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "assistant") {
+            const text = (row.payload.content ?? []).map((part: any) => typeof part.text === "string" ? part.text : "").join("\n");
+            const markerNumbers = [...text.matchAll(markerPattern)].map(match => match[1]);
+            if (markerNumbers.length) recordDiagnostic({ kind: "native-assistant-markers", id,
+              timestamp: typeof row.timestamp === "string" ? row.timestamp.slice(0, 128) : null,
+              markerNumbers, markerCount: markerNumbers.length });
+          } else if (row.type === "event_msg" && ["task_started", "task_complete", "turn_started", "turn_complete"].includes(row.payload?.type)) {
+            recordDiagnostic({ kind: "native-turn", id, type: row.payload.type,
+              timestamp: typeof row.timestamp === "string" ? row.timestamp.slice(0, 128) : null,
+              turn_id: typeof row.payload.turn_id === "string" ? row.payload.turn_id.slice(0, 256) : null });
+          }
+        }
+      } catch (error) { cleanupErrors.push(error); }
+      collectDiagnostics = false;
+      try {
+        await info.attach("actual-pm-terminal-diagnostics", { contentType: "application/json",
+          body: JSON.stringify({ theme, id, session, marker, limits: diagnosticLimits, bytes: diagnosticBytes,
+            truncated: diagnosticDroppedEvents > 0, droppedEvents: diagnosticDroppedEvents,
+            droppedBytes: diagnosticDroppedBytes, events: diagnosticEvents }) });
+      } catch (error) { cleanupErrors.push(error); }
+    }
     await page.goto("about:blank").catch(() => {});
     try { await fixture?.stop(); } catch (error) { cleanupErrors.push(error); }
     try {
