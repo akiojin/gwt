@@ -1,6 +1,7 @@
-//! Syntax-only deployment configuration for the future coordinator listener.
+//! Deployment configuration for the future coordinator listener.
 //!
-//! Parsing performs no I/O and grants no registration or device authority.
+//! `from_json` performs no I/O; `load` validates only private config storage.
+//! Neither grants registration or device authority.
 //! Before serving, the caller must independently validate private storage,
 //! certificate/key contents, permissions, ownership, ACLs and symlinks, and
 //! retain the existing CoordinatorStore's separate registry lock. Registry
@@ -17,6 +18,14 @@ const MAX_CONFIG_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
+    #[error("unsafe coordinator config storage; use a canonical absolute directory outside repositories, owned 0700, and an owned single-link regular 0600 config.json, without symlinks or macOS extended ACLs; explicitly repair storage and load again")]
+    UnsafeStorage,
+    #[error("coordinator config storage is inside a repository; select a trusted private directory outside repositories and load again")]
+    RepositoryStorage,
+    #[error("coordinator config storage is unavailable; inspect the selected directory and config.json, explicitly repair missing or unreadable storage, and load again")]
+    StorageUnavailable,
+    #[error("private coordinator config storage is unsupported on this platform; use a supported Unix host until a Windows ACL adapter is available")]
+    UnsupportedPrivateStorage,
     #[error("coordinator config exceeds 16 KiB; reduce the configuration and parse again")]
     TooLarge,
     #[error("invalid coordinator config JSON: required fields must appear exactly once and unknown fields are unsupported; correct the configuration and parse again")]
@@ -81,7 +90,7 @@ where
     deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
 }
 
-/// Validated syntax only. Paths have not been opened or proven private.
+/// Validated syntax. TLS paths have not been opened or proven private.
 pub struct CoordinatorConfig {
     origin: String,
     bind: SocketAddr,
@@ -91,6 +100,74 @@ pub struct CoordinatorConfig {
 }
 
 impl CoordinatorConfig {
+    /// Read fixed `config.json` from a trusted canonical private directory.
+    ///
+    /// The caller must keep ancestors trusted and non-replaceable and prevent
+    /// concurrent in-place edits. This does not validate the private HOME layout,
+    /// TLS files or their contents, or acquire the coordinator registry lock.
+    /// Missing/unsafe files are errors; no files or permissions are changed.
+    #[cfg(unix)]
+    pub fn load(directory: &Path) -> Result<Self, ConfigError> {
+        use super::storage::{
+            has_repository_marker, open_directory, open_private_file, same_file, StoreError,
+        };
+        use std::io::Read;
+
+        fn storage_error(error: StoreError) -> ConfigError {
+            match error {
+                StoreError::UnsafeStorage => ConfigError::UnsafeStorage,
+                StoreError::UnsupportedPrivateStorage => ConfigError::UnsupportedPrivateStorage,
+                _ => ConfigError::StorageUnavailable,
+            }
+        }
+
+        if !directory.is_absolute()
+            || directory
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+        {
+            return Err(ConfigError::UnsafeStorage);
+        }
+        if directory
+            .canonicalize()
+            .map_err(|_| ConfigError::StorageUnavailable)?
+            != directory
+        {
+            return Err(ConfigError::UnsafeStorage);
+        }
+        let parent = open_directory(directory).map_err(storage_error)?;
+        if has_repository_marker(directory).map_err(storage_error)? {
+            return Err(ConfigError::RepositoryStorage);
+        }
+        let path = directory.join("config.json");
+        let file = open_private_file(&path, false).map_err(storage_error)?;
+        let mut bytes = Vec::new();
+        (&file)
+            .take(MAX_CONFIG_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ConfigError::StorageUnavailable)?;
+        if bytes.len() > MAX_CONFIG_BYTES {
+            return Err(ConfigError::TooLarge);
+        }
+        if !same_file(&parent, &open_directory(directory).map_err(storage_error)?)
+            .map_err(storage_error)?
+            || !same_file(
+                &file,
+                &open_private_file(&path, false).map_err(storage_error)?,
+            )
+            .map_err(storage_error)?
+        {
+            return Err(ConfigError::UnsafeStorage);
+        }
+        Self::from_json(&bytes)
+    }
+
+    /// Private storage requires a platform-specific ownership/ACL adapter.
+    #[cfg(not(unix))]
+    pub fn load(_: &Path) -> Result<Self, ConfigError> {
+        Err(ConfigError::UnsupportedPrivateStorage)
+    }
+
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
         if bytes.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge);
@@ -355,5 +432,125 @@ mod tests {
         value["limits"]["host_burst"] = json!(255);
         assert!(matches!(parse(&value), Err(ConfigError::InvalidLimits)));
         assert!(parse(&valid()).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn private_config() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().canonicalize().unwrap();
+        write_config(&path, &serde_json::to_vec(&valid()).unwrap());
+        (directory, path)
+    }
+
+    #[cfg(unix)]
+    fn write_config(directory: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join("config.json");
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn loads_private_config_and_recovers_after_missing_invalid_and_oversized_input() {
+        let (_directory, path) = private_config();
+        assert_eq!(
+            CoordinatorConfig::load(&path).unwrap().origin(),
+            "https://coordinator.example"
+        );
+        std::fs::remove_file(path.join("config.json")).unwrap();
+        assert!(matches!(
+            CoordinatorConfig::load(&path),
+            Err(ConfigError::StorageUnavailable)
+        ));
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+        write_config(&path, b"secret-sentinel");
+        let error = CoordinatorConfig::load(&path).err().unwrap();
+        assert_eq!(error, ConfigError::InvalidJson);
+        assert!(!error.to_string().contains("secret-sentinel"));
+        write_config(&path, &vec![b' '; MAX_CONFIG_BYTES + 1]);
+        assert!(matches!(
+            CoordinatorConfig::load(&path),
+            Err(ConfigError::TooLarge)
+        ));
+        let mut bytes = serde_json::to_vec(&valid()).unwrap();
+        bytes.resize(MAX_CONFIG_BYTES, b' ');
+        write_config(&path, &bytes);
+        assert_eq!(
+            CoordinatorConfig::load(&path).unwrap().bind(),
+            "127.0.0.1:8443".parse().unwrap()
+        );
+        assert_eq!(std::fs::read(path.join("config.json")).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refuses_unsafe_config_storage_and_accepts_explicit_repairs() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let (_directory, path) = private_config();
+        let file = path.join("config.json");
+        for (target, unsafe_mode, private_mode) in [(&file, 0o644, 0o600), (&path, 0o755, 0o700)] {
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(unsafe_mode)).unwrap();
+            assert!(matches!(
+                CoordinatorConfig::load(&path),
+                Err(ConfigError::UnsafeStorage)
+            ));
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(private_mode))
+                .unwrap();
+            assert!(CoordinatorConfig::load(&path).is_ok());
+        }
+        let saved = path.join("saved.json");
+        std::fs::rename(&file, &saved).unwrap();
+        symlink(&saved, &file).unwrap();
+        assert!(CoordinatorConfig::load(&path).is_err());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::rename(&saved, &file).unwrap();
+        assert!(CoordinatorConfig::load(&path).is_ok());
+        std::fs::hard_link(&file, &saved).unwrap();
+        assert!(matches!(
+            CoordinatorConfig::load(&path),
+            Err(ConfigError::UnsafeStorage)
+        ));
+        std::fs::remove_file(&saved).unwrap();
+        assert!(CoordinatorConfig::load(&path).is_ok());
+        symlink("missing-git", path.join(".git")).unwrap();
+        assert!(matches!(
+            CoordinatorConfig::load(&path),
+            Err(ConfigError::RepositoryStorage)
+        ));
+        std::fs::remove_file(path.join(".git")).unwrap();
+        assert!(CoordinatorConfig::load(&path).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refuses_relative_parent_and_symlink_directory_aliases() {
+        use std::os::unix::fs::symlink;
+        let (_directory, path) = private_config();
+        let alias = path.join("alias");
+        symlink(&path, &alias).unwrap();
+        for invalid in [
+            Path::new("relative").to_owned(),
+            path.join("missing/.."),
+            alias.clone(),
+        ] {
+            let error = CoordinatorConfig::load(&invalid).err().unwrap();
+            assert_eq!(error, ConfigError::UnsafeStorage);
+            assert!(!error.to_string().contains(path.to_str().unwrap()));
+        }
+        std::fs::remove_file(alias).unwrap();
+        assert!(CoordinatorConfig::load(&path).is_ok());
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn config_loading_requires_supported_private_storage() {
+        assert!(matches!(
+            CoordinatorConfig::load(Path::new("unused")),
+            Err(ConfigError::UnsupportedPrivateStorage)
+        ));
     }
 }
