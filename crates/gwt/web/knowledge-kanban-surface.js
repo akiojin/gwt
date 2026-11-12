@@ -429,7 +429,7 @@ function issueRowSecondaryItems({ entry, work, attention, primary, localLive = n
   const canonicalHuman = entry?.monitor_state === "needs_human" && Object.hasOwn(entry, "human_attention");
   const reason = cleanupPending ? "Session cleanup pending"
     : stopReason ?? (canonicalHuman ? entry.human_attention?.reason || ""
-      : entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+      : entry?.review_attention?.reason || entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -1186,7 +1186,8 @@ export function createKnowledgeKanbanSurface({
       }
       let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {},
-        humanAttention: { count: null, summary: "", byIssue: {} }, status: {
+        humanAttention: { count: null, summary: "", byIssue: {} },
+        reviewAttention: { count: null, summary: "", byIssue: {} }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1416,6 +1417,7 @@ export function createKnowledgeKanbanSurface({
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
             issueMonitorModel.read().humanAttention.summary,
+            issueMonitorModel.read().reviewAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1512,8 +1514,28 @@ export function createKnowledgeKanbanSurface({
 
       }
 
+      function withReviewAttention(model) {
+        const records = model.status.autonomous_issues;
+        if (!Array.isArray(records) || model.humanAttention.count === null) return model;
+        // Dispatch holds include automatic capacity/retry waits, not just
+        // human decisions. Join the two current snapshots once for every view.
+        const current = Object.fromEntries(records.filter(record => Number.isFinite(record?.issue_number))
+          .map(record => [record.issue_number, record]));
+        const byIssue = Object.fromEntries(Object.values(current).filter(record => {
+          const live = model.inboxByIssue[record.issue_number];
+          return live && issueEntryStateKey(live.issue) === "open"
+            && !["needs_human", "merged", "released", "awaiting_measurement", "launch_failed", "agent_failed"].includes(live.state)
+            && !record.needs_human && ["implementing", "reviewing"].includes(record.phase)
+            && record.review_dispatch_hold;
+        }).map(record => [record.issue_number, {
+          reason: String(record.review_dispatch_hold.reason || "").trim() || "Review dispatch pending",
+        }]));
+        const count = Object.keys(byIssue).length;
+        return { ...model, reviewAttention: { count, summary: `Review holds ${count}`, byIssue } };
+      }
+
       function applyIssueMonitorStatus(nextStatus) {
-        issueMonitorModel.update(model => ({ ...model, status: {
+        issueMonitorModel.update(model => withReviewAttention({ ...model, status: {
           ...model.status,
           ...(nextStatus || {}),
           max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
@@ -1530,6 +1552,7 @@ export function createKnowledgeKanbanSurface({
           // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
           agent_blackout: nextStatus?.agent_blackout ?? null,
           update_drain: nextStatus?.update_drain ?? null,
+          autonomous_issues: Array.isArray(nextStatus?.autonomous_issues) ? nextStatus.autonomous_issues : [],
         }}));
       }
 
@@ -1546,7 +1569,7 @@ export function createKnowledgeKanbanSurface({
             reason: String(item.error_message || "").trim() || "Human decision required",
           }]));
         const count = Object.keys(byIssue).length;
-        issueMonitorModel.update(model => ({ ...model, inboxByIssue,
+        issueMonitorModel.update(model => withReviewAttention({ ...model, inboxByIssue,
           humanAttention: { count, summary: `Needs human ${count}`, byIssue } }));
       }
 
@@ -3429,7 +3452,9 @@ export function createKnowledgeKanbanSurface({
         // arrives; a cached descriptor is never an authoritative observation.
         entry = { ...entry };
         delete entry.human_attention;
-        if (live) entry = { ...entry, human_attention:
+        delete entry.review_attention;
+        if (live) entry = { ...entry, review_attention:
+          issueMonitorModel.read().reviewAttention.byIssue[entry.number] ?? null, human_attention:
           issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null,
           state: live.issue.state ?? entry.state, monitor_state: live.state,
           exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
@@ -4490,7 +4515,7 @@ export function createKnowledgeKanbanSurface({
         pill.dataset.stateKey = row.primary.key;
         explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
-        if (entry.human_attention) {
+        if (entry.human_attention || entry.review_attention) {
           const reason = row.secondary.find(item => item.key === "reason");
           if (reason) {
             const node = createNode("span", "knowledge-row-secondary-item", reason.label);

@@ -409,6 +409,62 @@ test("needs_human derives one immutable count and reason for shared Issue views"
   assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
 });
 
+test("review holds derive shared counts and reasons from current status and open inbox", async (t) => {
+  const { body, surface, sent, mod } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const record = (issue_number, phase = "implementing", reason = "max_active reached (2/2)") => ({
+    issue_number, phase, review_dispatch_hold: { reason, since: "2026-11-12T15:00:00Z" },
+  });
+  const status = { autonomous_issues: [record(51, "implementing", "Old reason"), record(51),
+    record(52), record(53), record(54, "merged"), record(55)] };
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(surface.issueMonitorModel.read().reviewAttention?.count, null,
+    "status without an inbox snapshot is unknown");
+  const inbox = [51, 52, 53, 54, 55].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: number === 53 ? "closed" : "open" },
+    state: [52, 55].includes(number) ? "needs_human" : "launched",
+    error_message: number === 52 ? "stopped: PM paused" : undefined,
+  }));
+  surface.applyIssueMonitorInbox(inbox);
+  const snapshot = surface.issueMonitorModel.read().reviewAttention;
+  assert.deepEqual(snapshot, { count: 1, summary: "Review holds 1",
+    byIssue: { 51: { reason: "max_active reached (2/2)" } } });
+  assert.ok(Object.isFrozen(snapshot.byIssue[51]));
+  assert.equal(mod.issueRowStateModel({ entry: {
+    ...knowledgeEntry(51, "launched"), review_attention: snapshot.byIssue[51],
+  } }).secondary[0].label, snapshot.byIssue[51].reason);
+  assert.match(monitorBand(body).pill.title, /Review holds 1/);
+  body.querySelector('[data-issue-number="51"] .knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 51, title: "Issue 51", state: "open",
+      labels: [], sections: [], related_works: [] } });
+  const rowReason = () => body.querySelector('[data-issue-number="51"] [data-key="reason"]')?.textContent;
+  const detailReason = () => body.querySelector('.issue-detail-status [data-key="reason"]')?.textContent;
+  assert.equal(rowReason(), snapshot.byIssue[51].reason);
+  assert.equal(detailReason(), rowReason());
+  surface.applyIssueMonitorStatus({ enabled: true });
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 0,
+    "omitting the status list must clear old holds");
+  assert.equal(rowReason(), undefined);
+  assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 1,
+    "inbox-first updates derive the same value");
+  for (const state of ["launch_failed", "agent_failed"]) {
+    surface.applyIssueMonitorInbox([{ ...inbox[0], state, error_message: "Implementation failed" }]);
+    assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 0,
+      "a terminal inbox overrides the earlier review hold");
+    assert.equal(rowReason(), "Implementation failed");
+    assert.equal(detailReason(), undefined);
+  }
+  surface.applyIssueMonitorInbox([{ ...inbox[0], issue: { ...inbox[0].issue, state: "closed" } }]);
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 0);
+  assert.equal(rowReason(), undefined);
+  assert.equal(detailReason(), undefined);
+  assert.equal(snapshot.byIssue[51].reason, "max_active reached (2/2)");
+});
+
 test("Issues band presents and clears the quota-hold provider and reset", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -698,7 +754,7 @@ test("Issues band preserves higher-priority states around quota-hold metadata", 
     });
 
     assert.equal(band.text(), "Waiting · Hold | Queue 3 | Active 0 · 0 issues · PM 0");
-    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z | Needs human 0");
+    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z | Needs human 0 | Review holds 0");
   }
 
   surface.applyIssueMonitorStatus({

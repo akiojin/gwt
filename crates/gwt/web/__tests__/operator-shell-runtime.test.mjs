@@ -11,7 +11,7 @@ const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 
-test("Issues strip reads the shared human-attention summary on inbox-only updates", async () => {
+test("Issues strip reads shared attention summaries on model-only updates", async () => {
   const { subscribeIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const model = createUiStateStore({ status: { enabled: false }, humanAttention: {
@@ -23,6 +23,10 @@ test("Issues strip reads the shared human-attention summary on inbox-only update
   assert.match(cell.title, /Needs human 2/);
   model.update(state => ({ ...state, humanAttention: { count: 0, summary: "Needs human 0", byIssue: {} } }));
   assert.match(cell.title, /Needs human 0/);
+  model.update(state => ({ ...state, reviewAttention: { count: 1, summary: "Review holds 1", byIssue: {} } }));
+  assert.match(cell.title, /Review holds 1/);
+  model.update(state => ({ ...state, reviewAttention: { count: 0, summary: "Review holds 0", byIssue: {} } }));
+  assert.match(cell.title, /Review holds 0/);
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Off");
   unsubscribe();
 });
