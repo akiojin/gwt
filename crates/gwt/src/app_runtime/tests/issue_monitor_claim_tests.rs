@@ -6232,6 +6232,211 @@ fn issue_5140_expired_fallback_delivery_does_not_authorize_a_window() {
 }
 
 #[test]
+fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = gwt_core::test_support::socket_tempdir().expect("fixture home");
+    let _home = ScopedGwtHome::set(temp.path());
+    // The subscriber resolves its endpoint on its own OS thread.
+    let _process_home = ScopedEnvVar::set("HOME", temp.path());
+    let _process_profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "materializer-restart",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let root = fixture.project_root.clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.enabled = true;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let original_owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let original_endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
+        .unwrap()
+        .unwrap();
+    let context = fixture.runtime.test_context();
+    let callback_context = context.clone();
+    let proxy = fixture.runtime.proxy.clone();
+    let resolver_root = root.clone();
+    let reconnect_allowed = Arc::new(AtomicBool::new(false));
+    let reconnect_gate = reconnect_allowed.clone();
+    let first_connection = AtomicBool::new(true);
+    let (retry_started, retry_observed) = mpsc::channel();
+    let subscriber = gwt::daemon_subscriber::DaemonSubscriber::spawn_materializer_with_resolver(
+        move || {
+            if !first_connection.swap(false, Ordering::SeqCst)
+                && !reconnect_gate.load(Ordering::SeqCst)
+            {
+                let _ = retry_started.send(());
+                return Err("fixture holds reconnect until restarted-host observation".into());
+            }
+            gwt::daemon_publisher::resolve_project_daemon_endpoint(&resolver_root)?
+                .ok_or_else(|| "project daemon is unavailable".into())
+        },
+        crate::daemon_subscriber_channels(),
+        move |channel, payload| {
+            // The real daemon fixture shares this process. A distinct logical
+            // GUI PID retains production decoding without same-process echo suppression.
+            crate::dispatch_daemon_project_event(&proxy, &callback_context, &channel, payload, 0);
+        },
+    );
+    let recorded = fixture.recorded_events.clone();
+    let has_delivery = || {
+        recorded.lock().unwrap().iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::IssueMonitorLaunchRequest {
+                    issue_number: 3165,
+                    ..
+                }
+            )
+        })
+    };
+    let request_scan = || {
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(
+            &root,
+            gwt::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"scan_now": {}}),
+                std::process::id(),
+            ),
+        )
+        .expect("request the actual Monitor scan");
+    };
+    // test-hygiene: allow-wall-clock-deadline The real subscription hang guard does not establish event ordering.
+    let initial_deadline = Instant::now() + Duration::from_secs(30);
+    while !has_delivery() {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bounds real subscription/scan progress; received delivery establishes readiness.
+            Instant::now() < initial_deadline,
+            "initial materializer did not subscribe"
+        );
+        request_scan();
+        owner_fixture_block_on(original_owner.wait_monitor_idle()).unwrap();
+        thread::yield_now();
+    }
+    assert!(fixture.runtime.runtimes.is_empty());
+    fixture.runtime.test_project_owners.remove(&root);
+    let Ok(original_owner) = Arc::try_unwrap(original_owner) else {
+        panic!("the fixture must release its exact original owner");
+    };
+    owner_fixture_block_on(original_owner.shutdown());
+    gwt_core::test_support::recv_event(&retry_observed, "subscriber observes daemon disconnect");
+    recorded.lock().unwrap().clear();
+
+    // Preserve the AppRuntime, project tab, and subscriber across the real
+    // listener shutdown/rebind. Only the daemon and its credential are new.
+    let restarted_owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let restarted_endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(original_endpoint.auth_token, restarted_endpoint.auth_token);
+    assert_eq!(fixture.runtime.test_context(), context);
+    assert!(fixture.runtime.runtimes.is_empty());
+    let disconnected = gwt::daemon_publisher::read_issue_monitor_status(&root)
+        .unwrap()
+        .unwrap();
+    assert_eq!(disconnected["stall_reason"], "gui_disconnected");
+    assert!(
+        !has_delivery(),
+        "a missing typed materializer must not deliver a launch"
+    );
+
+    reconnect_allowed.store(true, Ordering::SeqCst);
+    // test-hygiene: allow-wall-clock-deadline The real reconnect hang guard does not establish event ordering.
+    let reconnect_deadline = Instant::now() + Duration::from_secs(30);
+    while !has_delivery() {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bounds actual automatic reconnect; a received launch, not elapsed time, releases the fixture.
+            Instant::now() < reconnect_deadline,
+            "open project did not recover its materializer"
+        );
+        request_scan();
+        owner_fixture_block_on(restarted_owner.wait_monitor_idle()).unwrap();
+        thread::yield_now();
+    }
+    let connected = gwt::daemon_publisher::read_issue_monitor_status(&root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(connected["stall_reason"], "gui_disconnected");
+    let launch = {
+        let mut events = recorded.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorLaunchRequest { .. }
+                )
+            })
+            .unwrap();
+        into_recorded_project_payload(events.remove(index))
+    };
+    let UserEvent::IssueMonitorLaunchRequest {
+        project_root,
+        issue_number,
+        linked_issue_kind,
+        delivery_id,
+        launch_session_strategy,
+    } = launch
+    else {
+        unreachable!("matched actual subscriber delivery")
+    };
+    assert_eq!(project_root, root);
+    assert_eq!(delivery_id, fixture.delivery_id);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let mut outbound = fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+            delivery_id,
+            launch_session_strategy,
+        );
+    outbound.extend(commit_issue_monitor_preparations(
+        &mut fixture.runtime,
+        &tasks,
+        &recorded,
+    ));
+    assert!(outbound
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
+    assert_eq!(fixture.runtime.runtimes.len(), 1);
+    let window_id = fixture.runtime.runtimes.keys().next().unwrap().clone();
+    let pane = owner_runtime_probe(&fixture.runtime, &window_id);
+    let child_pid = pane
+        .pty
+        .process_id()
+        .expect("actual launched provider process");
+    assert_ne!(child_pid, std::process::id());
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    assert_eq!(
+        fixture.runtime.runtimes[&window_id].child_pid,
+        Some(child_pid)
+    );
+    assert_eq!(
+        fixture.runtime.active_agent_sessions[&window_id].session_id,
+        pane.session.as_ref().unwrap().id
+    );
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    subscriber.stop();
+    fixture.runtime.test_project_owners.remove(&root);
+    let Ok(restarted_owner) = Arc::try_unwrap(restarted_owner) else {
+        panic!("the fixture must release its exact restarted owner");
+    };
+    owner_fixture_block_on(restarted_owner.shutdown());
+}
+
+#[test]
 fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks() {
     let _env_lock = env_test_lock()
         .lock()
