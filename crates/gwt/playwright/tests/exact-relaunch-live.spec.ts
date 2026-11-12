@@ -22,6 +22,7 @@ type RosterMember = { agent_member_id: string; agent_id: string; name: string; e
   saved_manual_revision?: string | null;
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
+const WINDOWS_WORKS_CASE = "Works shows the real PM and four implementation children after reload";
 
 async function rosterAfter(page: Page, after: number, previousRevision = -1): Promise<AgentRoster> {
   return page.waitForFunction(({ after, previousRevision }) => {
@@ -292,7 +293,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // CI Playwright job does not build.
   test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1",
     "GWT_PLAYWRIGHT_EXACT_RELAUNCH=1 is not set; checkout relaunch E2E skipped");
-  test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
+  test.beforeEach(({}, info) => {
+    test.skip(process.platform === "win32" && info.title !== WINDOWS_WORKS_CASE,
+      "only the Works cold-restart case has Windows acceptance coverage");
+  });
   test.setTimeout(420_000);
 
   test("Issue #6946: explicit Quit drains the GUI, managed daemon and live provider", async ({ page }, info) => {
@@ -1379,7 +1383,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
-  test("Works shows the real PM and four implementation children after reload", async ({ page }, info) => {
+  test(WINDOWS_WORKS_CASE, async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
     let finalOwner: { pid: number; birth: number } | undefined;
@@ -1387,6 +1391,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       page,
       monitorPreferences: { max_active_agents: 4 },
       async prepare({ home, bin, project, env }) {
+        env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info"].join(",");
         const git = (...args: string[]) => execFileSync("git", args, { cwd: project, env, encoding: "utf8" });
         git("clone", "--bare", "--quiet", project, join(home, "origin.git"));
         git("remote", "add", "origin", join(home, "origin.git")); git("fetch", "--quiet", "origin");
@@ -1400,24 +1405,82 @@ const at = new Date().toISOString();`);
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
-  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
+  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_BEGIN_MISSED', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
     const event = line.trim() === 'GWT_FIXTURE_IDLE' ? 'Stop' : 'UserPromptSubmit';
-    const hook = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH,
-      ['hook', 'event', event], {cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
-        input:JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()})});
-    if (hook.status !== 0) { console.log('WORKS_HOOK_FAILED'); return; }
-    if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
-      const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
-        cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
-        input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
-          items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
-          next_trigger:'Agent update'}})});
-      if (result.status !== 0 || !JSON.parse(result.stdout).ok) { console.log('WORKS_STATUS_FAILED'); return; }
+    const missed = line.trim() === 'GWT_FIXTURE_BEGIN_MISSED';
+    const receipt = (stage, extra = {}) => fs.appendFileSync(
+      path.join(process.env.HOME,'works-hook-receipts.jsonl'),JSON.stringify({
+        session:process.env.GWT_SESSION_ID,command:line.trim(),stage,...extra})+'\\n');
+    let phase = 'native-hook';
+    try {
+      const runtimePath = process.env.GWT_SESSION_RUNTIME_PATH;
+      const journalPath = path.join(path.dirname(path.dirname(path.dirname(runtimePath))),
+        'hook-live',path.basename(path.dirname(runtimePath)),path.basename(runtimePath));
+      const completedBefore = JSON.parse(fs.readFileSync(runtimePath,'utf8')).last_completed_hook_event_at;
+      const payload = JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()});
+      const invoke = (args, env = process.env, input = payload) => require('node:child_process').spawnSync(
+        process.env.GWT_BIN_PATH,args,{cwd:process.cwd(),env,encoding:'utf8',timeout:30000,input});
+      const hook = invoke(['hook','event',event],missed
+        ? {...process.env,GWT_HOOK_FORWARD_TOKEN:'works-fixture-rejected-token'} : process.env);
+      const output = hook.stdout.trim() ? JSON.parse(hook.stdout) : {};
+      if (hook.error || hook.status !== 0 || output.decision === 'block'
+        || output.hookSpecificOutput?.decision === 'block' || output.continue === false)
+        throw new Error('managed hook rejected');
+      phase = 'native-completion';
+      const nativeRuntime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      if (nativeRuntime.status !== (event === 'Stop' ? 'Idle' : 'Running') || nativeRuntime.source_event !== event
+        || !nativeRuntime.last_completed_hook_event_at || nativeRuntime.last_completed_hook_event_at === completedBefore
+        || nativeRuntime.last_completed_hook_outcome !== 'normal') throw new Error('native event did not complete normally');
+      if (missed) {
+        phase = 'pending-proof';
+        const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
+        if (!journal.health.pending_runtime_state || journal.health.consecutive_failures < 1
+          || journal.pending?.gwt_session_id !== process.env.GWT_SESSION_ID
+          || journal.pending?.source_event !== event || journal.pending?.status !== 'Running')
+          throw new Error('missing real pending Running event');
+        receipt('pending');
+      }
+      // Report the real Read above through the public provider hook. It
+      // coalesces to the latest Running and invokes the normal Forward path;
+      // it does not promise delivery of the earlier prompt event itself.
+      let completionBefore = completedBefore;
+      if (event === 'UserPromptSubmit') {
+        phase = 'provider-follow-up';
+        const followUp = invoke(['hook','event','PostToolUse'],process.env,JSON.stringify({
+          session_id:native,hook_event_name:'PostToolUse',cwd:process.cwd(),
+          tool_name:'Read',tool_input:{file_path:runtimePath}}));
+        if (followUp.error || followUp.status !== 0) throw new Error('provider follow-up failed');
+        completionBefore = nativeRuntime.last_completed_hook_event_at;
+      }
+      phase = 'ack-state';
+      const runtime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
+      if (runtime.status !== (event === 'Stop' ? 'Idle' : 'Running')
+        || runtime.source_event !== (event === 'Stop' ? 'Stop' : 'PostToolUse')
+        || !runtime.last_completed_hook_event_at || runtime.last_completed_hook_event_at === completionBefore
+        || runtime.last_completed_hook_outcome !== 'normal' || journal.pending !== null
+        || journal.health.pending_runtime_state !== false || journal.health.consecutive_failures !== 0
+        || !journal.health.last_success_at) throw new Error('runtime or delivery ACK missing');
+      if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
+        phase = 'pm-status';
+        const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+          cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
+          input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
+            items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
+            next_trigger:'Agent update'}})});
+        if (result.error || result.status !== 0 || !JSON.parse(result.stdout).ok) throw new Error('PM status failed');
+      }
+      receipt('ack');
+      console.log('WORKS_STATE ' + event);
+    } catch {
+      receipt('failed',{phase});
+      console.log('WORKS_HOOK_FAILED ' + phase);
     }
-    console.log('WORKS_STATE ' + event); return;
+    return;
   }
   if (line.trim() === 'GWT_FIXTURE_EXIT')`);
         let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
+          .replace("const hookProvider = 'codex';", "const hookProvider = 'claude';")
           .replace("'.codex', 'hooks.json'", "'.claude', 'settings.local.json'")
           .replace("const resumed = resumeAt < 0 ? null :", "const resumed = option('--resume') || (resumeAt < 0 ? null :")
           .replace(" ?? null);\nconst requested", " ?? null));\nconst requested");
@@ -1479,7 +1542,19 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     });
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
-    const input = (id: string, command: string) => sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+    const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
+      .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; }))
+      .split("\n").slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
+    const input = async (id: string, command: string) => {
+      const session = (await windows()).find((window: any) => window.id === id)?.session_id;
+      const matches = (receipt: any) => receipt.session === session && receipt.command === command && receipt.stage !== "pending";
+      const before = (await receipts()).filter(matches).length;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+      await expect.poll(async () => (await receipts()).filter(matches).length,
+        { timeout: 60_000, message: "the native hook and ordinary provider follow-up finish before UI assertions" }).toBe(before + 1);
+      const receipt = (await receipts()).filter(matches).at(-1);
+      expect(receipt.stage, `native hook/provider follow-up failed at ${receipt.phase}`).toBe("ack");
+    };
     const assertAggregates = async () => {
       await expect.poll(() => usage?.filter((session: any) => session.state.kind === "ok"
         && session.telemetry?.quality === "measured").length, { timeout: 45_000 }).toBe(5);
@@ -1530,7 +1605,8 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       const pmName = pm.agent_name;
       expect(typeof pmName === "string" && pmName.trim().length > 0).toBe(true);
       await expect.poll(async () => (await fixture.launches()).length).toBe(5);
-      for (const worker of live.filter((window: any) => !window.is_pm)) await input(worker.id, "GWT_FIXTURE_BEGIN");
+      for (const [index, worker] of live.filter((window: any) => !window.is_pm).entries())
+        await input(worker.id, index === 0 ? "GWT_FIXTURE_BEGIN_MISSED" : "GWT_FIXTURE_BEGIN");
       await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 60_000 });
@@ -1550,7 +1626,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await assertAggregates();
       await expect.poll(async () => Number(await first.locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
       await expect.poll(() => first.locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
-      const pmWorktree = tomlString(await sessionRecord(fixture.home, pm.session_id), "worktree_path");
+      const registration = JSON.parse(await readFile(join(fixture.preferences, "pm.json"), "utf8")).registration;
+      expect(registration.session_id).toBe(pm.session_id);
+      const pmWorktree = registration.worktree_path;
       expect(pmWorktree).toBeTruthy();
       const pmBranch = execFileSync("git", ["-C", pmWorktree!, "branch", "--show-current"], { encoding: "utf8" }).trim();
       await expect(first.locator('[data-stat="branch"]')).toHaveText(pmBranch);
@@ -1581,10 +1659,17 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       }, { timeout: 45_000, message: "the measured machine budget must support PM plus four workers before cold restore" }).toBeGreaterThanOrEqual(5);
       const coldOwner = await readLatestOwnActivity(page);
       await captureCapacity("before-cold-restart");
-      // Prevent the old document from reconnecting before the fresh navigation.
-      await page.goto("about:blank");
-      const restarted = await fixture.restart({ coldOwner }); workspace = null; usage = null; activity = null;
+      // Capture and qualify the live owner before disconnect starts its natural drain.
+      const restarted = await fixture.restart({
+        ...(process.platform === "win32" ? {} : { coldOwner }), signalFree: true,
+        disconnectBrowser: () => page.goto("about:blank"),
+      }); workspace = null; usage = null; activity = null;
       await captureCapacity("after-cold-restart");
+      const shutdown = info.attachments.find(attachment => attachment.name === "fixture-cold-gui-shutdown");
+      expect(shutdown, "cold restart must prove signal-free normal GUI shutdown").toBeDefined();
+      expect(JSON.parse(shutdown!.body!.toString())).toMatchObject({
+        exit_code: 0, signal: null, shutdown_requested: true, cleanup_completed: true, backstop: false,
+      });
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
@@ -1669,8 +1754,10 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       expect(children).toHaveLength(5);
       for (const child of children) expect(() => process.kill(child.pid, 0)).not.toThrow();
       await info.attach("real-child-membership", { body: JSON.stringify({ windows: current, children }), contentType: "application/json" });
-      const [pid, birth] = (await readLatestOwnActivity(page, activity.project_key)).host_id.split(":").map(Number);
-      finalOwner = { pid, birth };
+      if (process.platform !== "win32") {
+        const [pid, birth] = (await readLatestOwnActivity(page, activity.project_key)).host_id.split(":").map(Number);
+        finalOwner = { pid, birth };
+      }
     } finally {
       try {
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
@@ -1683,12 +1770,16 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         for (const session of new Set((await fixture.launches()).map(launch => launch.gwt_session_id))) {
           expect(profiles, `retain hook timings for launched Session ${session}`).toContain(`hook-${session}.jsonl`);
         }
-      } finally { await fixture.stop(); }
+      } finally {
+        await fixture.stop(undefined, { signalFree: true, disconnectBrowser: () => page.goto("about:blank") });
+      }
     }
-    expect(finalOwner).toBeDefined();
-    const remaining = await readProcessState(finalOwner!.pid);
-    expect(!remaining || remaining.birth !== finalOwner!.birth,
-      "final captured owner is reaped before fixture state can be removed").toBe(true);
+    if (process.platform !== "win32") {
+      expect(finalOwner).toBeDefined();
+      const remaining = await readProcessState(finalOwner!.pid);
+      expect(!remaining || remaining.birth !== finalOwner!.birth,
+        "final captured owner is reaped before fixture state can be removed").toBe(true);
+    }
     expect(errors, "console/page errors including owned fixture teardown").toEqual([]);
   });
 

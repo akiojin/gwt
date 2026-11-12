@@ -911,45 +911,53 @@ fn handle_with_input_inner(
         {
             return Ok(None);
         }
-        let published = completion.with_current_runtime(true, |current, _| {
-            let persisted = persist_hook_metadata(
-                &sessions_dir,
-                &gwt_session_id,
-                event,
-                agent_session_id.as_ref(),
-                current,
-                true,
-            );
-            let (prepared, metadata_saved) = match persisted {
-                Ok(prepared) => (prepared, true),
-                Err(error) => {
-                    log_session_metadata_error("record hook metadata for", &gwt_session_id, &error);
-                    if event == "SessionStart" && agent_session_id.is_some() {
-                        return Err(error);
+        // Issue #7142: profile the owned publication, which carries the
+        // Session/runtime leases and identity re-proof before the live notice.
+        let published = timed_substage(event, "runtime-state/completion-publish", || {
+            completion.with_current_runtime(true, |current, _| {
+                let persisted = persist_hook_metadata(
+                    &sessions_dir,
+                    &gwt_session_id,
+                    event,
+                    agent_session_id.as_ref(),
+                    current,
+                    true,
+                );
+                let (prepared, metadata_saved) = match persisted {
+                    Ok(prepared) => (prepared, true),
+                    Err(error) => {
+                        log_session_metadata_error(
+                            "record hook metadata for",
+                            &gwt_session_id,
+                            &error,
+                        );
+                        if event == "SessionStart" && agent_session_id.is_some() {
+                            return Err(error);
+                        }
+                        (current.clone(), false)
                     }
-                    (current.clone(), false)
-                }
-            };
-            validate_persisted_session_start(
-                event,
-                &gwt_session_id,
-                agent_session_id.as_ref(),
-                Some(&prepared),
-            )
-            .map_err(io::Error::other)?;
-            let pending = load_pending_resume(&prepared.worktree_path).ok().flatten();
-            let status = status_for_event(event)
-                .ok_or_else(|| io::Error::other(format!("invalid hook event: {event}")))?;
-            write_state_under_runtime_leases(
-                &runtime_path,
-                event,
-                status,
-                pending,
-                hook_event.as_ref().and_then(RawHookEvent::tool_use_id),
-                completion.observation.as_ref(),
-            )
-            .map_err(io::Error::other)?;
-            Ok((prepared, metadata_saved))
+                };
+                validate_persisted_session_start(
+                    event,
+                    &gwt_session_id,
+                    agent_session_id.as_ref(),
+                    Some(&prepared),
+                )
+                .map_err(io::Error::other)?;
+                let pending = load_pending_resume(&prepared.worktree_path).ok().flatten();
+                let status = status_for_event(event)
+                    .ok_or_else(|| io::Error::other(format!("invalid hook event: {event}")))?;
+                write_state_under_runtime_leases(
+                    &runtime_path,
+                    event,
+                    status,
+                    pending,
+                    hook_event.as_ref().and_then(RawHookEvent::tool_use_id),
+                    completion.observation.as_ref(),
+                )
+                .map_err(io::Error::other)?;
+                Ok((prepared, metadata_saved))
+            })
         });
         return completion.accept_runtime_publication(published);
     }

@@ -141,6 +141,7 @@ export async function startExactRelaunchFixture(testInfo: TestInfo, setup: Exact
   }
   Object.assign(env, {
     HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"),
+    CLAUDE_CONFIG_DIR: join(home, ".claude"),
     PATH: [bin, process.env.PATH ?? process.env.Path ?? ""].join(delimiter),
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: join(home, "project"),
@@ -387,6 +388,7 @@ const terminalActorFailure = error => {
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
+const hookProvider = 'codex';
 const args = process.argv.slice(2);
 if (args.includes('--version') || args.includes('-V')) {
   console.log('codex-cli 0.116.0'); process.exit(0);
@@ -427,9 +429,12 @@ try {
   const input = JSON.stringify({session_id:native,hook_event_name:'SessionStart',source:resumed ? 'resume' : 'startup',cwd:process.cwd(),transcript_path:rollout,model:option('--model')});
   for (const group of hooks.hooks?.SessionStart ?? []) for (const hook of group.hooks ?? []) {
     if (hook.type !== 'command') continue;
-    const windows = process.platform === 'win32';
+    // Claude interprets managed hooks through a POSIX shell on every platform.
+    const windows = process.platform === 'win32' && hookProvider === 'codex';
+    const posixShell = process.platform === 'win32'
+      ? path.join(process.env.ProgramFiles, 'Git', 'bin', 'bash.exe') : '/bin/sh';
     startupEvent('session_start_hook_begin');
-    const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh',
+    const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : posixShell,
       windows ? ['/d','/s','/c',hook.command] : ['-c',hook.command],
       {input, stdio:['pipe','ignore','inherit'], timeout:60000, windowsHide:true, windowsVerbatimArguments:windows});
     startupEvent('session_start_hook_returned',{exit_status:result.status,signal:result.signal,error_code:result.error?.code ?? null});
@@ -517,6 +522,50 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   let coldCleanupFailed = false, protectGuiOwner = false;
   let incarnation = 0;
   let url = "";
+  type ShutdownOptions = { signalFree?: boolean; disconnectBrowser?: () => Promise<unknown> };
+  async function shutdownEvents() {
+    const directory = join(state, "logs");
+    const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const records = [];
+    for (const name of names.filter(name => name.startsWith("gwt.log.")).sort()) {
+      for (const line of (await readFile(join(directory, name), "utf8")).split("\n").filter(Boolean)) {
+        const event = JSON.parse(line);
+        if (event.target === "gwt::shutdown") records.push(event);
+      }
+    }
+    return records;
+  }
+  async function proveGuiShutdown(current: ChildProcess | undefined, shutdownOffset: number) {
+    const events = (await shutdownEvents()).slice(shutdownOffset);
+    const proof = {
+      pid: current?.pid, exit_code: current?.exitCode, signal: current?.signalCode,
+      shutdown_requested: events.some(event => event.fields?.message === "gui shutdown requested"
+        && event.fields?.reason === "quit app"),
+      cleanup_completed: events.some(event => event.fields?.message === "gui shutdown cleanup completed"
+        && event.fields?.reason === "quit app"),
+      backstop: events.some(event => event.fields?.message === "gui shutdown timed out; forcing process exit"),
+      events,
+    };
+    await testInfo.attach("fixture-cold-gui-shutdown", { body: JSON.stringify(proof), contentType: "application/json" });
+    if (proof.exit_code !== 0 || proof.signal !== null || !proof.shutdown_requested
+      || !proof.cleanup_completed || proof.backstop) throw new Error("Fixture cold GUI shutdown lacks normal-exit proof");
+  }
+  async function disconnectFixtureBrowser(options: ShutdownOptions) {
+    let failed = false;
+    try { await options.disconnectBrowser?.(); } catch { failed = true; }
+    if (setup.page && url) {
+      try {
+        const origin = new URL(url).origin;
+        const pages = setup.page.context().pages().filter(page => !page.isClosed() && new URL(page.url()).origin === origin);
+        const unloaded = await Promise.allSettled(pages.map(page => page.goto("about:blank")));
+        if (unloaded.some(result => result.status === "rejected")) failed = true;
+      } catch { failed = true; }
+    }
+    if (failed) throw new Error("Fixture browser unload failed");
+  }
   async function launches(): Promise<ExactRelaunchInvocation[]> {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
@@ -538,13 +587,60 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (result.status !== 0 || paths.length !== 1 || !paths[0]) throw new Error(`Unknown PID ${pid} cwd`);
     return realpath(paths[0]);
   };
-  async function stopGui() {
+  function processBirth(pid: number) {
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+    { encoding: "utf8", windowsHide: true });
+    if (result.error) throw result.error;
+    return result.status === 0 ? result.stdout.trim() : "";
+  }
+  async function captureGuiOwner() {
+    const directory = join(state, "projects", hash, "runtime/daemon");
+    for (const name of await readdir(directory)) {
+      if (!name.endsWith(".json")) continue;
+      const endpointFile = join(directory, name), bytes = await readFile(endpointFile, "utf8");
+      const endpoint = JSON.parse(bytes);
+      if (endpoint.scope?.repo_hash !== hash || !endpoint.project_transport_url
+        || await realpath(endpoint.scope.project_root) !== await realpath(project)) continue;
+      if (!Number.isInteger(endpoint.pid) || endpoint.pid <= 0) throw new Error("Invalid fixture owner PID");
+      if (endpoint.pid === child?.pid) {
+        protectGuiOwner = true;
+        throw new Error("Fixture owner identity overlaps GUI");
+      }
+      const birth = processBirth(endpoint.pid);
+      const transport = new URL(endpoint.project_transport_url);
+      if (transport.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(transport.hostname)
+        || transport.username || transport.password || transport.pathname !== "/" || transport.search || transport.hash
+        || typeof endpoint.auth_token !== "string" || !endpoint.auth_token)
+        throw new Error("Fixture owner private transport unavailable");
+      const response = await fetch(new URL("/private/project/command", transport), {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+        headers: { Authorization: `Bearer ${endpoint.auth_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ project_key: hash, command: { type: "health" } }),
+      });
+      const health = await response.json();
+      if (!response.ok || !birth || processBirth(endpoint.pid) !== birth
+        || health.pid !== endpoint.pid || health.project_key !== hash
+        || health.startup_intent !== "gui_managed" || !(health.gui_presence_count >= 1)
+        || !(health.host_started_at > 0) || typeof health.host_instance_id !== "string" || !health.host_instance_id || health.draining
+        || await readFile(endpointFile, "utf8") !== bytes) throw new Error("Fixture GUI owner identity changed before restart");
+      return { pid: endpoint.pid as number, birth, host_started_at: health.host_started_at,
+        host_instance_id: health.host_instance_id, project_key: hash,
+        startup_intent: health.startup_intent, gui_presence_count: health.gui_presence_count };
+    }
+    throw new Error("Fixture has no authenticated GUI-managed owner to drain");
+  }
+  async function stopGui(signalFree = false) {
+    let timedOut = false;
     if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
-      current.kill("SIGTERM");
-      const deadline = Date.now() + 8_000;
+      if (!signalFree) current.kill("SIGTERM");
+      // A signal-free stop waits for the browser-disconnect QuitApp, which only
+      // starts after the 5 s reconnect grace; 8 s would leave ~3 s for cleanup.
+      const deadline = Date.now() + (signalFree ? 15_000 : 8_000);
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
       if (current.exitCode === null && current.signalCode === null) {
+        timedOut = true;
         current.kill("SIGKILL");
         const forcedDeadline = Date.now() + 8_000;
         while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
@@ -553,22 +649,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (child?.pid && processCommand(child.pid)) {
       throw new Error(`Fixture gwt process ${child.pid} remained after shutdown`);
     }
+    if (signalFree && timedOut) throw new Error("Fixture signal-free GUI shutdown timed out");
   }
-  async function stop(afterGuiStop?: () => Promise<void>) {
+  async function stop(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
     let browserError: Error | undefined;
     let afterGuiStopError: Error | undefined;
-    if (setup.page && url) {
-      try {
-        const origin = new URL(url).origin;
-        const pages = setup.page.context().pages().filter(page => !page.isClosed() && new URL(page.url()).origin === origin);
-        const unloaded = await Promise.allSettled(pages.map(page => page.goto("about:blank")));
-        if (unloaded.some(result => result.status === "rejected")) throw new Error("Fixture browser unload failed");
-      } catch {
-        browserError = new Error("Fixture browser unload failed");
-      }
-    }
+    const guiErrors: unknown[] = [];
     const ownedGui = child;
     const ownedPid = ownedGui?.pid;
+    let shutdownOffset: number | undefined;
+    let windowsOwner: Awaited<ReturnType<typeof captureGuiOwner>> | undefined;
     const ownerObservationSupported = process.platform === "darwin" || process.platform === "linux";
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     let owner: { pid: number; birth: number; instance: string; startup_intent: "gui_managed" | "standalone"; natural: boolean | null } | null = null;
@@ -669,17 +759,24 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         ownerError = new Error("Fixture owner capture failed");
       }
     }
+    if (ownedPid && windows && options.signalFree && !coldCleanupFailed && !protectGuiOwner) {
+      try { windowsOwner = await captureGuiOwner(); }
+      catch {
+        ownerCaptureFailed = true;
+        ownerError = new Error("Fixture owner capture failed");
+      }
+    }
+    if (options.signalFree) {
+      try { shutdownOffset = (await shutdownEvents()).length; }
+      catch (error) { guiErrors.push(error); }
+    }
+    // Capture the owner before the last browser document can start its drain.
+    try { await disconnectFixtureBrowser(options); }
+    catch { browserError = new Error("Fixture browser unload failed"); }
     try {
-      if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
-        const current = child;
-        current.kill("SIGTERM");
-        const deadline = Date.now() + 8_000;
-        while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-        if (current.exitCode === null && current.signalCode === null) {
-          current.kill("SIGKILL");
-          const forcedDeadline = Date.now() + 8_000;
-          while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
-        }
+      try { await stopGui(options.signalFree); } catch (error) { guiErrors.push(error); }
+      if (options.signalFree && shutdownOffset !== undefined) {
+        try { await proveGuiShutdown(ownedGui, shutdownOffset); } catch (error) { guiErrors.push(error); }
       }
       if (afterGuiStop) {
         try {
@@ -689,6 +786,20 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         } catch (error) {
           afterGuiStopError = error instanceof Error ? error : new Error("Fixture post-GUI shutdown callback failed");
         }
+      }
+      if (windowsOwner) {
+        let exited = false;
+        try {
+          const deadline = Date.now() + 45_000;
+          while (processBirth(windowsOwner.pid) === windowsOwner.birth && Date.now() < deadline) await delay(100);
+          exited = processBirth(windowsOwner.pid) !== windowsOwner.birth;
+          if (!exited) throw new Error("Fixture owner natural reap not observed before deadline");
+        } catch { ownerError = new Error("Fixture owner natural reap not observed before deadline"); }
+        try {
+          await testInfo.attach("fixture-cold-owner-drain", {
+            body: JSON.stringify({ ...windowsOwner, exited }), contentType: "application/json",
+          });
+        } catch (error) { guiErrors.push(error); }
       }
       if (owner?.startup_intent === "gui_managed") {
         const waitStarted = performance.now();
@@ -778,30 +889,29 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         const remaining = processCommand(ownedPid);
         await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining,
           owner, owner_health_observations: ownerHealthObservations,
-          ...(ownerObservationSupported ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
+          ...(ownerObservationSupported || windowsOwner ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
           ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
         if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
       }
       child = undefined;
     } catch (error) {
-      const errors = [browserError, ownerError, afterGuiStopError].filter((failure): failure is Error => failure !== undefined);
+      const errors = [browserError, ownerError, afterGuiStopError, ...guiErrors].filter(failure => failure !== undefined);
       if (!errors.length) throw error;
       throw new AggregateError([...errors, new Error("Fixture physical cleanup failed")], "Fixture cleanup failed");
     }
-    if (afterGuiStopError) throw new AggregateError(
-      [browserError, ownerError, afterGuiStopError].filter((failure): failure is Error => failure !== undefined),
-      "Fixture post-GUI shutdown cleanup failed");
-    if (browserError && ownerError) throw new AggregateError([browserError, ownerError], "Fixture browser and owner cleanup failed");
-    if (browserError) throw browserError;
-    if (ownerError) throw ownerError;
+    const errors = [browserError, ownerError, afterGuiStopError, ...guiErrors].filter(failure => failure !== undefined);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length) throw new AggregateError(errors, "Fixture cleanup failed");
   }
   type ColdCensus = { project_key: string; host_id: string; observed_at: string;
     agents: { window_id: string; session_id: string; runtime_incarnation: number }[] };
   type ColdWitness = { session: string; childPid: number; childBirth: number; hostPid: number; hostBirth: number; incarnation: number; identity: string; window: string; cwd: string; providerPath: string };
-  async function coldRestart(census: ColdCensus) {
+  async function coldRestart(census: ColdCensus, options: ShutdownOptions) {
     if (!["darwin", "linux"].includes(process.platform)) throw new Error("Cold owner observation unsupported on this platform");
     const errors: unknown[] = [], witnesses: ColdWitness[] = [];
+    const ownedGui = child;
     const ownedPid = child?.pid;
+    let shutdownOffset: number | undefined;
     const providerPaths = [join(bin, "codex"), join(bin, "claude")];
     const privateChild = async (witness: ColdWitness) => {
       const current = await readProcessState(witness.childPid);
@@ -866,23 +976,18 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       const current = await qualifyCohort(false);
       if (JSON.stringify(current) !== JSON.stringify(witnesses)) throw new Error("Cold owner cohort changed before GUI shutdown");
     } catch (error) { errors.push(error); }
+    if (options.signalFree) {
+      try { shutdownOffset = (await shutdownEvents()).length; }
+      catch (error) { errors.push(error); }
+    }
 
     // Always attempt each cleanup independently; no observer failure may skip
     // the GUI receipt or leave the handle assigned to this fixture.
-    try {
-      if (!protectGuiOwner && child?.pid && child.exitCode === null && child.signalCode === null) {
-        const current = child;
-        current.kill("SIGTERM");
-        const deadline = Date.now() + 8_000;
-        while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-        if (current.exitCode === null && current.signalCode === null) {
-          current.kill("SIGKILL");
-          const forced = Date.now() + 8_000;
-          while (current.exitCode === null && current.signalCode === null && Date.now() < forced) await delay(100);
-        }
-        if (current.exitCode === null && current.signalCode === null) throw new Error(`Fixture gwt process ${current.pid} remained after shutdown`);
-      }
-    } catch (error) { errors.push(error); }
+    try { await disconnectFixtureBrowser(options); } catch (error) { errors.push(error); }
+    try { await stopGui(options.signalFree); } catch (error) { errors.push(error); }
+    if (options.signalFree && shutdownOffset !== undefined) {
+      try { await proveGuiShutdown(ownedGui, shutdownOffset); } catch (error) { errors.push(error); }
+    }
     if (!errors.length) {
       try {
         const deadline = performance.now() + 30_000;
@@ -998,6 +1103,9 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
-    async restart(options?: { coldOwner: ColdCensus }) { if (options) return coldRestart(options.coldOwner); await stop(); return start(); } };
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches, start, stopGui, stop,
+    async restart(options: ShutdownOptions & { coldOwner?: ColdCensus } = {}) {
+      if (options.coldOwner) return coldRestart(options.coldOwner, options);
+      await stop(undefined, options); return start();
+    } };
 }

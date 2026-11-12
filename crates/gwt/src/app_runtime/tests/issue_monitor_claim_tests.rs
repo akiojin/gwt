@@ -6299,6 +6299,240 @@ fn issue_5140_expired_fallback_delivery_does_not_authorize_a_window() {
 }
 
 #[test]
+fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = gwt_core::test_support::socket_tempdir().expect("fixture home");
+    let _home = ScopedGwtHome::set(temp.path());
+    // The subscribers resolve their endpoints on their own OS threads.
+    let _process_home = ScopedEnvVar::set("HOME", temp.path());
+    let _process_profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "materializer-restart",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let root = fixture.project_root.clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.enabled = true;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let original_owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let original_endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
+        .unwrap()
+        .unwrap();
+    let context = fixture.runtime.test_context();
+    let recorded = fixture.recorded_events.clone();
+    let status = || {
+        gwt::daemon_publisher::read_issue_monitor_status(&root)
+            .unwrap()
+            .unwrap()
+    };
+    let scan_until = |owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+                      label: &str,
+                      ready: &dyn Fn() -> bool| {
+        // test-hygiene: allow-wall-clock-deadline Bounds actual socket/scan progress; observed state establishes ordering.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline This hang guard cannot establish subscription readiness.
+                Instant::now() < deadline,
+                "timed out waiting for {label}"
+            );
+            gwt::daemon_publisher::publish_durable_issue_monitor_control(
+                &root,
+                gwt::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"scan_now": {}}),
+                    std::process::id(),
+                ),
+            )
+            .expect("request the actual Monitor scan");
+            owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+            thread::yield_now();
+        }
+    };
+    let has_delivery = || {
+        recorded.lock().unwrap().iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::IssueMonitorLaunchRequest {
+                    issue_number: 3165,
+                    ..
+                }
+            )
+        })
+    };
+    fixture.runtime.deferred_issue_monitor_launches = Some(Vec::new());
+    fixture.runtime.startup_generation_reaper_pending = false;
+    fixture.runtime.pending_startup_restore_log = None;
+    // Keep the fixture's already-running owner; do not execute the unrelated
+    // background ensure intent while testing this GUI subscription boundary.
+    fixture.runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut subscribers = crate::BoardDaemonSubscriberRegistry::default();
+    subscribers.sync(&fixture.runtime, fixture.runtime.proxy.clone());
+    scan_until(&original_owner, "the original GUI observer", &|| {
+        status()["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION
+    });
+    assert!(!fixture.runtime.issue_monitor_materializer_ready());
+    assert!(subscribers.subscribers.values().all(|(_, ready, _)| !ready));
+    assert!(fixture.runtime.runtimes.is_empty());
+    fixture.runtime.test_project_owners.remove(&root);
+    let Ok(original_owner) = Arc::try_unwrap(original_owner) else {
+        panic!("the fixture must release its exact original owner");
+    };
+    owner_fixture_block_on(original_owner.shutdown());
+    recorded.lock().unwrap().clear();
+
+    // Preserve the GUI, its pending startup admission, and its registry while
+    // the real daemon listener restarts and publishes a fresh credential.
+    let restarted_owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let restarted_endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(original_endpoint.auth_token, restarted_endpoint.auth_token);
+    assert_eq!(fixture.runtime.test_context(), context);
+    // No registry sync here: the same observer must rediscover the new daemon.
+    scan_until(
+        &restarted_owner,
+        "the GUI observer after host restart",
+        &|| status()["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION,
+    );
+    assert_eq!(status()["stall_reason"], "gui_disconnected");
+    assert!(fixture.runtime.runtimes.is_empty());
+    assert!(!has_delivery(), "an observer cannot authorize a launch");
+
+    let callback_context = context.clone();
+    let proxy = fixture.runtime.proxy.clone();
+    let resolver_root = root.clone();
+    let observation = gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+        move || {
+            gwt::daemon_publisher::resolve_project_daemon_endpoint(&resolver_root)?
+                .ok_or_else(|| "project daemon is unavailable".into())
+        },
+        crate::daemon_subscriber_channels(),
+        move |channel, payload| {
+            // The actual daemon shares this test PID. This observer uses a
+            // distinct logical GUI PID only to avoid suppressing its echoes;
+            // materialization authority belongs exclusively to the real registry.
+            crate::dispatch_daemon_project_event(&proxy, &callback_context, &channel, payload, 0);
+        },
+    );
+    scan_until(&restarted_owner, "the read-only callback observer", &|| {
+        recorded.lock().unwrap().iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::IssueMonitorDaemonStatus { .. }
+            )
+        })
+    });
+    assert!(
+        !has_delivery(),
+        "both observers still lack materializer authority"
+    );
+    let proxy = fixture.runtime.proxy.clone();
+    let mut outbound = Vec::new();
+    crate::dispatch_startup_auto_resume_admission_prepared(
+        &mut fixture.runtime,
+        super::super::StartupAutoResumeAdmissionPrepared {
+            sessions: Vec::new(),
+        },
+        &mut subscribers,
+        proxy,
+        |events| outbound.extend(events),
+    );
+    assert!(fixture.runtime.issue_monitor_materializer_ready());
+    assert!(
+        subscribers.subscribers.values().all(|(_, ready, _)| *ready),
+        "startup admission must promote the retained GUI observer to materializer"
+    );
+    scan_until(
+        &restarted_owner,
+        "the promoted materializer delivery",
+        &has_delivery,
+    );
+    assert_ne!(status()["stall_reason"], "gui_disconnected");
+    let launch = {
+        let mut events = recorded.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorLaunchRequest { .. }
+                )
+            })
+            .unwrap();
+        into_recorded_project_payload(events.remove(index))
+    };
+    let UserEvent::IssueMonitorLaunchRequest {
+        project_root,
+        issue_number,
+        linked_issue_kind,
+        delivery_id,
+        launch_session_strategy,
+    } = launch
+    else {
+        unreachable!("matched actual subscriber delivery")
+    };
+    assert_eq!(project_root, root);
+    assert_eq!(delivery_id, fixture.delivery_id);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    outbound.extend(
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &project_root,
+                issue_number,
+                linked_issue_kind,
+                delivery_id,
+                launch_session_strategy,
+            ),
+    );
+    outbound.extend(commit_issue_monitor_preparations(
+        &mut fixture.runtime,
+        &tasks,
+        &recorded,
+    ));
+    assert!(outbound
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
+    assert_eq!(fixture.runtime.runtimes.len(), 1);
+    let window_id = fixture.runtime.runtimes.keys().next().unwrap().clone();
+    let pane = owner_runtime_probe(&fixture.runtime, &window_id);
+    let child_pid = pane
+        .pty
+        .process_id()
+        .expect("actual launched provider process");
+    assert_ne!(child_pid, std::process::id());
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    assert_eq!(
+        fixture.runtime.runtimes[&window_id].child_pid,
+        Some(child_pid)
+    );
+    assert_eq!(
+        fixture.runtime.active_agent_sessions[&window_id].session_id,
+        pane.session.as_ref().unwrap().id
+    );
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    observation.stop();
+    subscribers.shutdown();
+    fixture.runtime.test_project_owners.remove(&root);
+    let Ok(restarted_owner) = Arc::try_unwrap(restarted_owner) else {
+        panic!("the fixture must release its exact restarted owner");
+    };
+    owner_fixture_block_on(restarted_owner.shutdown());
+}
+
+#[test]
 fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks() {
     let _env_lock = env_test_lock()
         .lock()

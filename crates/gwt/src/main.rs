@@ -1714,6 +1714,18 @@ impl BoardDaemonSubscriberRegistry {
     }
 }
 
+fn dispatch_startup_auto_resume_admission_prepared(
+    app: &mut AppRuntime,
+    prepared: app_runtime::StartupAutoResumeAdmissionPrepared,
+    board_daemon_subscribers: &mut BoardDaemonSubscriberRegistry,
+    proxy: AppEventProxy,
+    dispatch: impl FnOnce(Vec<OutboundEvent>),
+) {
+    // Admission flips readiness; dispatch its events before promoting the subscriber.
+    dispatch(app.startup_auto_resume_admission_prepared_events(prepared));
+    board_daemon_subscribers.sync(app, proxy);
+}
+
 fn spawn_project_owner_subscriber(
     context: app_runtime::ProjectContext,
     proxy: AppEventProxy,
@@ -2772,10 +2784,18 @@ mod tests {
             .split_once("IssueMonitorPreflightRejected")
             .expect("next handler")
             .0;
-        let drain = handler
+        assert!(handler.contains("dispatch_startup_auto_resume_admission_prepared("));
+        let admission = source
+            .split_once("fn dispatch_startup_auto_resume_admission_prepared(")
+            .expect("shared admission dispatch")
+            .1
+            .split_once("fn spawn_project_owner_subscriber(")
+            .expect("next helper")
+            .0;
+        let drain = admission
             .find("startup_auto_resume_admission_prepared_events")
             .expect("admission drain");
-        let sync = handler
+        let sync = admission
             .find("board_daemon_subscribers.sync(")
             .expect("admission must resync the Issues subscriber");
         assert!(
@@ -11589,11 +11609,13 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
             }
             Event::UserEvent(UserEvent::StartupAutoResumeAdmissionPrepared(prepared)) => {
-                // Issue #7087: this drain is what flips materializer readiness.
-                // Sync after it so the open window replaces its observer
-                // subscriber with the materializer role.
-                clients.dispatch(app.startup_auto_resume_admission_prepared_events(*prepared));
-                board_daemon_subscribers.sync(app, proxy.clone());
+                dispatch_startup_auto_resume_admission_prepared(
+                    app,
+                    *prepared,
+                    &mut board_daemon_subscribers,
+                    proxy.clone(),
+                    |events| clients.dispatch(events),
+                );
             }
             Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
                 clients.dispatch(app.handle_monitor_preflight_rejected(*completion));

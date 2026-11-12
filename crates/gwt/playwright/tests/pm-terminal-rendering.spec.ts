@@ -515,9 +515,12 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await gotoLiveGwt(page, liveBase!, { enableTestBridge: true });
       const projectKey = new URL(page.url()).pathname.split("/").at(-1);
       expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
-      await expect.poll(() => page.evaluate(key => (window as any).__gwtPlaywrightMessages
+      await expect.poll(async () => {
+        await sendLiveGwtEvent(page, { kind: "get_project_execution_status" });
+        return page.evaluate(key => (window as any).__gwtPlaywrightMessages
         .findLast((entry: any) => entry.payload.kind === "project_execution_status"
-          && entry.payload.status.project_key === key)?.payload.status.view_state, projectKey)).toBe("open");
+          && entry.payload.status.project_key === key)?.payload.status, projectKey);
+      }, { timeout: 60_000 }).toMatchObject({ view_state: "open", degraded: false });
       const windows = () => page.evaluate(() => {
         const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state");
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
@@ -528,6 +531,9 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await page.getByRole("option", { name: "Spawn shell window", exact: true }).click();
       await expect.poll(async () => (await windows()).filter((entry: any) => entry.preset === "shell" && !before.has(entry.id))).toHaveLength(1);
       id = (await windows()).find((entry: any) => entry.preset === "shell" && !before.has(entry.id)).id;
+      await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === "terminal_status" && entry.payload.id === id)?.payload, id),
+      { timeout: 60_000 }).toMatchObject({ status: "running" });
       const shell = page.locator(`.workspace-window[data-id="${id}"]`);
       const showShell = async () => {
         if (!await shell.isVisible()) {
@@ -579,14 +585,15 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await shell.locator(".xterm-helper-textarea").focus();
       await page.keyboard.type("/model");
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_1:2f6d6f64656c\r\n");
+      // Unix PTYs can apply ONLCR to the probe's CRLF; ConPTY preserves it.
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_1:2f6d6f64656c\r+\n/);
       await shell.locator(".xterm-helper-textarea").evaluate(node => {
         const clipboard = new DataTransfer();
         clipboard.setData("text/plain", "/model");
         node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
       });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_2:2f6d6f64656c\r\n");
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_2:2f6d6f64656c\r+\n/);
       await info.attach("real PTY observations", { body: JSON.stringify({ theme, observations, inputHex: "2f6d6f64656c", errors }), contentType: "application/json" });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "zero console/page errors").toEqual([]);
