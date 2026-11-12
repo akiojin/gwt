@@ -3705,7 +3705,7 @@ mod tests {
                 "`AskUserQuestion`",
                 "numbered choices",
                 "replying with the number is enough",
-                "names, numbers, or original descriptions",
+                "Free-text-only questions with an answer example are allowed when the answer inherently needs names, numbers, or original descriptions.",
                 "Never use a free-text-only question when the answers can be enumerated",
             ] {
                 assert!(role.contains(required), "{provider}: missing {required}");
