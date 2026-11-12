@@ -70,6 +70,13 @@ fn receipt_path(root: &Path, id: &str) -> io::Result<PathBuf> {
         .join(format!("{id}.json")))
 }
 
+/// Native actor evidence belongs to the authenticated transport, not receipts.
+fn durable_request(request: &AgentWorkspaceUpdateRequest) -> AgentWorkspaceUpdateRequest {
+    let mut request = request.clone();
+    request.primary_provider_session_id = None;
+    request
+}
+
 impl UpdateOperation {
     pub(crate) fn capture(
         root: &Path,
@@ -95,7 +102,7 @@ impl UpdateOperation {
             runtime_target: session.runtime_target,
             docker_runtime_binding: session.docker_runtime_binding,
             project_state_root: root.to_path_buf(),
-            request: request.clone(),
+            request: durable_request(request),
         })
     }
 
@@ -217,7 +224,8 @@ pub(crate) fn inspect(
             || operation.runtime_target != LaunchRuntimeTarget::Host
             || operation.docker_runtime_binding.is_some()
             || expected.is_some_and(|(request, identity)| {
-                request != &operation.request || identity != &operation.identity
+                durable_request(request) != durable_request(&operation.request)
+                    || identity != &operation.identity
             })
             || durable.event.agent_session_id.as_deref() != Some(session_id)
             || durable.event.work_item_id != durable.receipt.work_id

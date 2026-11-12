@@ -8,8 +8,9 @@ use crate::agent_capability::{
 };
 use crate::{
     AgentBuildAbortTerminalizationRequest, AgentWorkMaterializationProbeRequest,
-    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, RuntimeHookEvent,
+    AgentWorkTerminalizationRequest, AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError,
+    AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent,
+    RuntimeHookEvent,
 };
 use axum::{
     extract::{
@@ -515,7 +516,10 @@ thread_local! {
 fn defers_serialization(event: &BackendEvent) -> bool {
     matches!(
         event,
-        BackendEvent::ActiveWorkProjectionPatch { .. } | BackendEvent::TerminalSnapshot { .. }
+        BackendEvent::ActiveWorkProjectionPatch { .. }
+            | BackendEvent::TerminalSnapshot { .. }
+            | BackendEvent::IssueMonitorInbox { .. }
+            | BackendEvent::IssueMonitorStatus { .. }
     )
 }
 
@@ -1475,6 +1479,7 @@ pub fn agent_router(state: TransportState, access_log: AccessLogSink) -> Router 
             post(execution_adoption_handler),
         )
         .route("/internal/workspace-update", post(workspace_update_handler))
+        .route("/internal/workspace-reopen", post(workspace_reopen_handler))
         .route(
             "/internal/work-materialization-probe",
             post(work_materialization_probe_handler),
@@ -1746,6 +1751,74 @@ async fn workspace_update_handler(
     }
 }
 
+async fn workspace_reopen_handler(
+    headers: HeaderMap,
+    State(state): State<TransportState>,
+    Json(request): Json<AgentWorkspaceReopenRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "workspace_reopen_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::cli::execution_state::with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &execution_binding,
+            || {
+                crate::apply_bound_authenticated_workspace_reopen(
+                    &mutation_project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                )
+            },
+        )
+        .map_err(|_| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "workspace reopen authority lease is unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "workspace reopen authority changed before mutation",
+            )
+        })?
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt)) => {
+            state.send(TransportEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host workspace reopen task failed before a response was produced",
+            ),
+        ),
+    }
+}
+
 async fn work_terminalization_handler(
     headers: HeaderMap,
     State(state): State<TransportState>,
@@ -1927,6 +2000,8 @@ fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusC
         | AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
         | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
         | AgentWorkspaceUpdateErrorCode::IdentityConflict
+        | AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+        | AgentWorkspaceUpdateErrorCode::TerminalWork
         | AgentWorkspaceUpdateErrorCode::TransactionConflict => StatusCode::CONFLICT,
         AgentWorkspaceUpdateErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -2177,6 +2252,8 @@ struct AgentWorkspaceUpdateErrorResponse {
     reason: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Box<gwt_core::workspace_projection::WorkTerminalDiagnosis>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic_reason: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mismatched_fields: Vec<String>,
@@ -2197,6 +2274,8 @@ fn workspace_update_error_response(
         AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => "workspace_ensure_required",
         AgentWorkspaceUpdateErrorCode::ProvenanceMismatch => "provenance_mismatch",
         AgentWorkspaceUpdateErrorCode::IdentityConflict => "identity_conflict",
+        AgentWorkspaceUpdateErrorCode::PrimaryActorRequired => "primary_actor_required",
+        AgentWorkspaceUpdateErrorCode::TerminalWork => "terminal_work",
         AgentWorkspaceUpdateErrorCode::TransactionConflict => "transaction_conflict",
         AgentWorkspaceUpdateErrorCode::Internal => "internal",
     };
@@ -2206,6 +2285,7 @@ fn workspace_update_error_response(
             code: error.code,
             reason,
             message: error.message,
+            details: error.details,
             diagnostic_reason: error.diagnostic_reason,
             mismatched_fields: error.mismatched_fields,
             recovery_operations: error.recovery_operations,
@@ -2281,11 +2361,14 @@ impl AgentPaneSessionScope {
                     child_started_at,
                 })
             }
-            FrontendEvent::PaneSendInput { session_id, text }
-                if session_id == self.grant.principal().session_id()
-                    && self.grant.principal().authorizes_producing_mutation() =>
+            FrontendEvent::PaneSendInput {
+                session_id,
+                text,
+                request_id,
+            } if session_id == self.grant.principal().session_id()
+                && self.grant.principal().authorizes_producing_mutation() =>
             {
-                Some(AgentFrontendRequest::SendInput { text })
+                Some(AgentFrontendRequest::SendInput { text, request_id })
             }
             FrontendEvent::RecoverRestoredWindow {
                 id,
@@ -3621,6 +3704,7 @@ mod tests {
             .filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-connected-promotion".to_string(),
                 text: "before-promotion".to_string(),
+                request_id: None,
             })
             .is_none());
 
@@ -3635,9 +3719,10 @@ mod tests {
             scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-connected-promotion".to_string(),
                 text: "after-promotion".to_string(),
+                request_id: None,
             }),
             Some(ScopedFrontendRequest::Agent {
-                request: AgentFrontendRequest::SendInput { text },
+                request: AgentFrontendRequest::SendInput { text, .. },
                 ..
             }) if text == "after-promotion"
         ));
@@ -3998,6 +4083,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-1".to_string(),
                     text: "hello".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "Inspection principal must not dispatch producing terminal input"
@@ -4006,6 +4092,7 @@ mod tests {
             .filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "foreign-claim".to_string(),
                 text: "hello".to_string(),
+                request_id: None,
             })
             .is_none());
         assert!(
@@ -4108,8 +4195,9 @@ mod tests {
             bound_scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-1".to_string(),
                 text: "hello".to_string(),
+                request_id: Some(73),
             }),
-            Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
+            Some(super::AgentFrontendRequest::SendInput { text, request_id: Some(73) }) if text == "hello"
         ));
         // Issue #3552 AC-4: unblocking peer *close* (Issue #3629 AC-9) must not
         // leak into peer *injection*. An ordinary agent — even a fully bound,
@@ -4121,6 +4209,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-peer".to_string(),
                     text: "hello".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "a producing ordinary agent still cannot inject into a peer Session's pane"
@@ -4146,6 +4235,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-1".to_string(),
                     text: "must-not-dispatch".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "Prepared principal must remain observation-only"
@@ -4365,6 +4455,13 @@ mod tests {
                 window_id: "pane".into(),
                 state: crate::WindowProcessStatus::Stopped,
             },
+            BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            BackendEvent::IssueMonitorStatus {
+                status: Box::new(
+                    crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
+                        .status_view(),
+                ),
+            },
             BackendEvent::TerminalStatus {
                 id: "pane".into(),
                 status: crate::WindowProcessStatus::Stopped,
@@ -4390,7 +4487,24 @@ mod tests {
             "GUI producer must enqueue the patch without encoding it"
         );
 
-        for (queue, encodings) in [(first, 1), (second, 0)] {
+        // The counter only observes events already allowed to defer. Inspect
+        // these new kinds directly so eager encoding cannot pass with zero.
+        for queue in [&first, &second] {
+            let state = queue.state.lock().unwrap();
+            for kind in ["issue_monitor_inbox", "issue_monitor_status"] {
+                let queued = state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.kind == kind)
+                    .unwrap();
+                assert!(
+                    matches!(&queued.payload, SharedOutboundPayload::Deferred(_)),
+                    "GUI producer must defer {kind} encoding"
+                );
+            }
+        }
+
+        for (queue, encodings) in [(first, 3), (second, 0)] {
             let expected = expected.clone();
             std::thread::spawn(move || {
                 DEFERRED_SERIALIZATIONS.with(|count| count.set(0));

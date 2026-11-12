@@ -816,22 +816,74 @@ struct IssueMetadata {
 /// Issues runners must terminate before their heavy lease expires.
 pub const ISSUE_INDEX_BUILD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-fn issue_store_exists(repo_dir: &Path) -> bool {
+/// Check the supported published Issue storage contract without opening Chroma.
+/// The Python reader additionally verifies that every member exists in the pool.
+pub fn issue_store_exists(repo_dir: &Path) -> bool {
+    use serde_json::Value;
+
     let generations = repo_dir.join("issues.gen");
     let pointer = generations.join("active.json");
-    let store = if pointer.exists() {
-        let generation = fs::read(&pointer)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value.get("generation")?.as_str().map(str::to_owned));
-        let Some(generation) = generation else {
-            return false;
-        };
-        generations.join(generation)
-    } else {
-        repo_dir.join("issues")
-    };
-    store.join("chroma.sqlite3").is_file()
+    let store = (|| -> Option<PathBuf> {
+        if !pointer.exists() {
+            return Some(repo_dir.join("issues"));
+        }
+        let pointer: Value = serde_json::from_slice(&fs::read(pointer).ok()?).ok()?;
+        let generation = pointer.get("generation")?.as_str()?;
+        if !generation.starts_with("gen-")
+            || generation.len() <= 4
+            || !generation
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+        let generation = generations.join(generation);
+        let schema_version = pointer.get("schema_version")?.as_u64()?;
+        if schema_version == 1 {
+            return pointer
+                .get("writer_protocol")
+                .is_none()
+                .then_some(generation);
+        }
+        if schema_version != 2
+            || pointer.get("writer_protocol")?.as_str() != Some("issues-records-v1")
+            || pointer.get("scope")?.as_str() != Some("issues")
+            || pointer.get("delta").is_some()
+        {
+            return None;
+        }
+        let membership: Value =
+            serde_json::from_slice(&fs::read(generation.join("membership.json")).ok()?).ok()?;
+        let members = membership.get("members")?.as_object()?;
+        let mut storage_ids = HashSet::new();
+        if membership.as_object()?.len() != 5
+            || membership.get("schema_version")?.as_u64() != Some(1)
+            || membership.get("writer_protocol")?.as_str() != Some("issues-records-v1")
+            || membership.get("record_layout")?.as_str() != Some("issue-spec-chunks-v1")
+            || pointer.get("document_count")?.as_u64() != Some(members.len() as u64)
+            || !members.iter().all(|(logical_id, storage_id)| {
+                !logical_id.is_empty()
+                    && logical_id.is_ascii()
+                    && storage_id.as_str().is_some_and(|storage_id| {
+                        storage_id.len() == 64
+                            && storage_id
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                            && storage_ids.insert(storage_id)
+                    })
+            })
+        {
+            return None;
+        }
+        let digest = crate::index::view::canonical_json_sha256(&membership["members"]);
+        if membership.get("members_digest")?.as_str() != Some(digest.as_str())
+            || pointer.get("membership_digest")?.as_str() != Some(digest.as_str())
+        {
+            return None;
+        }
+        Some(generations.join("record-stores/issues-records-v1/store"))
+    })();
+    store.is_some_and(|store| store.join("chroma.sqlite3").is_file())
 }
 
 /// Source drift can reuse vectors, but a missing/inconsistent manifest cannot.

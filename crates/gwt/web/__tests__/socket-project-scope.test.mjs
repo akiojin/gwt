@@ -918,7 +918,7 @@ test("first project connection reads saved Works settings without a Settings hos
 
 test("close choices and view receipts belong to their exact live connection and never queue", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key }); context.connectSocket();
-  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready']) {
+  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready', 'restart_wedged_owner']) {
     assert.equal(context.send({ kind }), 'unavailable');
   }
   assert.deepEqual(context.pendingMessages, []);

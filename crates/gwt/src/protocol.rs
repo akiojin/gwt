@@ -500,6 +500,11 @@ pub enum PmRequestTaskResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
+    /// Explicitly confirmed recovery of the authenticated project owner.
+    RestartWedgedOwner {
+        confirmed: bool,
+        recovery_id: String,
+    },
     RefreshOrphanDaemons,
     ReapOrphanDaemon {
         observation_token: String,
@@ -583,6 +588,10 @@ pub enum FrontendEvent {
         model: Option<String>,
         #[serde(default)]
         reasoning: Option<String>,
+        #[serde(default)]
+        codex_speed: Option<gwt_agent::CodexSpeed>,
+        #[serde(default)]
+        fast_mode: Option<bool>,
     },
     /// SPEC-3431 FR-026: stop the live PM and bring it back on the configured
     /// profile. Starts a NEW conversation — a history cannot cross agents.
@@ -773,6 +782,9 @@ pub enum FrontendEvent {
     PaneSendInput {
         session_id: String,
         text: String,
+        /// Origin-connection correlation only; never pane access authority.
+        #[serde(default)]
+        request_id: Option<u64>,
     },
     /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
     /// agent pane of the same project. Caller identity comes only from the
@@ -1686,10 +1698,13 @@ pub enum ProjectOwnerHealthState {
     Connecting,
     Healthy,
     Degraded,
+    Wedged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectOwnerHealthView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_id: Option<String>,
     pub project_key: String,
     pub state: ProjectOwnerHealthState,
     pub detail: Option<String>,
@@ -2128,6 +2143,12 @@ pub struct LocalAgentActivityAgentView {
     pub is_pm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_task: Option<String>,
+    /// Issue #7035 AC-1: an independent review window holds an Issues slot
+    /// without a roster member, so the Agents surface lists it separately.
+    #[serde(default)]
+    pub review_dispatch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2520,6 +2541,9 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
+        /// Current-card failure only; `reports` remain authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_error: Option<String>,
     },
     PmRequestTask {
         id: String,
@@ -2557,6 +2581,8 @@ pub enum BackendEvent {
         ok: bool,
         window_id: Option<String>,
         error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
     },
     /// A refused window operation carries no child/PTY lifecycle evidence.
     WindowCommandError {
@@ -2645,6 +2671,10 @@ pub enum BackendEvent {
         configured_agent_id: String,
         configured_model: Option<String>,
         configured_reasoning: Option<String>,
+        #[serde(default)]
+        configured_codex_speed: Option<gwt_agent::CodexSpeed>,
+        #[serde(default)]
+        configured_fast_mode: Option<bool>,
         running_agent_id: Option<String>,
         running_model: Option<String>,
         running_reasoning: Option<String>,
@@ -4356,7 +4386,7 @@ mod tests {
             matches!(request, FrontendEvent::LoadPmReports { request_id: 7, version: Some(cursor), .. } if cursor == version)
         );
         let event = BackendEvent::PmReports {
-            id: "pm".into(), session_id: Some("session".into()), error: None,
+            id: "pm".into(), session_id: Some("session".into()), error: None, current_error: None,
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
@@ -4616,8 +4646,18 @@ mod tests {
 
         assert!(matches!(
             event,
-            FrontendEvent::PaneSendInput { session_id, text }
+            FrontendEvent::PaneSendInput { session_id, text, request_id: None }
                 if session_id == "session-1" && text == "/goal all tests pass\r"
+        ));
+        let correlated: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "pane_send_input", "session_id": "session-1", "text": "hello\r", "request_id": 17
+        })).unwrap();
+        assert!(matches!(
+            correlated,
+            FrontendEvent::PaneSendInput {
+                request_id: Some(17),
+                ..
+            }
         ));
     }
 
@@ -4693,6 +4733,8 @@ mod tests {
             configured_agent_id: "claude".to_string(),
             configured_model: None,
             configured_reasoning: None,
+            configured_codex_speed: None,
+            configured_fast_mode: None,
             running_agent_id: None,
             running_model: None,
             running_reasoning: None,
@@ -4847,9 +4889,14 @@ mod tests {
             ok: false,
             window_id: None,
             error: Some("no pane bound to session session-1".to_string()),
+            request_id: None,
         };
 
         let value = serde_json::to_value(&event).expect("serialize pane_send_result");
+        assert!(
+            value.get("request_id").is_none(),
+            "legacy reply shape is unchanged"
+        );
         assert_eq!(
             value.get("kind").and_then(Value::as_str),
             Some("pane_send_result")

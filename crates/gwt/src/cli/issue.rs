@@ -264,6 +264,10 @@ pub(super) fn run<E: CliEnv>(
             &issue_numbers,
             out,
         )?,
+        IssueCommand::MonitorQueueAdopt {
+            project_root,
+            terminal,
+        } => run_monitor_queue_adopt(env, project_root.as_deref(), &terminal, out)?,
         IssueCommand::MonitorQueueList {
             project_root,
             terminal,
@@ -943,6 +947,7 @@ fn run_monitor_status<E: CliEnv>(
         output["needs_human_authority"] = needs_human_authority;
     }
     output["project_root"] = serde_json::json!(project_root);
+    output["caller_host_identity"] = serde_json::json!(crate::process::current_host_identity());
     output["reliability"] = super::reliability::load_report(&project_root, chrono::Utc::now());
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
@@ -2348,6 +2353,36 @@ fn check_expected_queue_order(
         }
     }
     Ok(())
+}
+
+fn run_monitor_queue_adopt<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    terminal: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+    let now = chrono::Utc::now().to_rfc3339();
+    let (prefs, adopted) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let adopted = monitor.adopt_terminal_queue(terminal, &now);
+        *prefs = monitor.prefs();
+        Ok(adopted)
+    })
+    .map_err(io_as_api_error)?;
+    let response = serde_json::json!({
+        "terminal": terminal,
+        "host_id": crate::process::current_hostname(),
+        "adopted": adopted,
+        "terminal_queues": prefs.terminal_queues,
+    });
+    out.push_str(&serde_json::to_string(&response).expect("queue adoption serializes"));
+    out.push('\n');
+    Ok(0)
 }
 
 fn run_monitor_queue_remove<E: CliEnv>(
@@ -5254,6 +5289,12 @@ pub fn validate_monitor_profiles_set(
             }
             Some(agent_id) => agent_id.command().to_ascii_lowercase(),
         };
+        if provider != "codex" && profile.codex_speed != gwt_agent::CodexSpeed::Off {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "codex_speed is only supported for Codex launch profiles",
+            ));
+        }
         let identity = crate::issue_monitor::launch_profile_identity(profile);
         if !providers.insert(identity) {
             return Err(io::Error::new(
@@ -7466,6 +7507,8 @@ fn fetch_linked_prs_bulk_via_gh_with_observer(
 #[derive(Default)]
 pub(crate) struct LinkedPrBulkRead {
     chunks: std::collections::VecDeque<LinkedPrReadChunk>,
+    /// Aliases per page; 0 until [`Self::sync_numbers`] sets it.
+    chunk_size: usize,
 }
 
 #[derive(Clone, Default)]
@@ -7478,6 +7521,8 @@ struct LinkedPrReadChunk {
 
 impl LinkedPrBulkRead {
     pub(crate) fn sync_numbers(&mut self, numbers: &[u64], chunk_size: usize) {
+        let chunk_size = chunk_size.clamp(1, LINKED_PR_BULK_CHUNK);
+        self.chunk_size = chunk_size;
         let requested: std::collections::BTreeSet<_> = numbers.iter().copied().collect();
         for chunk in &mut self.chunks {
             chunk.numbers.retain(|number| requested.contains(number));
@@ -7500,7 +7545,7 @@ impl LinkedPrBulkRead {
             .copied()
             .filter(|number| queued.insert(*number))
             .collect();
-        for chunk in missing.chunks(chunk_size.clamp(1, LINKED_PR_BULK_CHUNK)) {
+        for chunk in missing.chunks(chunk_size) {
             self.chunks.push_back(LinkedPrReadChunk {
                 numbers: chunk.to_vec(),
                 ..Default::default()
@@ -7529,9 +7574,28 @@ impl LinkedPrBulkRead {
         mut run: impl FnMut(&str) -> io::Result<String>,
         mut observe: impl FnMut(u64, &[LinkedPrSummary]),
     ) -> io::Result<()> {
-        let Some(original) = self.chunks.pop_front() else {
+        let Some(mut original) = self.chunks.pop_front() else {
             return Ok(());
         };
+        // Issue #6877 AC-2: a partial page fills with the next queued Issues of
+        // the same kind rather than costing one call each. Continuations never
+        // mix with first pages, so a failing deep history cannot starve them.
+        let chunk_size = if self.chunk_size == 0 {
+            LINKED_PR_BULK_CHUNK
+        } else {
+            self.chunk_size
+        };
+        let continuation = !original.cursors.is_empty();
+        for queued in &mut self.chunks {
+            let room = chunk_size.saturating_sub(original.numbers.len());
+            if room == 0 {
+                break;
+            }
+            if queued.cursors.is_empty() != continuation {
+                original.absorb(queued, room);
+            }
+        }
+        self.chunks.retain(|chunk| !chunk.numbers.is_empty());
         // A transport failure must retry with its original cursor and summaries.
         let mut next = original.clone();
         match next.read_page(&mut run, &mut observe) {
@@ -7560,6 +7624,29 @@ impl LinkedPrBulkRead {
 }
 
 impl LinkedPrReadChunk {
+    /// Move up to `room` Issues, with their cursors and partial summaries.
+    fn absorb(&mut self, other: &mut Self, room: usize) {
+        let moved: Vec<u64> = other
+            .numbers
+            .drain(..room.min(other.numbers.len()))
+            .collect();
+        for number in &moved {
+            if let Some(cursor) = other.cursors.remove(number) {
+                self.cursors.insert(*number, cursor);
+            }
+            if let Some(prs) = other.prs_by_issue.remove(number) {
+                self.prs_by_issue.insert(*number, prs);
+            }
+        }
+        let (seen, kept) = std::mem::take(&mut other.seen_cursors)
+            .into_iter()
+            .partition(|(issue, _)| moved.contains(issue));
+        other.seen_cursors = kept;
+        self.seen_cursors
+            .extend::<std::collections::BTreeSet<_>>(seen);
+        self.numbers.extend(moved);
+    }
+
     fn read_page(
         &mut self,
         run: &mut impl FnMut(&str) -> io::Result<String>,
@@ -11408,6 +11495,68 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_queue_adopt_moves_retired_host_and_releases_its_schedule() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[41], "operator", "2026-11-11T00:00:00Z");
+        let host = crate::process::current_hostname();
+        let mut prefs = monitor.prefs();
+        let queue = prefs.terminal_queues.remove(&host).unwrap();
+        prefs
+            .terminal_queues
+            .insert("retired-host".into(), queue.clone());
+        let mut unrelated = queue;
+        unrelated.entries[0].number = 42;
+        prefs
+            .terminal_queues
+            .insert("unrelated-host".into(), unrelated);
+        prefs.agent_issue_schedule.reservations = vec![
+            crate::issue_monitor::AgentIssueReservation {
+                host_id: "retired-host".into(),
+                agent_member_id: "member".into(),
+                issue_number: 41,
+                reason: crate::issue_monitor::AgentScheduleReason::QueueOrder,
+            },
+            crate::issue_monitor::AgentIssueReservation {
+                host_id: "unrelated-host".into(),
+                agent_member_id: "other-member".into(),
+                issue_number: 42,
+                reason: crate::issue_monitor::AgentScheduleReason::QueueOrder,
+            },
+        ];
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        let super::super::CliCommand::Issue(command) =
+            super::super::json_envelope::parse_operation(
+                "issue.monitor.queue.adopt",
+                &serde_json::json!({"terminal":"retired-host"}),
+            )
+            .expect("canonical retired-host adoption")
+        else {
+            panic!("expected Issue command")
+        };
+        let mut output = String::new();
+        run(&mut env, command, &mut output).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.terminal_queues.contains_key("retired-host"));
+        assert_eq!(saved.terminal_queues[&host].entries[0].number, 41);
+        assert_eq!(
+            saved.terminal_queues["unrelated-host"],
+            prefs.terminal_queues["unrelated-host"]
+        );
+        assert_eq!(
+            saved.agent_issue_schedule.reservations,
+            prefs.agent_issue_schedule.reservations[1..]
+        );
+        let reply: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(reply["adopted"], 1);
+    }
+
+    #[test]
     fn issue_monitor_queue_remove_all_terminals_preserves_unrelated_entries() {
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -12913,6 +13062,7 @@ mod tests {
                 account_label: None,
                 plan: Some("pro".to_string()),
                 extra_usage: None,
+                credits: None,
                 windows: vec![gwt_core::usage::UsageWindow::new(
                     gwt_core::usage::WindowKind::Weekly,
                     100.0,
@@ -13761,6 +13911,13 @@ mod tests {
             );
         }
         assert_eq!(
+            status
+                .as_object_mut()
+                .unwrap()
+                .remove("caller_host_identity"),
+            Some(serde_json::json!(crate::process::current_host_identity()))
+        );
+        assert_eq!(
             status,
             serde_json::json!({
                 // Issue #4413 AC-1/AC-3: this fallback is the rebuilt
@@ -13908,6 +14065,13 @@ mod tests {
         assert_eq!(code, 0);
         let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
         assert_eq!(status["last_scan_at"], "2020-01-01T00:00:00Z");
+        assert_eq!(
+            status["caller_host_identity"]["host_id"],
+            crate::process::current_hostname()
+        );
+        assert!(status["caller_host_identity"]["source"]
+            .as_str()
+            .is_some_and(|source| !source.is_empty()));
         assert!(
             status["scan_stall"]
                 .as_str()
@@ -15556,6 +15720,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: gwt_agent::CodexSpeed::Off,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -15951,6 +16116,21 @@ command = "my-agent-cli"
         let error = validate_monitor_profiles_set(&[duplicate.clone(), duplicate], None)
             .expect_err("duplicate custom candidate must be rejected");
         assert!(error.to_string().contains("duplicate launch candidate"));
+    }
+
+    #[test]
+    fn monitor_profiles_validate_codex_speed_without_affecting_claude_fast_mode() {
+        let mut profile = pool_profile("codex", &[]);
+        profile.codex_speed = gwt_agent::CodexSpeed::Ultrafast;
+        validate_monitor_profiles_set(&[profile.clone()], None).unwrap();
+        profile.agent_id = "claude".to_string();
+        let error = validate_monitor_profiles_set(&[profile.clone()], None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("codex_speed is only supported for Codex"));
+        profile.codex_speed = gwt_agent::CodexSpeed::Off;
+        profile.fast_mode = true;
+        validate_monitor_profiles_set(&[profile], None).unwrap();
     }
 
     /// Issue #4079 AC-3/AC-4/AC-5: reordering the pool with `{agent_id}`-only
@@ -19045,6 +19225,86 @@ command = "my-agent-cli"
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
     }
 
+    /// Issue #6877 AC-2: deep-timeline continuations share one page instead
+    /// of spending a separate `gh` call per leftover Issue.
+    #[test]
+    fn issue_6877_linked_pr_bulk_read_packs_continuations_into_one_page() {
+        let mut pending = LinkedPrBulkRead::default();
+        pending.sync_numbers(&(1..=10).collect::<Vec<_>>(), 5);
+        let mut linked = std::collections::BTreeMap::new();
+        let mut queries = Vec::new();
+        while !pending.is_empty() {
+            assert!(queries.len() < 6, "the read must converge");
+            if queries.len() == 1 {
+                // A later scan queues new first pages between continuations.
+                pending.sync_numbers(&(1..=11).collect::<Vec<_>>(), 5);
+            }
+            pending
+                .read_next_with(
+                    |query| {
+                        queries.push(query.to_owned());
+                        let repository: serde_json::Map<_, _> = (1..=11u64)
+                            .filter(|number| query.contains(&format!("i{number}: issue(")))
+                            .map(|number| {
+                                let deep = matches!(number, 1 | 6);
+                                let continuation = query.contains(&format!(
+                                    "i{number}: issue(number: {number}) {{\n      timelineItems(first: 100, after:"
+                                ));
+                                let nodes = if deep {
+                                    vec![serde_json::json!({
+                                        "__typename": "CrossReferencedEvent", "willCloseTarget": true,
+                                        "source": {"__typename": "PullRequest",
+                                            "number": number * 100 + u64::from(continuation), "state": "OPEN"}
+                                    })]
+                                } else {
+                                    vec![]
+                                };
+                                (format!("i{number}"), serde_json::json!({"timelineItems": {
+                                    "nodes": nodes, "pageInfo": {
+                                        "hasNextPage": deep && !continuation,
+                                        "endCursor": format!("c{number}")
+                                    }
+                                }}))
+                            })
+                            .collect();
+                        Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+                    },
+                    |number, prs| {
+                        linked.insert(number, prs.to_vec());
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(queries.len(), 4, "first pages plus one packed continuation");
+        let packed = queries
+            .iter()
+            .find(|query| query.contains("after:"))
+            .unwrap();
+        assert!(packed.contains("i1: issue(") && packed.contains("after: \"c1\""));
+        assert!(packed.contains("i6: issue(") && packed.contains("after: \"c6\""));
+        assert!(
+            !packed.contains("i11: issue("),
+            "first pages never wait on a continuation"
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|query| query.contains("after:"))
+                .count(),
+            1
+        );
+        assert_eq!(linked.len(), 11);
+        for number in [1u64, 6] {
+            assert_eq!(
+                linked[&number]
+                    .iter()
+                    .map(|pr| pr.number)
+                    .collect::<Vec<_>>(),
+                vec![number * 100, number * 100 + 1]
+            );
+        }
+    }
+
     #[test]
     fn linked_pr_bulk_read_resumes_one_small_page_per_scan_and_keeps_retry_state() {
         let numbers: Vec<u64> = (1..=80).collect();
@@ -20236,6 +20496,7 @@ command = "my-agent-cli"
                     session_mode: Default::default(),
                     skip_permissions: true,
                     fast_mode: false,
+                    codex_speed: gwt_agent::CodexSpeed::Off,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),

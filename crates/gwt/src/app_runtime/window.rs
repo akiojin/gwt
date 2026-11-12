@@ -660,14 +660,26 @@ impl AppRuntime {
         let Some(runtime) = self.runtimes.get(id) else {
             return Vec::new();
         };
-        self.queue_remote_runtime_command(
-            id,
+        if runtime.exit_confirmed && runtime.status == WindowProcessStatus::Stopped {
+            return self.apply_owner_status_projection(id, WindowProcessStatus::Stopped, None);
+        }
+        let agent = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.tab(&address.tab_id)?.workspace.window(&address.raw_id))
+            .is_some_and(crate::runtime_support::window_is_agent_pane);
+        let command = if agent {
+            gwt::project_runtime::events::OwnerCommand::Stop {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+            }
+        } else {
             gwt::project_runtime::events::OwnerCommand::Close {
                 id: runtime.owner_pane_id.clone(),
                 incarnation: runtime.incarnation,
-            },
-            super::RemoteRuntimeCommandKind::Stop,
-        )
+            }
+        };
+        self.queue_remote_runtime_command(id, command, super::RemoteRuntimeCommandKind::Stop)
     }
 
     /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's

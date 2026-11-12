@@ -3,10 +3,13 @@
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+export { createIslandContainer } from "../hosts/island-container.js";
 import { WorkspaceStateNotice } from "../surfaces/WorkspaceStateNotice.jsx";
+import { TaskHome } from "../surfaces/TaskHome.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
+  "task-home": TaskHome,
 });
 
 export function mountIsland(name, container, props) {

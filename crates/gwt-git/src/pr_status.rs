@@ -3810,8 +3810,17 @@ pub fn try_fetch_open_pr_numbers_by_branch_for_monitor(
 
 fn try_fetch_open_pr_numbers_by_branch_with<F>(
     repo_path: &Path,
-    mut run_gh: F,
+    run_gh: F,
 ) -> Result<std::collections::HashMap<String, u64>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    Ok(open_pr_numbers_by_branch(&try_fetch_open_pr_rows_with(
+        repo_path, run_gh,
+    )?))
+}
+
+fn try_fetch_open_pr_rows_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<serde_json::Value>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
@@ -3827,7 +3836,7 @@ where
         }
     })
     .map_err(|error| GwtError::Git(format!("gh api pulls open inventory: {error}")))?;
-    Ok(open_pr_numbers_by_branch(&pages.rows))
+    Ok(pages.rows)
 }
 
 fn open_pr_numbers_by_branch(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
@@ -3873,6 +3882,23 @@ pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
 /// Checked variant used by deadline-integral scans.
 pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+/// Discovery for a held review reuses the same open-pulls pages as the
+/// Monitor inventory. Explicit scans stay live. Actual review dispatch must
+/// still use [`try_fetch_pr_head_sha`] rather than this bounded discovery.
+pub fn try_fetch_pr_head_sha_for_monitor(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    if crate::gh_rest::monitor_read_max_age_secs().is_none() {
+        return try_fetch_pr_head_sha(repo_path, number);
+    }
+    let rows = try_fetch_open_pr_rows_with(repo_path, run_cached_list_command)?;
+    Ok(rows
+        .iter()
+        .find(|row| row.get("number").and_then(serde_json::Value::as_u64) == Some(number))
+        .and_then(|row| row.pointer("/head/sha"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string))
 }
 
 /// Fresh lifecycle evidence for Issues' launch decision, without
@@ -4722,9 +4748,93 @@ where
         .ok_or_else(|| GwtError::Other("gh pr view mergeable JSON: unparseable".to_string()))
 }
 
+/// The Reviewing gate's PR evidence — CI rollup, head SHA and mergeability —
+/// read in one `gh pr view` (Issue #6877 AC-2: one spawn per scan, not three).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrGateReadback {
+    /// `statusCheckRollup` array JSON (`"[]"` when absent, fail-closed).
+    pub status_check_rollup: String,
+    pub head_sha: Option<String>,
+    pub merge: PrMergeReadback,
+}
+
+pub fn try_fetch_pr_gate_readback(repo_path: &Path, number: u64) -> Result<PrGateReadback> {
+    try_fetch_pr_gate_readback_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_gate_readback_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<PrGateReadback>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "view",
+            &number,
+            "--json",
+            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view gate readback: {}",
+            output.stderr.trim()
+        )));
+    }
+    let merge = parse_pr_merge_readback(&output.stdout)
+        .ok_or_else(|| GwtError::Other("gh pr view gate readback JSON: unparseable".to_string()))?;
+    Ok(PrGateReadback {
+        status_check_rollup: extract_status_check_rollup(&output.stdout),
+        head_sha: parse_pr_head_sha(&output.stdout),
+        merge,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_readback_reads_rollup_head_and_mergeability_in_one_call() {
+        let mut calls = 0;
+        let readback = try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, args| {
+            calls += 1;
+            assert_eq!(
+                args,
+                [
+                    "pr",
+                    "view",
+                    "7",
+                    "--json",
+                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus"
+                ]
+            );
+            Ok(GhCliOutput {
+                success: true,
+                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+                stderr: String::new(),
+            })
+        })
+        .expect("gate readback");
+        assert_eq!(calls, 1);
+        assert!(readback.status_check_rollup.contains("\"build\""));
+        assert_eq!(readback.head_sha.as_deref(), Some("abc"));
+        assert_eq!(readback.merge.state, "OPEN");
+        assert!(
+            try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, _| Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "boom".to_string(),
+            }))
+            .is_err()
+        );
+    }
 
     /// Issue #4726 AC-1: the two states an armed auto-merge cannot get past on
     /// its own are told apart from the ones that resolve themselves.
