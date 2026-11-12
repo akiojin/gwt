@@ -29,6 +29,7 @@ function reportDisplayText(report) {
 export function createPmWindowModel() {
   const model = createUiStateStore({ windows: {}, changedWindowId: null, resyncRequest: null });
   let requestSequence = 0;
+  let paneResultSequence = 0;
   const requests = new Map();
   const validVersion = version => version && typeof version.epoch === 'string' && version.epoch.length > 0
     && Number.isSafeInteger(version.revision) && version.revision > 0;
@@ -53,7 +54,7 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null, conversation: null, chatSend: null };
+      requestTasks: null, requestTasksError: null, conversation: null, chatSend: null, paneResult: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -120,18 +121,35 @@ export function createPmWindowModel() {
         if (JSON.stringify(conversation) === JSON.stringify(previous.conversation)) return state;
         next = { ...next, conversation };
       } else if (event.kind === 'pane_send_result') {
-        // Palette/CLI replies and expired attempts cannot settle a Chat send.
-        // Session refusals omit the window, but still carry the exact request ID.
-        if (!Number.isSafeInteger(event.request_id)) return state;
-        const windowId = Object.keys(state.windows).find(id => state.windows[id].chatSend?.status === 'pending'
-          && state.windows[id].chatSend.sequence === event.request_id
-          && (event.window_id == null || event.window_id === id));
-        const pending = state.windows[windowId];
-        if (pending?.chatSend?.status !== 'pending') return state;
+        // Every result is receipted on its window: results do not always
+        // carry a correlation ID (palette / CLI sends), and the Decide
+        // surface settles the answer it sent from the window receipt. Only a
+        // result carrying the exact request ID may settle a Chat send, so
+        // palette replies and expired attempts cannot clear the composer.
+        // Session refusals omit the window, but still carry the request ID.
+        const correlatedId = Number.isSafeInteger(event.request_id)
+          ? Object.keys(state.windows).find(id => state.windows[id].chatSend?.status === 'pending'
+            && state.windows[id].chatSend.sequence === event.request_id
+            && (event.window_id == null || event.window_id === id))
+          : undefined;
+        const pendingIds = Object.keys(state.windows)
+          .filter(id => state.windows[id].chatSend?.status === 'pending');
+        const receiptId = correlatedId ?? event.window_id
+          ?? (pendingIds.length === 1 ? pendingIds[0] : undefined);
+        let next = state;
+        const receiptWindow = receiptId != null ? state.windows[receiptId] : undefined;
+        if (receiptWindow) {
+          next = { ...state, windows: { ...state.windows, [receiptId]: { ...receiptWindow,
+            paneResult: { receipt: ++paneResultSequence, ok: Boolean(event.ok),
+              error: event.ok ? null : event.error || 'The PM pane refused the message.' },
+            revision: receiptWindow.revision + 1 } }, changedWindowId: receiptId };
+        }
+        const pending = correlatedId != null ? next.windows[correlatedId] : undefined;
+        if (pending?.chatSend?.status !== 'pending') return next;
         const chatSend = { sequence: pending.chatSend.sequence, status: event.ok ? 'sent' : 'failed',
           error: event.ok ? null : event.error || 'The PM pane refused the message.' };
-        return { ...state, windows: { ...state.windows, [windowId]: { ...pending, chatSend,
-          revision: pending.revision + 1 } }, changedWindowId: windowId };
+        return { ...next, windows: { ...next.windows, [correlatedId]: { ...pending, chatSend,
+          revision: pending.revision + 1 } }, changedWindowId: correlatedId };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
@@ -365,6 +383,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const answeredDecisions = new Map();
   let pendingDecision = null;
   let decisionSendError = null;
+  let observedPaneReceipt = 0;
   function decisionItems(state) {
     return (state?.reports || []).filter(report => report.kind === 'decision').map(report => {
       const summary = report.structured?.summary ?? null;
@@ -396,15 +415,36 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       pendingDecision = null;
     }
   }
+  // A result without a correlation ID never settles the composer send, but
+  // its window receipt still settles a Decide answer waiting on it: the pane
+  // serializes sends, so the first result receipted after the answer was
+  // sent is that answer's outcome.
+  function observePaneResult(result) {
+    if (!result || result.receipt <= observedPaneReceipt) return;
+    observedPaneReceipt = result.receipt;
+    if (!pendingDecision || result.receipt <= pendingDecision.afterReceipt) return;
+    if (result.ok) {
+      answeredDecisions.set(pendingDecision.id, pendingDecision.optionText);
+      pendingDecision = null;
+      decisionSendError = null;
+    } else {
+      decisionSendError = { id: pendingDecision.id,
+        message: result.error || 'The answer could not be sent.' };
+      pendingDecision = null;
+    }
+  }
   function renderDecisions(state) {
     observeDecisionSend(state?.chatSend ?? null);
+    observePaneResult(state?.paneResult ?? null);
     const answered = {};
     for (const [id, optionText] of answeredDecisions) answered[id] = optionText;
     taskDecisions.receive({
       loaded: Boolean(state?.loaded),
       error: state?.error ?? null,
       decisions: decisionItems(state),
-      sending: state?.chatSend?.status === 'pending',
+      // The island's in-flight flag follows the answer's own lifecycle; the
+      // shared composer send slot is guarded separately in answerDecision.
+      sending: pendingDecision != null,
       pendingId: pendingDecision?.id ?? null,
       sendError: decisionSendError,
       answered,
@@ -414,7 +454,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (disposed || chatSend?.status === 'pending' || pendingDecision) return;
     const optionText = item.options?.[optionIndex];
     if (optionText == null) return;
-    pendingDecision = { id: item.id, optionText, afterSequence: chatSend?.sequence ?? 0 };
+    pendingDecision = { id: item.id, optionText, afterSequence: chatSend?.sequence ?? 0,
+      afterReceipt: latestState?.paneResult?.receipt ?? 0 };
     decisionSendError = null;
     onSend(`Answer to "${item.question}": ${optionIndex + 1}. ${optionText}`);
     const send = latestState?.chatSend ?? null;
@@ -703,6 +744,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     answeredDecisions.clear();
     pendingDecision = null;
     decisionSendError = null;
+    observedPaneReceipt = 0;
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
