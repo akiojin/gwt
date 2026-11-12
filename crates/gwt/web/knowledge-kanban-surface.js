@@ -3424,10 +3424,14 @@ export function createKnowledgeKanbanSurface({
       }
 
       function queueProjectedEntry(entry) {
-        entry = { ...entry, human_attention:
-          issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null };
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
+        // Cache-only rows retain their Work attention until the live inbox
+        // arrives; a cached descriptor is never an authoritative observation.
+        entry = { ...entry };
+        delete entry.human_attention;
+        if (live) entry = { ...entry, human_attention:
+          issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null,
+          state: live.issue.state ?? entry.state, monitor_state: live.state,
           exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
         const diagnosis = live?.error_message;
         entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
