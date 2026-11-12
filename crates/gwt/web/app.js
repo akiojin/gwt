@@ -4196,7 +4196,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4258,6 +4258,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onTaskDetail: key => {
+            const request = requestPmTaskDetail(windowData.id, key);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowData.id, request.request_id);
+            window.setTimeout(() => markPmTaskDetailUnavailable(windowData.id, request.request_id), 30000);
+          },
           onOpenTerminal: sessionId => {
             if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
             openSurface("works");
@@ -5204,6 +5210,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "pm_reports":
           case "pm_conversation":
+          case "pm_request_task":
           case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;

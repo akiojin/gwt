@@ -12327,6 +12327,7 @@ impl AppRuntime {
                 id,
                 request_id,
                 task_id,
+                task_key,
                 receipt_operation_id,
             } => self.pm_request_task_events(
                 context,
@@ -12335,6 +12336,7 @@ impl AppRuntime {
                 request_id,
                 pm_chat::PmRequestTaskOperation::Read {
                     task_id,
+                    task_key,
                     receipt_operation_id,
                 },
             ),
