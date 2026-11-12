@@ -144,34 +144,37 @@ fi
 # browser-check-hook-authority-end
 
 # Audit the managed hook fallback with the real HOME, as required by browser-check.
-ALLOW_MISSING_LOGICAL_FALLBACK=false
-if [ "$CHECK_HOOK_BIN" = gwtd ] && ! command -v gwtd >/dev/null 2>&1; then
-  ALLOW_MISSING_LOGICAL_FALLBACK=true
-fi
+# The typed managed_browser preflight classifies retained failures; a recovered,
+# fail-open or foreign one does not block the isolated launch.
 assert_hook_health() {
-  if ! jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
-    [.issues[] | select(
-      ($allow_missing_logical and startswith("managed hook binary missing: ") and endswith(" uses gwtd"))
-      or (startswith("managed hook failure: ") and test(" state=fail-open( |$)")) | not)] as $blocking
-    | .status != "inactive" and ($blocking | length == 0)
+  local health_json
+  health_json="$(cat)"
+  if ! printf '%s' "$health_json" | jq -e '
+    .preflight.result == "proceed"
+    and .preflight.schema_version == 1
+    and .preflight.context == "current"
+    and .preflight.normal_completion == "normal"
+    and .preflight.convergence == "converged"
+    and (.preflight.reasons | type == "array" and length == 0)
+    and (.preflight.diagnostics | type == "array")
+    and all(.preflight.diagnostics[];
+      (.id | type == "string" and length > 0)
+      and (.classification as $kind | ["recovered", "fail_open", "foreign"] | index($kind) != null))
   ' >/dev/null; then
     echo 'browser-check hook convergence failed' >&2
+    printf '%s' "$health_json" | jq '{preflight, health}' >&2
     return 1
   fi
 }
 # browser-check-hook-repair-begin
 HOOK_DOCTOR_ENVELOPE="$(
   jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
-    --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
-    '{schema_version:1,operation:"hook.doctor",params:{repair:true,expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+    '{schema_version:1,operation:"hook.doctor",params:{purpose:"managed_browser",repair:true,expected_hook_bin:$expected_hook_bin}}' \
     | env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD"
 )"
-HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson | .health')"
+HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" > "$CHECK_HOME/hook-doctor-health.json"
-if ! printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | assert_hook_health; then
-  printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | jq '{status,issues}' >&2
-  exit 1
-fi
+printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | assert_hook_health
 # browser-check-hook-repair-end
 
 ENV_ARGS=(HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1
@@ -179,7 +182,13 @@ ENV_ARGS=(HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" GIT_TERMINAL_PROMPT=0 GH_
 
 # browser-check-process-cleanup-begin
 CHECK_PID=""
+CHECK_KEEPALIVE_PID=""
 cleanup_browser_check() {
+  if [ -n "$CHECK_KEEPALIVE_PID" ]; then
+    kill -TERM "$CHECK_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$CHECK_KEEPALIVE_PID" 2>/dev/null || true
+    CHECK_KEEPALIVE_PID=""
+  fi
   if [ -z "$CHECK_PID" ]; then return 0; fi
   if kill -0 "$CHECK_PID" 2>/dev/null; then
     kill -TERM "$CHECK_PID" 2>/dev/null || true
@@ -247,17 +256,39 @@ done
 # browser-check-hook-audit-begin
 HOOK_HEALTH_ENVELOPE="$(
   jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
-    --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
-    '{schema_version:1,operation:"hook.health",params:{expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+    '{schema_version:1,operation:"hook.doctor",params:{purpose:"managed_browser",expected_hook_bin:$expected_hook_bin}}' \
     | env -u GWT_BIN_PATH "$CHECKOUT_GWTD"
 )"
 HOOK_HEALTH_JSON="$(printf '%s' "$HOOK_HEALTH_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_HEALTH_JSON" > "$CHECK_HOME/hook-health.json"
-if ! printf '%s' "$HOOK_HEALTH_JSON" | assert_hook_health; then
-  printf '%s' "$HOOK_HEALTH_JSON" | jq '{status,issues}' >&2
+printf '%s' "$HOOK_HEALTH_JSON" | assert_hook_health
+# browser-check-hook-audit-end
+
+# Issue #5219: a --no-tray instance exits once no GUI client is connected, which
+# happens between tests that close their page. Retain one read-only Hub
+# connection until the suite ends. This client and the server belong to this shell.
+CHECK_KEEPALIVE_READY="$CHECK_HOME/keepalive-ready"
+node --input-type=module - "$CHECK_URL" "$CHECK_KEEPALIVE_READY" \
+  > "$CHECK_HOME/keepalive.log" 2>&1 <<'JS' &
+import { writeFileSync } from "node:fs";
+const url = new URL("/ws", process.argv[2]);
+url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+const socket = new WebSocket(url);
+socket.addEventListener("open", () => writeFileSync(process.argv[3], "ready"));
+socket.addEventListener("error", (event) => { console.error(event.error); process.exit(1); });
+socket.addEventListener("close", () => process.exit(1));
+JS
+CHECK_KEEPALIVE_PID=$!
+for ((CHECK_WAIT=0; CHECK_WAIT<100; CHECK_WAIT++)); do
+  if [ -s "$CHECK_KEEPALIVE_READY" ]; then break; fi
+  if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+if [ ! -s "$CHECK_KEEPALIVE_READY" ] || ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
+  cat "$CHECK_HOME/keepalive.log" >&2
+  echo 'browser-check Hub connection failed' >&2
   exit 1
 fi
-# browser-check-hook-audit-end
 
 # Keep the runner on the real HOME so its pinned browser cache is available.
 # Only the owned checkout process receives CHECK_HOME. Extra arguments include
@@ -268,3 +299,9 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
     --workers=1 --output "$CHECK_HOME/playwright-artifacts" \
     "crates/gwt/playwright/tests/$CHECK_SUITE-live.spec.ts" \
     --project="$CHECK_PROJECT" "$@"
+
+if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
+  cat "$CHECK_HOME/keepalive.log" >&2
+  echo 'browser-check Hub connection dropped during the suite' >&2
+  exit 1
+fi
