@@ -55,7 +55,30 @@ struct StoredConfig {
     bind: String,
     tls_certificate: PathBuf,
     tls_private_key: PathBuf,
+    #[serde(deserialize_with = "deserialize_object")]
     limits: CoordinatorLimits,
+}
+
+fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with named fields")
+        }
+
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<T, M::Error> {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
 }
 
 /// Validated syntax only. Paths have not been opened or proven private.
@@ -72,8 +95,10 @@ impl CoordinatorConfig {
         if bytes.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge);
         }
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
         let config: StoredConfig =
-            serde_json::from_slice(bytes).map_err(|_| ConfigError::InvalidJson)?;
+            deserialize_object(&mut deserializer).map_err(|_| ConfigError::InvalidJson)?;
+        deserializer.end().map_err(|_| ConfigError::InvalidJson)?;
         if config.schema_version != 1 {
             return Err(ConfigError::InvalidSchema);
         }
@@ -224,6 +249,26 @@ mod tests {
                 .replacen('{', "{\"schema_version\":1,", 1);
         assert!(matches!(
             CoordinatorConfig::from_json(duplicate.as_bytes()),
+            Err(ConfigError::InvalidJson)
+        ));
+        let value = valid();
+        let positional = json!([
+            value["schema_version"],
+            value["origin"],
+            value["bind"],
+            value["tls_certificate"],
+            value["tls_private_key"],
+            value["limits"]
+        ]);
+        let mut value = valid();
+        value["limits"] = json!([64, 8, 32, 64, 256, 512]);
+        assert_eq!(
+            [parse(&positional).err(), parse(&value).err()],
+            [Some(ConfigError::InvalidJson); 2]
+        );
+        let trailing = format!("{} true", valid());
+        assert!(matches!(
+            CoordinatorConfig::from_json(trailing.as_bytes()),
             Err(ConfigError::InvalidJson)
         ));
         assert!(matches!(
