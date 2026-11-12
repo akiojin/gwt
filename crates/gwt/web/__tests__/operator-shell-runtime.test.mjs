@@ -11,6 +11,22 @@ const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 
+test("Issues strip reads the shared human-attention summary on inbox-only updates", async () => {
+  const { subscribeIssueMonitorStatus } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const model = createUiStateStore({ status: { enabled: false }, humanAttention: {
+    count: null, summary: "", byIssue: {},
+  } }, { scheduleFrame: run => { run(); return () => {}; } });
+  const unsubscribe = subscribeIssueMonitorStatus(document, model);
+  const cell = document.getElementById("op-strip-issue-monitor");
+  model.update(state => ({ ...state, humanAttention: { count: 2, summary: "Needs human 2", byIssue: {} } }));
+  assert.match(cell.title, /Needs human 2/);
+  model.update(state => ({ ...state, humanAttention: { count: 0, summary: "Needs human 0", byIssue: {} } }));
+  assert.match(cell.title, /Needs human 0/);
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Off");
+  unsubscribe();
+});
+
 test("runtime health batches a frame into the same latest immutable cell and detail snapshot", async () => {
   const { subscribeRuntimeHealth } = await importOperatorShell();
   assert.equal(typeof subscribeRuntimeHealth, "function");

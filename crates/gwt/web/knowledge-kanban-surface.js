@@ -426,8 +426,10 @@ function issueRowSecondaryItems({ entry, work, attention, primary, localLive = n
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
   const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
     issueQueueColumn(entry, work, localLive) === "active";
+  const canonicalHuman = entry?.monitor_state === "needs_human" && Object.hasOwn(entry, "human_attention");
   const reason = cleanupPending ? "Session cleanup pending"
-    : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+    : stopReason ?? (canonicalHuman ? entry.human_attention?.reason || ""
+      : entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -1183,7 +1185,8 @@ export function createKnowledgeKanbanSurface({
           ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       }
       let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
-      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, status: {
+      const issueMonitorModel = createUiStateStore({ inboxByIssue: {},
+        humanAttention: { count: null, summary: "", byIssue: {} }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1412,6 +1415,7 @@ export function createKnowledgeKanbanSurface({
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
+            issueMonitorModel.read().humanAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1533,7 +1537,17 @@ export function createKnowledgeKanbanSurface({
         const inboxByIssue = Object.fromEntries((Array.isArray(items) ? items : [])
           .filter(item => Number.isFinite(item?.issue?.number))
           .map(item => [item.issue.number, item]));
-        issueMonitorModel.update(model => ({ ...model, inboxByIssue }));
+        // SPEC #5016 AC-HS1/HS2: derive once from the complete, deduplicated
+        // inbox. A deliberate stop is Held, not a pending human decision.
+        const byIssue = Object.fromEntries(Object.values(inboxByIssue)
+          .filter(item => item.state === "needs_human" && issueEntryStateKey(item.issue) === "open"
+            && issueStopReason({ monitor_state: item.state, error_message: item.error_message }) === null)
+          .map(item => [item.issue.number, {
+            reason: String(item.error_message || "").trim() || "Human decision required",
+          }]));
+        const count = Object.keys(byIssue).length;
+        issueMonitorModel.update(model => ({ ...model, inboxByIssue,
+          humanAttention: { count, summary: `Needs human ${count}`, byIssue } }));
       }
 
       function applyIssueMonitorQueueResult(event) {
@@ -3410,6 +3424,8 @@ export function createKnowledgeKanbanSurface({
       }
 
       function queueProjectedEntry(entry) {
+        entry = { ...entry, human_attention:
+          issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null };
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
         if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
           exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
@@ -4470,6 +4486,14 @@ export function createKnowledgeKanbanSurface({
         pill.dataset.stateKey = row.primary.key;
         explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
+        if (entry.human_attention) {
+          const reason = row.secondary.find(item => item.key === "reason");
+          if (reason) {
+            const node = createNode("span", "knowledge-row-secondary-item", reason.label);
+            node.dataset.key = "reason";
+            status.appendChild(node);
+          }
+        }
         if (work?.pr_number) {
           const prState = String(work.pr_state || "").trim();
           const pr = createNode(
