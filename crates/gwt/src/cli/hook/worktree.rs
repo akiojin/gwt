@@ -69,7 +69,9 @@ mod tests {
 
     #[test]
     fn registered_pm_cd_boundary_survives_an_unrelated_cwd() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&fallback_cwd());
