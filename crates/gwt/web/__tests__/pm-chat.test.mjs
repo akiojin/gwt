@@ -139,6 +139,56 @@ test('Home is the default PM view; Tasks preserves the unfinished filter and sta
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
 });
 
+test('Task criteria disclose bounded literal previews and retain the same Task disclosure', () => {
+  const { root, model, update, view } = fixture();
+  const criteria = { purpose: 'Keep <img src=x> as literal purpose',
+    completion_conditions: ['Verify <script>literal</script>', 'Confirm the original outcome'], completion_condition_total: 7 };
+  let task = trackedTask('known', { source_key: 'source', criteria_preview: criteria });
+  const publish = () => update([report()], null, { request_tasks: taskOverview([task, trackedTask('legacy')]) });
+  publish();
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep my unfinished request';
+  const disclosure = () => root.querySelector('[data-task-key="known"] details.pm-chat__task-criteria');
+  const initial = disclosure();
+  assert.ok(initial, 'saved criteria use a native disclosure');
+  assert.equal(initial.querySelector('summary').textContent, 'Purpose and completion criteria');
+  assert.equal(initial.hasAttribute('open'), false);
+  assert.ok(initial.textContent.includes(criteria.purpose));
+  assert.deepEqual([...initial.querySelectorAll('ol li')].map(node => node.textContent), criteria.completion_conditions);
+  assert.match(initial.textContent, /Showing 2 of 7 completion criteria\. Text is limited to 240 characters per item\./);
+  assert.equal(initial.querySelector('img, script'), null, 'preview content stays literal');
+  const legacy = root.querySelector('[data-task-key="legacy"]');
+  assert.equal(legacy.querySelector('.pm-chat__task-criteria'), null);
+  assert.ok(legacy.querySelector('button'), 'an older summary remains usable');
+  initial.setAttribute('open', '');
+  publish();
+  assert.equal(disclosure(), initial, 'report-only polls retain the disclosure node');
+  task = { ...task, title: 'Updated title', criteria_preview: { ...criteria, purpose: 'Updated purpose' } };
+  publish();
+  assert.equal(disclosure().hasAttribute('open'), true, 'same-key Task updates retain the disclosure');
+  assert.ok(disclosure().textContent.includes('Updated purpose'));
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'original', role: 'user', text: 'Original request', source_key: 'source' }]));
+  assert.equal(disclosure().hasAttribute('open'), true, 'source-link arrival retains the disclosure');
+  update([], null, { request_tasks: { state: 'error', message: 'Unreadable task store' } });
+  assert.equal(disclosure().hasAttribute('open'), true, 'a stale confirmed preview stays expanded');
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /last confirmed list/);
+  assert.equal(draft.value, 'Keep my unfinished request');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(root.querySelectorAll('.pm-chat__task-criteria').length, 0, 'a new PM Session clears old criteria');
+});
+
+test('Task criteria disclosure uses Operator tokens and a visible keyboard focus ring', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  for (const selector of ['\\.pm-chat__task-criteria', '\\.pm-chat__task-criteria > summary']) {
+    const rule = css.match(new RegExp(`${selector}\\s*\\{([^}]+)\\}`));
+    assert.ok(rule, `${selector} has an Operator style rule`);
+    assert.match(rule[1], /var\(--/);
+    assert.doesNotMatch(rule[1], /#[0-9a-f]|rgba?\(/i);
+  }
+  assert.match(css, /\.pm-chat__task-criteria > summary:focus-visible\s*\{[^}]*outline:[^}]*var\(--color-focus-ring\)/);
+});
+
 test('A current-card failure keeps the last explanation but never hides newly saved reports (#6950)', () => {
   const { root, model, update } = fixture();
   const confirmed = { status: { items: [{ kind: 'waiting', text: 'Watching CI', started_at: '2026-10-13T09:00:00Z' }], next_trigger: 'CI result' }, request_tasks: taskOverview() };

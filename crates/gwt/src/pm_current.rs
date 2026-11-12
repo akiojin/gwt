@@ -330,8 +330,10 @@ mod tests {
         let draft = |id: String| TaskDraft {
             title: "界".repeat(300),
             id,
-            purpose: "private purpose".into(),
-            completion_conditions: vec!["original outcome".into()],
+            purpose: "目的".repeat(150),
+            completion_conditions: (0..6)
+                .map(|i| format!("{i}:{}", "条件".repeat(150)))
+                .collect(),
             issue_numbers: vec![],
             goal_ids: vec![],
             assignee: Some("PM".into()),
@@ -370,21 +372,33 @@ mod tests {
         assert!(rows.iter().all(|row| row["source_key"] == source_key));
         assert!(rows[0]["title"].as_str().unwrap().chars().count() <= 241);
         assert!(rows[0]["parent_key"].as_str().is_some());
+        let preview = &rows[0]["criteria_preview"];
+        assert_eq!(preview["purpose"], format!("{}…", "目的".repeat(120)));
+        assert_eq!(preview["completion_condition_total"], 6);
+        let conditions = preview["completion_conditions"].as_array().unwrap();
+        assert_eq!(conditions.len(), 5);
+        for (index, condition) in conditions.iter().enumerate() {
+            assert_eq!(
+                condition,
+                &serde_json::json!(format!("{index}:{}…", "条件".repeat(119)))
+            );
+        }
         let mut legacy = overview.clone();
         for row in legacy["tasks"].as_array_mut().unwrap() {
             row.as_object_mut().unwrap().remove("source_key");
+            row.as_object_mut().unwrap().remove("criteria_preview");
         }
         let legacy: PmTaskOverview = serde_json::from_value(legacy).unwrap();
-        assert!(serde_json::to_value(legacy).unwrap()["tasks"][0]
-            .get("source_key")
-            .is_none());
+        let legacy = serde_json::to_value(legacy).unwrap();
+        assert!(legacy["tasks"][0].get("source_key").is_none());
+        assert!(legacy["tasks"][0].get("criteria_preview").is_none());
         let text = overview.to_string();
         for private in [
             "private-root",
             "private-child",
             "private-source",
             "PRIVATE ORIGINAL",
-            "private purpose",
+            "5:条件",
             "authority",
             "receipt",
         ] {

@@ -2182,7 +2182,10 @@ shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
 shows completed and cancelled tasks. The preview contains at most 50 tasks and
 shows the total and any requests awaiting classification. Long summaries are
-shortened; the saved tasks remain complete. A read failure retains the last
+shortened; the saved tasks remain complete. Expand **Purpose and completion
+criteria** on a task to see its purpose and the first five completion criteria.
+The preview shows the full criteria count and limits each item to 240 characters
+(with an ellipsis for shortened text). A read failure retains the last
 confirmed list with a warning. Task editing, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.

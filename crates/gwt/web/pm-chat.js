@@ -610,6 +610,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       : [];
     const nextDigest = JSON.stringify([includeCompleted, rows, sources.map(message => [message.sourceKey, message.id])]);
     if (nextDigest !== tasksDigest) {
+      const focusedCriteriaKey = taskList.contains(document.activeElement)
+        && document.activeElement?.matches('.pm-chat__task-criteria > summary')
+        ? document.activeElement.closest('.pm-chat__task')?.dataset.taskKey : null;
       tasksDigest = nextDigest;
       const parents = new Map(rows.map(task => [task.key, task.title]));
       const labels = { pending: 'Pending', in_progress: 'In progress', waiting: 'Waiting', completed: 'Completed', cancelled: 'Cancelled' };
@@ -623,6 +626,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         const source = sources.find(message => message.sourceKey === task.source_key);
         const digest = JSON.stringify([task, parents.get(task.parent_key), source?.id]);
         if (row.dataset.digest !== digest) {
+          const previousCriteria = row.querySelector('.pm-chat__task-criteria');
+          const criteriaOpen = previousCriteria?.hasAttribute('open');
           row.dataset.digest = digest;
           row.classList.toggle('pm-chat__task--child', !!task.parent_key);
           const title = element('h3', '', task.title);
@@ -632,6 +637,18 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
           if (task.review_required) fields.push(element('p', 'pm-chat__task-review', 'PM reassessment required'));
           if (task.wait_reason) fields.push(element('p', '', `Waiting: ${task.wait_reason}`));
           if (task.next_action) fields.push(element('p', '', `Next: ${task.next_action}`));
+          if (task.criteria_preview) {
+            const preview = task.criteria_preview;
+            const criteria = element('details', 'pm-chat__task-criteria');
+            if (criteriaOpen) criteria.setAttribute('open', '');
+            const conditions = element('ol', '');
+            for (const condition of preview.completion_conditions) conditions.append(element('li', '', condition));
+            criteria.append(element('summary', '', 'Purpose and completion criteria'),
+              element('p', '', `Purpose: ${preview.purpose}`),
+              element('p', 'pm-chat__task-meta', `Preview. Showing ${preview.completion_conditions.length} of ${preview.completion_condition_total} completion criteria. Text is limited to 240 characters per item.`),
+              conditions);
+            fields.push(criteria);
+          }
           const link = element('button', '', 'Show in conversation');
           link.type = 'button';
           link.disabled = !source;
@@ -657,6 +674,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       if (nodes.length !== taskList.children.length || nodes.some((node, index) => taskList.children[index] !== node)) {
         taskList.replaceChildren(...nodes);
       }
+      if (focusedCriteriaKey) nodes.find(node => node.dataset.taskKey === focusedCriteriaKey)
+        ?.querySelector('.pm-chat__task-criteria > summary')?.focus();
       const keys = new Set(rows.map(task => task.key));
       for (const key of taskRows.keys()) if (!keys.has(key)) taskRows.delete(key);
     }

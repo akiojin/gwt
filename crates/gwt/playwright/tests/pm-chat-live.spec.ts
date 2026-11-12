@@ -1724,7 +1724,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1960,8 +1960,13 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const sourceId = `native:${createHash('sha256').update(JSON.stringify(['codex', nativeConversation, 'task-human'])).digest('hex')}`;
       const overviewSource = { ...seed.sources[pendingTask.source_id], id: sourceId,
         authority: { ...seed.sources[pendingTask.source_id].authority, turn_id: 'synthetic-overview-turn' } };
+      const criteriaPurpose = '目的😀'.repeat(90) + 'PURPOSE_TAIL_NOT_IN_PREVIEW';
+      const criteriaCondition = '条件🧪'.repeat(90) + 'CONDITION_TAIL_NOT_IN_PREVIEW';
+      const criteriaConditions = [criteriaCondition, 'Second criterion <literal> stays text',
+        'Third criterion', 'Fourth criterion', 'Fifth criterion', 'SIXTH_CRITERION_NOT_IN_PREVIEW'];
       const rootTask = { ...pendingTask, source_id: overviewSource.id,
-        draft: { ...draft, id: 'overview-root', title: 'Original request still pending', assignee: 'PM' } };
+        draft: { ...draft, id: 'overview-root', title: 'Original request still pending', assignee: 'PM',
+          purpose: criteriaPurpose, completion_conditions: criteriaConditions } };
       const childTask = { ...pendingTask, source_id: overviewSource.id, parent_id: rootTask.draft.id,
         draft: { ...draft, id: 'overview-child', title: 'Verify remaining outcome', assignee: 'Reviewer' } };
       const appendFixtureReceipt = (actor: { kind: string; id: string }, action: Record<string, unknown>, tasks: unknown[]) => {
@@ -1981,7 +1986,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       overviewState.sources[overviewSource.id] = overviewSource;
       overviewState.tasks[rootTask.draft.id] = rootTask;
       overviewState.tasks[childTask.draft.id] = waitingChild;
-      const overviewBytes = JSON.stringify(overviewState);
+      let overviewBytes = JSON.stringify(overviewState);
       writeFileSync(statePath, overviewBytes);
       // Real native-reader projection plus synthetic TaskStore scaffolding:
       // this proves source navigation, not live provider intake/classification.
@@ -2014,11 +2019,58 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(tasksView).toContainText('Cancelled');
       await expect(tasksView).toContainText('PM reassessment required');
       await expect(completedFilter).toBeFocused();
+      await chat.getByRole('button', { name: 'Chat', exact: true }).click();
+      const criteriaDraft = chat.locator('.pm-chat__draft');
+      await criteriaDraft.fill('Keep this draft while reviewing the original request');
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      const rootKey = createHash('sha256').update(rootTask.draft.id).digest('hex');
+      const rootRow = tasksView.locator(`[data-task-key="${rootKey}"]`);
+      const criteria = rootRow.locator('details.pm-chat__task-criteria');
+      const criteriaSummary = criteria.locator('summary');
+      await expect(criteriaSummary).toHaveText('Purpose and completion criteria');
+      await expect(criteria).not.toHaveAttribute('open');
+      await expect(criteria).toContainText(`Purpose: ${Array.from(criteriaPurpose).slice(0, 240).join('')}…`);
+      await expect(criteria.locator('ol li')).toHaveText([
+        Array.from(criteriaCondition).slice(0, 240).join('') + '…', ...criteriaConditions.slice(1, 5),
+      ]);
+      await expect(criteria).toContainText('Showing 5 of 6 completion criteria. Text is limited to 240 characters per item.');
+      await expect(criteria).not.toContainText('PURPOSE_TAIL_NOT_IN_PREVIEW');
+      await expect(criteria).not.toContainText('CONDITION_TAIL_NOT_IN_PREVIEW');
+      await expect(criteria).not.toContainText(criteriaConditions[5]);
+      await expect(criteria.locator('literal')).toHaveCount(0);
+      await criteriaSummary.focus();
+      await page.keyboard.press('Enter');
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      const criteriaCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      const scopedWindowId = await page.locator('.workspace-window').filter({ has: chat }).getAttribute('data-id');
+      expect(scopedWindowId).toBeTruthy();
+      await refreshPmReports(page);
+      await page.waitForFunction(({ cursor, id }) => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > cursor && entry.payload.kind === 'pm_reports' && entry.payload.id === id),
+      { cursor: criteriaCursor, id: scopedWindowId });
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      const criteriaUpdate = await exchange('update_pm_request_task', { request: {
+        operation_id: `criteria-overview-update-${theme}`, expected_revision: overviewState.revision,
+        reason: 'Refresh the saved Task summary without replacing its open criteria.',
+        task: { ...rootTask.draft, assignee: 'PM reviewer' },
+      } });
+      expect(criteriaUpdate).toMatchObject({ state: 'ready', task: { draft: { assignee: 'PM reviewer' } } });
+      overviewBytes = readFileSync(statePath, 'utf8');
+      await refreshPmReports(page);
+      await expect(rootRow).toContainText('PM reviewer');
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
       try {
         writeFileSync(statePath, 'broken task store');
         await refreshPmReports(page);
         await expect(tasksView.getByRole('status')).toContainText('last confirmed list');
         await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+        await expect(criteria).toHaveAttribute('open');
+        await expect(criteriaSummary).toBeFocused();
+        await expect(criteria.locator('ol li')).toHaveCount(5);
+        await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
       } finally {
         writeFileSync(statePath, overviewBytes);
       }
@@ -2068,6 +2120,31 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(tasksView).toBeVisible();
       expect(await tasksView.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await info.attach(`T-UTASK-OV ${theme} Tasks`, { body: await tasksView.screenshot(), contentType: 'image/png' });
+      await page.setViewportSize({ width: 404, height: 1000 });
+      const criteriaPane = page.locator('.workspace-window').filter({ has: chat });
+      await expect.poll(async () => Math.round((await criteriaPane.boundingBox())!.width)).toBe(400);
+      await criteriaSummary.scrollIntoViewIfNeeded();
+      await criteriaSummary.focus();
+      await expect(criteriaSummary).toBeFocused();
+      await expect(criteria).toHaveAttribute('open');
+      expect(await criteria.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      expect(await tasksView.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+      const childKey = createHash('sha256').update(childTask.draft.id).digest('hex');
+      await expect(tasksView.locator('.pm-chat__task').first()).toHaveAttribute('data-task-key', childKey);
+      const cancelChild = await exchange('cancel_pm_request_task', { request: {
+        operation_id: `criteria-list-reorder-${theme}`,
+        expected_revision: JSON.parse(readFileSync(statePath, 'utf8')).revision,
+        reason: 'Withdraw the child while retaining focus on the root criteria.', task_id: childTask.draft.id,
+      } });
+      expect(cancelChild).toMatchObject({ state: 'ready', task: { status: 'cancelled' } });
+      await refreshPmReports(page);
+      await expect(tasksView.locator('.pm-chat__task').first()).toHaveAttribute('data-task-key', rootKey);
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
+      await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+      await info.attach(`T-TASK-CRITERIA ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
