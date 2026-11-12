@@ -70,6 +70,7 @@ fn handle_with_observation(
         IntentBoundaryEvent::from_name(event).is_some()
             && super::is_resident_pm_session(worktree_root, current_session)
     });
+    pm_loop_stop_check::handle_grok_delivery_acceptance(worktree_root, event, input);
     let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root, completion),
         "UserPromptSubmit" => {
@@ -227,10 +228,9 @@ fn handle_user_prompt_submit(
         if reporting.is_ok() { "ok" } else { "error" },
     );
     reporting?;
-    // Start the three bookkeeping writes together. The exact delivery ACK must
-    // precede the live RuntimeState notice: the Host uses it to release retained
-    // input even while paused. Other writes overlap RuntimeState and Board work;
-    // timing records retain their historical handler order.
+    // Start bookkeeping together before the live RuntimeState notice. Grok
+    // records only pre-turn correlation here; its matching PreToolUse/Stop
+    // later commits the ACK before that event's RuntimeState notice.
     let event_deadline = gwt_core::operation_deadline::current();
     #[cfg(test)]
     let operation_clock = gwt_core::operation_deadline::ScopedOperationClock::current();
@@ -1139,6 +1139,7 @@ mod tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.into(),
                 recorded_at: "2026-10-26T00:00:00Z".into(),
                 status: PmDeliveryReceiptStatus::Prepared,

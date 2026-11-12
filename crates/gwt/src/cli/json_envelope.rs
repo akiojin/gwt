@@ -213,6 +213,28 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 payload["warnings"] =
                     serde_json::to_value(&warnings).expect("operation warnings must serialize");
             }
+            if code != 0 && (operation.starts_with("workspace.") || operation.starts_with("build."))
+            {
+                if let Ok(error) = serde_json::from_str::<crate::AgentWorkspaceUpdateError>(&output)
+                {
+                    payload["error_code"] = serde_json::to_value(error.code).unwrap_or(Value::Null);
+                    payload["error"] = Value::String(error.message);
+                    if let Some(reason) = error.diagnostic_reason {
+                        payload["diagnostic_reason"] = Value::String(reason);
+                    }
+                    if !error.mismatched_fields.is_empty() {
+                        payload["mismatched_fields"] =
+                            serde_json::to_value(error.mismatched_fields).unwrap();
+                    }
+                    if !error.recovery_operations.is_empty() {
+                        payload["recovery_operations"] =
+                            serde_json::to_value(error.recovery_operations).unwrap();
+                    }
+                    if let Some(details) = error.details {
+                        payload["details"] = serde_json::to_value(details).unwrap_or(Value::Null);
+                    }
+                }
+            }
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -581,6 +603,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
             })
         }
+        "workspace.reopen" => CliCommand::Workspace(WorkspaceCommand::Reopen {
+            reason: required_nonempty_workspace_reopen_string(params, "reason")?,
+            observed_done_event_id: required_nonempty_workspace_reopen_string(
+                params,
+                "observed_done_event_id",
+            )?,
+        }),
         "workspace.projection_list" | "workspace.projection-list" => {
             CliCommand::Workspace(WorkspaceCommand::ProjectionList {
                 stale: optional_bool(params, "stale")?.unwrap_or(false),
@@ -1729,7 +1758,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "execution.repair" => {
             let reason = required_string(params, "reason")?;
-            let command = match optional_string(params, "session_id")? {
+            let command = match lookup(params, "session_id")
+                .map(|_| required_string(params, "session_id"))
+                .transpose()?
+            {
                 Some(session_id) => crate::cli::execution_state::ExecutionCommand::RepairSession {
                     session_id,
                     reason,
@@ -2320,6 +2352,20 @@ fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         topic: optional_string(params, "topic")?,
         boundary: optional_string(params, "boundary")?,
     }))
+}
+
+fn required_nonempty_workspace_reopen_string(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<String, CliParseError> {
+    let value = required_string(params, key)?;
+    if value.trim().is_empty() {
+        return Err(CliParseError::InvalidValue {
+            flag: key,
+            reason: "must not be empty",
+        });
+    }
+    Ok(value)
 }
 
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -8275,6 +8321,29 @@ mod tests {
     }
 
     #[test]
+    fn workspace_reopen_requires_observed_terminal_event_and_reason() {
+        let input = envelope(
+            "workspace.reopen",
+            json!({
+                "reason": "Recover unintended helper completion",
+                "observed_done_event_id": "done-event-3725"
+            }),
+        );
+        assert!(
+            parse(&input).is_ok(),
+            "explicit Work recovery must be reachable"
+        );
+        assert!(parse(&envelope("workspace.reopen", json!({"reason": "recover"}))).is_err());
+        assert!(parse(&envelope(
+            "workspace.reopen",
+            json!({
+                "observed_done_event_id": "done-event-3725", "reason": "  "
+            })
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn pm_status_variants() {
         assert!(matches!(
             ok("pm.status", json!({})),
@@ -8831,6 +8900,15 @@ mod tests {
             err("execution.repair", json!({})),
             CliParseError::MissingFlag("reason")
         ));
+        for session_id in ["", "  "] {
+            assert!(matches!(
+                err(
+                    "execution.repair",
+                    json!({"reason": "repair target", "session_id": session_id})
+                ),
+                CliParseError::MissingFlag("session_id")
+            ));
+        }
         assert!(matches!(
             ok("execution.reopen", json!({"reason": "blocker resolved"})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen { .. })

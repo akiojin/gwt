@@ -342,6 +342,22 @@ function usageSummaryPercent(account) {
   return percentages.length ? Math.max(...percentages) : null;
 }
 
+function codexCreditStatus(account) {
+  if (account.provider !== "codex" || !account.credits ||
+      !["ok", "stale"].includes(account.state?.kind)) return null;
+  const full = (account.windows || []).some(window =>
+    ["five_hour", "weekly"].includes(window.kind) && usageWindowPercent(window) === 100);
+  return {
+    active: full && account.credits.has_credits === true,
+    exhausted: full && account.credits.has_credits === false,
+  };
+}
+
+function usageDisplayLimitReached(account) {
+  const credits = codexCreditStatus(account);
+  return !credits?.active && (account.limit_reached || credits?.exhausted);
+}
+
 // Stable, glanceable per-provider summary value for the status strip (the
 // window nearest its limit when available, else a short degraded token).
 function usageSummaryValue(account) {
@@ -349,13 +365,21 @@ function usageSummaryValue(account) {
   if (kind === "disabled") return "off";
   if (kind === "no_data") return "—";
   if (kind === "unavailable") return "n/a";
+  if (codexCreditStatus(account)?.active) {
+    const credits = account.credits;
+    const balance = credits.unlimited ? "unlimited"
+      : Number.isFinite(credits.balance) && credits.balance >= 0
+        ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
+    return `Using credits · ${balance}${kind === "stale" ? " · stale" : ""}`;
+  }
   const percent = usageSummaryPercent(account);
   if (percent != null) return `${Math.round(percent)}%`;
   return "—";
 }
 
 function usageSeverity(account) {
-  if (account.limit_reached) return "danger";
+  if (usageDisplayLimitReached(account)) return "danger";
+  if (codexCreditStatus(account)?.active) return "normal";
   const percent = usageSummaryPercent(account);
   if (percent == null) return "";
   if (percent >= 95) return "danger";
@@ -421,7 +445,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
       USAGE_PROVIDER_NAME[account.provider] || usageProviderLabel(account.provider),
     value: usageSummaryValue(account),
     severity: usageSeverity(account),
-    accessibleSeverity: account.limit_reached
+    accessibleSeverity: usageDisplayLimitReached(account)
       ? "limit reached"
       : usageSeverity(account),
     criticality: usageCriticality(account),
@@ -440,7 +464,8 @@ export function applyProviderUsage(doc, snapshot = {}) {
     const chip = doc.createElement("span");
     chip.className = "op-usage-sum";
     chip.dataset.provider = account.provider;
-    if (account.limit_reached) chip.dataset.limit = "true";
+    if (usageDisplayLimitReached(account)) chip.dataset.limit = "true";
+    if (codexCreditStatus(account)?.active) chip.classList.add("op-usage-sum--credits");
     if (summary.severity) chip.dataset.severity = summary.severity;
     if (summary.models) {
       chip.classList.add("op-usage-sum--models");
@@ -494,7 +519,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
   cell.setAttribute("aria-controls", "provider-usage-popover");
   if (!cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
   cell.title = accessibleSummary;
-  if (accounts.some((a) => a.limit_reached)) cell.dataset.limit = "true";
+  if (accounts.some(usageDisplayLimitReached)) cell.dataset.limit = "true";
   else delete cell.dataset.limit;
   cell.hidden = false;
 

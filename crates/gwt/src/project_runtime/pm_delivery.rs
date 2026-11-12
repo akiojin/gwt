@@ -917,6 +917,7 @@ pub(crate) fn deliver_pm_wake(
                 let body = prompt.trim_end_matches('\r');
                 let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
                 let prepared = pm_registry::PmDeliveryReceipt {
+                    grok_prompt: None,
                     operation_id: operation_id.to_string(),
                     recorded_at: chrono::Utc::now().to_rfc3339(),
                     status: pm_registry::PmDeliveryReceiptStatus::Prepared,
@@ -1708,6 +1709,7 @@ pub(crate) fn deliver_board_notification(
     let body_sha256 = pm_registry::pm_delivery_prompt_sha256(&body);
     let prompt = format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r");
     let prepared = pm_registry::PmDeliveryReceipt {
+        grok_prompt: None,
         operation_id: operation_id.clone(),
         recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         status: pm_registry::PmDeliveryReceiptStatus::Prepared,

@@ -1632,6 +1632,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         &session_id,
         session.execution_binding.as_ref().unwrap(),
         gwt::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: session_id.clone(),
             observation: gwt::observe_agent_runtime(&fixture.worktree).unwrap(),

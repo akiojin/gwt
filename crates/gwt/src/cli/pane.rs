@@ -2302,7 +2302,10 @@ fn resolve_pm_send_target<'a>(
 fn pm_window_has_exact_prompt_ack(window: &PersistedWindowState) -> bool {
     matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
         || (window.preset == WindowPreset::Agent
-            && matches!(window.agent_id.as_deref(), Some("claude" | "codex")))
+            && matches!(
+                window.agent_id.as_deref(),
+                Some("claude" | "codex" | "grok")
+            ))
 }
 
 fn status_label(status: WindowState) -> &'static str {
@@ -3342,6 +3345,19 @@ mod tests {
                 .id,
             "tab-1::agent-2"
         );
+    }
+
+    #[test]
+    fn issue_3706_grok_is_an_exact_prompt_ack_target() {
+        let mut grok = window("tab-1::grok", WindowPreset::Agent, Some("grok"));
+        grok.session_id = Some("grok-session".into());
+        assert!(resolve_pm_send_target(std::slice::from_ref(&grok), "grok").is_ok());
+
+        grok.status = WindowState::Stopped;
+        assert!(resolve_pm_send_target(std::slice::from_ref(&grok), "grok").is_err());
+        grok.status = WindowState::Running;
+        grok.agent_id = Some("unknown".into());
+        assert!(resolve_pm_send_target(&[grok], "grok").is_err());
     }
 
     #[test]

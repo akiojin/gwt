@@ -616,7 +616,10 @@ pub fn authenticated_pm_pane_send_input_events(
                             let exact_prompt_ack =
                                 matches!(target_preset, WindowPreset::Claude | WindowPreset::Codex)
                                     || (*target_preset == WindowPreset::Agent
-                                        && matches!(session.agent_id.as_str(), "claude" | "codex"));
+                                        && matches!(
+                                            session.agent_id.as_str(),
+                                            "claude" | "codex" | "grok"
+                                        ));
                             exact_prompt_ack
                                 && session.window_id == window_id
                                 && session.tab_id == *target_tab_id
@@ -625,6 +628,13 @@ pub fn authenticated_pm_pane_send_input_events(
                 })
         },
     );
+    let target_is_grok = panes.iter().any(|pane| {
+        pane.window.id == window_id
+            && pane
+                .active
+                .as_ref()
+                .is_some_and(|session| session.agent_id == "grok")
+    });
     let expected_entry = if target_is_live_agent {
         writers
             .read()
@@ -713,6 +723,7 @@ pub fn authenticated_pm_pane_send_input_events(
                         recorded_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                        grok_prompt: None,
                         principal_session_id: principal_session_id.clone(),
                         target_window_id: worker_window_id.clone(),
                         target_session_id: target_session_id.clone(),
@@ -766,8 +777,16 @@ pub fn authenticated_pm_pane_send_input_events(
                 bracketed_paste,
                 2,
                 |bytes| {
+                    let owned_submit = bytes == b"\r" && (body_written || replay.is_some());
                     let written = reservation
                         .write_input_authorized(bytes, |commit| {
+                            if target_is_grok {
+                                if owned_submit {
+                                    expected_pty.ensure_grok_prompt_submit_ready()?;
+                                } else {
+                                    expected_pty.ensure_grok_prompt_input_ready()?;
+                                }
+                            }
                             if Instant::now() >= deadline
                                 || worker_responder
                                     .as_ref()
@@ -843,6 +862,15 @@ pub fn authenticated_pm_pane_send_input_events(
                                 }
                             };
                             reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                // Recheck after the body/submit settle and at
+                                // every retry, including submit-only recovery.
+                                if target_is_grok {
+                                    if owned_submit {
+                                        expected_pty.ensure_grok_prompt_submit_ready()?;
+                                    } else {
+                                        expected_pty.ensure_grok_prompt_input_ready()?;
+                                    }
+                                }
                                 commit(&mut mark_attempted)
                             })
                         })

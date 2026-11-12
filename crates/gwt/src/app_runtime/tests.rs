@@ -1173,6 +1173,7 @@ pub(super) fn runtime_hook_state_for_event(
         source_event: Some(source_event.to_string()),
         gwt_session_id: Some(session_id.to_string()),
         continuation_readiness_nonce: None,
+        native_prompt_id: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -1189,6 +1190,7 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
         source_event: Some("PostToolUse".to_string()),
         gwt_session_id: Some(session_id.to_string()),
         continuation_readiness_nonce: None,
+        native_prompt_id: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -1569,11 +1571,13 @@ pub(super) fn owner_fixture_block_on<T: Send>(
 ) -> T {
     let home = gwt_core::test_support::gwt_home_override();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let clock = gwt_core::operation_deadline::ScopedOperationClock::current();
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let _home = home.as_ref().map(ScopedGwtHome::set);
+                let _clock = clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -11160,6 +11164,7 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     for submits_before_expiry in [0, 1] {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let prepared = pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: "2026-11-06T00:00:00Z".into(),
             status: Status::Prepared,
@@ -12480,6 +12485,7 @@ fn codex_usage_account(
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             weekly_used_percent,
@@ -12757,6 +12763,7 @@ fn assert_pm_delivery_refused(
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
         let hash = gwt::pm_registry::pm_delivery_prompt_sha256("do not deliver to the PM");
         let receipt = gwt::pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: Utc::now().to_rfc3339(),
             status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,

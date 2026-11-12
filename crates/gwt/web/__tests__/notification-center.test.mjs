@@ -191,6 +191,26 @@ test("identical notices aggregate into one row with an occurrence count, latest 
   assert.match(first.textContent, /steering requested \(1\): resolve the review before closing/, "original text is kept");
 });
 
+test("a recurrence that brings the first jump-to makes the aggregated row operable", () => {
+  const { document, center } = setup();
+  const jumps = [];
+  const row = center.record({ kind: "attention", level: "info", title: "same" });
+  assert.ok(row.getAttribute("role") === null, "a notice without jump-to is not a button");
+  center.record({ kind: "attention", level: "info", title: "same", onActivate: () => jumps.push("latest") });
+  assert.ok(row.querySelector(".notification-center__count")?.textContent === "×2");
+  assert.ok(row.getAttribute("role") === "button", "the row becomes keyboard-operable");
+  assert.ok(row.getAttribute("tabindex") === "0");
+  click(document, row);
+  const enter = new document.defaultView.Event("keydown", { bubbles: true, cancelable: true });
+  enter.key = "Enter";
+  row.dispatchEvent(enter);
+  assert.deepEqual(jumps, ["latest", "latest"]);
+  center.record({ kind: "attention", level: "info", title: "same" });
+  click(document, row);
+  assert.deepEqual(jumps, ["latest", "latest", "latest"], "a later occurrence without jump-to keeps the latest one");
+  assert.ok(center.count() === 1, "activation keeps the history row");
+});
+
 test("aggregation never merges a different Issue, message, level, kind or window id", () => {
   const { center } = setup();
   const base = { kind: "attention", level: "warn", title: "Agent attention", message: "needs input", id: "attention-w1" };

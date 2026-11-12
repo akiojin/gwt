@@ -9887,6 +9887,10 @@ impl OwnerState {
             })
         });
         let readiness_nonce = event.continuation_readiness_nonce.take();
+        let native_prompt_id = event
+            .native_prompt_id
+            .take()
+            .filter(|id| !id.trim().is_empty());
         if event.kind != crate::RuntimeHookEventKind::RuntimeState {
             self.dispatch_project(
                 crate::BackendEvent::RuntimeHookEvent {
@@ -9930,10 +9934,21 @@ impl OwnerState {
             self.begin_readiness(&id, readiness_nonce, false, None);
         }
         let hook_status = crate::window_state::runtime_hook_window_state(&event);
+        let grok = self
+            .runtimes
+            .get(&id)
+            .and_then(|runtime| runtime.agent.as_ref())
+            .is_some_and(|agent| agent.snapshot.agent_id == gwt_agent::AgentId::GrokBuild);
+        // Grok's pre-submit hook can still be rejected by a later hook.
+        // Its session-end Stop has no prompt ID and proves no accepted turn.
         let progress = matches!(
             event.source_event.as_deref(),
-            Some("UserPromptSubmit" | "PreToolUse" | "PostToolUse")
-        );
+            Some("PreToolUse" | "PostToolUse")
+        ) || if grok {
+            event.source_event.as_deref() == Some("Stop") && native_prompt_id.is_some()
+        } else {
+            event.source_event.as_deref() == Some("UserPromptSubmit")
+        };
         if hook_status.is_none() && !progress {
             return;
         }
@@ -13978,6 +13993,7 @@ mod tests {
             source_event: Some("SessionStart".into()),
             gwt_session_id: Some("materialized-session".into()),
             continuation_readiness_nonce: Some("private-challenge".into()),
+            native_prompt_id: None,
             agent_session_id: None,
             project_root: Some(root.path().display().to_string()),
             branch: None,

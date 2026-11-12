@@ -923,6 +923,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.reopen",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.close",
         aliases: &[],
     },

@@ -255,7 +255,7 @@ Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
 workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
-While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
+While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, workspace.reopen, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -633,7 +633,7 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// not threaten that, and refusing them is what closed the interlock #4533
 /// reports:
 ///
-/// - `execution.adopt` / `execution.repair` / `execution.reopen` /
+/// - `execution.adopt` / `execution.repair` / `execution.reopen` / `workspace.reopen` /
 ///   `execution.release_prepared` are recovery-only. They are exactly what
 ///   `execution.status` advertises in `available_recoveries`, and a session
 ///   that cannot set its title is the only kind of session that ever needs
@@ -673,6 +673,9 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // Repair proves an existing Work's immutable source history;
             // a broken assignment must not prevent its own bounded recovery.
             | "workspace.work_repair"
+            // Work-only recovery authenticates the current primary actor and
+            // exact Done event; it must remain reachable before identity repair.
+            | "workspace.reopen"
             | "execution.reopen"
             | "execution.release_prepared"
             | "execution.release-prepared"
@@ -2419,6 +2422,10 @@ mod tests {
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,
             ),
             envelope_command("workspace.work_repair", r#"{"work_id":"existing-work"}"#),
+            envelope_command(
+                "workspace.reopen",
+                r#"{"reason":"resume premature completion","observed_done_event_id":"done-event"}"#,
+            ),
         ] {
             assert_eq!(
                 evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
