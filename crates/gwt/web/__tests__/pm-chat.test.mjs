@@ -45,6 +45,30 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
 
+test('Home opens Chat in one action and rebinds without showing the previous conversation (AC-3431-CHAT-1)', () => {
+  const { root, model, view } = fixture({ tasksDefault: true });
+  assert.equal(view.isChatVisible(), false, 'Home remains the default PM view');
+  const home = root.querySelector('.task-home');
+  assert.ok(home && !home.hidden, 'Home is visible on entry');
+  const chatButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Chat');
+  chatButton.click();
+  assert.equal(view.isChatVisible(), true, 'one toolbar action opens Chat');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'old', role: 'assistant', text: 'Previous session' }]));
+  assert.match(root.querySelector('.pm-chat__chat').textContent, /Previous session/);
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(view.isChatVisible(), false, 'a new session returns to Home');
+  assert.equal(home.hidden, false, 'Home is visible after rebinding');
+  chatButton.click();
+  assert.equal(view.isChatVisible(), true, 'the rebound session keeps one-action Chat access');
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0, 'previous-session bubbles are cleared');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'stale', role: 'assistant', text: 'Stale reply' }]));
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0, 'a delayed old-session reply stays hidden');
+  model.applyPmWindowReceiveEvent({ ...conversation([{ id: 'new', role: 'assistant', text: 'New session' }]),
+    session_id: 'replacement' });
+  assert.deepEqual([...root.querySelectorAll('.pm-chat__bubble')].map(node => node.textContent), ['New session']);
+});
+
 test('Home is the default PM view; Tasks preserves the unfinished filter and stable rows', () => {
   const { root, update, view, model } = fixture({ tasksDefault: true });
   update([report()], null, { request_tasks: taskOverview([
