@@ -2921,7 +2921,7 @@ impl AgentDispatchCapture {
                                 },
                             )]
                         }
-                        AgentFrontendRequest::SendInput { text } => {
+                        AgentFrontendRequest::SendInput { text, request_id } => {
                             let target = principal_session_window(&self.panes, &principal);
                             let result = target.as_ref().map_err(Clone::clone).and_then(|id| {
                                 let entry = self
@@ -2939,6 +2939,7 @@ impl AgentDispatchCapture {
                                     ok: result.is_ok(),
                                     window_id: target.ok(),
                                     error: result.err(),
+                                    request_id,
                                 },
                             )]
                         }

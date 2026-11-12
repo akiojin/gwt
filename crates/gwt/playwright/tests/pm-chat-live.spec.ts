@@ -146,6 +146,11 @@ test.describe('PM reports', () => {
   test('T-CHAT-VIEW Chat renders the PM conversation as user-right and PM-left bubbles', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
+      const sendResults: any[] = [];
+      page.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === 'pane_send_result') sendResults.push(event);
+      }));
       page.on('pageerror', error => errors.push(error.message));
       page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
@@ -194,13 +199,22 @@ test.describe('PM reports', () => {
       expect(userBox.y).toBeLessThan(assistantBox.y);
       expect(await pane.locator('.pm-chat__transcript').textContent()).not.toContain('Ship');
       // T-CHAT-INPUT: the composer submits through the real host's pane input path.
-      await page.evaluate(() => {
+      await page.evaluate(id => {
         const sent: any[] = (window as any).__gwtChatSent = [];
         for (const socket of (window as any).__gwtPlaywrightSockets as WebSocket[]) {
           const original = socket.send.bind(socket);
-          socket.send = (data: any) => { const message = JSON.parse(String(data)); if (message.kind === 'pane_send_input') sent.push(message); original(data); };
+          socket.send = (data: any) => {
+            const message = JSON.parse(String(data));
+            if (message.kind === 'pane_send_input') {
+              sent.push(message);
+              // A Palette/CLI success on the same pane is unrelated to this draft.
+              socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+                kind: 'pane_send_result', window_id: id, ok: true, error: null }) }));
+            }
+            original(data);
+          };
         }
-      });
+      }, id);
       const composer = chat.getByRole('form', { name: 'Message PM' });
       const draft = composer.getByRole('textbox', { name: 'Message to PM' });
       await expect(composer.getByRole('button', { name: 'Send' })).toBeDisabled();
@@ -209,7 +223,9 @@ test.describe('PM reports', () => {
       await draft.pressSequentially('next');
       await draft.press('Enter');
       await expect.poll(() => page.evaluate(() => (window as any).__gwtChatSent)).toEqual([
-        { kind: 'pane_send_input', session_id: SESSION, text: 'Plan #3431\nnext\r' }]);
+        { kind: 'pane_send_input', session_id: SESSION, text: 'Plan #3431\nnext\r', request_id: expect.any(Number) }]);
+      const requestId = await page.evaluate(() => (window as any).__gwtChatSent[0].request_id);
+      await expect.poll(() => sendResults.find(result => result.request_id === requestId)).toMatchObject({ ok: false, request_id: requestId });
       // The fixture PM has no live runtime, so the real host refuses and the draft is kept.
       await expect(composer.locator('.pm-chat__composer-status')).toHaveText(/^Not sent: .+[^.]\. Your message is kept\.$/, { timeout: 30_000 });
       await expect(draft).toHaveValue('Plan #3431\nnext');

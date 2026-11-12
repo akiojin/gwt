@@ -2358,11 +2358,14 @@ impl AgentPaneSessionScope {
                     child_started_at,
                 })
             }
-            FrontendEvent::PaneSendInput { session_id, text }
-                if session_id == self.grant.principal().session_id()
-                    && self.grant.principal().authorizes_producing_mutation() =>
+            FrontendEvent::PaneSendInput {
+                session_id,
+                text,
+                request_id,
+            } if session_id == self.grant.principal().session_id()
+                && self.grant.principal().authorizes_producing_mutation() =>
             {
-                Some(AgentFrontendRequest::SendInput { text })
+                Some(AgentFrontendRequest::SendInput { text, request_id })
             }
             FrontendEvent::RecoverRestoredWindow {
                 id,
@@ -3698,6 +3701,7 @@ mod tests {
             .filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-connected-promotion".to_string(),
                 text: "before-promotion".to_string(),
+                request_id: None,
             })
             .is_none());
 
@@ -3712,9 +3716,10 @@ mod tests {
             scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-connected-promotion".to_string(),
                 text: "after-promotion".to_string(),
+                request_id: None,
             }),
             Some(ScopedFrontendRequest::Agent {
-                request: AgentFrontendRequest::SendInput { text },
+                request: AgentFrontendRequest::SendInput { text, .. },
                 ..
             }) if text == "after-promotion"
         ));
@@ -4075,6 +4080,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-1".to_string(),
                     text: "hello".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "Inspection principal must not dispatch producing terminal input"
@@ -4083,6 +4089,7 @@ mod tests {
             .filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "foreign-claim".to_string(),
                 text: "hello".to_string(),
+                request_id: None,
             })
             .is_none());
         assert!(
@@ -4185,8 +4192,9 @@ mod tests {
             bound_scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-1".to_string(),
                 text: "hello".to_string(),
+                request_id: Some(73),
             }),
-            Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
+            Some(super::AgentFrontendRequest::SendInput { text, request_id: Some(73) }) if text == "hello"
         ));
         // Issue #3552 AC-4: unblocking peer *close* (Issue #3629 AC-9) must not
         // leak into peer *injection*. An ordinary agent — even a fully bound,
@@ -4198,6 +4206,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-peer".to_string(),
                     text: "hello".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "a producing ordinary agent still cannot inject into a peer Session's pane"
@@ -4223,6 +4232,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-1".to_string(),
                     text: "must-not-dispatch".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "Prepared principal must remain observation-only"
