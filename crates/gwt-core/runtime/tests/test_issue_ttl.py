@@ -619,19 +619,29 @@ class IssueTtlTests(unittest.TestCase):
             self._write_cached_issue(cache, 41, "Added", "added body", [])
             copied = []
             copy = runner._copy_unchanged_records
+            validations = []
+            verify_members = runner._verified_issue_members
 
             def record_copy(*copy_args, **copy_kwargs):
                 count = copy(*copy_args, **copy_kwargs)
                 copied.append(count)
                 return count
 
-            with mock.patch.object(runner, "_copy_unchanged_records", side_effect=record_copy):
+            def record_validation(collection, members):
+                validations.append(len(members))
+                return verify_members(collection, members)
+
+            with (mock.patch.object(runner, "_copy_unchanged_records", side_effect=record_copy),
+                  mock.patch.object(runner, "_verified_issue_members", side_effect=record_validation)):
                 result = runner.action_index_issues_v2(**args, mode="incremental")
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["mode"], "incremental", result)
             self.assertEqual(result["indexed"], 40, result)
             self.assertEqual(result["newly_embedded"], 2, result)
             self.assertEqual(sum(copied), 0, "no unchanged record may be copied into the delta")
+            self.assertEqual(validations.count(40), 2,
+                             "only pre-health and fresh post-publication scan every payload")
+            self.assertLessEqual(sum(validations), 2 * 40 + 2 * 2, validations)
 
             # The preceding snapshot retains exact membership, while the pool
             # contains both versions. Physical count is not logical count.
@@ -660,6 +670,7 @@ class IssueTtlTests(unittest.TestCase):
             # A later refresh reuses all previous members and inserts only B.
             self._write_cached_issue(cache, 5, "Changed again", "fifth body", [])
             copied.clear()
+            validations.clear()
             from chromadb.api.models.Collection import Collection
             upsert = Collection.upsert
             inserted = []
@@ -669,11 +680,14 @@ class IssueTtlTests(unittest.TestCase):
                 return upsert(collection, *upsert_args, **kwargs)
 
             with (mock.patch.object(runner, "_copy_unchanged_records", side_effect=record_copy),
-                  mock.patch.object(Collection, "upsert", autospec=True, side_effect=record_upsert)):
+                  mock.patch.object(Collection, "upsert", autospec=True, side_effect=record_upsert),
+                  mock.patch.object(runner, "_verified_issue_members", side_effect=record_validation)):
                 result = runner.action_index_issues_v2(**args, mode="incremental")
             self.assertTrue(result["ok"], result)
             self.assertEqual(sum(copied), 0, "earlier delta members must not be copied again")
             self.assertEqual(result["newly_embedded"], 1, result)
+            self.assertEqual(validations.count(40), 2, validations)
+            self.assertLessEqual(sum(validations), 2 * 40 + 2, validations)
             members = runner._active_issue_members(db)
             self.assertEqual(inserted, [members["5"]])
             self.assertTrue(previous_store.is_dir())
@@ -681,11 +695,15 @@ class IssueTtlTests(unittest.TestCase):
             self.assertEqual(len(self._visible_issue_records(db)), 40)
             self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
             inserted.clear()
-            with mock.patch.object(Collection, "upsert", autospec=True, side_effect=record_upsert):
+            validations.clear()
+            with (mock.patch.object(Collection, "upsert", autospec=True, side_effect=record_upsert),
+                  mock.patch.object(runner, "_verified_issue_members", side_effect=record_validation)):
                 unchanged = runner.action_index_issues_v2(**args, mode="incremental")
             self.assertTrue(unchanged["ok"], unchanged)
             self.assertEqual(inserted, [])
             self.assertEqual(unchanged["newly_embedded"], 0)
+            self.assertEqual(validations.count(40), 2, validations)
+            self.assertEqual(sum(validations), 2 * 40, validations)
 
     def test_many_issue_changes_reuse_unchanged_members_without_compaction(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
@@ -764,20 +782,40 @@ class IssueTtlTests(unittest.TestCase):
             self.assertTrue((pointer_path.parent / future_pointer["generation"]).is_dir())
             pointer_path.write_bytes(original_pointer)
             client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
-            orphan = "a" * 64
+            orphans = [f"{number:064x}" for number in range(20)]
             try:
-                collection.upsert(ids=[orphan], documents=["orphan"], metadatas=[{"record_kind":"issue"}])
+                collection.upsert(ids=orphans, documents=["orphan"] * len(orphans),
+                                  embeddings=[[1.0] * runner._FakeEmbeddingModel.DIM] * len(orphans),
+                                  metadatas=[{"record_kind":"issue"}] * len(orphans))
+                before_ids = set(collection.get(include=[])["ids"])
+                first_unused = [record_id for record_id in collection.get(limit=16, offset=0, include=[])["ids"]
+                                if record_id in orphans]
             finally:
                 runner._close_chroma_client(client)
             unknown = runner.generations_root(db) / "gen-future"
             unknown.mkdir()
             (unknown / runner.ISSUE_MEMBERSHIP_FILENAME).write_text('{"writer_protocol":"future"}')
-            with runner.acquire_lock(db, exclusive=True):
+            from chromadb.api.models.Collection import Collection
+            get_records = Collection.get
+            with runner.acquire_lock(db / "build", exclusive=True), runner.acquire_lock(db, exclusive=True):
                 self.assertEqual(runner._prune_issue_record_pool(db), 0)
                 (unknown / runner.ISSUE_MEMBERSHIP_FILENAME).unlink()
                 unknown.rmdir()
-                self.assertEqual(runner._prune_issue_record_pool(db), 1)
+                with mock.patch.object(Collection, "get", autospec=True, side_effect=get_records) as gc_read:
+                    self.assertEqual(runner._prune_issue_record_pool(db), len(first_unused))
+                self.assertGreater(len(first_unused), 0)
+                self.assertLessEqual(len(first_unused), 16)
+                client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
+                try:
+                    self.assertEqual(set(collection.get(include=[])["ids"]), before_ids - set(first_unused),
+                                     "only unused IDs from the first original 16-ID block may be deleted")
+                finally:
+                    runner._close_chroma_client(client)
+                self.assertEqual(runner._prune_issue_record_pool(db), len(orphans) - len(first_unused))
             self.assertEqual(self._visible_issue_records(db), {"1":"Retained\nbody"})
+            self.assertEqual([call.kwargs for call in gc_read.call_args_list], [
+                {"limit": 128, "offset": 0, "include": []},
+            ])
 
     def test_explicit_repair_quarantines_an_unreadable_issue_pool(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
@@ -843,10 +881,44 @@ class IssueTtlTests(unittest.TestCase):
             self._write_cached_issue(cache, 2, "Plain now", "ordinary body", [])
             rebuilt = runner.action_index_issues_v2(**args, mode="incremental")
             self.assertEqual(rebuilt["newly_embedded"], 1, rebuilt)
-            result = runner.action_search_multi_v2(
-                repo, None, tmp, "alpha", 5, ["specs", "issues"], db_root=args["db_root"])
+            from chromadb.api.models.Collection import Collection
+            query_collection = Collection.query
+
+            def omit_unchanged_issue(collection, *query_args, **query_kwargs):
+                found = query_collection(collection, *query_args, **query_kwargs)
+                if query_kwargs.get("where") == {"record_kind": "issue"}:
+                    keep = [index for index, meta in enumerate(found["metadatas"][0])
+                            if meta["number"] != 1]
+                    for field in ("ids", "metadatas", "documents", "distances"):
+                        found[field] = [[found[field][0][index] for index in keep]]
+                return found
+
+            # An ANN index may omit a member even when every member is requested.
+            # The unchanged Issue is closer than the newly reclassified Issue.
+            with mock.patch.object(Collection, "query", omit_unchanged_issue):
+                result = runner.action_search_multi_v2(
+                    repo, None, tmp, "alpha", 5, ["specs", "issues"], db_root=args["db_root"])
             self.assertEqual(result["specResults"], [], result)
             self.assertEqual({item["number"] for item in result["issueResults"]}, {1, 2}, result)
+            self.assertEqual([item["number"] for item in result["issueResults"]], [1, 2], result)
+
+            with mock.patch.object(Collection, "query", autospec=True, side_effect=query_collection) as ann:
+                runner.action_search_multi_v2(
+                    repo, None, tmp, "alpha", 1, ["issues"], db_root=args["db_root"])
+            self.assertEqual(ann.call_count, 1, "ordinary top-k still uses ANN")
+
+            get_records = Collection.get
+            for broken_vector in ([0.0] * 32, [float("nan")] * 32, [1.0]):
+                with self.subTest(vector=broken_vector):
+                    def invalid_vectors(collection, *get_args, **get_kwargs):
+                        found = get_records(collection, *get_args, **get_kwargs)
+                        if get_kwargs.get("include") == ["embeddings"]:
+                            found["embeddings"] = [broken_vector for _ in found["ids"]]
+                        return found
+
+                    with mock.patch.object(Collection, "get", invalid_vectors):
+                        with self.assertRaises(ValueError):
+                            runner._query_active_layers(db, "issues", "alpha", 5)
 
     def test_old_issue_layout_is_not_served_as_a_unified_store(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):

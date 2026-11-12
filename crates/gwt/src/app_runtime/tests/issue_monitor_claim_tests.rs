@@ -6970,38 +6970,39 @@ fn assert_expired_launch_ack_cleanup(
         .unwrap();
         None
     } else {
-        // The real scan commit rebases and expires at real now. Age only this
-        // exact fixture delivery so expiry survives that canonical recheck.
-        let created_at = (Utc::now() - chrono::Duration::seconds(121)).to_rfc3339();
-        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            let delivery = prefs
-                .pending_launch_deliveries
-                .iter_mut()
-                .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
-                .expect("the exact paused materializer delivery");
-            assert_eq!(delivery.issue_number, 42);
-            assert_eq!(
-                delivery.materializer_window_id.as_deref(),
-                Some(id.as_str())
-            );
-            delivery.created_at = created_at.clone();
-            prefs
-                .launching_issues
-                .iter_mut()
-                .find(|launch| launch.issue_number == 42)
-                .unwrap()
-                .claimed_at = Some(created_at.clone());
-            Ok(())
-        })
-        .unwrap();
-        owner_fixture_block_on(
-            owner.expire_monitor_windowless_launches_at(Utc::now().to_rfc3339()),
+        // This verifies cleanup after a committed expiry, not the deadline
+        // predicate. A scan can observe the paused Session's provisional live
+        // execution and correctly refuse to expire it (Issue #7098). Commit
+        // the exact delivery's timeout before releasing its launch checkpoint.
+        let delivery = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .pending_launch_deliveries
+            .into_iter()
+            .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
+            .expect("the exact paused materializer delivery");
+        assert_eq!(delivery.issue_number, 42);
+        assert_eq!(
+            delivery.materializer_window_id.as_deref(),
+            Some(id.as_str())
+        );
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(
+            &root,
+            gwt::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"launch_failed": {
+                    "issue_number": 42,
+                    "message": "Launch timed out: no window was created within 120s",
+                    "delivery_id": delivery.delivery_id,
+                    "materializer_id": delivery.materializer_id,
+                }}),
+                std::process::id(),
+            ),
         )
         .unwrap();
         let expired = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert!(
             expired.pending_launch_deliveries.is_empty(),
-            "the real daemon expired its windowless delivery"
+            "the real daemon committed the exact delivery's timeout"
         );
         assert!(expired.launching_issues.is_empty());
         Some(expired)

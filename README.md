@@ -2129,7 +2129,7 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
-The PM window opens **Tasks**, a read-only preview of saved request tasks. It
+The PM window's **Tasks** view is a read-only preview of saved request tasks. It
 shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
 shows completed and cancelled tasks. The preview contains at most 50 tasks and
@@ -2139,7 +2139,7 @@ confirmed list with a warning. Task editing, automatic intake, and history impor
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 
-The PM window's **Chat** view shows the PM conversation as chat bubbles: your
+The PM window opens on **Home**. Select **Chat** in the toolbar to open the PM conversation in one action. Chat shows your
 messages on the right and PM replies on the left, with PM Markdown (headings,
 lists, tables, and code) formatted. It reads the PM session's own conversation
 record and omits tool calls, hook notes, and automatic prompts. When PM sends
