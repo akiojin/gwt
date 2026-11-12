@@ -2183,7 +2183,10 @@ gwt shows an actionable hint.
 The PM window's **Tasks** view is a read-only preview of saved request tasks. It
 shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
-shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows completed and cancelled tasks. Parents show counts of their direct subtasks
+across all saved tasks, including those outside the preview: completed, cancelled,
+unfinished, and total. Cancellation is separate from completion; finishing all
+subtasks does not complete the parent automatically. The preview contains at most 50 tasks and
 shows the total and any requests awaiting classification. Long summaries are
 shortened; the saved tasks remain complete. Expand **Purpose and completion
 criteria** on a task to see its purpose and the first five completion criteria.

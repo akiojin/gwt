@@ -3,6 +3,7 @@
 use gwt_core::pm_request_tasks::{TaskStatus, TaskStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,15 @@ pub struct PmTaskSummary {
     pub review_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub criteria_preview: Option<PmTaskCriteriaPreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_progress: Option<PmTaskChildProgress>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmTaskChildProgress {
+    pub total: usize,
+    pub completed: usize,
+    pub cancelled: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +79,17 @@ pub(super) fn load(repo: &Path) -> PmTaskOverview {
     };
     let unfinished =
         |status: TaskStatus| !matches!(status, TaskStatus::Completed | TaskStatus::Cancelled);
+    // Count direct children before the preview limit; cancellation does not
+    // satisfy a parent's completion conditions and grandchildren are separate.
+    let mut child_progress: HashMap<&str, PmTaskChildProgress> = HashMap::new();
+    for task in state.tasks.values() {
+        if let Some(parent) = task.parent_id.as_deref() {
+            let progress = child_progress.entry(parent).or_default();
+            progress.total += 1;
+            progress.completed += usize::from(task.status == TaskStatus::Completed);
+            progress.cancelled += usize::from(task.status == TaskStatus::Cancelled);
+        }
+    }
     // Preserve stable ID order in each group, without copying the source,
     // authority, full drafts or audit history into every Reports poll.
     let tasks = state
@@ -98,6 +119,7 @@ pub(super) fn load(repo: &Path) -> PmTaskOverview {
                     .collect(),
                 completion_condition_total: task.draft.completion_conditions.len(),
             }),
+            child_progress: child_progress.get(task.draft.id.as_str()).copied(),
         })
         .collect();
     PmTaskOverview::Ready {
