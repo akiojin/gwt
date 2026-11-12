@@ -256,16 +256,20 @@ fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
 #[test]
 fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
     assert_eq!(WindowPreset::Issue.title(), "Issues");
-    assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
+    assert_eq!(WindowPreset::IssueMonitor.title(), "Issues");
     assert_eq!(WindowPreset::Spec.title(), "SPEC");
     assert_eq!(WindowPreset::Work.title(), "Work");
 
     let titles = [
         WindowPreset::Issue.title(),
-        WindowPreset::IssueMonitor.title(),
         WindowPreset::Spec.title(),
         WindowPreset::Work.title(),
     ];
+    // The retired monitor preset restores the canonical Issues surface.
+    assert_eq!(
+        WindowPreset::IssueMonitor.canonical_surface_preset(),
+        WindowPreset::Issue
+    );
     let unique = titles.iter().collect::<std::collections::HashSet<_>>();
     assert_eq!(
         unique.len(),

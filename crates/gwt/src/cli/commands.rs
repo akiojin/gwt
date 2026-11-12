@@ -171,7 +171,7 @@ pub enum IssueCommand {
         body: String,
     },
     /// SPEC #3200 Option A: an independent-review agent reports its verdict for a
-    /// reviewed SHA. Published to the Issue Monitor daemon control channel, where
+    /// reviewed SHA. Published to Issues daemon control channel, where
     /// the daemon (trusted) re-judges it against the launch-time criteria.
     MonitorReviewVerdict {
         issue_number: u64,
@@ -193,6 +193,10 @@ pub enum IssueCommand {
         expected_priority_order: Option<Vec<u64>>,
         reason: Option<String>,
         issue_numbers: Vec<u64>,
+    },
+    MonitorQueueAdopt {
+        project_root: Option<std::path::PathBuf>,
+        terminal: String,
     },
     MonitorQueueList {
         project_root: Option<std::path::PathBuf>,
@@ -371,7 +375,7 @@ pub enum IssueCommand {
         reason: String,
     },
     /// Issue #3844: a launched agent declares (or clears) that it is waiting,
-    /// so the Issue Monitor does not mistake the silence for a stall. `number`
+    /// so Issues does not mistake the silence for a stall. `number`
     /// defaults to the launch context's owner Issue.
     MonitorWait {
         project_root: Option<std::path::PathBuf>,

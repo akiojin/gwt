@@ -87,6 +87,8 @@ impl LaunchWizardState {
             .permission_launch_source(self.permission_launch_source())
             .skip_permissions(self.effective_skip_permissions());
 
+        builder = builder.codex_speed(self.codex_speed);
+
         if self.fast_mode_enabled_for_current_agent() {
             builder = builder.fast_mode(true);
         }
@@ -248,7 +250,7 @@ impl LaunchWizardState {
 
     /// Issue #4079 AC-2: the launch profile this wizard would save right now.
     ///
-    /// The Issue Monitor Agent Settings form previews its own effect on the
+    /// Issues Agent Settings form previews its own effect on the
     /// candidate pool, and it must preview the exact profile the save writes —
     /// so it reads it through the same builder the save uses. `None` when the
     /// current selection is not a launchable agent target.
@@ -732,7 +734,7 @@ mod tests {
         assert!(config.skip_permissions);
     }
 
-    /// AC-6: the Issue Monitor identifies itself after the config is built,
+    /// AC-6: Issues identifies itself after the config is built,
     /// and the re-decision describes the launch that actually ships.
     #[test]
     fn recording_the_launch_source_after_build_redecides_the_permission_mode() {
@@ -847,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_legacy_fast_mode_is_hidden_and_disabled() {
+    fn claude_explicit_fast_mode_is_visible_and_applied() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -867,17 +869,17 @@ mod tests {
 
         let view = state.view();
         assert_eq!(view.selected_agent_id, "claude");
-        assert!(!view.show_fast_mode);
-        assert!(!view.fast_mode);
+        assert!(view.show_fast_mode);
+        assert!(view.fast_mode);
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "off"));
+            .any(|item| item.label == "Fast mode" && item.value == "on"));
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-        assert!(!config.fast_mode);
-        assert!(!config
+        assert!(config.fast_mode);
+        assert!(config
             .args
             .windows(2)
             .any(|pair| pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")));
@@ -907,14 +909,14 @@ mod tests {
     }
 
     /// Issue #4228 AC-2: the reported reproduction, end to end. A Codex launch
-    /// with Fast Mode writes the Issue Monitor head profile; the operator then
+    /// with Fast Mode writes Issues head profile; the operator then
     /// switches that profile's agent to Claude; the Monitor opens the wizard
     /// from the saved profile and launches. The resulting Claude `LaunchConfig`
     /// must not carry Fast Mode.
     #[test]
     fn issue_monitor_profile_switched_to_claude_launches_without_fast_mode() {
         // Step 1-2 of the reported reproduction: a Codex launch with Fast Mode
-        // writes the Issue Monitor head profile.
+        // writes Issues head profile.
         let codex_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .fast_mode(true)
             .build();
@@ -940,7 +942,7 @@ mod tests {
             .expect("head profile");
         assert_eq!(stuck.agent_id, "claude");
 
-        // Step 4: the Issue Monitor opens the wizard from the saved head
+        // Step 4: Issues opens the wizard from the saved head
         // profile and launches.
         let previous_profiles = LaunchWizardPreviousProfiles::from_profile(Some(stuck.into()));
         let mut state = LaunchWizardState::open_with_previous_profiles(

@@ -135,6 +135,9 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
+        FrontendEvent::RestartWedgedOwner { .. } => {
+            FrontendUserActionLog::new("restart_wedged_owner", "project")
+        }
         FrontendEvent::RefreshOrphanDaemons => {
             FrontendUserActionLog::new("refresh_orphan_daemons", "project")
         }
@@ -720,6 +723,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels, .. } => {
             FrontendUserActionLog::new("set_issue_monitor_allowed_labels", "issue_monitor")
                 .count(allowed_labels.len())
+        }
+        FrontendEvent::GetRepositoryLabels { refresh } => {
+            FrontendUserActionLog::new("get_repository_labels", "issue_monitor").mode(if *refresh {
+                "refresh"
+            } else {
+                "cached"
+            })
         }
         FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
             FrontendUserActionLog::new("reorder_issue_monitor_issues", "issue_monitor")

@@ -2,7 +2,10 @@
 
 pub mod recovery;
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 const DURABLE_LAUNCH_RECOVERY_DIR: &str = "execution-launch-recovery";
 
@@ -21,8 +24,14 @@ pub fn durable_launch_recovery_path(
 }
 
 /// Whether an exact Session has a pending launch-recovery receipt.
-pub fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
-    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
+pub fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> io::Result<bool> {
+    let path = durable_launch_recovery_path(sessions_dir, session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Why a restored Session cannot be handed to the agent CLI as `--resume`
@@ -84,6 +93,7 @@ pub fn launch_config_from_persisted_session(
     if session.skip_permissions || pm_scratch.is_some() {
         builder = builder.skip_permissions(true);
     }
+    builder = builder.codex_speed(session.codex_speed());
     if session.fast_mode_enabled() {
         builder = builder.fast_mode(true);
     }
@@ -608,6 +618,26 @@ pub fn persist_finalized_launch_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_3730_recovery_metadata_preserves_errors_and_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!durable_launch_recovery_exists(dir.path(), "session").unwrap());
+        let path = durable_launch_recovery_path(dir.path(), "session").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "{}").unwrap();
+        assert!(durable_launch_recovery_exists(dir.path(), "session").unwrap());
+        let error =
+            durable_launch_recovery_exists(&dir.path().join("unreadable\0sessions"), "session")
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            durable_launch_recovery_exists(dir.path(), "../session")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 
     #[test]
     fn named_issue_history_records_start_handover_pr_and_completion_once() {

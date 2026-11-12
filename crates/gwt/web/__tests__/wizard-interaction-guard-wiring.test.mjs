@@ -111,6 +111,14 @@ function createWizardHarness({ sendResult = "sent" } = {}) {
   const deliveries = [];
   const createNode = (tag, className, textContent) => {
     const node = document.createElement(tag);
+    // linkedom exposes a read-only select value; supply the browser setter.
+    if (tag === "select") Object.defineProperty(node, "value", {
+      get: () => node.querySelector("option[selected]")?.value ?? node.options[0]?.value ?? "",
+      set: value => {
+        for (const option of node.options) option.removeAttribute("selected");
+        [...node.options].find(option => option.value === value)?.setAttribute("selected", "");
+      },
+    });
     if (className) node.className = className;
     if (textContent != null) node.textContent = textContent;
     return node;
@@ -148,6 +156,29 @@ function dispatchPointerActivation(document, button) {
     new document.defaultView.Event("click", { bubbles: true, cancelable: true }),
   );
 }
+
+test("saved unavailable Codex model stays visible until an explicit new selection", () => {
+  const harness = createWizardHarness();
+  try {
+    harness.surface.applyLaunchWizardStateEvent({ wizard: holderWizard({
+      show_manual_setup: true,
+      show_agent_settings: true,
+      selected_agent_id: "codex",
+      selected_model: "retired-model",
+      model_options: [{ value: "current-model", label: "Current model" }],
+      model_fallback_notice: "Codex no longer offers retired-model; the saved model is kept and not replaced.",
+    }) });
+    const select = harness.document.querySelector('select[aria-label="Model"]');
+    assert.equal(select.value, "retired-model");
+    assert.equal(select.querySelector('option[value="retired-model"]').disabled, true);
+    assert.match(select.textContent, /unavailable/);
+    select.value = "current-model";
+    select.dispatchEvent(new harness.document.defaultView.Event("change"));
+    assert.deepEqual(harness.sent.at(-1), { kind: "set_model", model: "current-model" });
+  } finally {
+    harness.restore();
+  }
+});
 
 test("holder decision replaces normal launch chrome with availability-gated actions and reasons", () => {
   const harness = createWizardHarness();
@@ -824,4 +855,47 @@ test("app forwards WebSocket connection state to the launch wizard surface", () 
     /function\s+setConnectionState\(connected,\s*recoverSnapshots\s*=\s*false\)[\s\S]{0,500}?handleLaunchWizardTransportChange\(connected\)/,
     "expected reconnect epochs to reach the launch wizard pending-action state",
   );
+});
+
+// Issue #7030: explicit speed controls stay scoped to their provider.
+test("Codex speed choices dispatch typed speed and explain Ultrafast availability", () => {
+  const harness = createWizardHarness();
+  try {
+    harness.surface.applyLaunchWizardStateEvent({ wizard: holderWizard({
+      show_manual_setup: true, show_agent_settings: true,
+      selected_agent_id: "codex", show_codex_speed: true,
+      codex_speed: "fast", show_fast_mode: true,
+    }) });
+    const group = harness.document.querySelector('[role="radiogroup"][aria-label="Speed"]');
+    assert.ok(group, "Codex exposes the shared segmented Speed control");
+    const buttons = [...group.querySelectorAll("button")];
+    assert.deepEqual(buttons.map(button => button.textContent), ["Off", "Fast", "Ultrafast"]);
+    assert.equal(buttons[1].getAttribute("aria-checked"), "true");
+    buttons[2].dispatchEvent(new harness.document.defaultView.Event("click", { bubbles: true }));
+    assert.deepEqual(harness.sent.at(-1), { kind: "set_codex_speed", speed: "ultrafast" });
+    assert.match(harness.document.querySelector("#wizard-body").textContent, /Pro \$500/);
+    assert.equal(harness.document.querySelector('input[aria-label="Use Claude Code Fast mode"]'), null);
+  } finally { harness.restore(); }
+});
+
+test("Claude has its own Fast toggle and other agents never expose Ultrafast", () => {
+  const harness = createWizardHarness();
+  try {
+    const render = agent => harness.surface.applyLaunchWizardStateEvent({ wizard: holderWizard({
+      show_manual_setup: true, show_agent_settings: true,
+      selected_agent_id: agent, show_codex_speed: true,
+      codex_speed: "ultrafast", show_fast_mode: true, fast_mode: true,
+    }) });
+    render("claude");
+    const checkbox = harness.document.querySelector('input[type="checkbox"]');
+    assert.ok(checkbox, "Claude exposes a Fast toggle");
+    assert.equal(checkbox.checked, true);
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new harness.document.defaultView.Event("change"));
+    assert.deepEqual(harness.sent.at(-1), { kind: "set_fast_mode", enabled: false });
+    assert.doesNotMatch(harness.document.querySelector("#wizard-body").textContent, /Ultrafast/);
+    render("hermes");
+    assert.equal(harness.document.querySelector('[aria-label="Speed"]'), null);
+    assert.doesNotMatch(harness.document.querySelector("#wizard-body").textContent, /Ultrafast|Fast mode/);
+  } finally { harness.restore(); }
 });

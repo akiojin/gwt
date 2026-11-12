@@ -670,8 +670,7 @@ mod tests {
         let unrelated_survived = crate::process::is_process_alive(unrelated_pid);
         std::fs::write(root.join("unrelated-auth-release"), "release").unwrap();
         let unrelated_result = unrelated.read_frame::<DaemonFrame>().await.unwrap();
-        server.abort();
-        let _ = server.await;
+        server.shutdown().await;
         assert!(
             matches!(result, Err(DelegatedRunError::InteractiveAuthentication(message))
             if message == "interactive authentication fixture")
@@ -771,8 +770,7 @@ mod tests {
         let unrelated_survived = crate::process::is_process_alive(unrelated_pid);
         std::fs::write(root.join("unrelated-release"), "release").unwrap();
         let unrelated_result = unrelated.read_frame::<DaemonFrame>().await.unwrap();
-        server.abort();
-        let _ = server.await;
+        server.shutdown().await;
         let cancelled = outcome
             .ok()
             .and_then(Result::ok)
@@ -879,8 +877,7 @@ mod tests {
         {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        server.abort();
-        let _ = server.await;
+        server.shutdown().await;
         let timed_out = outcome.ok().and_then(Result::ok).is_some_and(|result| {
             matches!(result,
                 Err(DelegatedRunError::TimedOut(timeout)) if timeout == Duration::from_secs(60))

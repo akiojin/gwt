@@ -71,7 +71,7 @@ pub(crate) fn capture_restored_launch(
         current,
         feedback: LaunchFeedbackContext {
             client_id: "__issue_monitor__".into(),
-            title: "Issue Monitor".into(),
+            title: "Issues".into(),
             issue_monitor_issue_number: Some(issue),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(root.into()),
@@ -393,7 +393,7 @@ pub(crate) fn reject_preflight_launch(
             source: None,
             feedback: LaunchFeedbackContext {
                 client_id: "__issue_monitor__".into(),
-                title: "Issue Monitor".into(),
+                title: "Issues".into(),
                 issue_monitor_issue_number: Some(issue),
                 issue_monitor_delivery_id: expected.map(|expected| expected.delivery_id.clone()),
                 issue_monitor_project_root: Some(root.into()),
@@ -564,6 +564,15 @@ impl MonitorLaunch {
     ) -> Result<Option<IssueMonitorAgentFailureSource>, String> {
         self.check_current()?;
         let issue = self.issue()?;
+        let launch_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_publication",
+            issue_number = issue, delivery_id = self.feedback.issue_monitor_delivery_id.as_deref().unwrap_or("none"),
+            window_id = %self.id);
+        let _launch_span = launch_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start(if ready {
+            "window_publish_ack"
+        } else {
+            "window_publish"
+        });
         let before = self.read_monitor()?;
         // OFF revokes existing reservations, not the materialized owner. Auto
         // may already be OFF while a valid manual reservation awaits its ACK.
@@ -573,6 +582,7 @@ impl MonitorLaunch {
         }
         if ready {
             if let Some(source) = self.confirmed_source(&before) {
+                phase.finish();
                 return Ok(Some(source));
             }
         }
@@ -689,6 +699,7 @@ impl MonitorLaunch {
             }
         }
         if !ready {
+            phase.finish();
             return Ok(None);
         }
         self.check_current()?;
@@ -770,6 +781,7 @@ impl MonitorLaunch {
         if !source.matches(&monitor, &self.id) || monitor.live_claim_id(issue) != expected_claim {
             return Err("Monitor ACK did not bind the exact owner pane".into());
         }
+        phase.finish();
         Ok(Some(source))
     }
 
@@ -810,6 +822,31 @@ impl MonitorLaunch {
             payload
         };
         publish(&self.root, payload).map_err(|error| error.to_string())
+    }
+
+    /// Retire an exited diagnostic only after this exact launch's failure
+    /// committed an automatic retry. Publishing alone is not a close receipt.
+    pub(crate) fn terminal_failure_retry(
+        &self,
+        detail: &str,
+        failure: Option<&crate::IssueMonitorFailure>,
+    ) -> Result<Option<u64>, String> {
+        let before = self.read_monitor();
+        let publication = self.failure(detail, failure, true);
+        let before = before?;
+        let exact_source = self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.matches(&before, &self.id));
+        let previous_version = before.prefs().failure_release_version;
+        let after = self.read_monitor()?;
+        let issue = self.issue()?;
+        if exact_source
+            && automatic_retry_committed(&after.prefs(), issue, previous_version, detail)
+        {
+            return Ok(Some(issue));
+        }
+        publication.map(|()| None)
     }
 
     /// A failed worker has proved that no physical candidate remains. Only
@@ -1169,7 +1206,58 @@ impl MonitorLaunch {
     }
 }
 
-const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issue Monitor startup timed out after ";
+fn automatic_retry_committed(
+    prefs: &crate::IssueMonitorPrefs,
+    issue: u64,
+    previous_version: u64,
+    detail: &str,
+) -> bool {
+    prefs.autonomous_mode
+        && prefs.autonomous_records.iter().any(|record| {
+            record.issue_number == issue && record.phase != crate::AutonomousPhase::NeedsHuman
+        })
+        && prefs.requeue_audit.iter().any(|release| {
+            release.issue_number == issue
+                && release.release_version > previous_version
+                && !release.operator_requested
+                && release.reason == detail
+                && release.retry_record.is_some()
+        })
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_retry_close_requires_a_new_matching_automatic_audit() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let detail = "Process exited with status 1";
+        monitor.record_autonomous_failure(4131, detail, "2026-11-11T02:16:12Z");
+        let mut prefs = monitor.prefs();
+        assert!(automatic_retry_committed(&prefs, 4131, 0, detail));
+        assert!(!automatic_retry_committed(&prefs, 4131, 1, detail));
+        assert!(!automatic_retry_committed(
+            &prefs,
+            4131,
+            0,
+            "another failure"
+        ));
+        prefs.requeue_audit[0].operator_requested = true;
+        assert!(!automatic_retry_committed(&prefs, 4131, 0, detail));
+        prefs.requeue_audit[0].operator_requested = false;
+        prefs.autonomous_records[0].phase = crate::AutonomousPhase::NeedsHuman;
+        assert!(!automatic_retry_committed(&prefs, 4131, 0, detail));
+    }
+}
+
+const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issues startup timed out after ";
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
     let owner = format!("#{issue}");

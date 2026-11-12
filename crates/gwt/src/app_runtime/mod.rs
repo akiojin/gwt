@@ -514,7 +514,7 @@ pub(crate) struct UpdateDrainObservation {
 }
 
 /// A notification-center record about the self-update (AC-12), broadcast to
-/// every client through the Issue Monitor toast channel.
+/// every client through Issues toast channel.
 fn update_notice(level: &str, message: String) -> OutboundEvent {
     OutboundEvent::global_update_notice(level, message)
 }
@@ -1356,7 +1356,7 @@ pub struct LaunchWizardSession {
     /// from a linked Issue on Start Work, Knowledge, Monitor, or resume flows.
     pub(crate) origin: LaunchWizardOrigin,
     /// Exact manual-holder arbitration snapshot. `None` on autonomous,
-    /// startup, Resume, Continue Work, and Issue Monitor launch adapters.
+    /// startup, Resume, Continue Work, and Issues launch adapters.
     pub(crate) manual_holder_intent: Option<ManualLaunchHolderIntent>,
 }
 
@@ -1589,7 +1589,7 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
 #[cfg(test)]
 pub(super) use gwt::project_runtime::installation::IssueMonitorLaunchClaimInput;
 
-/// Issue #4378 AC-2: one Issue Monitor launch delivery held until the startup
+/// Issue #4378 AC-2: one Issues launch delivery held until the startup
 /// generation reaper reports back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeferredIssueMonitorLaunch {
@@ -2044,7 +2044,7 @@ pub(crate) struct ProviderQuotaCandidate {
     pub(crate) first_seen: chrono::DateTime<chrono::Utc>,
 }
 
-/// Durable Issue Monitor outcome produced by a detached window-close
+/// Durable Issues outcome produced by a detached window-close
 /// finalizer. Only the already-computed result returns to Tao; transport,
 /// prefs locks, cache scans, and persistence all stay on the worker.
 #[derive(Debug, Clone)]
@@ -2112,11 +2112,13 @@ pub struct AppRuntime {
     /// replay never creates a second agent window and can re-ACK after a
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
+    /// Last consecutive launch failure per project, independent of delivery identity.
+    pub(crate) issue_monitor_launch_failure_causes: HashMap<PathBuf, String>,
     pub(crate) issue_monitor_launch_preparations: HashSet<wizard::IssueMonitorLaunchPreparationKey>,
     pub(crate) issue_monitor_launch_attempts: HashMap<wizard::IssueMonitorLaunchPreparationKey, u8>,
     pub(crate) issue_monitor_launch_queue: Vec<wizard::PendingIssueMonitorLaunch>,
     pub(crate) issue_monitor_materializer_id: String,
-    /// Issue #3878: budget for one local fallback commit of the Issue Monitor
+    /// Issue #3878: budget for one local fallback commit of Issues
     /// prefs. Injected at construction so a test runtime owns its budget
     /// instead of inheriting the GUI-thread one through process state.
     pub(crate) issue_monitor_fallback_commit_timeout: std::time::Duration,
@@ -2187,7 +2189,7 @@ pub struct AppRuntime {
     /// active project's `Auto` update drain. Advanced by
     /// [`AppRuntime::update_drain_tick_events`].
     /// Issue #4038 (AC-4 / AC-5): project hashes whose `update_drain` hold
-    /// (#4037) the settling bootstrap released. The Issue Monitor hold itself
+    /// (#4037) the settling bootstrap released. Issues hold itself
     /// lands with #4037; this is the seam it reads.
     pub(crate) update_drain_released_projects: Vec<String>,
     /// Issue #4038 (AC-4 / AC-5): `(level, message)` recorded into the
@@ -2357,7 +2359,7 @@ pub struct AppRuntime {
     /// silent while no client is connected and Claude's account read is opt-in.
     pub(crate) provider_usage_accounts: Vec<gwt_core::usage::ProviderUsage>,
     /// SPEC-3431 FR-068: when each agent window last showed activity, so the
-    /// heartbeat published to the Issue Monitor can be throttled instead of
+    /// heartbeat published to Issues can be throttled instead of
     /// firing a daemon control on every hook. Keyed by combined window id.
     pub(crate) last_agent_activity: HashMap<String, chrono::DateTime<chrono::Utc>>,
     /// Issue #4608: when each window's heartbeat was last let through the
@@ -2378,7 +2380,7 @@ pub struct AppRuntime {
     /// captured by full load/search/refresh augmentation and reused verbatim
     /// by the detail-only selection path.
     pub(crate) knowledge_related_snapshot: knowledge::KnowledgeRelatedSnapshot,
-    /// SPEC #3214 Phase 15: latest complete Issue Monitor projection per
+    /// SPEC #3214 Phase 15: latest complete Issues projection per
     /// project root, joined into cache-backed Knowledge rows by issue number.
     pub(crate) knowledge_monitor_snapshot: knowledge::KnowledgeMonitorSnapshot,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
@@ -2645,9 +2647,7 @@ fn load_mutate_and_persist_issue_monitor_state<T: Default>(
                 gwt::IssueMonitorConfig::default(),
                 prefs.clone(),
             );
-            let apply = mutation
-                .take()
-                .expect("issue monitor prefs mutation runs once");
+            let apply = mutation.take().expect("Issues prefs mutation runs once");
             result = Some(apply(&mut latest));
             *prefs = latest.prefs();
             monitor = Some(latest);
@@ -2655,7 +2655,7 @@ fn load_mutate_and_persist_issue_monitor_state<T: Default>(
     if let Err(error) = transaction {
         tracing::warn!(
             error = %error,
-            "issue monitor GUI prefs transaction failed"
+            "Issues GUI prefs transaction failed"
         );
         // Issue #4045: the closure may already have run when the durable
         // write expired the budget. Nothing reached disk, so drop the
@@ -2710,7 +2710,7 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
             if *disk != observed {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
-                    "Issue Monitor GUI proposal snapshot changed before commit",
+                    "Issues GUI proposal snapshot changed before commit",
                 ));
             }
             *disk = proposed;
@@ -2794,7 +2794,7 @@ fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
             ) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
-                    "Issue Monitor daemon authority fence appeared before local fallback commit",
+                    "Issues daemon authority fence appeared before local fallback commit",
                 ));
             }
             let observed = gwt::load_issue_monitor_prefs(prefs_path)?;
@@ -2811,7 +2811,7 @@ fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
                 if *disk != observed {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
-                        "Issue Monitor GUI proposal snapshot changed before commit",
+                        "Issues GUI proposal snapshot changed before commit",
                     ));
                 }
                 *disk = proposed;
@@ -2837,10 +2837,8 @@ fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
                         gwt::load_issue_monitor_authority_fence(prefs_path),
                         Ok(gwt::IssueMonitorAuthorityFenceState::Missing)
                     )
-                    || gwt_core::operation_deadline::ensure_remaining(
-                        "Issue Monitor scan commit retry",
-                    )
-                    .is_err()
+                    || gwt_core::operation_deadline::ensure_remaining("Issues scan commit retry")
+                        .is_err()
                 {
                     return Err(error);
                 }
@@ -2856,7 +2854,7 @@ fn record_issue_monitor_scan_failures(
     launch_failures: Vec<(u64, String)>,
 ) {
     if let Some(error) = merge_reconciliation_error {
-        tracing::warn!(error = %error, "issue monitor merge reconciliation failed");
+        tracing::warn!(error = %error, "Issues merge reconciliation failed");
         monitor.record_scan_error(now, error);
     }
     for (issue_number, message) in launch_failures {
@@ -2982,7 +2980,7 @@ fn commit_local_issue_monitor_effect_result(
         _ => None,
     };
     if let Some(error) = &remote_error {
-        tracing::warn!(%error, "local Issue Monitor claim mutation did not complete cleanly");
+        tracing::warn!(%error, "local Issues claim mutation did not complete cleanly");
     }
 
     let key = effect.attempt_key();
@@ -3089,7 +3087,7 @@ fn commit_local_issue_monitor_effect_result(
                 ) => {
                     latest.record_scan_error(
                         now_text,
-                        format!("Issue Monitor claim cleanup failed: {error}"),
+                        format!("Issues claim cleanup failed: {error}"),
                     );
                     latest.retry_pending_effect(&key);
                     2
@@ -3102,7 +3100,7 @@ fn commit_local_issue_monitor_effect_result(
                 ) if current => {
                     latest.record_scan_error(
                         now_text,
-                        format!("Issue Monitor claim acquisition failed: {error}"),
+                        format!("Issues claim acquisition failed: {error}"),
                     );
                     latest.retry_pending_effect(&key);
                     2
@@ -3118,7 +3116,7 @@ fn commit_local_issue_monitor_effect_result(
                 ) => {
                     latest.record_scan_error(
                         now_text,
-                        format!("Issue Monitor revoked claim cleanup failed: {error}"),
+                        format!("Issues revoked claim cleanup failed: {error}"),
                     );
                     latest.complete_pending_effect(&key);
                     1
@@ -3137,7 +3135,7 @@ fn commit_local_issue_monitor_effect_result(
                 ) => {
                     latest.record_scan_error(
                         now_text,
-                        format!("Issue Monitor claim mutation outcome is unknown: {error}"),
+                        format!("Issues claim mutation outcome is unknown: {error}"),
                     );
                     0
                 }
@@ -3579,7 +3577,7 @@ fn drive_local_issue_monitor_claim_effects_matching_with(
     ) -> Result<LocalIssueMonitorEffectOutcome, String>,
 ) -> Result<(), String> {
     let local_deadline =
-        match gwt_core::operation_deadline::ensure_remaining("local Issue Monitor claim driver")
+        match gwt_core::operation_deadline::ensure_remaining("local Issues claim driver")
             .map_err(|error| error.to_string())?
         {
             Some(_) => None,
@@ -3612,10 +3610,8 @@ fn drive_local_issue_monitor_claim_effects_matching_with(
                 effect.payload,
                 gwt::IssueMonitorEffectPayload::RenewClaim { .. }
             ) || monitor.claim_renewal_is_current(&effect.payload));
-        gwt_core::operation_deadline::ensure_remaining(
-            "local Issue Monitor remote effect submission",
-        )
-        .map_err(|error| error.to_string())?;
+        gwt_core::operation_deadline::ensure_remaining("local Issues remote effect submission")
+            .map_err(|error| error.to_string())?;
         let now = chrono::Utc::now();
         let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let outcome = execute(&effect, authority_current, &now, &now_text)?;
@@ -3631,7 +3627,7 @@ fn drive_local_issue_monitor_claim_effects_matching_with(
             now_text
         };
         if let Err(error) = gwt_core::operation_deadline::ensure_remaining(
-            "local Issue Monitor remote effect result commit",
+            "local Issues remote effect result commit",
         ) {
             if matches!(
                 effect.payload,
@@ -3706,7 +3702,7 @@ fn execute_local_issue_monitor_claim_effects(
                     gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => {
                         LocalIssueMonitorEffectOutcome::Release(Err(error))
                     }
-                    _ => return Err("unsupported local Issue Monitor effect".to_string()),
+                    _ => return Err("unsupported local Issues effect".to_string()),
                 });
             }
         };
@@ -3797,7 +3793,7 @@ fn execute_local_issue_monitor_claim_effects(
                 claim_id,
                 owner,
             )),
-            _ => return Err("unsupported local Issue Monitor effect".to_string()),
+            _ => return Err("unsupported local Issues effect".to_string()),
         })
     };
     drive_local_issue_monitor_claim_effects_matching_with(
@@ -4109,7 +4105,7 @@ fn observe_local_claim_candidates(
                 .map(|completed| completed.unwrap_or(ClaimProbeOutcome::Claimable))
         });
     let observations = observations.inspect_err(|failure| {
-        tracing::warn!(error = %failure, "issue monitor completion probe expired");
+        tracing::warn!(error = %failure, "Issues completion probe expired");
     })?;
     gwt::issue_monitor_worker::ensure_scan_deadline(
         gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
@@ -4148,14 +4144,14 @@ fn observe_local_issue_completion(
                 tracing::debug!(
                     issue = issue.number,
                     error = %failure,
-                    "issue monitor completion probe deferred within scan budget"
+                    "Issues completion probe deferred within scan budget"
                 );
                 return Ok(Some(ClaimProbeOutcome::Deferred));
             }
             tracing::debug!(
                 issue = issue.number,
                 error = %failure,
-                "issue monitor completion probe failed within budget (fail-open)"
+                "Issues completion probe failed within budget (fail-open)"
             );
             Ok(None)
         }
@@ -4219,7 +4215,7 @@ fn publish_issue_monitor_window_snapshot(
     if let Err(error) = publication {
         tracing::debug!(
             %error,
-            "Issue Monitor window snapshot stayed local; no daemon accepted it"
+            "Issues window snapshot stayed local; no daemon accepted it"
         );
     }
 }
@@ -4465,7 +4461,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     }
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-        .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
+        .map_err(|error| format!("load Issues prefs failed: {error}"))?;
     // Issue #4975 AC-A3: worktree inventory and recovery have their own worker
     // so a slow holder inspection cannot delay this Monitor tick. Reserve
     // before the authority probe (#3964): daemon-owned scans still need local
@@ -4483,7 +4479,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
         }
-        Err(error) => return Err(format!("Issue Monitor authority probe failed: {error}")),
+        Err(error) => return Err(format!("Issues authority probe failed: {error}")),
     }
 
     let cleanup_only = !prefs.enabled && issue_monitor_prefs_need_local_claim_cleanup(&prefs);
@@ -4564,7 +4560,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         )
                         .err()
                         .map(|error| {
-                            format!("issue monitor merge reconciliation failed: {error}")
+                            format!("Issues merge reconciliation failed: {error}")
                         });
                     match observe_local_claim_candidates(&monitor, &loaded, &owner, &repo) {
                         Ok(proposal) => local_claim_proposal = proposal,
@@ -4611,11 +4607,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
         }
-        Err(error) => {
-            return Err(format!(
-                "Issue Monitor authority commit check failed: {error}"
-            ))
-        }
+        Err(error) => return Err(format!("Issues authority commit check failed: {error}")),
     };
     #[cfg(test)]
     run_scheduled_scan_after_lease_before_commit_test_hook();
@@ -4656,7 +4648,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             if !reconciliation.readopted.is_empty() {
                 tracing::warn!(
                     issues = ?reconciliation.readopted,
-                    "issue monitor recovered launches whose agent windows were still running"
+                    "Issues recovered launches whose agent windows were still running"
                 );
             }
         } else {
@@ -4713,9 +4705,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         {
             return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
         }
-        return Err(format!(
-            "Issue Monitor scheduled scan commit failed: {error}"
-        ));
+        return Err(format!("Issues scheduled scan commit failed: {error}"));
     }
 
     if let Some((owner, repo)) = local_repo_identity {
@@ -4742,10 +4732,10 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             )
             .map_err(|commit_error| {
                 format!(
-                    "local Issue Monitor effect failed ({error}); recording the failure failed: {commit_error}"
+                    "local Issues effect failed ({error}); recording the failure failed: {commit_error}"
                 )
             })?;
-            tracing::warn!(error = %error, "local issue monitor claim execution unavailable");
+            tracing::warn!(error = %error, "local Issues claim execution unavailable");
         }
     }
 
@@ -4773,7 +4763,7 @@ fn quick_issue_body(title: &str) -> String {
 
 fn issue_registration_failure_message(error: &gwt_github::ApiError) -> String {
     format!(
-        "Issue registration failed: {error}. Fallback: create the Issue manually on GitHub, then launch it from Issue Monitor or retry from an intake session after fixing access."
+        "Issue registration failed: {error}. Fallback: create the Issue manually on GitHub, then launch it from Issues or retry from an intake session after fixing access."
     )
 }
 
@@ -5199,6 +5189,7 @@ impl AppRuntime {
             pending_launch_delivery_acks: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
             issue_monitor_launch_attempts: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
@@ -6186,7 +6177,7 @@ impl AppRuntime {
                     .remove(&delivery.local_delivery_key);
                 (
                     "error",
-                    format!("Issue Monitor could not deliver the human answer: {error}"),
+                    format!("Issues could not deliver the human answer: {error}"),
                 )
             }
             Ok(()) if !delivery.submitted => return Vec::new(),
@@ -6204,8 +6195,7 @@ impl AppRuntime {
                 }
                 (
                     "info",
-                    "Issue Monitor submitted the human answer; waiting for the provider receipt"
-                        .into(),
+                    "Issues submitted the human answer; waiting for the provider receipt".into(),
                 )
             }
         };
@@ -7579,7 +7569,7 @@ impl AppRuntime {
     }
 
     /// One or more agent windows were closed (single window close or whole
-    /// project tab close). For any window that was an Issue Monitor launched
+    /// project tab close). For any window that was an Issues launched
     /// window, return its Issue to pending (`Queued`) and free the active slot —
     /// never a fabricated completion. Cheaply gated so non-monitor window
     /// closes do not trigger a scan.
@@ -7680,7 +7670,7 @@ impl AppRuntime {
                 tracing::warn!(
                     error = %error,
                     operation = "window-closed",
-                    "issue monitor close finalizer failed"
+                    "Issues close finalizer failed"
                 );
                 if let Some(context) = owner.as_ref() {
                     events.push(
@@ -7847,7 +7837,7 @@ impl AppRuntime {
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
-                        message: format!("Issue Monitor scheduled worker could not start: {error}"),
+                        message: format!("Issues scheduled worker could not start: {error}"),
                         issue_number: None,
                     },
                 ));
@@ -7939,7 +7929,7 @@ impl AppRuntime {
             .unwrap_or_else(|_| {
                 Err(
                     gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                        "Issue Monitor Max active worker panicked".to_string(),
+                        "Issues Max active worker panicked".to_string(),
                     ),
                 )
             });
@@ -8103,7 +8093,7 @@ impl AppRuntime {
                 tracing::debug!(
                     error = %error,
                     operation,
-                    "issue monitor control daemon publish failed; using local fallback"
+                    "Issues control daemon publish failed; using local fallback"
                 );
                 self.commit_local_issue_monitor_control(context, apply_fallback)
                     .map(|(monitor, ())| Some(monitor))
@@ -8376,7 +8366,7 @@ impl AppRuntime {
         tracing::warn!(
             error = %error,
             operation,
-            "issue monitor control outcome is rejected or uncertain; local fallback denied"
+            "Issues control outcome is rejected or uncertain; local fallback denied"
         );
         let message = error.to_string();
         // A rejected or uncertain control does not describe monitor state.
@@ -8412,7 +8402,7 @@ impl AppRuntime {
         else {
             tracing::warn!(
                 ?project_root,
-                "dropping Issue Monitor notification without an open project owner"
+                "dropping Issues notification without an open project owner"
             );
             return None;
         };
@@ -8664,7 +8654,7 @@ impl AppRuntime {
             if let Err(error) = persisted {
                 tracing::warn!(
                     error = %error,
-                    "issue monitor GUI cache-only scan was not persisted; the next scan retries"
+                    "Issues GUI cache-only scan was not persisted; the next scan retries"
                 );
             }
             return self.issue_monitor_snapshot_events_for(client_id, Some(&project_root), monitor);
@@ -8743,7 +8733,7 @@ impl AppRuntime {
                             )
                             .err()
                             .map(|error| {
-                                format!("issue monitor merge reconciliation failed: {error}")
+                                format!("Issues merge reconciliation failed: {error}")
                             });
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
@@ -8824,7 +8814,7 @@ impl AppRuntime {
         if let Err(error) = persisted {
             tracing::warn!(
                 error = %error,
-                "issue monitor GUI scan was not persisted; the next scan retries"
+                "Issues GUI scan was not persisted; the next scan retries"
             );
         }
         #[cfg(not(unix))]
@@ -8869,7 +8859,7 @@ impl AppRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 tracing::debug!(
                     prefs_path = %prefs_path.display(),
-                    "local Issue Monitor claim execution deferred to the current authority"
+                    "local Issues claim execution deferred to the current authority"
                 );
                 return Vec::new();
             }
@@ -8877,9 +8867,9 @@ impl AppRuntime {
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 monitor.record_scan_error(
                     now,
-                    format!("Issue Monitor local authority acquisition failed: {error}"),
+                    format!("Issues local authority acquisition failed: {error}"),
                 );
-                tracing::warn!(%error, "local Issue Monitor authority acquisition failed");
+                tracing::warn!(%error, "local Issues authority acquisition failed");
                 return Vec::new();
             }
         };
@@ -8899,7 +8889,7 @@ impl AppRuntime {
             } else {
                 monitor.record_launch_auth_required(now);
             }
-            tracing::warn!(error = %error, "local issue monitor claim execution unavailable");
+            tracing::warn!(error = %error, "local Issues claim execution unavailable");
         }
 
         let mut events = Vec::new();
@@ -9041,9 +9031,7 @@ impl AppRuntime {
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
-                            message: format!(
-                                "Issue Monitor scheduled worker could not start: {error}"
-                            ),
+                            message: format!("Issues scheduled worker could not start: {error}"),
                             issue_number: None,
                         },
                     ));
@@ -9054,9 +9042,9 @@ impl AppRuntime {
     }
 
     /// Issue #3633 AC-1/AC-2: keep a runtime daemon alive for every project
-    /// whose Issue Monitor is enabled.
+    /// whose Issues is enabled.
     ///
-    /// The daemon is the single driver for the Issue Monitor control lane
+    /// The daemon is the single driver for Issues control lane
     /// (`scan_now`, `daemon.subscribe`), and nothing in the production
     /// topology used to start one. Because the check is idempotent, "start it"
     /// and "restart the one that died" are the same call; the caller only has
@@ -9102,7 +9090,7 @@ impl AppRuntime {
                     tracing::info!(
                         pid,
                         project_root = %project_root.display(),
-                        "started the runtime daemon for the Issue Monitor"
+                        "started the runtime daemon for Issues"
                     );
                 }
                 Ok(_) => {}
@@ -9340,6 +9328,21 @@ impl AppRuntime {
                     .iter()
                     .find(|(tab_id, _)| *tab_id == worker_expected_project_tab_id)
                     .map(|(_, live_window_ids)| live_window_ids);
+                // Issue #6933 AC-4: the weekly Codex model-list check rides
+                // the scheduled scan worker; it is a no-op until seven days
+                // have passed; a failure does not stop the scan.
+                if let Err(error) = gwt::launch_wizard::codex_models::run_weekly_check(
+                    &worker_project_root,
+                    &gwt::launch_wizard::codex_models::saved_codex_profile_models(
+                        &worker_prefs_path,
+                    ),
+                    chrono::Utc::now(),
+                ) {
+                    tracing::warn!(
+                        project_root = %worker_project_root.display(),
+                        "Codex model list weekly check failed: {error}"
+                    );
+                }
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
@@ -9358,7 +9361,7 @@ impl AppRuntime {
                     .map(|message| (*message).to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_string());
-                format!("Issue Monitor scheduled worker panicked: {detail}")
+                format!("Issues scheduled worker panicked: {detail}")
             });
             let (outcome, vanished_window_failures) = match result {
                 Ok((outcome, failures)) => (outcome, failures),
@@ -9378,7 +9381,7 @@ impl AppRuntime {
                     .issue_monitor_scheduled_scans_in_flight
                     .remove(prefs_path);
             }
-            tracing::error!(%error, "failed to spawn Issue Monitor scheduled worker");
+            tracing::error!(%error, "failed to spawn Issues scheduled worker");
             return Err(IssueMonitorScanEnqueueError::WorkerUnavailable(error));
         }
         Ok(())
@@ -9440,7 +9443,7 @@ impl AppRuntime {
                     .issue_monitor_scheduled_scans_in_flight
                     .remove(&failed_prefs_path);
             }
-            tracing::error!(%error, "failed to prepare Issue Monitor scheduled completion");
+            tracing::error!(%error, "failed to prepare Issues scheduled completion");
         }
         Vec::new()
     }
@@ -9468,9 +9471,7 @@ impl AppRuntime {
                 Ok(_) => (None, None, false),
                 Err(error) => (
                     Some((**scanned).clone()),
-                    Some(format!(
-                        "Issue Monitor scheduled completion failed: {error}"
-                    )),
+                    Some(format!("Issues scheduled completion failed: {error}")),
                     false,
                 ),
             },
@@ -9556,7 +9557,7 @@ impl AppRuntime {
         }
         let mut events = Vec::new();
         if let Some(error) = error {
-            tracing::error!(%error, "Issue Monitor scheduled completion failed");
+            tracing::error!(%error, "Issues scheduled completion failed");
             events.extend(self.issue_monitor_project_notification(
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
@@ -9597,7 +9598,7 @@ impl AppRuntime {
                 window_id = %close.window_id,
                 issue_number = ?close.issue_number,
                 idle_kind = close.idle_kind.as_str(),
-                "closing an idle agent window whose Issue Monitor launch was released"
+                "closing an idle agent window whose Issues launch was released"
             );
             events.extend(self.close_window_after_issue_monitor_finalize_events(&close.window_id));
         }
@@ -9679,9 +9680,29 @@ impl AppRuntime {
             window_id,
             ?issue_number,
             idle_kind,
-            "closing an idle agent window released by the Issue Monitor daemon"
+            "closing an idle agent window released by Issues daemon"
         );
-        self.close_window_after_issue_monitor_finalize_events(window_id)
+        // Issue #7035 AC-2: with a native project owner connected, the daemon's
+        // canvas names panes in the owner namespace, not by their GUI alias.
+        let alias = if self.window_lookup.contains_key(window_id) {
+            Some(window_id.to_string())
+        } else {
+            self.runtimes
+                .iter()
+                .find(|(_, runtime)| runtime.owner_pane_id == window_id)
+                .map(|(alias, _)| alias.clone())
+        };
+        let Some(alias) = alias else {
+            tracing::warn!(
+                target: "gwt.pane.teardown",
+                window_id,
+                ?issue_number,
+                idle_kind,
+                "Issues daemon idle close names no window known to this GUI"
+            );
+            return Vec::new();
+        };
+        self.close_window_after_issue_monitor_finalize_events(&alias)
     }
 
     fn issue_monitor_snapshot_events_for(
@@ -9791,8 +9812,8 @@ impl AppRuntime {
         };
         let start = if let Some(start) = error.find("Git needs attention") {
             start
-        } else if error.starts_with("Issue Monitor authority recovery is blocked")
-            || error.starts_with("Issue Monitor scan stalled")
+        } else if error.starts_with("Issues authority recovery is blocked")
+            || error.starts_with("Issues scan stalled")
         {
             0
         } else {
@@ -10269,6 +10290,23 @@ impl AppRuntime {
                 if !gwt::window_state::uses_agent_hook_state(window.preset) {
                     return None;
                 }
+                // A saved GUI alias is not proof of a physical pane. Failed
+                // launches can leave Starting rows without an owner runtime.
+                // Protect the actual launch interval before its runtime arrives.
+                let live_runtime = self
+                    .runtimes
+                    .get(window_id)
+                    .is_some_and(|runtime| runtime.child_pid.is_some() && !runtime.exit_confirmed);
+                let pending_launch =
+                    self.pending_launch_completions
+                        .get(window_id)
+                        .is_some_and(|pending| {
+                            pending.launch_in_flight
+                                && pending.current.load(std::sync::atomic::Ordering::Acquire)
+                        });
+                if !live_runtime && !pending_launch {
+                    return None;
+                }
                 let resident_pm =
                     self.pm_session_for_root(&tab.project_root)
                         .is_some_and(|pm_session| {
@@ -10281,7 +10319,11 @@ impl AppRuntime {
                         tab.title,
                         window.purpose_title.as_deref().unwrap_or(&window.title)
                     ),
-                    state: self.window_status(window_id).unwrap_or(window.status),
+                    state: if pending_launch {
+                        WindowProcessStatus::Starting
+                    } else {
+                        self.window_status(window_id).unwrap_or(window.status)
+                    },
                     resident_pm,
                 })
             })
@@ -10378,7 +10420,7 @@ impl AppRuntime {
     }
 
     /// Issue #3906 AC-3: a staged update (manifest persisted) raises the
-    /// `Auto` update drain when the Issue Monitor runs unattended and
+    /// `Auto` update drain when Issues runs unattended and
     /// auto-apply is on (the default while autonomous). Issue #4376 AC-1 /
     /// AC-2: an attended monitor raises the same drain when the download of
     /// a manual Update click lands while the host is not quiescent (agent
@@ -10544,7 +10586,7 @@ impl AppRuntime {
         tracing::info!(
             target: "gwt::update",
             version,
-            "staged update raises the Issue Monitor update drain (autonomous auto-apply)"
+            "staged update raises Issues update drain (autonomous auto-apply)"
         );
         let Some(state) = self.project_state_mut(context) else {
             observe(
@@ -10670,17 +10712,36 @@ impl AppRuntime {
             return Vec::new();
         }
         let (panes, worktrees) = self.capture_update_quiescence_inputs();
+        let sessions_dir = self.sessions_dir.clone();
+        let restoring_session_ids = self.restoring_session_ids();
         let proxy = self.proxy.clone();
         self.update_drain_scan_in_flight = true;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 gwt_core::operation_deadline::now() + std::time::Duration::from_secs(2),
             );
-            let observations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                contexts
-                    .into_iter()
-                    .filter_map(|context| {
-                        let drain = Self::read_project_auto_update_drain(&context);
+            let observations =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let drains: Vec<_> = contexts
+                        .into_iter()
+                        .map(|context| {
+                            let drain = Self::read_project_auto_update_drain(&context);
+                            (context, drain)
+                        })
+                        .collect();
+                    // Update recovery cannot depend on enabled Issues scans. Use
+                    // the same exact holder/runtime revalidation on this worker,
+                    // retaining admitted restores until their launch completes.
+                    if drains.iter().any(|(_, drain)| drain.is_some()) {
+                        startup::reap_defunct_active_generations(
+                            &sessions_dir,
+                            &worktrees,
+                            &[],
+                            &restoring_session_ids,
+                            startup::GenerationReaperFailureLog::Debug,
+                        );
+                    }
+                    drains.into_iter().filter_map(|(context, drain)| {
                         let monitor = gwt::IssueMonitorState::with_prefs(
                             gwt::IssueMonitorConfig::default(),
                             drain
@@ -10706,11 +10767,11 @@ impl AppRuntime {
                         })
                     })
                     .collect()
-            }))
-            .unwrap_or_else(|_| {
-                tracing::warn!("update drain observer panicked; automatic apply deferred");
-                Vec::new()
-            });
+                }))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("update drain observer panicked; automatic apply deferred");
+                    Vec::new()
+                });
             proxy.send(UserEvent::UpdateDrainObserved { now, observations });
         });
         if let Err(error) = spawn {
@@ -10955,7 +11016,7 @@ impl AppRuntime {
                         "{blocker} [{window_id}] — let the agent finish; inspect its pane if stalled"
                     ),
                     gwt::update_drain::UpdateBlocker::PendingAcquireClaim { .. } => format!(
-                        "{blocker} — wait for the claim to settle; inspect Issue Monitor status if stalled"
+                        "{blocker} — wait for the claim to settle; inspect Issues status if stalled"
                     ),
                     gwt::update_drain::UpdateBlocker::ActiveExecution { .. } => format!(
                         "{blocker} — have the owning agent verify and settle its execution"
@@ -11265,7 +11326,7 @@ impl AppRuntime {
                         if monitor.prefs().config_token() != expected_config_token {
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::WouldBlock,
-                                "Issue Monitor configuration changed before update drain release; read the latest status and retry.",
+                                "Issues configuration changed before update drain release; read the latest status and retry.",
                             ));
                         }
                         monitor.clear_update_drain();
@@ -11534,6 +11595,7 @@ impl AppRuntime {
             // These operations target the authenticated project connection.
             FrontendEvent::CreateWindow { .. }
             | FrontendEvent::RetryWorkspaceStateLoad
+            | FrontendEvent::RestartWedgedOwner { .. }
             | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
             | FrontendEvent::RunWorkspaceCleanup { .. }
             | FrontendEvent::CycleFocus { .. }
@@ -11553,6 +11615,7 @@ impl AppRuntime {
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
             | FrontendEvent::SetIssueMonitorTier { .. }
             | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
+            | FrontendEvent::GetRepositoryLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
             | FrontendEvent::QuickRegisterIssue { .. } => {
@@ -12032,6 +12095,49 @@ impl AppRuntime {
                     },
                 )]
             }
+            FrontendEvent::RestartWedgedOwner {
+                confirmed,
+                recovery_id,
+            } => {
+                let key = context.project_key.to_string();
+                let wedged = self
+                    .project_state(context)
+                    .and_then(|state| state.project_owner_health.as_ref())
+                    .is_some_and(|health| {
+                        health.state == gwt::protocol::ProjectOwnerHealthState::Wedged
+                            && health.recovery_id.as_deref() == Some(recovery_id.as_str())
+                    });
+                if !confirmed || !wedged {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
+                            notification_transition_id: None,
+                            level: "error".into(),
+                            message:
+                                "Owner restart requires confirmation of the current wedged owner"
+                                    .into(),
+                            issue_number: None,
+                        },
+                    )];
+                }
+                let supervisor = self.daemon_supervisor.clone();
+                let root = context.project_root.clone();
+                let proxy = self.proxy.for_project(context.clone());
+                self.blocking_tasks.spawn(move || {
+                    let result = gwt::daemon_subscriber::restart_wedged_owner(&key, confirmed, &recovery_id)
+                        .and_then(|()| supervisor.ensure_running(&root).map(|_| ()));
+                    let (level, message) = match result {
+                        Ok(()) => ("info", "Daemon stopped after saving diagnostics; reconnecting to its replacement".to_string()),
+                        Err(error) => ("error", format!("Daemon restart: {error}")),
+                    };
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(client_id, BackendEvent::IssueMonitorToast {
+                        notification_transition: None, notification_transition_id: None,
+                        level: level.into(), message, issue_number: None,
+                    })]));
+                });
+                Vec::new()
+            }
             FrontendEvent::RetryWorkspaceStateLoad => {
                 spawn_workspace_projection_reload(
                     &self.blocking_tasks,
@@ -12107,7 +12213,16 @@ impl AppRuntime {
                 agent_id,
                 model,
                 reasoning,
-            } => self.set_pm_launch_profile_events(context, &agent_id, model, reasoning),
+                codex_speed,
+                fast_mode,
+            } => self.set_pm_launch_profile_events(
+                context,
+                &agent_id,
+                model,
+                reasoning,
+                codex_speed,
+                fast_mode,
+            ),
             FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(context),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(&client_id),
             FrontendEvent::SelectCloneProjectParent => {
@@ -12699,6 +12814,9 @@ impl AppRuntime {
                     request_id,
                 )
             }
+            FrontendEvent::GetRepositoryLabels { refresh } => {
+                self.repository_labels_events(context, &client_id, refresh)
+            }
             FrontendEvent::GetIssueMonitorProfiles => {
                 let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
                 match gwt::load_issue_monitor_prefs(&prefs_path) {
@@ -12720,7 +12838,7 @@ impl AppRuntime {
                         Some(&context.project_root),
                         Some(&client_id),
                         gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
-                            format!("failed to load Issue Monitor profiles: {error}"),
+                            format!("failed to load Issues profiles: {error}"),
                         ),
                         "profiles-get",
                         None,
@@ -12882,7 +13000,7 @@ impl AppRuntime {
             // path only ever offered "start an agent", so an operator who
             // wanted the row back in the queue had to edit the state file.
             FrontendEvent::IssueMonitorRequeue { issue_number } => {
-                let reason = "operator requeue from the Issue Monitor surface";
+                let reason = "operator requeue from Issues surface";
                 let publication = self.publish_project_issue_monitor_control(
                     context,
                     serde_json::json!({
@@ -13770,7 +13888,9 @@ impl AppRuntime {
                 && gwt::window_state::uses_agent_hook_state(preset)
                 && !matches!(
                     base,
-                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    WindowProcessStatus::Stopped
+                        | WindowProcessStatus::Error
+                        | WindowProcessStatus::Interrupted
                 )
             {
                 WindowProcessStatus::Waiting
@@ -15163,6 +15283,7 @@ impl AppRuntime {
                 id,
                 incarnation,
                 error,
+                explicit_stop,
                 final_screen,
             } => {
                 let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
@@ -15208,6 +15329,19 @@ impl AppRuntime {
                 runtime.exit_confirmed = true;
                 runtime.status = status;
                 runtime.detail = detail.clone();
+                if explicit_stop {
+                    if let Some(address) = self.window_lookup.get(&id).cloned() {
+                        if let Some(tab) = self.tab_mut(&address.tab_id) {
+                            if tab
+                                .workspace
+                                .window(&address.raw_id)
+                                .is_some_and(crate::runtime_support::window_is_agent_pane)
+                            {
+                                tab.workspace.set_persist(&address.raw_id, false);
+                            }
+                        }
+                    }
+                }
                 self.active_agent_sessions.remove(&id);
                 let mut events = Vec::new();
                 if let Some(snapshot) = final_snapshot {
@@ -15215,6 +15349,11 @@ impl AppRuntime {
                     events.push(snapshot);
                 }
                 events.extend(self.apply_owner_status_projection(&id, status, detail));
+                if explicit_stop {
+                    // Status alone cannot update the catalog's snapshot
+                    // eligibility after this pane leaves the live census.
+                    events.push(self.workspace_state_broadcast(context));
+                }
                 events
             }
             OwnerEvent::LaunchProgress {
@@ -15419,7 +15558,13 @@ fn read_owner_session(
     sessions_dir: &Path,
 ) -> Option<gwt_agent::Session> {
     let id = snapshot.session_id.as_ref()?;
-    if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, id) {
+    if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, id).unwrap_or_else(
+        |error| {
+            tracing::warn!(session_id = %id, error_kind = ?error.kind(), %error,
+            "excluding owner snapshot with unreadable launch recovery receipt");
+            true
+        },
+    ) {
         return None;
     }
     let session = gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()?;
@@ -15732,6 +15877,7 @@ impl AppRuntime {
                 generation,
                 context: Some(context.clone()),
                 current: current.clone(),
+                launch_in_flight: true,
                 operation_id: operation_id.clone(),
                 owner_pane_id: owner_pane_id.clone(),
                 client_cell: client_cell.clone(),
@@ -15983,10 +16129,11 @@ impl AppRuntime {
             });
             return Vec::new();
         }
-        let pending = self
+        let mut pending = self
             .pending_launch_completions
             .remove(&window_id)
             .expect("current exact owner completion");
+        pending.launch_in_flight = false;
         self.pending_auto_resume_sources.remove(&window_id);
         self.inflight_launches.retain(|_, (id, _)| id != &window_id);
         let mut wizard_events = Vec::new();

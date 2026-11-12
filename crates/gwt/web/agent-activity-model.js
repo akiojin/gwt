@@ -307,7 +307,7 @@ export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], 
     } };
 }
 
-// Display-only membership. Window status, Work history and Monitor reservations
+// Display-only membership. Window status, Work history and Issues reservations
 // are deliberately absent: only the host's observed child census proves live use.
 export function createAgentActivityModel(projectKey) {
   const model = createUiStateStore(unknownActivity());

@@ -20,7 +20,7 @@
  * - `GWT_PLAYWRIGHT_BRANCH_NAME`       existing branch to launch on (required for the latency test)
  * - `GWT_PLAYWRIGHT_RESOURCE_AGENT_ID` custom agent id running the full build (required for the latency test)
  * - `GWT_PLAYWRIGHT_RESOURCE_EVIDENCE` optional JSON output path for the evidence bundle
- * - `GWT_PLAYWRIGHT_RESOURCE_MAX_ACTIVE` Issue Monitor max active agents to seed (default 3)
+ * - `GWT_PLAYWRIGHT_RESOURCE_MAX_ACTIVE` Issues max active agents to seed (default 3)
  * - `GWT_PLAYWRIGHT_RESOURCE_ROOT_EXE` executable path of the gwt process under test; the
  *   process evidence is scoped to its descendants so unrelated host builds do not leak in
  */

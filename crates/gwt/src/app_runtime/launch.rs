@@ -38,7 +38,6 @@ pub(super) use gwt::session_launch::{
 };
 
 use super::agent_maintenance;
-use super::continuation::durable_launch_recovery_exists;
 use super::{
     active_agent_session_matches_work, combined_window_id, normalize_branch_name,
     ActiveAgentSession, AgentKanbanLaunchTarget, AppRuntime, LaunchFeedbackContext,
@@ -55,6 +54,9 @@ pub(crate) struct PendingLaunchCompletion {
     pub(crate) generation: u64,
     pub(crate) context: Option<super::ProjectContext>,
     pub(crate) current: Arc<AtomicBool>,
+    /// A completed failure may retain current retry/cleanup authority without
+    /// a physical launch still awaiting its initial completion.
+    pub(crate) launch_in_flight: bool,
     pub(crate) operation_id: String,
     pub(crate) owner_pane_id: String,
     pub(crate) client_cell: super::RemoteLaunchClientCell,
@@ -208,9 +210,8 @@ impl AppRuntime {
     /// the main thread ever performing the session-directory scan.
     pub(crate) fn apply_refreshed_launch_wizard_sessions(
         &mut self,
-        mut sessions: Vec<gwt_agent::Session>,
+        sessions: Vec<gwt_agent::Session>,
     ) {
-        sessions.retain(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id));
         self.launch_wizard_cache.replace_sessions(sessions);
     }
 
@@ -855,13 +856,30 @@ impl AppRuntime {
             self.inflight_launches
                 .insert(key, (window_id.clone(), std::time::Instant::now()));
         }
-        let mut events = self.queue_project_owner_launch(
+        let mut events = match self.queue_project_owner_launch(
             &context,
             window_id.clone(),
             generation,
             Box::new(config),
             Box::new(metadata),
-        )?;
+        ) {
+            Ok(events) => events,
+            Err(error) => {
+                self.inflight_launches.retain(|_, (id, _)| id != &window_id);
+                // No owner launch was queued. Converge the local placeholder
+                // through the same failure projection as asynchronous refusal,
+                // while preserving the original error for the caller.
+                self.apply_owner_terminal_launch_projection(
+                    &context,
+                    &window_id,
+                    None,
+                    None,
+                    WindowProcessStatus::Error,
+                    Some(error.clone()),
+                );
+                return Err(error);
+            }
+        };
         events.push(self.workspace_state_broadcast(&context));
         events.extend(self.status_events(
             window_id,

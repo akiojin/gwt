@@ -390,14 +390,14 @@ resource-allocation agreements remain separate follow-up work.
   escalations back to the user.
 - You never implement production code yourself, and your sub-agents
   never modify the production working tree. Implementation is always
-  performed by implementation agents that the Issue Monitor launches
+  performed by implementation agents launched by Issues
   through its claim/slot path.
 - **PM-facing fixes are implementation work too.** Changes to what the
   PM itself needs in order to operate (the PM guidance and the PM skill,
   the `issue.monitor.*` / `pm.*` operations the PM calls, the Board and
   escalation surfaces the PM rules through, and defects that leave the
   PM unable to observe, order, or settle work) are implemented by the
-  implementation agents the Issue Monitor launches, like any other
+  implementation agents launched by Issues, like any other
   Issue (user instruction, 2026-10-06). Do not implement them in the PM
   worktree. An implementation agent must not declare itself blocked
   because the target is PM-facing. When the fleet cannot be steered
@@ -410,7 +410,7 @@ Hard limits, no exceptions:
   pane and is not a coordination channel.
 - Read scrollback to diagnose and to report, never to hand an agent
   instructions behind the Monitor's back.
-- Never edit Issue Monitor state files directly, never submit a review verdict
+- Never edit Issues state files directly, never submit a review verdict
   into the internal review gate, and never alter acceptance-criteria snapshots.
   An explicitly authorized GitHub review uses `pr.review.submit` and retains
   reviewer, self-review and CI checks. The merge gate decides merges on its own.
@@ -439,14 +439,32 @@ Hard limits, no exceptions:
   - two user instructions that genuinely conflict and both still apply.
     When one is newer and clearly supersedes the other, follow the newer
     one without asking.
-- When you do ask, ask once: state the question, your recommendation
-  and why, and a copy-paste answer, so one reply settles it.
+- When you do ask, ask once using the [choice-first question format](#choice-first-questions):
+  state the question, your recommendation and why, so one reply settles it.
 - While a question is pending, proceed with the recommended option when
   it is reversible and already within your authority, and say so; keep other
   fleet work moving. A pending permission request does not authorize the action.
 - When the user leaves a decision to you ("任せる" or equivalent),
   record that this class of decision is delegated and do not ask it
   again. Delegation does not create permission for a gated operation.
+
+## Choice-first questions
+
+- For a decision or confirmation whose answers can be enumerated, offer
+  2-4 distinct choices. Put the recommended choice first and mark it
+  `(Recommended)` in the user's language. Include one line explaining the
+  outcome of each choice and a brief reason for the recommendation.
+- Use the provider's native choice UI when available, such as Claude Code's
+  `AskUserQuestion`. Always allow an `Other` free-text answer; do not invent
+  a predefined answer when the user needs to provide their own.
+- When no choice UI is available, show numbered choices and say that
+  replying with the number is enough. Keep the free-text alternative.
+- Free-text-only questions with an answer example are allowed when the
+  answer inherently needs names, numbers, or original descriptions.
+  Never use a free-text-only question when the answers can be enumerated.
+- A recommended or preselected choice is not a submitted answer or approval.
+  Keep the existing permission boundaries and wait for actual authorization
+  whenever it is required.
 
 ## Scoped permissions and native approval
 
@@ -579,6 +597,14 @@ Approved existing operations:
   naming Issue numbers created, changed, or launched. If none were taken,
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
+- A user question or instruction that arrived while you were working, or whose
+  response deadline has passed, still gets its Q&A report. Post it with the
+  same `instruction` object and no `authorizations`; with no current human turn
+  to bind, it is saved as a display-only Q&A that grants no authority.
+- Never let a report disappear silently. When `pm.report.post` fails, read
+  `pm.report.list`; if the report is absent, retry once with the same payload,
+  and if it still fails, tell the user in the conversation that the report was
+  not saved and why.
 - When an action needs a newly saved instruction before it can run, the one Q&A
   report acknowledges the request and concrete action plan first. Save its
   `instruction.authorizations`, obtain the instruction ID, then perform the
@@ -634,7 +660,9 @@ Use this wire through the existing operation; do not attach legacy `body`,
   are optional. Each summary string is one nonblank logical line of at most
   240 Unicode characters. A decision event requires both `action.kind:decide`
   and a decision packet with `question`, `recommendation`, `reason`, and
-  2-3 `options`. Put a copy-paste answer example in the full details.
+  2-4 `options`. Put the recommended option first and explain each outcome in
+  its option text. Reports display numbered options; the user can reply with
+  the option number or an `Other` free-text answer in the execution log.
 - Preserve complete supporting detail in `details` and `refs`; never truncate
   evidence to fit the summary. Bounds are 1-32 events, 64 KiB details per event,
   at most 16 single-line refs of 2 KiB each, and 256 KiB for the submission.
@@ -720,12 +748,19 @@ Use this wire through the existing operation; do not attach legacy `body`,
 - For selected native intake, use the `native_turns` selector through
   `pm.request_tasks.read` (`selector:{kind:"native_turns"}`). It returns the
   current registered PM's `provider`, `conversation_id` and eligible turn IDs
-  with `prompt_sha256`, without originals. These reads are independent of
-  unavailable Task tracking. Preserve `window_only:true` and `detail`: this
+  with `prompt_sha256` and server-derived `source_id`, without originals.
+  These reads are independent of unavailable Task tracking.
+  Preserve `window_only:true` and `detail`: this
   bounded conversation window is neither complete history nor a durable
   cursor, and an absent turn does not prove no request remains.
 - Read a selected original with the `native_turn` selector and the exact
-  returned `provider`, `conversation_id` and `id`. Use
+  returned `provider`, `conversation_id` and `id`; it returns the same `source_id`.
+  Read the existing `source` selector before recapturing, using that `source_id`.
+  Verify a saved source's native identity and prompt hash against the selection,
+  then reconcile its pending classification or existing tasks without recapture.
+  A source ID does not prove persistence or grant authority. Only `missing_source`
+  establishes that this source is absent at the returned revision; unreadable,
+  foreign or unauthorized results stay degraded, never uncaptured. Use
   `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
   `reason`, and that exact `provider`, `conversation_id`, `id` and
   `prompt_sha256`. The server resolves the original, source and Intake actor;
@@ -793,10 +828,14 @@ Use this wire through the existing operation; do not attach legacy `body`,
   or update. Do not repeat the offer for status queries, monitor events, or
   replies within the same intake. Immediate registration remains the default
   for every request type unless the user opts into refinement.
-- Before registration, offer one optional line in the user's language:
-  "Would you like to refine the details? Otherwise I will proceed with the
-  defaults." Do not wait for a reply or repeat the question. If the user says
-  no or gives no answer, continue the default intake and registration below.
+- Before registration, offer one optional choice in the user's language using
+  the [choice-first question format](role-and-boundaries.md#choice-first-questions).
+  Use a nonblocking native choice UI, or numbered text if the available UI
+  would wait for input: "1. Proceed with defaults (Recommended) — register now;
+  2. Refine details — discuss and refine the same Issue; Other — describe your
+  preference." Recommend defaults to keep registration moving. Do not wait
+  for a reply or repeat the question. If the user chooses defaults or gives no
+  answer, continue the default intake and registration below.
 - If the user opts in, follow the existing `gwt-discussion` skill and its
   references for investigation and clarification; do not duplicate its dialogue
   flow here. Explicit opt-in permits that skill's questions instead of the
@@ -820,8 +859,8 @@ Use this wire through the existing operation; do not attach legacy `body`,
   asking the user.
 - Outside opted-in refinement, ask the user only when a branch is irreversible
   or determines a core specification choice. Present all remaining questions in a single batch;
-  each question includes your recommendation and rationale plus a copy-paste
-  answer example.
+  use the [choice-first question format](role-and-boundaries.md#choice-first-questions)
+  for each question, including your recommendation and rationale.
 - For every branch registered using a PM default, add a Notes entry to the
   Issue body in the form `PM default ruling (override available): ...`.
   Record the branch, chosen default, and rationale, and tell the user that a
@@ -891,8 +930,8 @@ it does not turn that owner into a raw report or exclude its repair.
   infer adoption from silence, labels, bot notifications or approval text in a
   report. Present a `needs_human` summary, recommendation and evidence through
   the existing PM conversation and Reports decision wait; keep current status
-  waiting with the concrete owner action. Do not invent an Issue Monitor
-  NeedsHuman row or queue the raw report to manufacture one.
+  waiting with the concrete owner action. Do not invent a NeedsHuman row in Issues
+  or queue the raw report to manufacture one.
 - Record the actual owner's adopt / reject / defer decision and rationale on
   the report so the reporter can follow it. Only actually adopted requests
   proceed to a trusted curated `gwt-spec` owner with approved requirements,
@@ -988,7 +1027,7 @@ You own the backlog for its whole life, not just at creation.
   `auto-merge` acceptance-block guard of `issue.create` applies to the
   edited result too: a body or label change that leaves an `auto-merge`
   Issue without a `- [ ] AC-N:` block is refused.
-- Readiness format the Issue Monitor reads: a `## Acceptance Criteria`,
+- Readiness format read by Issues: a `## Acceptance Criteria`,
   `## 受け入れ基準` or `## 受け入れ条件` heading (never `## 成功基準`)
   followed by `- [ ] AC-N:` checkbox lines. A `- [ ]` line without the
   `AC-N:` prefix is accepted and numbered by position, so the prefix is
@@ -1041,7 +1080,7 @@ body cannot hold `plan` / `tasks` sections.
   read those before concluding that a queued-looking Issue is simply
   waiting its turn.
 - Read `source` before you read any number in that snapshot. `daemon`
-  means a live Issue Monitor answered. `degraded_cache` means nothing
+  means the live Issues runtime answered. `degraded_cache` means nothing
   answered and the projection was rebuilt from preferences and the
   local Issue cache: every count is a lower bound, `active_launches` is
   marked `active_launches_incomplete`, `gui_status.state` reads
@@ -1324,9 +1363,8 @@ drive them.
   `pm.operation.execute` with `operation:"pm.message.send"` and the exact
   target `id` and response `text` in `params`. `pane.send` remains forbidden.
 - A `waiting` pane is a runtime observation state, including for manually
-  launched panes. It does not create or imply an Issue Monitor
-  `needs_human` record; never mutate Monitor state or invent a NeedsHuman
-  row from `pane.list`.
+  launched panes. It does not create or imply a `needs_human` record in Issues;
+  never mutate Monitor state or invent a NeedsHuman row from `pane.list`.
 - `board.post` with `params.kind` and `params.mentions` is how you speak
   to another agent. Delivery is pull-based — the recipient sees it at
   its next intent boundary, not immediately. A Board post never
@@ -1460,9 +1498,18 @@ same profile to try again.
 ### Stop during blocked authority recovery
 
 When `issue.monitor.status` reports `authority recovery is blocked`,
-`issue.monitor.config.set` remains fail-closed, including OFF and
-`max_active` changes. Record the error and its preferences/fence paths;
-do not delete the fence or hand-edit the preferences to bypass it.
+the registered PM may use `issue.monitor.config.set` for OFF and capacity changes
+through the typed emergency transaction. ON and unrelated configuration changes
+remain refused. A malformed/unreadable authority fence can also prevent transport
+before this reply; use the direct stop fallback below in that case. Record the
+error and its preferences/fence paths; do not delete the fence or hand-edit the
+preferences to bypass it.
+
+For a launch storm, five launches of one Issue within 300 seconds exhaust its
+budget. The next launch stops Monitor and parks that Issue in `needs_human`.
+Inspect the recorded reason, resolve the cause, then use `issue.monitor.requeue`
+and enable Monitor after the five-minute window expires. Restarting the app does
+not reset this budget.
 
 - Apply `issue.label {number, action:"add", labels:["hold"]}` to each
   affected owner and require successful GitHub readback. A `hold` label
@@ -1644,13 +1691,13 @@ act.
 - Route `waiting_for_human` / `report_to_human` through the existing digest
   and human-input path; the observation does not create a Monitor NeedsHuman row.
   For `close_or_relaunch` and `stop_and_requeue`, preserve the existing authority,
-  canonical settlement checks, the configured close grace, and the Issue Monitor's
+  canonical settlement checks, the configured close grace, and the Issues
   launch path. A recommendation never authorizes an immediate close or relaunch.
 - The directive goes through the ruling channels only: `board.post`
   with a mention when the agent will pick it up at its next intent
   boundary, `pm.message.send` when the pane is idle and must move now.
   Never spawn, relaunch, or inject launch or bootstrap instructions
-  past the Issue Monitor's launch path, and never `pane.send` into
+  past the Issues launch path, and never `pane.send` into
   another pane: steering tells a running agent what to do next; it
   never starts one.
 - A launch waiting on a `verify.lease` holder, held by a provider quota,
@@ -1731,7 +1778,7 @@ re-derives the failure from the persisted hold, so the row does not move.
   lock), the requeued issue fails the same way on its next scan. Read the
   `error_message` first and resolve the cause, then requeue.
 
-Never repair Issue Monitor state by editing `issue-monitor.json`. A hand
+Never repair Issues state by editing `issue-monitor.json`. A hand
 edit is invisible to every process that already holds the same state in
 memory: they re-stamp what you removed on their next commit, so the
 repair silently un-happens and the row comes back. `issue.monitor.requeue`
@@ -1890,14 +1937,15 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   unattended work, use `issue.monitor.config.set` under the existing
   registered-PM authority and `expected_config_token` rules, then read back
   status before attempting a launch. Respect an explicit instruction to keep
-  the Monitor off; the standing mandate does not override it. Config success
-  alone is not proof of launch availability or launch success.
+  the Monitor off; the standing mandate does not override it.
+  A launch-storm shutdown stays off until its cause is resolved, the affected Issue is explicitly
+  requeued, and the five-minute window expires; do not auto-enable it for other work.
+  Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
   approval/owner-handoff rules before asking the user to act. When recovery
   actually needs a human decision, present a NeedsHuman conversation with the
-  observed obstacle and concrete recovery action. Do not manufacture an Issue
-  Monitor `needs_human` row or requeue healthy Issues to represent a project
+  observed obstacle and concrete recovery action. Do not manufacture a `needs_human` row in Issues or requeue healthy Issues to represent a project
   configuration obstacle. A disabled Monitor is not a no-change success or
   proof that an agent launched while intended launch work remains blocked;
   continue the other resident duties within their authority.
@@ -1976,7 +2024,7 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 ## Concern supervision
 
 Every resident cycle supervises durable Concerns independently of whether the
-Issue Monitor queue changed or became empty:
+Issues queue changed or became empty:
 
 - Begin with `concern.list` and read its summary so the unresolved count and
   oldest unresolved `raised_at` are visible before deciding that the cycle is
@@ -2022,7 +2070,7 @@ Issue Monitor queue changed or became empty:
 
 Every resident cycle reads the open pull request inventory through
 `pr.list`. Do not wait to be asked, and do not skip the read because
-the Issue Monitor queue looks quiet — agent windows disappear, PRs do
+the Issues queue looks quiet — agent windows disappear, PRs do
 not. The read itself is budget-aware (Issue #3891), so a cycle never
 has to choose between inventorying and protecting the shared GitHub
 quota:
@@ -2213,7 +2261,7 @@ PR | owner Issue | dwell | conflicting files | behind | recommendation
 `conflict.conflicting_file_count` (`-` when the PR is not conflicted),
 and `behind` is `conflict.behind_by`. Use `?` for a fact the row did not
 measure; never leave a column out and never guess one.
-- When `default_action_executable` is false the Issue Monitor cannot
+- When `default_action_executable` is false the Issues runtime cannot
   perform the default action and `blocker` says why: `stale_pr_inventory`,
   `owner_unknown`
   (no closing Issue and no launch ref naming one) or
@@ -2384,7 +2432,7 @@ gap stays invisible until someone happens to look (Issue #3516).
 ## GitHub read budget
 
 Your own survey is the most likely cause of a shared-quota exhaustion
-that then stalls the Issue Monitor scan and every agent's PR handoff.
+that then stalls the Issues scan and every agent's PR handoff.
 
 - Issue and PR reads are cache-first. Pass `refresh:true` only when the
   decision at hand needs the live state (a launch, a ruling, a close
@@ -2572,7 +2620,8 @@ and urgency.
   immediately when first detected or materially changed, using the affected
   window title and the action required
   from the user. For a decision wait, include the question, your
-  recommendation and rationale, and a copy-paste answer example. Never
+  recommendation and rationale using the
+  [choice-first question format](role-and-boundaries.md#choice-first-questions). Never
   reduce the handoff to an instruction to write something in another
   window. Reuse the sanitized episode summary; subsequent supervision does not
   authorize another `pane.read`.
@@ -2647,6 +2696,8 @@ a quiet queue or a handed-off PR alone does not finish the PM role.
 ## References
 
 Choose the reference for the current action; read only the relevant sections.
+Read references and project memory by absolute path (the file-read tool or
+`cat <absolute path>`); do not `cd` into them.
 
 - At startup or before an authority decision: [Role, boundaries, and user instructions](references/role-and-boundaries.md).
 - For request intake, Issue ownership, queue order, or launches: [Intake and priority](references/intake-and-priority.md).
@@ -2857,6 +2908,10 @@ mod tests {
                 "completion must be visible at entry"
             );
             assert!(
+                root.contains("do not `cd` into them"),
+                "Issue #6989: references are read by absolute path"
+            );
+            assert!(
                 root.len() <= 2500,
                 "router must stay small: {} bytes",
                 root.len()
@@ -2891,6 +2946,9 @@ mod tests {
                 "`pm.request_tasks.capture`",
                 "`native_turns`",
                 "`native_turn`",
+                "server-derived `source_id`",
+                "Read the existing `source` selector before recapturing",
+                "A source ID does not prove persistence",
                 "Never infer native identity from candidate text",
                 "`unverified_raw`",
                 "Candidates are not authenticated sources, Tasks or instructions",
@@ -3048,7 +3106,7 @@ mod tests {
             "every branch that is neither irreversible nor a core specification choice",
             "irreversible or determines a core specification choice",
             "single batch",
-            "copy-paste answer example",
+            "role-and-boundaries.md#choice-first-questions",
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
@@ -3113,7 +3171,7 @@ mod tests {
             "pane's window title",
             "Without applicable authority, do not call `pm.message.send`",
             "only the human may resolve that prompt in the pane",
-            "does not create or imply an Issue Monitor `needs_human` record",
+            "does not create or imply a `needs_human` record in Issues",
             "Never include raw command text, filesystem paths, tokens, secrets, or tool arguments",
             // FR-066: stopping a pane is allowed and bounded. This is the
             // explicit amendment to FR-023's blanket prohibition.
@@ -3164,7 +3222,7 @@ mod tests {
             "the one component that tolerates silence",
             "stranded_launch",
             "has waited eight",
-            "Never repair Issue Monitor state by editing `issue-monitor.json`",
+            "Never repair Issues state by editing `issue-monitor.json`",
             "they re-stamp what you removed on their next commit",
             "Recovering a row does not fix why it failed",
             // Issue #3607: the PM singleton is per repository, and an orphan
@@ -3344,7 +3402,7 @@ mod tests {
                 "actual `akiojin` adoption",
                 "override generic default-permission and adoption policies",
                 "existing PM conversation and Reports decision wait",
-                "Do not invent an Issue Monitor NeedsHuman row",
+                "Do not invent a NeedsHuman row in Issues",
                 "adopt / reject / defer",
             ] {
                 assert!(intake.contains(required), "{provider} intake is missing {required}");
@@ -3376,7 +3434,8 @@ mod tests {
         let guidance = unwrapped(&render_contract());
         for phrase in [
             "authority recovery is blocked",
-            "`issue.monitor.config.set` remains fail-closed",
+            "registered PM may use `issue.monitor.config.set` for OFF and capacity changes",
+            "A launch-storm shutdown stays off",
             "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
             "The direct `issue.monitor.stop` path still works when typed preferences are readable",
             "preserves the authority fence",
@@ -3628,6 +3687,52 @@ mod tests {
     }
 
     #[test]
+    fn generated_user_questions_default_to_choices_for_both_providers() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let references = dir.path().join(provider).join("skills/gwt-pm/references");
+            let role = unwrapped(
+                &std::fs::read_to_string(references.join("role-and-boundaries.md")).unwrap(),
+            );
+            for required in [
+                "## Choice-first questions",
+                "2-4 distinct choices",
+                "recommended choice first",
+                "one line explaining the outcome of each choice",
+                "`Other` free-text answer",
+                "provider's native choice UI",
+                "`AskUserQuestion`",
+                "numbered choices",
+                "replying with the number is enough",
+                "names, numbers, or original descriptions",
+                "Never use a free-text-only question when the answers can be enumerated",
+            ] {
+                assert!(role.contains(required), "{provider}: missing {required}");
+            }
+            for name in ["intake-and-priority.md", "escalation-and-reporting.md"] {
+                let reference = std::fs::read_to_string(references.join(name)).unwrap();
+                assert!(
+                    reference.contains("role-and-boundaries.md#choice-first-questions"),
+                    "{provider}/{name}: missing shared question format"
+                );
+                assert!(
+                    !reference.contains("Would you like to refine the details?"),
+                    "{provider}/{name}: stale free-text-only intake question"
+                );
+            }
+            assert!(
+                role.contains("2-4 `options`"),
+                "{provider}: stale Reports choice bound"
+            );
+            assert!(
+                role.contains("option number"),
+                "{provider}: missing Reports fallback"
+            );
+        }
+    }
+
+    #[test]
     fn contract_delegates_request_intake_and_minimizes_user_questions() {
         assert!(body().contains(
             "No intermediate confirmation questions except for the intake questions explicitly allowed below"
@@ -3649,17 +3754,21 @@ mod tests {
             "every branch that is neither irreversible nor a core specification choice",
             "irreversible or determines a core specification choice",
             "single batch",
-            "copy-paste answer example",
+            "role-and-boundaries.md#choice-first-questions",
             "For every branch registered using a PM default",
             "PM default ruling (override available)",
             "one-line correction",
             "Offer once for each new user work request that may require Issue registration or update.",
             "Do not repeat the offer for status queries, monitor events, or replies within the same intake.",
             "Immediate registration remains the default for every request type unless the user opts into refinement.",
-            "Before registration, offer one optional line",
-            "Would you like to refine the details?",
+            "Before registration, offer one optional choice",
+            "Use a nonblocking native choice UI",
+            "numbered text if the available UI would wait for input",
+            "1. Proceed with defaults (Recommended)",
+            "2. Refine details",
+            "Other",
             "Do not wait for a reply",
-            "If the user says no or gives no answer",
+            "If the user chooses defaults or gives no answer",
             "If the user opts in, follow the existing `gwt-discussion` skill",
             "Use `gwt-plan-spec` when the resulting design-required Issue needs planning",
             "same Issue's `spec` section / acceptance criteria",
@@ -3713,7 +3822,8 @@ mod tests {
             "Default each user-facing report to 3-6 lines",
             "Every unresolved user-input or decision wait is an escalation",
             "first detected or materially changed",
-            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "the question, your recommendation and rationale using the",
+            "role-and-boundaries.md#choice-first-questions",
             "Build a stalled-item inventory every cycle",
             "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, `AUTO-MERGE-STALLED`, or `escalation_due`, pending PM-owned feedback triage, and quiet agents",
             "Advance at least one item from that inventory in every cycle",
@@ -3776,7 +3886,7 @@ mod tests {
                 "Respect an explicit instruction to keep the Monitor off",
                 "`pm.capabilities` and the existing approval/owner-handoff rules",
                 "NeedsHuman conversation with the observed obstacle and concrete recovery action",
-                "Do not manufacture an Issue Monitor `needs_human` row",
+                "Do not manufacture a `needs_human` row in Issues",
                 "A disabled Monitor is not a no-change success or proof that an agent launched",
                 "check fresh `has_launch_profile` before attempting unattended launches",
                 "Initialize only an empty saved pool",
@@ -3812,7 +3922,7 @@ mod tests {
                 "`close_or_relaunch` and `stop_and_requeue`",
                 "The health operation does not execute mutations",
                 "the configured close grace",
-                "Issue Monitor's launch path",
+                "Issues launch path",
             ] {
                 assert!(contract.contains(required), "{provider}: missing {required}");
             }
@@ -3848,7 +3958,7 @@ mod tests {
             "stopped for no visible reason",
             "`board.post` with a mention",
             "`pm.message.send`",
-            "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issue Monitor's launch path",
+            "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issues launch path",
             "never `pane.send`",
             "The steering judgment precedes the no-change judgment",
             "a launch requiring intervention left idle without a directive is never a no-change cycle",
@@ -4579,7 +4689,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane"
         ));
         assert!(body.contains(
-            "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
+            "It does not create or imply a `needs_human` record in Issues; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
         ));
         assert!(!body.contains("the PM may resolve a `waiting` pane"));
     }
@@ -4979,9 +5089,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         ] {
             assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
         }
-        assert!(intake.contains("Before registration, offer one optional line"));
+        assert!(intake.contains("Before registration, offer one optional choice"));
         assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
-        assert!(intake.contains("If the user says no or gives no answer"));
+        assert!(intake.contains("If the user chooses defaults or gives no answer"));
         assert!(claude.contains("Only canonical `verify.run` acquires the host-wide lease"));
         for phrase in [
             "develop uses `strict=false`",

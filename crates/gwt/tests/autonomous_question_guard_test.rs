@@ -1,7 +1,7 @@
 //! Issue #3478 (SPEC #3200 FR-025): the PreToolUse interception half. A
 //! monitor-launched autonomous session must never reach a waiting question UI:
 //! the question tool is denied *before* it can wait and is converted into a
-//! durable handoff in the Issue Monitor control plane.
+//! durable handoff in Issues control plane.
 
 use std::path::Path;
 

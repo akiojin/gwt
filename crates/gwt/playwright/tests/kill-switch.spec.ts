@@ -204,7 +204,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     expect(inj.text).toBe("hello agent");
   });
 
-  test("manual and Monitor-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
+  test("manual and Issues-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
     await page.goto(appUrl);
@@ -334,7 +334,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(waitingCount).toHaveText("0");
     await expect(waitingCell).not.toHaveClass(/op-status-strip__cell--alert/);
 
-    // `agent-3` models a pane launched by Issue Monitor. WindowState has no
+    // `agent-3` models a pane launched by Issues. WindowState has no
     // launch-source field by design, so the fixture deliberately uses the same
     // Agent window schema and exact event projection as the manual pane. Switch
     // to it through Works before exercising its cues.
@@ -420,13 +420,13 @@ async function installKillSwitchBackend(page) {
         tab_group_id: "approval-agent-tabs",
         tab_group_active: true,
       }),
-      // Issue Monitor launches an ordinary Agent window; its issue linkage is
+      // Issues launches an ordinary Agent window; its issue linkage is
       // session metadata and is intentionally not copied into the frontend
       // window schema. This second pane therefore exercises source parity
       // without inventing a frontend-only `source` discriminator.
       agentWindow("agent-3", 1600, 1200, 2, {
-        title: "Monitor-linked Agent",
-        purpose_title: "Monitor-linked Agent",
+        title: "Issues-linked Agent",
+        purpose_title: "Issues-linked Agent",
         agent_color: "violet",
         tab_group_id: "approval-agent-tabs",
       }),

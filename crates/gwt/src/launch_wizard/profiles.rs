@@ -117,6 +117,7 @@ pub fn quick_start_entries_from_sessions(
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
     let fast_mode = session.fast_mode_enabled();
+    let codex_speed = session.codex_speed();
     let hermes = hermes_preferences_from_session(&session);
     LaunchWizardPreviousProfile {
         agent_id: session.agent_id.command().to_string(),
@@ -125,6 +126,7 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         session_mode: session.session_mode,
         skip_permissions: session.skip_permissions,
         fast_mode,
+        codex_speed,
         runtime_target: session.runtime_target,
         docker_service: session.docker_service,
         docker_lifecycle_intent: session.docker_lifecycle_intent,
@@ -304,6 +306,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_settings_override_session_defaults_without_changing_runtime() {
+        let profile = |value| -> LaunchWizardPreviousProfile {
+            serde_json::from_value::<crate::IssueMonitorLaunchProfile>(value)
+                .unwrap()
+                .into()
+        };
+        let previous = profile(
+            serde_json::json!({"agent_id":"codex", "model":"gpt-6.1-sol", "reasoning":"low", "runtime_target":"Docker", "docker_service":"dev"}),
+        );
+        let defaults = profile(
+            serde_json::json!({"agent_id":"codex", "model":"gpt-6-astra", "reasoning":"high", "codex_speed":"ultrafast"}),
+        );
+        let ignored = profile(serde_json::json!({"agent_id":"codex", "model":"ignored"}));
+        let merged = LaunchWizardPreviousProfiles::from_profile(Some(previous))
+            .with_agent_defaults([defaults, ignored]);
+        let restored = merged.profile_for("codex").unwrap();
+        assert_eq!(restored.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(restored.reasoning.as_deref(), Some("high"));
+        assert_eq!(restored.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
+        assert_eq!(
+            restored.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(restored.docker_service.as_deref(), Some("dev"));
+    }
+
+    #[test]
     fn load_previous_launch_profile_uses_latest_session_for_repo_without_reusing_branch() {
         let dir = tempdir().expect("tempdir");
         let worktree = dir.path().join("repo");
@@ -326,7 +355,7 @@ mod tests {
             Some("resume-ignored"),
         );
         newer.tool_version = Some("0.110.0".to_string());
-        newer.model = Some("gpt-5.5".to_string());
+        newer.model = Some("gpt-6-luna".to_string());
         newer.reasoning_level = Some("high".to_string());
         newer.session_mode = gwt_agent::SessionMode::Continue;
         newer.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
@@ -357,7 +386,7 @@ mod tests {
             load_previous_launch_profile(&worktree, dir.path()).expect("previous profile");
 
         assert_eq!(profile.agent_id, "codex");
-        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(profile.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(profile.reasoning.as_deref(), Some("high"));
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(
@@ -449,18 +478,18 @@ mod tests {
             None,
         );
         higher_id.id = "session-b".to_string();
-        higher_id.model = Some("gpt-5.5".to_string());
+        higher_id.model = Some("gpt-6-luna".to_string());
 
         let profile = previous_launch_profile_from_sessions(
             &worktree,
             &[higher_id.clone(), lower_id.clone()],
         )
         .expect("profile");
-        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(profile.model.as_deref(), Some("gpt-6-luna"));
 
         let profile = previous_launch_profile_from_sessions(&worktree, &[lower_id, higher_id])
             .expect("profile");
-        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(profile.model.as_deref(), Some("gpt-6-luna"));
     }
 
     #[test]
@@ -475,7 +504,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.5".to_string());
+        codex.model = Some("gpt-6-luna".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -514,7 +543,7 @@ mod tests {
 
         assert_eq!(view.branch_name, "feature/current");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.5");
+        assert_eq!(view.selected_model, "gpt-6-luna");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
         // L2 uses fixed launch choices after restoring the saved agent profile.
@@ -556,7 +585,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.5".to_string());
+        codex.model = Some("gpt-6-luna".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -576,7 +605,7 @@ mod tests {
         let view = state.view();
 
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.5");
+        assert_eq!(view.selected_model, "gpt-6-luna");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
         // Issue #3462: the restored preference is advertised on Continue.

@@ -17,23 +17,26 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [];
+  const visibility = [], copied = [], sent = [];
+  let model;
   const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text) });
+    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
+    onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
-  const model = createPmWindowModel();
+  model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
   let revision = 0;
-  const update = (reports = [], error = null, current = null) => {
+  const update = (reports = [], error = null, current = null, current_error = undefined) => {
     const request = model.requestPmReports('pm');
     const event = { kind: 'pm_reports', id: 'pm', request_id: request.request_id,
       version: { epoch: 'fixture', revision: ++revision }, snapshot: request.version === null,
-      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current };
+      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
+      ...(current_error === undefined ? {} : { current_error }) };
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, update };
+  return { root, model, view, visibility, copied, sent, update };
 }
 
 const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
@@ -42,13 +45,16 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
 
-test('Tasks is the default PM view and preserves the unfinished filter and stable rows', () => {
+test('Home is the default PM view; Tasks preserves the unfinished filter and stable rows', () => {
   const { root, update, view, model } = fixture({ tasksDefault: true });
   update([report()], null, { request_tasks: taskOverview([
     trackedTask('parent'), trackedTask('child', { parent_key: 'parent', status: 'waiting',
       wait_reason: 'Waiting for CI', review_required: true }),
     trackedTask('done', { status: 'completed' }), trackedTask('cancelled', { status: 'cancelled' }),
   ]) });
+  assert.ok(root.querySelector('.task-home'), 'a Home surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true, 'Home is the entry view');
+  view.showTasks();
   const tasks = root.querySelector('.pm-chat__tasks');
   assert.ok(tasks, 'a separate Tasks surface exists');
   assert.equal(tasks.hidden, false);
@@ -79,6 +85,22 @@ test('Tasks is the default PM view and preserves the unfinished filter and stabl
   view.showTasks();
   assert.equal(filter.getAttribute('aria-pressed'), 'true');
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('A current-card failure keeps the last explanation but never hides newly saved reports (#6950)', () => {
+  const { root, model, update } = fixture();
+  const confirmed = { status: { items: [{ kind: 'waiting', text: 'Watching CI', started_at: '2026-10-13T09:00:00Z' }], next_trigger: 'CI result' }, request_tasks: taskOverview() };
+  update([report('one')], null, confirmed);
+  const before = model.readPmWindowState().windows.pm.current;
+  update([report('one'), report('two')], null, { request_tasks: taskOverview() }, 'PM current status could not be loaded');
+  const state = model.readPmWindowState().windows.pm;
+  assert.deepEqual(state.reports.map(item => item.id), ['one', 'two'], 'saved reports are displayed');
+  assert.equal(state.current, before, 'the last confirmed explanation is kept');
+  assert.equal(root.querySelectorAll('.pm-chat__body [data-report-id]').length, 2);
+  assert.match(root.querySelector('.pm-chat__body').textContent, /PM current status could not be loaded/);
+  update([report('three')], 'Unreadable reports', { request_tasks: taskOverview() });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['one', 'two'],
+    'only a reports failure keeps the last confirmed list');
 });
 
 test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
@@ -237,9 +259,9 @@ test('current card stays above history and distinguishes PM explanation from aut
 test('current card marks unknown automatic data instead of claiming an empty fleet', () => {
   const { root, update } = fixture();
   update([], null, { status: null, facts: { source: 'unavailable', active_windows: [], queue_head: null,
-    needs_human_count: null, release: null, release_observed_at: null, pending_update: null, error: 'Monitor unavailable' } });
+    needs_human_count: null, release: null, release_observed_at: null, pending_update: null, error: 'Issues unavailable' } });
   const facts = root.querySelector('[aria-label="Live facts"]');
-  assert.match(facts.textContent, /Monitor unavailable/);
+  assert.match(facts.textContent, /Issues unavailable/);
   assert.match(facts.textContent, /needs_human: Unknown/);
   assert.match(facts.textContent, /Release: Unknown/);
 });
@@ -248,13 +270,16 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   const { root, update, copied } = fixture();
   update([report()]);
   assert.equal(root.querySelector('[role="log"]').getAttribute('aria-label'), 'PM reports');
-  assert.equal(root.querySelector('h1').textContent, 'Update');
+  assert.equal(root.querySelector('.pm-chat__transcript h1').textContent, 'Update');
   assert.equal(root.querySelector('article strong').textContent, 'Ready');
   assert.equal(root.querySelector('li').textContent, 'checked');
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
   assert.equal(root.querySelector('article time').getAttribute('datetime'), report().created_at);
   assert.match(root.textContent, /progress/);
-  assert.equal(root.querySelectorAll('input, textarea, form, [contenteditable], button[type="submit"]').length, 0);
+  // Only the Chat composer (FR-CHAT-3) accepts input; Reports and Tasks stay read-only.
+  const editable = 'input, textarea, form, [contenteditable], button[type="submit"]';
+  assert.deepEqual([...root.querySelectorAll(editable)].filter(node => !node.closest('.pm-chat__composer')), []);
+  assert.equal(root.querySelectorAll('.pm-chat__composer').length, 1);
   root.querySelector('[aria-label="Copy report"]').click();
   await Promise.resolve();
   assert.deepEqual(copied, [report().body]);
@@ -275,6 +300,24 @@ test('Q&A separates safe question text from the Markdown answer and copies both'
   root.querySelector('[aria-label="Copy report"]').click();
   await Promise.resolve();
   assert.deepEqual(copied, [`Q: ${qa.question}\n\nA:\n${qa.body}`]);
+});
+
+test('decision Reports display and copy numbered choices without changing the stored body', async () => {
+  const { root, update, copied, model } = fixture();
+  const incoming = structuredReport('decision');
+  incoming.kind = 'decision';
+  incoming.structured.summary.decision = { question: 'Which recovery?', recommendation: 'Retry',
+    reason: 'The work is saved', options: ['Retry — run again', 'Wait — keep state',
+      'Inspect <logs> — gather evidence', 'Cancel — stop'] };
+  const expected = 'Ready\nNext: Check delivery\nDecision: Which recovery?\nRecommended: Retry (The work is saved)\n1. Retry — run again\n2. Wait — keep state\n3. Inspect <logs> — gather evidence\n4. Cancel — stop\nReply with the option number, or Other: your own answer.';
+  update([incoming]);
+  const article = root.querySelector('article');
+  assert.equal(article.querySelector('.pm-chat__text').textContent, expected);
+  assert.equal(article.querySelector('logs'), null, 'choices remain literal text');
+  article.querySelector('[aria-label="Copy report"]').click();
+  await Promise.resolve();
+  assert.deepEqual(copied, [`${expected}\n\n**All checks passed.**\n\n- https://example.com/issues/3431`]);
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
 });
 
 test('structured Reports show a compact overview and copy all expandable details and references', async () => {
@@ -497,8 +540,12 @@ test('Execution log toggle retains Reports; stale sessions and native transcript
   assert.equal(root.querySelectorAll('article').length, 1);
   const previous = model.readPmWindowState().windows.pm;
   model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'stale', reports: [] });
-  model.applyPmWindowReceiveEvent({ kind: 'pm_conversation', id: 'pm', session_id: 'session', snapshot: { messages: [] } });
+  model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'session', reports: [] });
   assert.ok(model.readPmWindowState().windows.pm === previous);
+  model.applyPmWindowReceiveEvent({ kind: 'pm_conversation', id: 'pm', session_id: 'session',
+    snapshot: { availability: 'ready', messages: [{ id: 'm', role: 'assistant', text: 'Native transcript' }] } });
+  assert.equal(model.readPmWindowState().windows.pm.reports, previous.reports);
+  assert.doesNotMatch(root.querySelector('.pm-chat__transcript').textContent, /Native transcript/);
   model.bindPmWindowState('pm', 'replacement');
   assert.equal(root.querySelectorAll('article').length, 0);
   model.removePmWindowState('pm');
@@ -675,5 +722,166 @@ test('Works full terminals own browser and native file drops and their progress'
   } finally {
     globalThis.window = previous.window;
     globalThis.document = previous.document;
+  }
+});
+
+const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: 'pm', session_id: 'session',
+  snapshot: { conversation_id: 'c', availability: 'ready', detail: null, messages, ...extra } });
+
+test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([report()]);
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, true, 'Home remains the default view');
+  assert.deepEqual(model.requestPmConversation('pm'), { kind: 'load_pm_conversation', id: 'pm' });
+  assert.equal(model.requestPmConversation('missing'), null);
+  model.applyPmWindowReceiveEvent(conversation([
+    { id: 'u1', role: 'user', text: 'Ship <b>it</b>?' },
+    { id: 'a1', role: 'assistant', text: '# Plan', text_html: '<h1>Plan</h1><table><tr><td>1</td></tr></table><pre><code>cargo test</code></pre>' },
+    { id: 'u2', role: 'user', text: 'Thanks' },
+  ]));
+  [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Chat').click();
+  const chat = root.querySelector('.pm-chat__chat');
+  assert.equal(chat.hidden, false);
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  const bubbles = [...chat.querySelectorAll('.pm-chat__bubble')];
+  assert.deepEqual(bubbles.map(bubble => [bubble.dataset.messageId, bubble.dataset.role]),
+    [['u1', 'user'], ['a1', 'assistant'], ['u2', 'user']]);
+  assert.ok(bubbles[0].classList.contains('pm-chat__bubble--user'));
+  assert.ok(bubbles[1].classList.contains('pm-chat__bubble--assistant'));
+  assert.equal(bubbles[0].querySelector('b'), null, 'user text is never parsed as HTML');
+  assert.match(bubbles[0].textContent, /Ship <b>it<\/b>\?/);
+  assert.ok(bubbles[1].querySelector('h1') && bubbles[1].querySelector('table') && bubbles[1].querySelector('pre'));
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 1, 'Reports stay report-only');
+  view.showReports();
+  assert.equal(chat.hidden, true);
+});
+
+test('Chat collapses earlier PM messages of one turn behind an N messages disclosure (T-CHAT-COLLAPSE)', () => {
+  const { root, model, view } = fixture();
+  view.showChat();
+  const chat = root.querySelector('.pm-chat__chat');
+  const turn = [
+    { id: 'u1', role: 'user', text: 'Status?' },
+    { id: 'a1', role: 'assistant', text: 'Checking the queue.' },
+    { id: 'a2', role: 'assistant', text: 'Reading CI.' },
+    { id: 'a3', role: 'assistant', text: 'All green.' },
+    { id: 'u2', role: 'user', text: 'Thanks' },
+    { id: 'a4', role: 'assistant', text: 'You are welcome.' },
+  ];
+  model.applyPmWindowReceiveEvent(conversation(turn));
+  const log = chat.querySelector('.pm-chat__conversation');
+  const order = () => [...log.children].map(node => node.tagName === 'DETAILS'
+    ? `group:${[...node.querySelectorAll('.pm-chat__bubble')].map(bubble => bubble.dataset.messageId).join(',')}`
+    : node.dataset.messageId);
+  assert.deepEqual(order(), ['u1', 'group:a1,a2', 'a3', 'u2', 'a4'], 'only the latest PM message of a turn stays open');
+  const group = log.querySelector('details.pm-chat__collapsed');
+  assert.equal(group.open, false);
+  assert.equal(group.querySelector('summary').textContent, '2 earlier messages');
+  group.open = true;
+  model.applyPmWindowReceiveEvent(conversation([...turn.slice(0, 4), { id: 'a5', role: 'assistant', text: 'Merged.' }, ...turn.slice(4)]));
+  assert.deepEqual(order(), ['u1', 'group:a1,a2,a3', 'a5', 'u2', 'a4']);
+  const regrown = log.querySelector('details.pm-chat__collapsed');
+  assert.equal(regrown.open, true, 'an expanded group stays expanded across snapshots');
+  assert.equal(regrown.querySelector('summary').textContent, '3 earlier messages');
+  model.applyPmWindowReceiveEvent(conversation([turn[0], turn[1], turn[4], { id: 'a6', role: 'assistant', text: 'Done.' }, { id: 'a7', role: 'assistant', text: 'Bye.' }]));
+  assert.deepEqual(order(), ['u1', 'a1', 'u2', 'group:a6', 'a7']);
+  assert.equal(log.querySelector('details.pm-chat__collapsed summary').textContent, '1 earlier message');
+});
+
+test('Chat rejects stale sessions and explains unavailable conversations', () => {
+  const { root, model, view } = fixture();
+  view.showChat();
+  const notice = () => root.querySelector('.pm-chat__chat [role="status"]').textContent;
+  assert.match(notice(), /Loading PM conversation/);
+  model.applyPmWindowReceiveEvent(conversation([], { availability: 'waiting', detail: 'Waiting for the PM session.' }));
+  assert.equal(notice(), 'Waiting for the PM session.');
+  model.applyPmWindowReceiveEvent(conversation([]));
+  assert.match(notice(), /No conversation yet/);
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Hello' }]));
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 1);
+  const before = model.readPmWindowState().windows.pm;
+  model.applyPmWindowReceiveEvent({ ...conversation([{ id: 'x', role: 'user', text: 'old' }]), session_id: 'stale' });
+  model.applyPmWindowReceiveEvent({ ...conversation([]), id: 'other' });
+  assert.equal(model.readPmWindowState().windows.pm, before);
+  assert.equal(model.readPmWindowState().windows.other, undefined);
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Hello' }]));
+  assert.equal(model.readPmWindowState().windows.pm, before, 'identical snapshots do not re-render');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0);
+});
+
+test('Chat composer sends text to the PM pane and keeps it until delivery is confirmed (AC-3431-CHAT-3)', () => {
+  const { root, model, view, sent } = fixture();
+  view.showChat();
+  const chat = root.querySelector('.pm-chat__chat');
+  const form = chat.querySelector('form.pm-chat__composer');
+  const draft = form.querySelector('textarea');
+  const button = form.querySelector('button[type="submit"]');
+  const status = form.querySelector('.pm-chat__composer-status');
+  assert.equal(draft.getAttribute('aria-label'), 'Message to PM');
+  assert.equal(button.disabled, true, 'an empty draft cannot be sent');
+  const key = (extra = {}) => {
+    const event = new root.ownerDocument.defaultView.Event('keydown', { bubbles: true, cancelable: true });
+    Object.assign(event, { key: 'Enter', shiftKey: false, isComposing: false }, extra);
+    draft.dispatchEvent(event);
+    return event;
+  };
+  draft.value = '   ';
+  draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  assert.equal(button.disabled, true, 'whitespace is not a message');
+  draft.value = 'Ship #3431?\nThen report.';
+  draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  assert.equal(button.disabled, false);
+  assert.equal(key({ shiftKey: true }).defaultPrevented, false, 'Shift+Enter inserts a new line');
+  assert.equal(key({ isComposing: true }).defaultPrevented, false, 'Enter during IME composition is not a send');
+  assert.equal(sent.length, 0);
+  assert.equal(key().defaultPrevented, true);
+  assert.deepEqual(sent, [{ kind: 'pane_send_input', session_id: 'session', text: 'Ship #3431?\nThen report.\r' }]);
+  assert.equal(draft.value, 'Ship #3431?\nThen report.', 'the draft is kept while delivery is pending');
+  assert.equal(button.disabled, true);
+  assert.equal(draft.readOnly, true, 'the pending draft cannot be edited and then lost on success');
+  assert.match(status.textContent, /Sending/);
+  key();
+  assert.equal(sent.length, 1, 'a pending message is not sent twice');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'other', error: null });
+  assert.match(status.textContent, /Sending/, 'another window result is ignored');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'no live runtime for remote pane' });
+  assert.equal(draft.value, 'Ship #3431?\nThen report.', 'a refused message stays in the draft');
+  assert.equal(status.textContent, 'Not sent: no live runtime for remote pane. Your message is kept.');
+  assert.equal(button.disabled, false);
+  assert.equal(draft.readOnly, false);
+  form.dispatchEvent(new root.ownerDocument.defaultView.Event('submit', { cancelable: true }));
+  assert.equal(sent.length, 2);
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'pm', error: null });
+  assert.equal(draft.value, '', 'a delivered message clears the draft');
+  assert.equal(status.textContent, '');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'late' });
+  assert.equal(status.textContent, '', 'an unsolicited result does not change the composer');
+  draft.value = 'Next';
+  draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  key();
+  model.expirePmChatSend('pm');
+  assert.match(status.textContent, /not confirmed/i);
+  assert.equal(draft.value, 'Next');
+  model.markPmChatSendUnavailable('pm');
+  assert.match(status.textContent, /not confirmed/i, 'only a pending send can fail');
+  key();
+  model.markPmChatSendUnavailable('pm');
+  assert.match(status.textContent, /Not sent.*not connected/i);
+  key();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: null, error: 'no pane bound to this project session' });
+  assert.match(status.textContent, /Not sent.*no pane bound/, 'a session refusal reaches the only pending send');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.requestPmChatSend('pm', 'x').session_id, 'replacement');
+});
+
+test('Chat composer is Operator-styled and stays below the scrolling conversation', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  const rule = name => css.match(new RegExp(`\\.${name}\\s*\\{([^}]*)\\}`))?.[1] || '';
+  assert.match(rule('pm-chat__chat'), /display:\s*flex/);
+  assert.match(rule('pm-chat__conversation'), /overflow-y:\s*auto/);
+  assert.match(rule('pm-chat__composer'), /border-top:\s*1px solid var\(--color-border\)/);
+  for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status', 'pm-chat__collapsed', 'pm-chat__collapsed-summary']) {
+    assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
   }
 });

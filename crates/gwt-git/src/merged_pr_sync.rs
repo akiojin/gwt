@@ -1,6 +1,6 @@
 //! Differential sync of merged pull requests (SPEC #4093 FR-003, Issue #3821).
 //!
-//! The Issue Monitor needs to know which work branches merged. Until this
+//! Issues needs to know which work branches merged. Until this
 //! module it asked `gh pr list --state merged --limit 999` on every scan: one
 //! GraphQL query whose point cost grows with the repository's merged-PR count,
 //! and which by 2026-08-31 burned the whole hourly GraphQL budget in minutes.
@@ -178,7 +178,7 @@ pub struct MergedPrSyncOutcome {
     pub complete: bool,
 }
 
-/// The store file for `repo_path`'s project, next to the Issue Monitor state.
+/// The store file for `repo_path`'s project, next to Issues state.
 pub fn store_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join(STORE_FILE)
 }

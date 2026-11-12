@@ -558,10 +558,10 @@ fn prepared_successor_concurrent_launch_recovers_and_rolls_back_its_exact_candid
         .sessions_dir
         .join(format!("{}.toml", other.id))
         .exists());
-    assert!(!gwt::session_launch::durable_launch_recovery_exists(
-        &launch.sessions_dir,
-        &other.id,
-    ));
+    assert!(
+        !gwt::session_launch::durable_launch_recovery_exists(&launch.sessions_dir, &other.id,)
+            .unwrap()
+    );
 }
 
 use gwt::project_runtime::launch_finalization::compensate_terminalized_genesis_workspace_projection;

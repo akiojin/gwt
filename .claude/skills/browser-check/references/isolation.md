@@ -70,4 +70,4 @@
      ```
 
      Keep these files inside `CHECK_HOME`; never symlink the real
-     `.gwt/projects` directory or copy its PM/Issue Monitor preferences.
+     `.gwt/projects` directory or copy its PM/Issues preferences.

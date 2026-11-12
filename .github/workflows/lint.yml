@@ -39,6 +39,14 @@ jobs:
           tool: cargo-deny@0.19.4
       - name: Run cargo deny (advisories + sources)
         run: cargo deny check advisories sources
+      # SPEC #6943 AC-9: keep npm policy in this existing required check.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Test frontend dependency gate
+        run: node --test scripts/check-frontend-deps.test.mjs
+      - name: Check frontend licenses and production advisories
+        run: node scripts/check-frontend-deps.mjs
   lint:
     name: Clippy & Rustfmt
     # Issue #5173: coverage / Rust Coverage is required independently, so

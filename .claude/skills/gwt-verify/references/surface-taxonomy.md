@@ -63,8 +63,7 @@ different classification, that wins.
      WinAppDriver / Unity Editor for a graphical UI surface; the project's
      CLI integration / E2E runner for an Interactive CLI / TUI surface —
      never a browser / GUI runner for a CLI surface).
-   - **Scope.** Escalation applies in `--mode full` and `--mode pre-pr`
-     only; `--mode quick` keeps the diff-path classification.
+   - **Scope.** Escalation applies in both `--mode full` and `--mode pre-pr`.
 
 8. **Tests of a surface are not that surface.** A change confined to test
    files — `**/__tests__/**`, `*.spec.*`, `*.test.*`, Playwright specs under

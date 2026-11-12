@@ -25,7 +25,7 @@ pub enum ErrorKind {
     HookFailure,
     OperationRefusal,
     DaemonFault,
-    /// An Issue Monitor scan stage failed, whether it aborted or continued.
+    /// An Issues scan stage failed, whether it aborted or continued.
     ScanFailure,
     /// Issue #4087 AC-2: the Issue cache full refresh (or the index rebuild
     /// that follows a cache write) failed. Reported here instead of a

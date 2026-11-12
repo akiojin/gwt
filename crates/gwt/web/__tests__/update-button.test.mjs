@@ -1184,11 +1184,11 @@ test("phase19: controller exposes the Phase 19 event handlers required by app.js
   assert.match(
     appSource,
     /issueMonitorModel\.subscribe\(model => model\.status, status =>\s*updateCtaController\.handleIssueMonitorStatus\(status\)\)/,
-    "update CTA must subscribe independently to the committed Monitor status",
+    "update CTA must subscribe independently to the committed Issues status",
   );
 });
 
-// Issue #3906 AC-12 — drain-and-apply: while the Issue Monitor holds new
+// Issue #3906 AC-12 — drain-and-apply: while Issues holds new
 // launches for a staged update, the CTA says what it is waiting for.
 test("issue #3906: update_drain in issue_monitor_status renders the draining CTA with blockers and minutes", () => {
   const fixture = createFixture({ now: () => Date.parse("2026-09-06T12:47:30Z") });

@@ -217,7 +217,7 @@ test("the Issue row shows Work lifecycle, attention reason, and PR state", async
   // badge and its (at most two) secondary items.
   const row = fixture.body.querySelector('[data-issue-number="3671"]');
   const badge = row.querySelector(".knowledge-row-badge");
-  // The fixture rows are Monitor-launched, so the Monitor state is the badge and
+  // The fixture rows are Issues-launched, so the Issues state is the badge and
   // the Work attention reason is the secondary line.
   assert.equal(badge.textContent, "Launched");
   assert.equal(badge.dataset.tone, "active");

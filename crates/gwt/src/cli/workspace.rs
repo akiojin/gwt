@@ -10,9 +10,8 @@ use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
     load_or_synthesize_workspace_work_items, load_workspace_projection_from_path,
     load_workspace_work_items_from_path, transact_workspace_state,
-    transact_workspace_state_for_work_event_root_with_preflight,
-    update_workspace_projection_with_journal_for_resolved_work_target, ClassifiedProjection,
-    PruneAction, PruneSkipReason, TrackedWorkEventPolicy, WorkEvent, WorkEventKind, WorkItem,
+    transact_workspace_state_for_work_event_root_with_preflight, ClassifiedProjection, PruneAction,
+    PruneSkipReason, TrackedWorkEventPolicy, WorkEvent, WorkEventKind, WorkItem,
     WorkItemsProjection, WorkspaceAgentSummary, WorkspaceExecutionContainerRef,
     WorkspaceProjection, WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
     WorkspaceStatusCategory,
@@ -24,6 +23,11 @@ use crate::cli::{CliEnv, CliParseError};
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Recover an observed Done event under the same active primary identity.
+    Reopen {
+        reason: String,
+        observed_done_event_id: String,
+    },
     /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
     EventsReconcile { reference: String, dry_run: bool },
     /// Ask the authenticated Host to close one eligible Work record.
@@ -123,6 +127,28 @@ pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
             })
         }
         "update" => parse_update(rest),
+        "reopen" => {
+            let mut reason = None;
+            let mut observed_done_event_id = None;
+            let mut i = 0;
+            while i < rest.len() {
+                let slot = match rest[i].as_str() {
+                    "--reason" => &mut reason,
+                    "--observed-done-event-id" => &mut observed_done_event_id,
+                    other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+                };
+                *slot = Some(parse_required_value(rest, i, "reopen value")?);
+                i += 2;
+            }
+            Ok(WorkspaceCommand::Reopen {
+                reason: reason
+                    .filter(|v: &String| !v.trim().is_empty())
+                    .ok_or(CliParseError::MissingFlag("reason"))?,
+                observed_done_event_id: observed_done_event_id
+                    .filter(|v: &String| !v.trim().is_empty())
+                    .ok_or(CliParseError::MissingFlag("observed_done_event_id"))?,
+            })
+        }
         "candidates" => parse_candidates(rest),
         "join" => parse_join(rest),
         "create" => parse_create(rest),
@@ -779,6 +805,8 @@ struct LocalWorkspaceUpdateTransaction<'a> {
     target: &'a crate::agent_project_state::SessionWorkMutationTarget,
     tracked_event_policy: TrackedWorkEventPolicy,
     opens_work_settlement: bool,
+    primary_provider_session_id: Option<&'a str>,
+    terminal_provenance: Option<gwt_core::workspace_projection::WorkTerminalProvenance>,
 }
 
 fn persist_local_workspace_update(
@@ -787,11 +815,18 @@ fn persist_local_workspace_update(
     settlement_trusted_dir: Option<&Path>,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkspaceJournalEntry> {
     let persistence_target = transaction.target.persistence_target();
-    update_workspace_projection_with_journal_for_resolved_work_target(
+    gwt_core::workspace_projection::update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
         &persistence_target,
         update,
         transaction.tracked_event_policy,
+        transaction.terminal_provenance.clone(),
         |_, _| {
+            if transaction.terminal_provenance.is_some() {
+                crate::agent_project_state::validate_primary_provider_session(
+                    transaction.session_id,
+                    transaction.primary_provider_session_id,
+                ).map_err(|error| GwtError::Other(error.to_string()))?;
+            }
             let refreshed = crate::agent_project_state::resolve_session_work_mutation_target(
                 transaction.invocation_repo_path,
                 transaction.session_id,
@@ -899,6 +934,47 @@ fn terminal_auto_tier_summary(
     enriched.or(summary)
 }
 
+/// Provider-native tool identity, never the inherited gwt Session or a durable
+/// root read back as caller evidence. Only Codex currently establishes actor identity.
+pub(crate) fn native_primary_provider_session_id() -> Option<String> {
+    std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn emit_workspace_error(
+    out: &mut String,
+    error: &crate::AgentWorkspaceUpdateError,
+) -> Result<i32, SpecOpsError> {
+    out.push_str(&serde_json::to_string(error).map_err(|error| string_error(error.to_string()))?);
+    out.push('\n');
+    Ok(1)
+}
+
+fn emit_workspace_bridge_error(
+    out: &mut String,
+    error: &crate::daemon_runtime::AgentBridgeFailure,
+) -> Result<i32, SpecOpsError> {
+    match error.structured_workspace_error() {
+        Some(structured) => emit_workspace_error(out, &structured),
+        None => Err(string_error(error.to_string())),
+    }
+}
+
+pub(crate) fn diagnose_current_terminal_work(
+    session_id: &str,
+    claim: Option<&str>,
+) -> Option<crate::AgentWorkspaceUpdateError> {
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let root = crate::validated_project_state_root_for_session_recovery(&session).ok()?;
+    crate::agent_project_state::diagnose_terminal_work_for_session(&root, session_id, claim)
+        .ok()
+        .flatten()
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: WorkspaceCommand,
@@ -987,6 +1063,12 @@ pub(super) fn run<E: CliEnv>(
                         .to_string(),
                 ));
             }
+            let primary_provider_session_id = native_primary_provider_session_id();
+            if let Some(error) =
+                diagnose_current_terminal_work(&session_id, primary_provider_session_id.as_deref())
+            {
+                return emit_workspace_error(out, &error);
+            }
             let legacy_repo_path = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
             let summary = terminal_auto_tier_summary(
                 &legacy_repo_path,
@@ -1036,6 +1118,13 @@ pub(super) fn run<E: CliEnv>(
                     claimed_session_id: session_id.clone(),
                     observation,
                     intent,
+                    primary_provider_session_id: if status_category
+                        == Some(WorkspaceStatusCategory::Done)
+                    {
+                        primary_provider_session_id.clone()
+                    } else {
+                        None
+                    },
                 };
                 let operation_id = uuid::Uuid::new_v4().to_string();
                 let receipt =
@@ -1076,7 +1165,13 @@ pub(super) fn run<E: CliEnv>(
                                 )))),
                             }
                         }
-                        Err(error) => return Err(string_error(format!("{error}; operation_id={operation_id}"))),
+                        Err(error) => {
+                            if let Some(mut structured) = error.structured_workspace_error() {
+                                structured.message.push_str(&format!("; operation_id={operation_id}"));
+                                return emit_workspace_error(out, &structured);
+                            }
+                            return Err(string_error(format!("{error}; operation_id={operation_id}")));
+                        },
                     };
                 out.push_str(&format!(
                     "workspace updated: {}\n",
@@ -1109,6 +1204,33 @@ pub(super) fn run<E: CliEnv>(
                 &session_id,
             )
             .map_err(core_error)?;
+            let terminal_provenance = if intent.status_category
+                == Some(WorkspaceStatusCategory::Done)
+            {
+                let session = match crate::agent_project_state::validate_primary_provider_session(
+                    &session_id,
+                    primary_provider_session_id.as_deref(),
+                ) {
+                    Ok(session) => session,
+                    Err(error) => return emit_workspace_error(out, &error),
+                };
+                Some(gwt_core::workspace_projection::WorkTerminalProvenance {
+                    source_operation: "workspace.update".to_string(),
+                    authority_class: if crate::agent_project_state::primary_provider_guard_applies(
+                        &session,
+                    ) {
+                        gwt_core::workspace_projection::WorkAuthorityClass::PrimaryAgent
+                    } else {
+                        gwt_core::workspace_projection::WorkAuthorityClass::TrustedHost
+                    },
+                    execution_generation: session
+                        .execution_binding
+                        .as_ref()
+                        .map(|binding| binding.identity.generation_id.clone()),
+                })
+            } else {
+                None
+            };
             let tracked_event_policy =
                 if crate::cli::execution_state::is_completed(&target.work_event_root) {
                     TrackedWorkEventPolicy::SkipTracked
@@ -1145,6 +1267,8 @@ pub(super) fn run<E: CliEnv>(
                 target: &target,
                 tracked_event_policy,
                 opens_work_settlement,
+                primary_provider_session_id: primary_provider_session_id.as_deref(),
+                terminal_provenance,
             };
             let entry = if !opens_work_settlement {
                 persist_local_workspace_update(&transaction, update, None)
@@ -1463,6 +1587,12 @@ pub(super) fn run<E: CliEnv>(
             topic,
             boundary,
         } => {
+            if let Some(error) = diagnose_current_terminal_work(
+                &agent_session,
+                native_primary_provider_session_id().as_deref(),
+            ) {
+                return emit_workspace_error(out, &error);
+            }
             let result = ensure_workspace_for_agent(
                 env.repo_path(),
                 WorkspaceEnsureInput {
@@ -1480,6 +1610,59 @@ pub(super) fn run<E: CliEnv>(
                 result.workspace_id,
                 result.disposition.as_str()
             ));
+            Ok(0)
+        }
+        WorkspaceCommand::Reopen {
+            reason,
+            observed_done_event_id,
+        } => {
+            let session_id = ambient_session_id().ok_or_else(|| {
+                string_error("workspace.reopen requires ambient GWT_SESSION_ID".to_string())
+            })?;
+            let request = crate::AgentWorkspaceReopenRequest {
+                schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session_id.clone(),
+                observation: crate::observe_agent_runtime(env.repo_path())
+                    .map_err(|error| string_error(error.to_string()))?,
+                primary_provider_session_id: native_primary_provider_session_id(),
+                reason,
+                observed_done_event_id,
+            };
+            let receipt = if let Some(target) =
+                crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
+            {
+                match crate::daemon_runtime::send_workspace_reopen_via_agent_bridge(
+                    &target, &request,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return emit_workspace_bridge_error(out, &error),
+                }
+            } else {
+                if std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV).is_some() {
+                    return Err(string_error(
+                        "managed workspace.reopen requires its Host bridge capability".to_string(),
+                    ));
+                }
+                let session = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+                )
+                .map_err(|error| string_error(error.to_string()))?;
+                let root = crate::validated_project_state_root_for_session_recovery(&session)
+                    .map_err(core_error)?;
+                match crate::agent_project_state::apply_authenticated_workspace_reopen(
+                    &root,
+                    &session_id,
+                    request,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return emit_workspace_error(out, &error),
+                }
+            };
+            out.push_str(
+                &serde_json::to_string(&receipt)
+                    .map_err(|error| string_error(error.to_string()))?,
+            );
+            out.push('\n');
             Ok(0)
         }
         WorkspaceCommand::ProjectionList { stale, all } => {
@@ -1602,7 +1785,20 @@ fn run_work_repair(
         })
         .collect();
     let [anchor] = anchors.as_slice() else {
-        return Err(refuse("exactly one absolute worktree anchor is required"));
+        let candidates = anchors
+            .iter()
+            .map(|container| {
+                format!(
+                    "branch={}, worktree_path={}",
+                    container.branch.as_deref().unwrap_or("<missing>"),
+                    container.worktree_path.as_deref().unwrap().display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(refuse(&format!(
+            "exactly one absolute worktree anchor is required; candidates: [{candidates}]"
+        )));
     };
     let root = anchor.worktree_path.as_deref().unwrap();
     let branch = anchor
@@ -2984,6 +3180,13 @@ fn workspace_execution_container_matches_recovery(
     container: &WorkspaceExecutionContainerRef,
     recovery: &crate::agent_project_state::ValidatedWorkspaceRecoverySession,
 ) -> bool {
+    // Relative roots need their immutable source context. Resolving them
+    // against reader CWD would duplicate the durable absolute anchor.
+    if container.worktree_path.as_deref().is_none_or(|path| {
+        !gwt_core::paths::normalize_windows_child_process_path(path).is_absolute()
+    }) {
+        return false;
+    }
     let branch_matches = container
         .branch
         .as_deref()
@@ -6029,6 +6232,7 @@ pub(crate) mod tests {
             session_id,
             &binding,
             crate::AgentWorkspaceUpdateRequest {
+                primary_provider_session_id: None,
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
                 observation: crate::observe_agent_runtime(&repo)
@@ -6100,6 +6304,7 @@ pub(crate) mod tests {
             session_id,
             *authority,
             crate::AgentWorkspaceUpdateRequest {
+                primary_provider_session_id: None,
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
                 observation: crate::observe_agent_runtime(&worktree)
@@ -7688,6 +7893,7 @@ pub(crate) mod tests {
                 .as_ref()
                 .expect("execution binding"),
             crate::AgentWorkspaceUpdateRequest {
+                primary_provider_session_id: None,
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: current_session.to_string(),
                 observation: crate::observe_agent_runtime(&worktree).expect("runtime observation"),
@@ -8039,6 +8245,7 @@ pub(crate) mod tests {
             session_id,
             &binding,
             crate::AgentWorkspaceUpdateRequest {
+                primary_provider_session_id: None,
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
                 observation: observation.clone(),
@@ -8055,6 +8262,7 @@ pub(crate) mod tests {
             session_id,
             &binding,
             crate::AgentWorkTerminalizationRequest {
+                primary_provider_session_id: None,
                 schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
                 observation,
@@ -8104,7 +8312,7 @@ pub(crate) mod tests {
             &mut env,
             WorkspaceCommand::Update {
                 title: None,
-                status: None,
+                status: Some("done".to_string()),
                 status_text: None,
                 summary: Some("Authenticated Host owns container mutation".to_string()),
                 progress_summary: None,
@@ -8855,6 +9063,170 @@ pub(crate) mod tests {
                 "{label} refusal must preserve every Workspace recovery surface"
             );
         }
+    }
+
+    #[test]
+    fn workspace_ensure_portable_alias_cannot_acquire_reader_cwd_authority() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-7033");
+        let session_id = "session-portable-alias";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 7033);
+        let validated =
+            crate::agent_project_state::validated_workspace_recovery_session(&worktree, session_id)
+                .unwrap()
+                .unwrap();
+        let crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(mut recovery) =
+            validated
+        else {
+            panic!("expected host recovery");
+        };
+        // Model a reader running in its bound root without changing process CWD.
+        recovery.worktree_identity = dunce::canonicalize(".").unwrap();
+        let mut local = WorkspaceExecutionContainerRef {
+            branch: Some(recovery.branch_identity.clone()),
+            worktree_path: Some(recovery.worktree_identity.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+        assert!(workspace_execution_container_matches_recovery(
+            &local, &recovery
+        ));
+        local.worktree_path = Some(PathBuf::from("."));
+        assert!(
+            !workspace_execution_container_matches_recovery(&local, &recovery),
+            "portable aliases require source evidence and cannot use reader CWD"
+        );
+        local.worktree_path = Some(temp.path().join("other-host/work/issue-7033"));
+        assert!(!workspace_execution_container_matches_recovery(
+            &local, &recovery
+        ));
+    }
+
+    #[test]
+    fn workspace_ensure_selects_local_anchor_with_portable_and_foreign_refs() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-7033");
+        let session_id = "session-local-anchor";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 7033);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            session_id,
+            Some("Issue #7033"),
+            "codex",
+        );
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let mut projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        let target = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == work_id)
+            .unwrap();
+        let mut portable = target.execution_containers[0].clone();
+        portable.worktree_path = Some(PathBuf::from("."));
+        let mut foreign = portable.clone();
+        foreign.worktree_path = Some(temp.path().join("other-host/work/issue-7033"));
+        target.execution_containers.extend([portable, foreign]);
+        let refs = target.execution_containers.clone();
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &works_path,
+            &projection,
+        )
+        .unwrap();
+        ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Recover local Work anchor".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("local durable anchor must remain unambiguous across hosts");
+        let after =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            after
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .unwrap()
+                .execution_containers,
+            refs
+        );
+    }
+
+    #[test]
+    fn work_repair_names_competing_absolute_anchors() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-7033");
+        let session_id = "session-repair-anchors";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 7033);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            session_id,
+            Some("Issue #7033"),
+            "codex",
+        );
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let mut projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        let target = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == work_id)
+            .unwrap();
+        let mut foreign = target.execution_containers[0].clone();
+        foreign.worktree_path = Some(temp.path().join("other-host/work/issue-7033"));
+        let paths: Vec<_> = [
+            target.execution_containers[0]
+                .worktree_path
+                .clone()
+                .unwrap(),
+            foreign.worktree_path.clone().unwrap(),
+        ]
+        .into();
+        target.execution_containers.push(foreign);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &works_path,
+            &projection,
+        )
+        .unwrap();
+        let before = std::fs::read(&works_path).unwrap();
+        let error = run_work_repair(&project_root, &work_id, false, &mut String::new())
+            .unwrap_err()
+            .to_string();
+        for path in paths {
+            assert!(error.contains(&path.display().to_string()), "{error}");
+        }
+        assert!(error.contains("work/20260601-0934"), "{error}");
+        assert_eq!(std::fs::read(&works_path).unwrap(), before);
     }
 
     #[test]

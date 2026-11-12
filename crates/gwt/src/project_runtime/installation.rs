@@ -103,6 +103,7 @@ pub fn is_expected_restore_exclusion(code: &str) -> bool {
             | "monitor_stopped"
             | "launch_revoked"
             | "unregistered_pm"
+            | "window_closed"
     )
 }
 
@@ -406,6 +407,11 @@ pub(crate) fn prepare_owner_saved_session_restore(
     }
     if restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore {
         if !session.restore_window_on_startup {
+            // Issue #6991: an expected exclusion, not a launch failure. A
+            // non-Stopped status still passes the GUI's legacy "window was
+            // open" check, so retire the source to stop the retry on every
+            // startup. Any retained placeholder stays as its diagnostic.
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
             return Err(restore.refuse(
                 "window_closed",
                 "The saved Session is no longer marked for restore",
@@ -1016,6 +1022,7 @@ pub fn install_agent_launch(
     };
     // This function already runs on a blocking worker. Keep the file guard
     // entirely within the physical spawn, never across a GUI event handoff.
+    let phase = super::launch::LaunchPhaseTimer::start("pty_spawn");
     let spawn = if monitor_admission {
         crate::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
@@ -1043,6 +1050,7 @@ pub fn install_agent_launch(
             });
         }
     };
+    phase.finish();
     input.failed_launch = Some(Box::new(PreparedAgentLaunchSuccess {
         project_root: input.project_root.clone(),
         active_session: active.clone(),
@@ -1227,7 +1235,13 @@ pub fn install_agent_launch(
             ));
         }
     }
-    let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id) {
+    let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id)
+        .map_err(|error| {
+            format!(
+                "launch recovery probe failed for Session {session_id} ({:?}): {error}",
+                error.kind()
+            )
+        })? {
         None
     } else {
         gwt_agent::Session::load_and_migrate(&input.sessions_dir.join(format!("{session_id}.toml")))
@@ -1442,7 +1456,7 @@ const ISSUE_MONITOR_PREFS_OBSERVATIONAL_RECORD_FIELDS: [(&str, &str); 2] = [
     ("autonomous_records", "last_heartbeat"),
 ];
 
-/// Content digest of Issue Monitor prefs bytes that ignores observation-only
+/// Content digest of Issues prefs bytes that ignores observation-only
 /// churn. `open_pr_observations` keeps only each Issue's non-null `hold`
 /// (launch admission reads the hold; `observed_at` only orders merges).
 /// Unparsable bytes hash raw so any byte change still invalidates.
@@ -1530,7 +1544,7 @@ fn issue_monitor_prefs_admission_map(
     }
 }
 
-/// Freshness fence for Issue Monitor prefs consumed by launch preparation.
+/// Freshness fence for Issues prefs consumed by launch preparation.
 /// Metadata is read before the content, so an unchanged metadata pair always
 /// still describes the digested bytes; a metadata change falls back to the
 /// content digest so observation-only rewrites keep prepared facts current.
@@ -1685,12 +1699,12 @@ pub struct IssueMonitorSpawnAdmissionInput {
 }
 
 pub const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
-    "Issue Monitor spawn admission changed; prepare the launch again";
+    "Issues spawn admission changed; prepare the launch again";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorAdmissionFileVersion {
     Metadata(Option<(std::time::SystemTime, u64)>),
-    /// Issue #6096: Issue Monitor prefs are fenced by admission-relevant
+    /// Issue #6096: Issues prefs are fenced by admission-relevant
     /// content, because the daemon rewrites observation-only keys every few
     /// seconds on every host project.
     IssueMonitorPrefs(Option<IssueMonitorPrefsStamp>),
@@ -1988,6 +2002,20 @@ impl PreparedIssueMonitorSpawnAdmission {
                     .all(IssueMonitorAdmissionFileStamp::is_current))
             && self.capacity_admits()
     }
+
+    /// Re-evaluate changed observations once, retaining all strict source fences.
+    pub fn revalidate_if_needed(
+        &mut self,
+        input: &IssueMonitorSpawnAdmissionInput,
+    ) -> Result<(), String> {
+        if !self.is_current(&input.host_project_roots) {
+            *self = input.refresh(self)?;
+            if !self.is_current(&input.host_project_roots) {
+                return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl IssueMonitorSpawnAdmissionInput {
@@ -2075,7 +2103,7 @@ impl IssueMonitorSpawnAdmissionInput {
             phase = "monitor_admission_metadata",
             elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
             thread = "worker",
-            "Issue Monitor launch phase"
+            "Issues launch phase"
         );
         phase_started = std::time::Instant::now();
         let hold = prepare_host_update_drain_launch_hold(&self.host_project_roots)?;
@@ -2084,7 +2112,7 @@ impl IssueMonitorSpawnAdmissionInput {
             phase = "monitor_host_drain",
             elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
             thread = "worker",
-            "Issue Monitor launch phase"
+            "Issues launch phase"
         );
         phase_started = std::time::Instant::now();
         if let Some(hold) = hold {
@@ -2100,7 +2128,7 @@ impl IssueMonitorSpawnAdmissionInput {
             phase = "monitor_shared_capacity",
             elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
             thread = "worker",
-            "Issue Monitor launch phase"
+            "Issues launch phase"
         );
         let capacity = monitor
             .agent_status_at(&chrono::Utc::now().to_rfc3339())
@@ -2339,6 +2367,11 @@ impl IssueMonitorLaunchClaimInput {
     pub fn claim_or_reuse(
         &self,
     ) -> Result<bool, crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+            issue_number = self.issue_number, delivery_id = %self.delivery_id,
+            window_id = %self.materializer_window_id);
+        let _claim_span = claim_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start("claim");
         let prefs = crate::load_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&self.project_root),
         )
@@ -2353,9 +2386,14 @@ impl IssueMonitorLaunchClaimInput {
                 crate::process::host_process_start_time(self.materializer_pid),
             )
         {
+            phase.finish();
             return Ok(true);
         }
-        self.claim_from_worker()
+        let result = self.claim_from_worker();
+        if result.is_ok() {
+            phase.finish();
+        }
+        result
     }
 
     fn matches_durable_claim(&self, prefs: &crate::IssueMonitorPrefs) -> bool {
@@ -2665,6 +2703,8 @@ pub(crate) struct OwnerAgentAdmissionInput<'a> {
     pub host_project_roots: &'a [PathBuf],
     pub snapshot: crate::IssueMonitorWindowSnapshot,
     pub snapshot_tabs: std::collections::BTreeSet<String>,
+    pub runtime_handles:
+        &'a std::collections::HashMap<String, std::sync::Arc<gwt_terminal::PtyHandle>>,
     pub known_names: &'a std::collections::HashSet<String>,
     pub metadata: OwnerLaunchMetadata,
     pub is_continue_work: bool,
@@ -2775,9 +2815,13 @@ pub(crate) fn prepare_owner_agent_admission(
             .as_ref()
             .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
-        if !prepared.is_current(input.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
-        }
+        prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
+            project_root: input.project_root.into(),
+            host_project_roots: input.host_project_roots.to_vec(),
+            issue_number,
+            target_branch: config.branch.clone().unwrap_or_default(),
+            issue_link_cache_dir: input.issue_link_cache_dir.into(),
+        })?;
         let now = chrono::Utc::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
@@ -2785,42 +2829,57 @@ pub(crate) fn prepare_owner_agent_admission(
                 .autonomous_wait(issue_number)
                 .is_some_and(|wait| crate::issue_monitor::wait_declaration_in_force(wait, &now))
         {
-            return Err(format!("Issue Monitor active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"));
+            return Err(format!("Issues active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"));
+        }
+        // A terminal policy status can precede physical tree cleanup. Count
+        // that exact retained PTY for admission without rewriting the original
+        // diagnostic/claim snapshot or replacing the shared host census.
+        let mut capacity_snapshot = input.snapshot.clone();
+        for window in &mut capacity_snapshot.windows {
+            if !window.review_dispatch
+                && matches!(
+                    window.status,
+                    crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
+                )
+                && input
+                    .runtime_handles
+                    .get(&window.window_id)
+                    .is_some_and(|handle| !handle.tree_exit_confirmed())
+            {
+                window.status = crate::WindowProcessStatus::Running;
+            }
         }
         if let Some(started) = crate::process::host_process_start_time(std::process::id()) {
             monitor.record_window_snapshot_from_host(
-                input.snapshot.clone(),
+                capacity_snapshot,
                 std::process::id(),
                 started,
                 input.snapshot_tabs.clone(),
             );
         } else {
-            monitor.record_window_snapshot_for_tabs(
-                input.snapshot.clone(),
-                input.snapshot_tabs.clone(),
-            );
+            monitor.record_window_snapshot_for_tabs(capacity_snapshot, input.snapshot_tabs.clone());
         }
         if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
             return Err(format!(
-                "Issue Monitor implementation pane already exists for Issue #{issue_number}"
+                "Issues implementation pane already exists for Issue #{issue_number}"
             ));
         }
         if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
             return Err(format!(
-                "Issue Monitor source admission refused Issue #{issue_number}: {reason}"
+                "Issues source admission refused Issue #{issue_number}: {reason}"
             ));
         }
         if !review_dispatch {
             if let Some(reason) = monitor.launch_dependency_exclusion(issue_number) {
                 return Err(format!(
-                    "Issue Monitor dependency admission refused Issue #{issue_number}: {reason}"
+                    "Issues dependency admission refused Issue #{issue_number}: {reason}"
                 ));
             }
         }
         if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
             let status = monitor.agent_status_at(&now);
             return Err(format!(
-                "Issue Monitor max_active reached ({}/{}) before launching Issue #{issue_number}",
+                "Issues max_active reached ({}/{}) before launching Issue #{issue_number}",
                 status
                     .occupied_slot_count
                     .unwrap_or(status.active_launches.len()),
@@ -2845,8 +2904,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 };
                 if !claim.claim_or_reuse().map_err(|error| error.to_string())? {
                     return Err(
-                        "Issue Monitor launch delivery claim changed before owner materialization"
-                            .into(),
+                        "Issues launch delivery claim changed before owner materialization".into(),
                     );
                 }
             }
@@ -2892,7 +2950,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 prefs.record_tier_launch(issue_number, tier);
                 Ok(())
             })
-            .map_err(|error| format!("Could not record Issue Monitor launch tier: {error}"))?;
+            .map_err(|error| format!("Could not record Issues launch tier: {error}"))?;
         }
         if deliver_pending_autonomous_answer {
             crate::preserve_answered_handoff_resume_strategy_from_prefs(&prefs_path, issue_number)
@@ -3226,7 +3284,7 @@ impl ExecutionTerminalFacts {
     }
 }
 
-/// Facts read from the repository-scoped Issue Monitor prefs for one window.
+/// Facts read from the repository-scoped Issues prefs for one window.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MonitorTerminalFacts {
     /// The Monitor durably binds this exact window to the linked Issue.
@@ -3503,7 +3561,7 @@ fn restore_admission_for_ineligible(cause: &'static str) -> RestoreAdmission {
         | "obligation_open"
         | "execution_blocked_or_corrupt"
         | "session_interrupted" => RestoreAdmission::Admit,
-        // Issue #4441 (AC-3): the Issue Monitor is holding this row. A hold is
+        // Issue #4441 (AC-3): Issues is holding this row. A hold is
         // reversible, so the placeholder and the restore flag stay: releasing
         // the row brings the window back.
         "needs_human" | "failure_hold" => RestoreAdmission::RefuseHeld(cause),
@@ -3545,7 +3603,7 @@ pub enum RestoreAdmission {
     /// Issue #5510 AC-3: keep the placeholder but let the stale Active holder
     /// reach the reaper and the Monitor's existing fresh-launch recovery.
     RefuseFreshSession,
-    /// Issue #4441 (AC-3): the Issue Monitor is holding this row. Do not
+    /// Issue #4441 (AC-3): Issues is holding this row. Do not
     /// spawn, but keep the placeholder — the hold is reversible.
     RefuseHeld(&'static str),
     /// The canonical facts could not be read. Do not spawn, but keep the
@@ -4037,5 +4095,176 @@ pub fn issue_monitor_delivery_marker_result(
     match (committed, unknown) {
         (false, Some(error)) => Err(error),
         _ => Ok(committed),
+    }
+}
+
+#[cfg(test)]
+mod owner_admission_tests {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    type PrefsUpdate = fn(&mut crate::IssueMonitorPrefs);
+
+    struct PrefsChurn {
+        path: PathBuf,
+        update: Arc<std::sync::Mutex<Option<PrefsUpdate>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PrefsChurn {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "gwt.launch.timing" {
+                return;
+            }
+            #[derive(Default)]
+            struct CapacityPhase(bool);
+            impl tracing::field::Visit for CapacityPhase {
+                fn record_debug(
+                    &mut self,
+                    _field: &tracing::field::Field,
+                    _value: &dyn std::fmt::Debug,
+                ) {
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0 |= field.name() == "phase" && value == "monitor_shared_capacity";
+                }
+            }
+            let mut phase = CapacityPhase::default();
+            event.record(&mut phase);
+            if phase.0 {
+                let update = self.update.lock().unwrap().take();
+                if let Some(update) = update {
+                    crate::try_mutate_issue_monitor_prefs(&self.path, |prefs| {
+                        update(prefs);
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    fn admit_after_prefs_update(
+        update: PrefsUpdate,
+    ) -> Result<PreparedOwnerAgentAdmission, String> {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let cache = crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap();
+        gwt_github::Cache::new(cache)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(7016),
+                author_login: None,
+                title: "Owner admission".into(),
+                body: String::new(),
+                labels: vec!["bug".into()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt(now.clone()),
+                comments: Vec::new(),
+            })
+            .unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(
+                    serde_json::from_value(serde_json::json!({"agent_id":"codex"})).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let update = Arc::new(std::sync::Mutex::new(Some(update)));
+        let subscriber = tracing_subscriber::registry().with(PrefsChurn {
+            path,
+            update: update.clone(),
+        });
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&repo)
+            .branch("work/issue-7016")
+            .linked_issue_number(7016)
+            .build();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            prepare_owner_agent_admission(
+                OwnerAgentAdmissionInput {
+                    project_root: &repo,
+                    sessions_dir: &gwt_core::paths::gwt_sessions_dir(),
+                    issue_link_cache_dir: &gwt_core::paths::gwt_cache_dir(),
+                    window_id: "tab::agent",
+                    materializer_id: "gui",
+                    host_project_roots: std::slice::from_ref(&repo),
+                    snapshot: crate::IssueMonitorWindowSnapshot {
+                        project_tab_id: "tab".into(),
+                        observed_at: now,
+                        windows: Vec::new(),
+                    },
+                    snapshot_tabs: std::collections::BTreeSet::from(["tab".into()]),
+                    runtime_handles: &std::collections::HashMap::new(),
+                    known_names: &HashSet::new(),
+                    metadata: OwnerLaunchMetadata {
+                        launch_feedback_context: Some(LaunchFeedbackContext {
+                            client_id: "fixture".into(),
+                            title: "Issues".into(),
+                            issue_monitor_issue_number: Some(7016),
+                            issue_monitor_delivery_id: None,
+                            issue_monitor_project_root: Some(repo.clone()),
+                            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
+                        }),
+                        ..Default::default()
+                    },
+                    is_continue_work: false,
+                    restore_source: None,
+                },
+                &mut config,
+            )
+        });
+        assert!(update.lock().unwrap().is_none(), "prefs churn was injected");
+        result
+    }
+
+    #[test]
+    fn issue_7016_owner_admission_revalidates_same_decision_prefs_churn() {
+        let result = admit_after_prefs_update(|prefs| prefs.priority_order = vec![7]);
+        assert!(result.is_ok(), "owner admission failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn issue_7016_owner_admission_preserves_strict_fences_after_prefs_churn() {
+        let result = admit_after_prefs_update(|prefs| {
+            prefs.update_drain = Some(crate::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: chrono::Utc::now().to_rfc3339(),
+                reason: crate::IssueMonitorUpdateDrainReason::Manual,
+                automatic: None,
+                blocking: Vec::new(),
+            });
+        });
+        assert!(result.is_err_and(|error| error == ISSUE_MONITOR_SPAWN_ADMISSION_STALE));
     }
 }

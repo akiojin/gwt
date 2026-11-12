@@ -32,9 +32,13 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — hover over USAGE for account limits, including Claude's
-  Fable weekly limit and enabled Usage credits with utilization, used/limit,
-  and currency. Enable Claude account usage in Settings → Usage & Limits.
+- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
+  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
+  account limits, reset times, and enabled Usage credits with utilization,
+  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
+  When Codex's subscription quota is full and credits remain, USAGE shows
+  `Using credits` and the balance. The popover shows the observed credits/hour
+  after two readings from the same account; an initial reading has no rate.
 
 ## Install
 
@@ -123,9 +127,13 @@ identity reset is retired; startup preserves saved purpose and focus values and
 leaves `agent_identity.migration.json` unchanged (or absent).
 
 The embedded frontend requires an operation ID for cleanup requests. Reload older
-open tabs after upgrading. Launch Wizard always skips permission prompts and
-launches with Fast mode off; it reads older saved choices without rewriting them.
-Issue Monitor profiles and direct Session resume keep their existing preferences.
+open tabs after upgrading. Launch Wizard always skips permission prompts.
+Agent Settings save model, reasoning and speed defaults for launches: Codex offers
+Off / Fast / Ultrafast, and Claude Code offers its own Fast toggle. Monitor and PM
+profiles can select speed as well. Legacy Codex Fast booleans retain effective Off;
+only an explicit speed selection enables Fast or Ultrafast. Ultrafast requires a
+supported model and eligible plan/workspace; Codex displays a warning when an
+unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
 ## Requirements
 
@@ -161,6 +169,12 @@ Linux desktop builds also require WebKitGTK-related system packages. See
 gwt supports the following built-in agents. Launch Agent lists only installed
 built-in agents that gwt detects; other CLI commands remain available through
 custom agents.
+
+Codex model choices follow its local `models_cache.json` in Launch Wizard and
+Agents settings, with a bundled fallback when the cache is unavailable. Saved
+models that disappear remain unchanged and show a warning. Once every seven
+days, gwt checks for catalog and saved-profile differences and adds each new
+difference to PM Reports once.
 
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
@@ -204,7 +218,9 @@ the tray menu:
 - **Open Project…** — opens the Hub and starts its folder picker directly.
 - **Clone from GitHub…** — opens the Hub with its Clone Project dialog.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
-  PTY children down in order.
+  GUI-managed project daemons and their PTY children down, including background
+  Continue work. A daemon shared with another connected GUI or started
+  independently remains running.
 
 Project browser tabs show agent RUN / BLOCK counts in their titles and a
 status favicon. BLOCK includes waiting, stopped, and error states; shell
@@ -583,14 +599,22 @@ metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte ca
 long posts increase the size, and `all: true` can return hundreds of KiB or more.
 
 Managed hooks and project runtime delegation use `gwtd`. Opening a project
-starts or reconnects to its shared daemon, which owns agent panes and the Issue
-Monitor. A connection failure affects that project; the Hub and other projects
+starts or reconnects to its shared daemon, which owns agent panes and the Issues runtime. A connection failure affects that project; the Hub and other projects
 remain available. GUI-managed daemons drain after the last GUI disconnects and
 a reconnect grace period expires. An explicit Continue retains that project's
 runtime while admitted work is unfinished. Closing one GUI does not kill a shared daemon.
 An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
 it also makes an already GUI-managed daemon resident. `daemon.status` reports
 the current endpoint for diagnostics.
+
+Repeated owner health timeouts show **Wedged**, distinct from an ordinary
+connection failure. GWT automatically saves stack samples (on macOS), recent
+terminal-delivery warnings, and CPU observations under
+`~/.gwt/logs/owner-recovery/<pid>-<id>/`. Choose **Restart daemon…** in the
+Project status strip to review and confirm recovery: diagnostics are saved
+before SIGTERM, with SIGKILL after a grace period if needed. Restarting stops
+all agents hosted by that daemon, including agents in other projects; unsaved
+terminal work may be lost. GWT never kills a wedged daemon without confirmation.
 
 The Hub's **終了待ちプロジェクト** section observes daemons for known projects.
 Choose **再確認** to refresh their status. **終了を再試行** retries an exact failed
@@ -618,7 +642,7 @@ platform's console shutdown signal.
    `gwt-spec` design-required label and SPEC artifacts on that Issue. Intake
    never creates a branch.
 4. In the **Execute** lane, run the registered work: `Open Workspace` launches
-   an `Agent` on an existing branch, the background `Issue Monitor` picks up
+   an `Agent` on an existing branch, the background `Issues` runtime picks up
    registered Issues automatically, or launch directly from an Issue detail
    with the unified prompt form `gwt-execute #N` when the owner is already known.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
@@ -634,11 +658,11 @@ platform's console shutdown signal.
 Common windows include:
 
 - `Agent` — live coding-agent process windows created through Intake, Open
-  Workspace, the Issue Monitor, or Launch Agent
+  Workspace, Issues, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view. Issue Monitor agents are mirrored read-only in
+  open this same Work Item view. Issues agents are mirrored read-only in
   the Issue window's right pane,
   and `Windowize` opens the same session in its native terminal in Works for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
@@ -664,12 +688,18 @@ Common windows include:
   System shows the saved and effective values and pending-update blockers.
   Change the preference in the GUI or ask the PM to use `update.settings.set`
   with `auto_apply_updates`; `update.settings.status` reports its state.
-  It is no longer an Issue Monitor setting.
+  It is no longer a setting for Issues.
   `Restart now` opens a confirmation showing active agent counts, pending
   claims, verification leases, and affected Issues. When work is active,
   `Apply after all agents finish` is the default choice; it holds new launches
   and waits for the existing work to finish. Confirming `Restart now` instead
   stops active agents and restarts gwt immediately.
+
+If an exact pane cleanup fails, gwt retries it once after 30 seconds while
+keeping other running panes connected. Set a positive
+`[project_owner].reconciliation_timeout_secs` in `~/.gwt/config.toml` to change
+that delay. A failed retry leaves its exact cleanup pending and records a
+`needs_human` diagnostic in `errors.list`.
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
@@ -699,7 +729,7 @@ The mouse wheel scrolls retained history even when an agent tracks the mouse.
 Use `Shift+drag` to select text in mouse-tracking applications (`Option+drag` on
 macOS); the terminal's hover hint also shows these modifiers.
 
-## Issue surface and Issue Monitor
+## Issue surface and Issues
 
 Open **Issues** from the rail to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
@@ -717,6 +747,16 @@ For maintenance, `issue.monitor.queue.remove` with `all_terminals:true` removes
 the requested `numbers` from every terminal queue saved in this machine's project
 store and preserves their manual auto-refill exclusions. Omit the option to affect
 only this host. It does not change another machine's independent project store.
+
+On macOS, CLI and Monitor use `scutil --get LocalHostName` for the host ID,
+falling back to `whoami::hostname` when unavailable; other platforms use
+`whoami::hostname`. The ID is cached once per process, so restart gwt after
+renaming the machine. `issue.monitor.status` includes `caller_host_identity`
+with the ID, its source, and the reason when the network hostname differs.
+To recover a retired host's queued work, call `issue.monitor.queue.adopt` with
+`{"terminal":"old-host"}`. It moves pending entries to this host and releases
+their old schedule reservations for replanning; work already claiming, launching,
+or running stays with its existing owner. Other host queues are left alone.
 
 Active cards have an agent process observed on this terminal. The Active badge
 counts agents, including PM, and separately shows distinct Issue and PM counts;
@@ -788,8 +828,14 @@ and the shared `agent_capacity` measurement. Roster projects also report
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
-**Allowed labels** in Settings → Issues execution settings accepts a comma-separated list; an Issue needs any label in the saved list. Matching
-ignores case and surrounding whitespace. An empty list allows all labels and
+**Allowed labels** in Settings → Issues execution settings offers checkboxes for the
+repository's GitHub labels, with their colors. Select one or more; an Issue needs
+any label in the saved list. The label catalog is cached; **Refresh labels** fetches
+the current list. A failed refresh displays an error and keeps the saved selection.
+A selected label deleted or renamed on GitHub is marked **Unavailable on GitHub**
+and can be unchecked. Kanban cards show up to three colored label chips and a
+`+N` count for additional labels; hover over a chip or count to read the full names.
+Matching ignores case and surrounding whitespace. An empty list allows all labels and
 preserves the existing admission rules. Changes apply on the next scan without
 cancelling running agents. Automation can set the same list with `issue.monitor.config.set`
 and `{"allowed_labels":["agent:mac"]}`; `issue.monitor.status` reports
@@ -933,7 +979,7 @@ provider's latest usage reading under `provider_usage`, or why there is none.
 Every rate-limit refusal immediately holds its provider. If all candidates
 are held, the queue resumes at the earliest known reset; if every reset is
 unknown, `needs_human_fleet` reports `launch_candidates_exhausted` instead
-of periodically retrying. In the GUI, the Issue Monitor settings form
+of periodically retrying. In the GUI, the Issues settings form
 (`⚙ Settings`) lists the same pool as Agent Settings sets: `＋` adds a set, `−`
 removes one, the arrows reorder them, and the saved order is the launch order.
 All operations accept an optional
@@ -1075,8 +1121,15 @@ monitor armed. The full gate design and threat model live in SPEC
 Once a work branch merges into `develop`, the monitor settles the delivered
 Issue itself (`Closes #N` only fires on the default branch). When every
 acceptance criterion is checked, it posts a comment carrying the PR number and
-merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
-`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open. With
+Autonomous on, the comment explains that remaining implementation work returns
+to the queue with a fresh session. If every remaining criterion is
+explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
+as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
+`awaiting_measurement`. Update its acceptance checklist
+after measurement to allow close, or choose **Return to queue** to resume work.
+With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
+`merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria
 does not bypass the unchecked checklist. Auto-close follows the
 `Autonomous` toggle by default; `issue.monitor.config.set` with
@@ -1132,7 +1185,7 @@ persist per project. The human-gated baseline is SPEC
 Each project also runs one resident **PM agent** pane. It is the single
 conversational window: you describe what you want in natural language, and the
 PM decomposes it into Issues, registers them, plans the design-required ones,
-decides the semantic execution order, and tells the Issue Monitor which Issue
+decides the semantic execution order, and tells the Issues runtime which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
 
@@ -1211,11 +1264,19 @@ are still pending.
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
 the current `provider`, `conversation_id` and eligible turn IDs with
-`prompt_sha256`, without originals. `window_only:true` and `detail` describe a
+`prompt_sha256` and server-derived `source_id`, without originals.
+`window_only:true` and `detail` describe a
 bounded conversation window, not complete history or a durable cursor. Use
 `selector:{kind:"native_turn",provider:"<provider>",conversation_id:"<conversation>",id:"<id>"}`
-to read one original. Both native selectors work independently of unavailable
-Task tracking. To preserve that selected turn as an unclassified pending source,
+to read one original and the same `source_id`. Both native selectors work
+independently of unavailable Task tracking.
+First read `selector:{kind:"source",id:"<source_id>"}` to find
+an already saved source and its pending state. Compare its native identity and
+prompt hash before reconciling its classification or tasks without recapturing.
+The ID does not prove persistence or grant authority. Only `missing_source`
+means this source is absent at the returned revision; an unreadable, foreign or
+unauthorized result remains degraded. To preserve an absent selected turn as
+an unclassified pending source,
 call `pm.request_tasks.capture` with `operation_id`, current `expected_revision`,
 `reason`, `provider`, `conversation_id`, `id` and `prompt_sha256`. The server
 resolves the original, source and actor; caller-supplied originals, sources,
@@ -1502,20 +1563,20 @@ as a digest rather than copied into the audit. They likewise lack direct Issue
 mapping. These records do not schedule work or prove duplicate prevention or notification.
 
 The PM never launches implementation agents itself — it moves an Issue to the
-front of the queue and asks for a scan, and the Issue Monitor's existing
+front of the queue and asks for a scan, and the existing Issues
 claim/slot path does the launching, so the duplicate-launch protections are
 unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
 - PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
-  across restarts while the PM remains available for conversation; Issue Monitor
+  across restarts while the PM remains available for conversation; Issues
   and running agents keep working. Resume reconciles the latest status. JSON
   operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
   reports `paused` separately from registration.
 - Closing the PM pane stops it; it will not restart itself. A crash does
   auto-resume, with a backoff so a crash loop cannot spin.
-- Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
+- Only the PM may turn on `enabled` / `autonomous_mode` for Issues
   from the CLI; every other agent session must use the GUI. Merges are
   unaffected — the strong automated gate above still decides every merge.
 - There is one PM per **repository**, not per project store, so a repository
@@ -2078,6 +2139,16 @@ confirmed list with a warning. Task editing, automatic intake, and history impor
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 
+The PM window's **Chat** view shows the PM conversation as chat bubbles: your
+messages on the right and PM replies on the left, with PM Markdown (headings,
+lists, tables, and code) formatted. It reads the PM session's own conversation
+record and omits tool calls, hook notes, and automatic prompts. When PM sends
+several messages in one turn, only the latest stays open; the earlier ones fold
+into an **N earlier messages** line you can expand. Type a message in
+the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
+line). Your text stays in the box until delivery is confirmed, and the reason is
+shown if it could not be sent. Use **Execution log** to attach images.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is
@@ -2093,6 +2164,9 @@ and references. **Copy** includes both. Unchanged observations create no new car
 including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
+Decision reports show two to four numbered choices with the recommendation and
+its reason. Use **Execution log** to reply with a choice number or your own answer;
+**Copy** includes the numbered choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected
@@ -2380,7 +2454,7 @@ processes or unavailable samples do not imply low CPU usage. A warning is an
 observation, not proof that a particular worktree caused the load; inspect
 active filesystem consumers and Spotlight privacy settings before attributing it.
 
-Spotlight's own indexing daemon is reported from the Issue Monitor snapshot
+Spotlight's own indexing daemon is reported from the Issues snapshot
 instead: `spotlight` in `issue.monitor.status` lists every `mds_stores`
 process with its CPU percentage and carries a `warning` once one of them
 exceeds 100%. On a host with hundreds of worktrees the daemon can outrank the

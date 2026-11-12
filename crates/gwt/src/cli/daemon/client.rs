@@ -150,6 +150,7 @@ mod tests {
 
     use super::DaemonClient;
     use crate::cli::daemon::{broadcast::BroadcastHub, server};
+    use crate::project_runtime::events::{OwnerCommand, OwnerRequest};
 
     fn sample_scope(temp: &TempDir) -> RuntimeScope {
         RuntimeScope::new(
@@ -231,6 +232,7 @@ mod tests {
             server_hub,
         )
         .expect("bind test server");
+        let owner = server_handle.owner.clone();
 
         assert!(
             crate::cli::daemon::transport::bind_is_present(&socket_path),
@@ -263,8 +265,17 @@ mod tests {
         assert_eq!(ack2, DaemonFrame::Ack);
 
         drop(client);
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
+        assert!(
+            owner
+                .request(OwnerRequest {
+                    project_key: scope.repo_hash,
+                    command: OwnerCommand::Health,
+                })
+                .await
+                .is_err(),
+            "fixture shutdown must drain its physical owner"
+        );
     }
 
     #[tokio::test]
@@ -301,8 +312,7 @@ mod tests {
             "unexpected error message: {message}"
         );
 
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -331,8 +341,7 @@ mod tests {
         let result = DaemonClient::connect(&bad_endpoint).await;
         assert!(result.is_err(), "client connect should fail");
 
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -392,15 +401,14 @@ mod tests {
                 );
                 let issue_monitor = status
                     .issue_monitor
-                    .expect("live daemon exposes Issue Monitor projection");
+                    .expect("live daemon exposes Issues projection");
                 assert_eq!(issue_monitor["queue"], serde_json::json!([]));
             }
             other => panic!("expected Status frame, got: {other:?}"),
         }
 
         drop(client);
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -465,8 +473,7 @@ mod tests {
 
         drop(subscriber);
         drop(publisher);
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -547,8 +554,7 @@ mod tests {
         }
 
         drop(publisher);
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -618,7 +624,6 @@ mod tests {
         assert_eq!(received, event);
 
         drop(client);
-        server_handle.abort();
-        let _ = server_handle.await;
+        server_handle.shutdown().await;
     }
 }

@@ -1,4 +1,4 @@
-//! Read-only process observations, separate from Issue Monitor admission.
+//! Read-only process observations, separate from Issues admission.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

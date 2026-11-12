@@ -7,7 +7,8 @@ use std::{
 
 use gwt_core::{
     index::runtime::{
-        refresh_issues_if_stale, PythonRunnerSpawner, RefreshIssuesOptions, RunnerSpawner,
+        issue_rebuild_mode, refresh_issues_if_stale, PythonRunnerSpawner, RefreshIssuesOptions,
+        RunnerSpawner,
     },
     repo_hash::compute_repo_hash,
 };
@@ -50,6 +51,139 @@ fn write_meta(index_root: &std::path::Path, repo_hash: &str, minutes_ago: i64) {
     });
     std::fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
     std::fs::write(dir.join("chroma.sqlite3"), b"fixture").unwrap();
+}
+
+fn write_pooled_generation(index_root: &std::path::Path, repo_hash: &str) -> std::path::PathBuf {
+    use gwt_core::index::view::canonical_json_sha256;
+    use serde_json::json;
+
+    write_meta(index_root, repo_hash, 5);
+    let repo = index_root.join(repo_hash);
+    std::fs::remove_file(repo.join("issues/chroma.sqlite3")).unwrap();
+    let generation = repo.join("issues.gen/gen-1-1");
+    let store = repo.join("issues.gen/record-stores/issues-records-v1/store");
+    std::fs::create_dir_all(&generation).unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("chroma.sqlite3"), b"fixture").unwrap();
+    let members = json!({"1": "a".repeat(64)});
+    let digest = canonical_json_sha256(&members);
+    std::fs::write(
+        generation.join("membership.json"),
+        json!({
+            "schema_version": 1,
+            "writer_protocol": "issues-records-v1",
+            "record_layout": "issue-spec-chunks-v1",
+            "members": members,
+            "members_digest": digest,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("issues.gen/active.json"),
+        json!({
+            "schema_version": 2,
+            "writer_protocol": "issues-records-v1",
+            "scope": "issues",
+            "generation": "gen-1-1",
+            "document_count": 1,
+            "membership_digest": digest,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("manifest-issues.json"),
+        json!([{"path":"1", "content_hash":"a".repeat(64)}]).to_string(),
+    )
+    .unwrap();
+    repo
+}
+
+#[tokio::test]
+async fn pooled_issue_generation_keeps_incremental_mode_and_fresh_ttl() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = compute_repo_hash("https://github.com/example/pooled-issues.git");
+    let repo_dir = write_pooled_generation(tmp.path(), repo.as_str());
+    assert_eq!(issue_rebuild_mode(tmp.path(), repo.as_str()), "incremental");
+    let spawner = RecordingSpawner::default();
+    let opts = RefreshIssuesOptions {
+        index_root: tmp.path().to_path_buf(),
+        repo_hash: repo,
+        project_root: tmp.path().to_path_buf(),
+        ttl: Duration::from_secs(900),
+    };
+    refresh_issues_if_stale(&opts, &spawner).await.unwrap();
+    assert!(spawner.calls.lock().unwrap().is_empty());
+
+    std::fs::remove_file(
+        repo_dir.join("issues.gen/record-stores/issues-records-v1/store/chroma.sqlite3"),
+    )
+    .unwrap();
+    assert_eq!(
+        issue_rebuild_mode(tmp.path(), opts.repo_hash.as_str()),
+        "full"
+    );
+    refresh_issues_if_stale(&opts, &spawner).await.unwrap();
+    assert_eq!(spawner.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn pooled_issue_generation_rejects_unknown_contract_and_inexact_membership() {
+    use gwt_core::index::view::canonical_json_sha256;
+    use serde_json::{json, Value};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = "abc1234567890def";
+    let repo_dir = write_pooled_generation(tmp.path(), repo);
+    let pointer_path = repo_dir.join("issues.gen/active.json");
+    let membership_path = repo_dir.join("issues.gen/gen-1-1/membership.json");
+    let original: Value = serde_json::from_slice(&std::fs::read(&pointer_path).unwrap()).unwrap();
+    for (field, value) in [
+        ("schema_version", json!(3)),
+        ("writer_protocol", json!("future-issues-records")),
+        ("scope", json!("memory")),
+        ("delta", json!("gen-2-2")),
+        ("generation", json!("../gen-1-1")),
+        ("document_count", json!(2)),
+        ("membership_digest", json!("b".repeat(64))),
+    ] {
+        let mut pointer = original.clone();
+        pointer[field] = value;
+        std::fs::write(&pointer_path, pointer.to_string()).unwrap();
+        assert_eq!(issue_rebuild_mode(tmp.path(), repo), "full", "{field}");
+    }
+    std::fs::write(&pointer_path, original.to_string()).unwrap();
+    let mut membership: Value =
+        serde_json::from_slice(&std::fs::read(&membership_path).unwrap()).unwrap();
+    membership["members"]["1"] = json!("c".repeat(64));
+    std::fs::write(&membership_path, membership.to_string()).unwrap();
+    assert_eq!(issue_rebuild_mode(tmp.path(), repo), "full");
+
+    // A self-consistent checksum cannot authorize two logical IDs sharing
+    // one storage key; generation membership remains one-to-one.
+    membership["members"]["2"] = membership["members"]["1"].clone();
+    let digest = canonical_json_sha256(&membership["members"]);
+    membership["members_digest"] = json!(digest);
+    let mut pointer = original;
+    pointer["document_count"] = json!(2);
+    pointer["membership_digest"] = json!(digest);
+    std::fs::write(&pointer_path, pointer.to_string()).unwrap();
+    std::fs::write(&membership_path, membership.to_string()).unwrap();
+    std::fs::write(
+        repo_dir.join("manifest-issues.json"),
+        json!([
+            {"path":"1", "content_hash":"c".repeat(64)},
+            {"path":"2", "content_hash":"c".repeat(64)}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let meta_path = repo_dir.join("issues/meta.json");
+    let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    meta["document_count"] = json!(2);
+    std::fs::write(meta_path, meta.to_string()).unwrap();
+    assert_eq!(issue_rebuild_mode(tmp.path(), repo), "full");
 }
 
 #[tokio::test]

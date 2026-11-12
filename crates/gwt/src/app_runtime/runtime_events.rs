@@ -539,22 +539,15 @@ impl AppRuntime {
         let screen = pending.screen;
         let preview = screen.as_deref().map(terminal_preview_text);
         let preview_elapsed = batch_started.elapsed();
-        if pending.authoritative_owner {
-            return preview
-                .into_iter()
-                .map(|text| {
-                    OutboundEvent::project(
-                        project_key.clone(),
-                        BackendEvent::TerminalPreview {
-                            id: id.to_string(),
-                            text,
-                        },
-                    )
-                })
-                .collect();
-        }
-        if let Some(tab) = self.tab(&address.tab_id) {
-            publish_runtime_output_change(&tab.project_root, id, &pending.data, preview.clone());
+        if !pending.authoritative_owner {
+            if let Some(tab) = self.tab(&address.tab_id) {
+                publish_runtime_output_change(
+                    &tab.project_root,
+                    id,
+                    &pending.data,
+                    preview.clone(),
+                );
+            }
         }
         let relay_elapsed = batch_started.elapsed();
         let mut events = Vec::new();
@@ -1263,6 +1256,7 @@ impl AppRuntime {
             if let Some(key) = key {
                 let mut public = event.clone();
                 public.continuation_readiness_nonce = None;
+                public.native_prompt_id = None;
                 events.push(OutboundEvent::project(
                     key,
                     BackendEvent::RuntimeHookEvent { event: public },

@@ -56,7 +56,7 @@ FR-002, …) — gaps cause a Format validation issue.>
 ## 受け入れ基準
 
 - [ ] AC-1: <One machine-checkable criterion. Keep the exact `- [ ] AC-N:`
-      prefix; the Issue Monitor's autonomous gate only reads this shape.>
+      prefix; the Issues autonomous gate only reads this shape.>
 - [ ] AC-2: <...>
 - [ ] AC-3: <Append `(visual)` when a human must look at a screen.>
 
@@ -89,8 +89,8 @@ FR-002, …) — gaps cause a Format validation issue.>
 - **成功基準** — prefer commands and observable signals. Subjective bullets
   ("ユーザー体験が向上する") are not measurable and should be deleted. This
   section is prose for humans: the verification command and its expected
-  result. It is **not** read by the Issue Monitor.
-- **受け入れ基準** — the machine-checkable checklist the Issue Monitor's
+  result. It is **not** read by Issues.
+- **受け入れ基準** — the machine-checkable checklist the Issues
   autonomous gate (`classify_acceptance_criteria`) reads. Every line must be
   `- [ ] AC-N: <text>` directly under this exact heading (`## Acceptance
   Criteria` and `## 受け入れ条件` are also accepted; `## 成功基準` is not).

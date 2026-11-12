@@ -811,7 +811,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-runtime gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor scheduled driver contracts
+      - name: Run Issues scheduled driver contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
@@ -820,7 +820,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime_local_driver_ -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor launch_now control-path contracts
+      - name: Run Issues launch_now control-path contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
@@ -927,7 +927,7 @@ jobs:
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee "$RUNNER_TEMP/feedback-ownership.log"
-          grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
+          grep -Fq 'test result: ok. 40 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
       - name: Run native fleet orphan process handle contracts
         shell: bash
         run: |
@@ -958,12 +958,12 @@ jobs:
       - name: Run inherited Claude session environment regressions
         run: node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor scheduled driver contracts
+      - name: Run Issues scheduled driver contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt local_fallback_lease -- --test-threads=1
         timeout-minutes: 15
-      - name: Run Issue Monitor launch_now control-path contracts
+      - name: Run Issues launch_now control-path contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1
@@ -995,7 +995,7 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
         timeout-minutes: 15
       # Issue #4078: pin both the wait declaration and its durable prefs fallback.
-      - name: Run Issue Monitor wait declaration contracts
+      - name: Run Issues wait declaration contracts
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1
@@ -1188,6 +1188,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
+      # SPEC #6943 AC-2: the committed React bundle must match a fresh,
+      # lockfile-pinned build of crates/gwt/web-react.
+      - name: Check React bundle freshness and run React tests
+        run: |
+          bash scripts/check-frontend-build.sh
+          node --test crates/gwt/web-react/__tests__/use-store-selector.test.mjs scripts/check-frontend-build.test.mjs
+          node --experimental-loader ./crates/gwt/web-react/__tests__/jsx-loader.mjs --test crates/gwt/web-react/__tests__/task-home.test.mjs
+        timeout-minutes: 5
       - name: Run frontend unit tests
         env:
           GWT_PULL_RENDER_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -1213,7 +1221,9 @@ jobs:
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
             bash scripts/run-visual-tests.sh
-        timeout-minutes: 15
+        # The full serial suite measured 14.7m before image/bootstrap overhead.
+        # Retain all cases and retries with finite execution headroom.
+        timeout-minutes: 25
 
   report-post-merge-failure:
     needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]

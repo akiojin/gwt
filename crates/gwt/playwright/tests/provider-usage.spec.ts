@@ -1,4 +1,4 @@
-/* SPEC #2970 Phase 10 / Issue #3784 — deterministic browser contract for the
+/* SPEC #2970 Phase 11 / Issue #3784 — deterministic browser contract for the
  * compact provider-usage status summary and its shared detail popover.
  * Playwright runs this spec in both Chromium dark and light projects.
  */
@@ -8,10 +8,17 @@ import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
 
+async function installUsageTheme(page: any, theme: string) {
+  await page.addInitScript(({ theme, appOrigin }) => {
+    // Init scripts can also run in the opaque document before app navigation.
+    if (location.origin === appOrigin) localStorage.setItem("gwt:ui:theme", theme);
+  }, { theme, appOrigin: new URL(liveUrl || APP_URL).origin });
+}
+
 test.describe("Provider usage status summary", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
   test.beforeEach(async ({ page }, info) => {
-    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
+    await installUsageTheme(page,
       info.project.name.includes("light") ? "light" : "dark");
   });
 
@@ -21,7 +28,8 @@ test.describe("Provider usage status summary", () => {
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page, true);
-    await page.goto(liveUrl || APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
     await page.getByRole("tab", { name: "Usage & Limits" }).click();
     const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
     await expect(checkbox).toBeChecked();
@@ -73,7 +81,9 @@ test.describe("Provider usage status summary", () => {
     expect(result.fallbackMs).toBeLessThan(1000);
     expect(result.focused && result.checked).toBe(true);
     await expect(checkbox).toBeFocused();
-    await expect(page.locator("#op-strip-usage")).toContainText("CC 70%");
+    await expectClaudeModels(page, "—", "—");
+    await expect(page.locator('#op-strip-usage [data-provider="claude_code"]'))
+      .toHaveAttribute("data-severity", "normal");
     await page.locator("#op-strip-usage").hover();
     await expect(page.locator("#provider-usage-popover")).toContainText(/Weekly\s*70%/);
     await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
@@ -88,7 +98,8 @@ test.describe("Provider usage status summary", () => {
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page, true);
-    await page.goto(liveUrl || APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
     await page.getByRole("tab", { name: "Usage & Limits" }).click();
     const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
     await expect(checkbox).toBeChecked();
@@ -114,7 +125,8 @@ test.describe("Provider usage status summary", () => {
 
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(liveUrl || APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
 
     const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
@@ -123,17 +135,16 @@ test.describe("Provider usage status summary", () => {
     await expect(strip).toBeVisible({ timeout: 10_000 });
     await expect(strip).toContainText("USAGE");
     await expect(strip).toContainText("CX 96%");
-    await expect(strip).toContainText("CC 80%");
+    await expectClaudeModels(page, "—", "—");
     await expect(strip).not.toContainText(/[⬡◇]/);
 
     const codex = strip.locator('[data-provider="codex"]');
     const claude = strip.locator('[data-provider="claude_code"]');
     await expect(codex).toHaveAttribute("data-severity", "danger");
     await expect(claude).toHaveAttribute("data-severity", "warning");
-    await expect(strip).toHaveAttribute(
-      "aria-label",
-      "Provider usage: Codex 96% danger, Claude Code 80% warning",
-    );
+    await expect(strip).toHaveAttribute("aria-label", /Codex 96% danger/);
+    await expect(strip).toHaveAttribute("aria-label", /Claude Code.*Fable weekly.*not provided.*Opus weekly.*not provided/);
+    await expect(strip).toHaveAttribute("aria-label", /warning/);
 
     const contrastRatios = await strip.evaluate((element) => {
       const parseRgb = (value: string) =>
@@ -245,7 +256,8 @@ test.describe("Provider usage status summary", () => {
 
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(liveUrl || APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
 
     const strip = page.locator("#op-strip-usage");
     await expect(strip).toBeVisible({ timeout: 10_000 });
@@ -276,6 +288,75 @@ test.describe("Provider usage status summary", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("Codex credits distinguish usable full quota and show observed credit pace", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    const account = { provider: "codex", account_id: "credits-fixture", state: { kind: "ok" },
+      fetched_at: "2031-01-02T10:00:00Z", limit_reached: false,
+      windows: [{ kind: "weekly", used_percent: 100 }],
+      credits: { has_credits: true, unlimited: false, balance: 37679.9 } };
+    await emitProviderUsage(page, [{ ...account, credits: undefined }]);
+    await expect(strip).toContainText("CX 100%");
+    await page.screenshot({ path: info.outputPath("codex-credits-before.png"), fullPage: true });
+    await emitProviderUsage(page, [account]);
+    await expect(strip).toContainText("CX Using credits · 37,679.9 credits");
+    await strip.focus();
+    await expect(strip).toBeFocused();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    await expect(popover).toContainText("Balance: 37,679.9 credits");
+    await expect(popover).not.toContainText("credits/hour");
+    await expect(popover).not.toContainText("Limit reached");
+    account.fetched_at = "2031-01-02T10:30:00Z";
+    account.credits.balance = 37669.9;
+    await emitProviderUsage(page, [account]);
+    await expect(popover).toContainText("37,669.9 credits · 20 credits/hour (observed)");
+    for (const width of [1440, 360]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(strip).toContainText("Using credits · 37,669.9 credits");
+      const layout = await strip.evaluate(element => {
+        const chip = element.querySelector<HTMLElement>('[data-provider="codex"]')!;
+        const box = chip.getBoundingClientRect();
+        return { clipped: chip.scrollWidth > chip.clientWidth + 1,
+          outside: box.left < 0 || box.right > innerWidth || box.bottom > innerHeight,
+          overflow: document.documentElement.scrollWidth > innerWidth + 1 };
+      });
+      expect(layout).toEqual({ clipped: false, outside: false, overflow: false });
+      await strip.focus();
+      await strip.press("ArrowDown");
+      await expect(popover).toBeVisible();
+      await expect(popover).toBeFocused();
+      await expect(popover.locator("[data-codex-credits]")).toBeInViewport();
+      const popupBox = (await popover.boundingBox())!;
+      expect(popupBox.x).toBeGreaterThanOrEqual(0);
+      expect(popupBox.x + popupBox.width).toBeLessThanOrEqual(width + 1);
+      expect(popupBox.y).toBeGreaterThanOrEqual(0);
+      expect(popupBox.y + popupBox.height).toBeLessThanOrEqual(900);
+      await page.screenshot({ path: info.outputPath(`codex-credits-${width}.png`), fullPage: true });
+    }
+    await emitProviderUsage(page, [{ ...account, state: { kind: "stale", age_secs: 420 } }]);
+    await expect(strip).toContainText("stale");
+    await expect(popover).toContainText("stale 7m");
+    await emitProviderUsage(page, [{ ...account, credits: { has_credits: true, unlimited: true, balance: null } }]);
+    await expect(strip).toContainText("Using credits · unlimited");
+    await expect(popover).not.toContainText("credits/hour");
+    await emitProviderUsage(page, [{ ...account, credits: { has_credits: false, unlimited: false, balance: 0 } }]);
+    await expect(strip).toHaveAttribute("aria-label", /limit reached/);
+    await expect(popover).toContainText("Limit reached");
+    await emitProviderUsage(page, [{ ...account, credits: undefined }]);
+    await expect(strip).toContainText("CX 100%");
+    await expect(popover.locator("[data-codex-credits]")).toHaveCount(0);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    expect(errors).toEqual([]);
+  });
+
   test("shows Claude Fable weekly and enabled usage credits (SPEC #2970 Phase 8)", async ({
     page,
   }, testInfo) => {
@@ -284,13 +365,10 @@ test.describe("Provider usage status summary", () => {
     page.on("console", message => {
       if (message.type() === "error") errors.push(message.text());
     });
-    const projectKey = process.env.GWT_PLAYWRIGHT_PROJECT_KEY;
-    const appUrl = liveUrl && projectKey
-      ? new URL(`/p/${projectKey}`, liveUrl).href
-      : liveUrl || APP_URL;
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(appUrl);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
     const strip = page.locator("#op-strip-usage");
     await expect(strip).toBeVisible({ timeout: 10_000 });
     const resetsAt = "2031-01-02T03:04:05Z";
@@ -301,7 +379,7 @@ test.describe("Provider usage status summary", () => {
     const extraUsage = { is_enabled: true, used_credits: 1610, monthly_limit: 2000,
       utilization: 80.5, currency: "USD", disabled_reason: null };
     await emitProviderUsage(page, [{ ...account, extra_usage: extraUsage }]);
-    await expect(strip).toContainText("CC —");
+    await expectClaudeModels(page, "0%", "—");
     // Keep the detail open through updates without depending on the native
     // pointer staying over the trigger in a headed browser.
     await page.mouse.move(0, 0);
@@ -359,7 +437,8 @@ test.describe("Provider usage status summary", () => {
     };
     await emitProviderUsage(page, [account]);
     const strip = page.locator("#op-strip-usage");
-    await expect(strip).toContainText("CC 96%");
+    await expectClaudeModels(page, "100%", "—");
+    await expect(strip.locator('[data-provider="claude_code"]')).toHaveAttribute("data-severity", "danger");
     await expect(strip).not.toHaveAttribute("data-limit", "true");
     await page.mouse.move(0, 0);
     await strip.focus();
@@ -378,9 +457,231 @@ test.describe("Provider usage status summary", () => {
 
     await emitProviderUsage(page, [{ ...account, limit_reached: true,
       windows: [{ kind: "five_hour", used_percent: 100 }, ...account.windows] }]);
-    await expect(strip).toContainText("CC 100%");
+    await expectClaudeModels(page, "100%", "—");
+    await expect(strip.locator('[data-provider="claude_code"]')).toHaveAttribute("data-limit", "true");
     await expect(card.locator(".op-usage-card__limit")).toHaveText("Limit reached");
     await expect(card).toContainText(/Fable weekly\s*100%/);
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps both Claude weekly models independent of the active session and shared limit (SPEC #2970 Phase 11)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page, false, true);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible();
+    const account = {
+      provider: "claude_code", state: { kind: "ok" }, limit_reached: false,
+      windows: [
+        { kind: "five_hour", used_percent: 30 },
+        { kind: "weekly", used_percent: 40 },
+        { kind: "opus_weekly", used_percent: 70 },
+        { kind: "fable_weekly", used_percent: 20, resets_at: "2031-01-02T03:04:05Z" },
+      ],
+    };
+    const codex = { provider: "codex", state: { kind: "ok" }, windows: [
+      { kind: "five_hour", used_percent: 90 }, { kind: "weekly", used_percent: 10 },
+    ] };
+    const sessions = ["fable", "opus", "codex"].map(model => ({
+      session_id: `usage-${model}-session`, provider: model === "codex" ? "codex" : "claude_code",
+      project_path: "/fixture",
+      model: model === "codex" ? "gpt-5" : `claude-${model}-5`,
+      total_tokens: 1000, context_left_pct: 80, eligible: true, state: { kind: "ok" },
+    }));
+    await emitProviderUsage(page, [codex, account], sessions);
+    await expectClaudeModels(page, "20%", "70%");
+    await expect(strip.locator(".op-usage-sum")).toHaveCount(2);
+    await expect(strip.locator(".op-usage-more")).toHaveCount(0);
+    await expect(strip.locator('[data-provider="codex"]')).toHaveText("CX 90%");
+    await expect(strip).toHaveAttribute("aria-label", /Claude Code.*Fable weekly 20%.*Opus weekly 70%/);
+    await expect(page.locator("#provider-usage-popover")).toBeHidden();
+
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    for (const model of ["fable", "opus", "codex"]) {
+      await page.locator(`.work-row[data-window-id="usage-${model}"] .work-open`).click();
+      await expect(page.locator(`.works-terminal[data-window-id="usage-${model}"]`)).toBeVisible();
+      await expect(page.locator(".works-full-meta")).toContainText(model === "codex" ? "gpt-5" : `claude-${model}-5`);
+      await expectClaudeModels(page, "20%", "70%");
+      await strip.focus();
+      await expectClaudeModels(page, "20%", "70%");
+      await page.keyboard.press("Escape");
+      await page.locator('.works-full [data-action="back"]').click();
+    }
+
+    // A snapshot changes only Fable; reversing the input order must not change
+    // the fixed Fable/Opus presentation or infer values from session models.
+    account.windows[3].used_percent = 25;
+    await emitProviderUsage(page, [codex, account], [...sessions].reverse());
+    await expectClaudeModels(page, "25%", "70%");
+    await page.mouse.move(0, 0);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeFocused();
+    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
+    const fable = card.locator(".op-usage-win").filter({ hasText: "Fable weekly" });
+    const opus = card.locator(".op-usage-win").filter({ hasText: "Opus weekly" });
+    await expect(fable.locator(".op-usage-win__pct")).toHaveText("25%");
+    await expect(opus.locator(".op-usage-win__pct")).toHaveText("70%");
+    const resetLabel = await page.evaluate(iso => new Date(iso).toLocaleString(undefined, {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    }), account.windows[3].resets_at!);
+    await expect(fable.locator(".op-usage-win__reset")).toHaveText(`↻ ${resetLabel}`);
+    await expect(opus.locator(".op-usage-win__reset")).toBeEmpty();
+    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
+
+    await emitProviderUsage(page, [codex, { ...account, windows: account.windows.map(window =>
+      window.kind === "five_hour" ? { ...window, used_percent: 100 } :
+        window.kind === "weekly" ? { ...window, used_percent: 95 } : window) }], sessions);
+    await expectClaudeModels(page, "25%", "70%");
+    await expect(strip.locator('[data-provider="claude_code"]')).toHaveAttribute("data-severity", "danger");
+    await expect(strip).toHaveAttribute("aria-label", /(?:shared|account).*100%/i);
+    await expect(card).toContainText(/5-hour\s*100%/);
+    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
+    await expect(popover).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(popover).toBeHidden();
+    await expect(strip).toBeFocused();
+    expect(await strip.evaluate(element => getComputedStyle(element).outlineStyle)).not.toBe("none");
+    await page.screenshot({ path: info.outputPath("claude-weekly-models.png"), fullPage: true });
+    expect(errors).toEqual([]);
+  });
+
+  test("distinguishes Claude model zero, missing, degraded and stale values (SPEC #2970 Phase 11)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    await page.goto("about:blank");
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+    const strip = page.locator("#op-strip-usage");
+    const modelWindows = (fable: unknown, opus: unknown) => [
+      { kind: "fable_weekly", used_percent: fable }, { kind: "opus_weekly", used_percent: opus },
+    ];
+    for (const [windows, fable, opus] of [
+      [[{ kind: "fable_weekly", used_percent: 0 }], "0%", "—"],
+      [[{ kind: "opus_weekly", used_percent: 0 }], "—", "0%"],
+      [[], "—", "—"],
+      [modelWindows(null, "invalid"), "—", "—"],
+    ] as const) {
+      await emitProviderUsage(page, [{ provider: "claude_code", state: { kind: "ok" }, windows }]);
+      await expectClaudeModels(page, fable, opus);
+      await expect(strip).toHaveAttribute("aria-label", /not provided/);
+    }
+    await page.mouse.move(0, 0);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    const popover = page.locator("#provider-usage-popover");
+    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
+    await expect(popover).toBeFocused();
+    await expect(card.locator(".op-usage-win__pct")).toHaveText(["—", "—"]);
+    await expect(card.locator(".op-usage-bar")).toHaveCount(0);
+    await expect(card).not.toContainText(/0%|NaN/);
+    await page.keyboard.press("Escape");
+    for (const [kind, value] of [["disabled", "off"], ["no_data", "—"], ["unavailable", "n/a"]]) {
+      await emitProviderUsage(page, [{ provider: "claude_code", state: { kind, reason: "fixture unavailable" },
+        windows: modelWindows(20, 70) }]);
+      await expectClaudeModels(page, value, value);
+    }
+    for (const [percent, severity] of [[79, "normal"], [80, "warning"], [94, "warning"], [95, "danger"]] as const) {
+      await emitProviderUsage(page, [{ provider: "claude_code", state: { kind: "ok" },
+        windows: modelWindows(percent, 70) }]);
+      await expectClaudeModels(page, `${percent}%`, "70%");
+      const claude = strip.locator('[data-provider="claude_code"]');
+      await expect(claude.locator('[data-window-kind="fable_weekly"]')).toHaveAttribute("data-severity", severity);
+      await expect(claude.locator('[data-window-kind="opus_weekly"]')).toHaveAttribute("data-severity", "normal");
+      await expect(claude).not.toHaveAttribute("data-severity", "danger");
+    }
+    await emitProviderUsage(page, [{ provider: "claude_code", fetched_at: "2026-01-01T00:00:00Z",
+      state: { kind: "stale", age_secs: 420 }, windows: modelWindows(20, 70) }]);
+    await expectClaudeModels(page, "20%", "70%");
+    await expect(strip.locator('[data-provider="claude_code"]')).toContainText(/stale/i);
+    await expect(strip).toHaveAttribute("aria-label", /stale.*(?:420|7m|7 min)/i);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    await expect(popover).toBeFocused();
+    await expect(card.locator(".op-usage-win__pct")).toHaveText(["20%", "70%"]);
+    await expect(card.locator(".op-usage-card__reason")).toHaveText("stale 7m");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: info.outputPath("claude-weekly-stale.png"), fullPage: true });
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps both Claude models readable after narrow and 200% reflow (SPEC #2970 Phase 11)", async ({ page: initialPage, browser }, info) => {
+    const errors = captureUsageErrors(initialPage);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const openFixture = async (page: any) => {
+      await installUsageTheme(page, theme);
+      if (!liveUrl) await installEmbeddedRoutes(page);
+      await installProviderUsageBackend(page);
+      if (liveUrl) await gotoLiveGwt(page, liveUrl);
+      else await page.goto(APP_URL);
+    };
+    await openFixture(initialPage);
+    const accounts = [
+      { provider: "codex", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 40 }] },
+      { provider: "claude_code", state: { kind: "ok" }, windows: [
+        { kind: "fable_weekly", used_percent: 20 }, { kind: "opus_weekly", used_percent: 70 },
+      ] },
+    ];
+    for (const [width, height, zoom] of [[1440, 900, 1], [768, 900, 1], [360, 900, 1], [720, 450, 2]] as const) {
+      // Supported context sizing preserves 1440×900 screenshot pixels at the
+      // 200% equivalent of 720×450 CSS pixels and device scale factor 2.
+      const context = zoom === 2 ? await browser.newContext({
+        viewport: { width, height }, deviceScaleFactor: 2, colorScheme: theme,
+      }) : null;
+      try {
+        const page = context ? await context.newPage() : initialPage;
+        const pageErrors = context ? captureUsageErrors(page) : errors;
+        if (context) await openFixture(page);
+        else await page.setViewportSize({ width, height });
+        if (zoom === 2) {
+          expect(await page.evaluate(() => ({ width: innerWidth, height: innerHeight, scale: devicePixelRatio })))
+            .toEqual({ width: 720, height: 450, scale: 2 });
+        }
+        const strip = page.locator("#op-strip-usage");
+        await emitProviderUsage(page, accounts);
+        await expectClaudeModels(page, "20%", "70%");
+        await assertUsageLayout(page);
+        accounts[1].windows[0].used_percent = 95;
+        await emitProviderUsage(page, accounts);
+        await expectClaudeModels(page, "95%", "70%");
+        await assertUsageLayout(page);
+        await page.evaluate(() => {
+          (window as any).__emitWorkspaceStateNotice({ kind: "load_error",
+            path: "/fixture/current.json", message: "Workspace persistence is unavailable. Retry to reload." });
+        });
+        await expect(page.locator("#app > .react-island > .workspace-state-notice")).toBeVisible();
+        await expectClaudeModels(page, "95%", "70%");
+        await assertUsageLayout(page);
+        await strip.focus();
+        await strip.press("ArrowDown");
+        const popover = page.locator("#provider-usage-popover");
+        await expect(popover).toBeVisible();
+        await expect(popover).toBeFocused();
+        const box = (await popover.boundingBox())!;
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.y + box.height).toBeLessThanOrEqual(height + 1);
+        await page.keyboard.press("Escape");
+        await expect(strip).toBeFocused();
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        const screenshot = await page.screenshot({ path: info.outputPath(`claude-weekly-${width}-${zoom}x.png`), fullPage: true });
+        if (zoom === 2) {
+          expect(screenshot.readUInt32BE(16), "200% PNG width in physical pixels").toBe(1440);
+          expect(screenshot.readUInt32BE(20), "200% PNG height in physical pixels").toBe(900);
+        }
+        await page.evaluate(() => (window as any).__emitWorkspaceStateNotice(null));
+        await expect(page.locator(".workspace-state-notice")).toHaveCount(0);
+        accounts[1].windows[0].used_percent = 20;
+        expect(pageErrors).toEqual([]);
+      } finally {
+        await context?.close();
+      }
+    }
     expect(errors).toEqual([]);
   });
 
@@ -394,14 +695,10 @@ test.describe("Provider usage status summary", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    const baseURL = process.env.GWT_PLAYWRIGHT_BASE_URL;
-    const projectKey = process.env.GWT_PLAYWRIGHT_PROJECT_KEY;
-    const liveURL = baseURL && projectKey
-      ? new URL(`/p/${projectKey}`, baseURL).href
-      : null;
-    if (!liveURL) await installEmbeddedRoutes(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(liveURL ?? APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
 
     const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
@@ -446,7 +743,8 @@ test.describe("Provider usage status summary", () => {
 
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installProviderUsageBackend(page);
-    await page.goto(liveUrl || APP_URL);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
 
     const strip = page.locator("#op-strip-usage");
     await expect(strip).toBeVisible({ timeout: 10_000 });
@@ -535,10 +833,9 @@ test.describe("Provider usage status summary", () => {
     await expect(strip.locator(".op-usage-sum")).toHaveCount(1);
     await expect(strip.locator('[data-provider="custom_provider"]')).toHaveText("CU 95%");
     await expect(strip.locator(".op-usage-more")).toHaveText("+2");
-    await expect(strip).toHaveAttribute(
-      "aria-label",
-      "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
-    );
+    await expect(strip).toHaveAttribute("aria-label", /Codex 40% normal/);
+    await expect(strip).toHaveAttribute("aria-label", /Claude Code.*Fable weekly.*not provided.*Opus weekly.*not provided/);
+    await expect(strip).toHaveAttribute("aria-label", /CU 95% danger/);
     expect((await strip.boundingBox())!.width).toBeCloseTo(initialWidth, 1);
 
     await strip.hover();
@@ -551,19 +848,94 @@ test.describe("Provider usage status summary", () => {
     await expect(popover).toContainText(/Weekly\s*70%/);
     await expect(popover).toContainText(/Weekly\s*95%/);
     await expect(popover).toContainText(/1\/4/);
+
+    // Selection still counts actual providers. A critical Claude account
+    // retains both models when it becomes the one visible provider.
+    await emitProviderUsage(page, [
+      { provider: "custom_provider", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 95 }] },
+      { provider: "claude_code", state: { kind: "ok" }, windows: [
+        { kind: "weekly", used_percent: 99 }, { kind: "opus_weekly", used_percent: 70 },
+        { kind: "fable_weekly", used_percent: 20 },
+      ] },
+      { provider: "codex", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 40 }] },
+    ]);
+    await expect(strip.locator(".op-usage-sum")).toHaveCount(1);
+    await expectClaudeModels(page, "20%", "70%");
+    await expect(strip.locator(".op-usage-more")).toHaveText("+2");
+    await expect(strip).toHaveAttribute("aria-label", /CU 95% danger.*Claude Code.*Fable weekly 20%.*Opus weekly 70%.*Codex 40% normal/);
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });
 });
 
-async function emitProviderUsage(page: any, accounts: unknown[]): Promise<void> {
-  await page.evaluate((nextAccounts) => {
-    (window as any).__emitProviderUsage(nextAccounts);
-  }, accounts);
+function captureUsageErrors(page: any): string[] {
+  const errors: string[] = [];
+  page.on("pageerror", (error: Error) => errors.push(error.message));
+  page.on("console", (message: any) => { if (message.type() === "error") errors.push(message.text()); });
+  return errors;
 }
 
-async function installProviderUsageBackend(page: any, withSettings = false): Promise<void> {
-  await page.addInitScript(withSettings => {
+async function expectClaudeModels(page: any, fable: string, opus: string): Promise<void> {
+  const models = page.locator('#op-strip-usage [data-provider="claude_code"] .op-usage-model');
+  await expect(models).toHaveCount(2);
+  await expect(models.nth(0)).toHaveAttribute("data-window-kind", "fable_weekly");
+  await expect(models.nth(1)).toHaveAttribute("data-window-kind", "opus_weekly");
+  await expect(models.nth(0)).toHaveText(new RegExp(`^Fable\\s+(?:weekly|7d)\\s+${escapeRegExp(fable)}$`));
+  await expect(models.nth(1)).toHaveText(new RegExp(`^Opus\\s+(?:weekly|7d)\\s+${escapeRegExp(opus)}$`));
+  await expect(models.nth(0)).toBeVisible();
+  await expect(models.nth(1)).toBeVisible();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function assertUsageLayout(page: any): Promise<void> {
+  const violations = await page.evaluate(() => {
+    const problems: string[] = [];
+    const strip = document.querySelector<HTMLElement>("#op-strip-usage")!;
+    const models = [...strip.querySelectorAll<HTMLElement>(".op-usage-model")];
+    const fits = (inner: DOMRect, outer: DOMRect) => inner.left >= outer.left - 1 &&
+      inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    const overlaps = (left: DOMRect, right: DOMRect) =>
+      Math.min(left.right, right.right) - Math.max(left.left, right.left) > 1 &&
+      Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top) > 1;
+    const viewport = new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+    for (const model of models) {
+      const range = document.createRange();
+      range.selectNodeContents(model);
+      for (const text of range.getClientRects()) {
+        if (!fits(text, viewport)) problems.push(`${model.dataset.windowKind}: outside viewport`);
+        for (let ancestor: HTMLElement | null = model; ancestor; ancestor = ancestor.parentElement) {
+          if ((ancestor === model || ancestor === strip || ancestor.classList.contains("op-status-strip")) &&
+              !fits(text, ancestor.getBoundingClientRect())) problems.push(`${model.dataset.windowKind}: text escapes ${ancestor.className}`);
+          const style = getComputedStyle(ancestor);
+          if (/(hidden|clip|auto|scroll)/.test(`${style.overflowX} ${style.overflowY}`) &&
+              !fits(text, ancestor.getBoundingClientRect())) problems.push(`${model.dataset.windowKind}: clipped by ${ancestor.className}`);
+        }
+      }
+      if (getComputedStyle(model).textOverflow === "ellipsis") problems.push("model ellipsis");
+    }
+    if (overlaps(models[0].getBoundingClientRect(), models[1].getBoundingClientRect())) problems.push("models overlap");
+    for (const neighbor of document.querySelectorAll<HTMLElement>(".op-status-strip__cell, .project-bar, #op-rail, .workspace-state-notice")) {
+      if (neighbor === strip || !neighbor.getClientRects().length) continue;
+      if (overlaps(strip.getBoundingClientRect(), neighbor.getBoundingClientRect())) problems.push(`overlap: ${neighbor.id || neighbor.className}`);
+    }
+    if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 ||
+        document.body.scrollWidth > document.documentElement.clientWidth + 1) problems.push("horizontal page overflow");
+    return problems;
+  });
+  expect(violations, "both full model labels and values fit without clipping or overlap").toEqual([]);
+}
+
+async function emitProviderUsage(page: any, accounts: unknown[], sessions: unknown[] = []): Promise<void> {
+  await page.evaluate(({ accounts, sessions }) => {
+    (window as any).__emitProviderUsage(accounts, sessions);
+  }, { accounts, sessions });
+}
+
+async function installProviderUsageBackend(page: any, withSettings = false, withAgents = false): Promise<void> {
+  await page.addInitScript(({ withSettings, withAgents }) => {
     try {
       window.sessionStorage.setItem("gwt:ui:briefing", "1");
     } catch {
@@ -585,7 +957,13 @@ async function installProviderUsageBackend(page: any, withSettings = false): Pro
               viewport: { x: 0, y: 0, zoom: 1 },
               windows: withSettings ? [{ id: "tab-1::settings", title: "Settings", preset: "settings",
                 geometry: { x: 40, y: 40, width: 1100, height: 750 }, z_index: 1,
-                status: "running", persist: true, minimized: false, maximized: false }] : [],
+                status: "running", persist: true, minimized: false, maximized: false }] :
+                withAgents ? ["fable", "opus", "codex"].map((model, index) => ({
+                  id: `usage-${model}`, title: model, preset: "agent", agent_name: model,
+                  agent_id: model === "codex" ? "codex" : "claude", session_id: `usage-${model}-session`,
+                  geometry: { x: 100, y: 100, width: 720, height: 400 }, geometry_revision: 0,
+                  z_index: index + 1, status: "idle", persist: true, minimized: false, maximized: false,
+                })) : [],
             },
           },
         ],
@@ -690,6 +1068,15 @@ async function installProviderUsageBackend(page: any, withSettings = false): Pro
         if (message?.kind === "frontend_ready") {
           this.emit(workspaceState);
           this.emit(usageSnapshot);
+          if (withAgents) this.emit({ kind: "active_work_projection", projection: {
+            id: "usage-fixture", active_works: [], local_agent_activity: {
+              project_key: location.pathname.split("/")[2], host_id: "usage-fixture",
+              observed_at: new Date().toISOString(), agents: ["fable", "opus", "codex"].map(model => ({
+                window_id: `usage-${model}`, session_id: `usage-${model}-session`,
+                runtime_incarnation: 1, is_pm: false, issue_number: null,
+              })),
+            },
+          } });
         }
       }
 
@@ -707,18 +1094,21 @@ async function installProviderUsageBackend(page: any, withSettings = false): Pro
       }
     }
 
-    (window as any).__emitProviderUsage = (accounts: unknown[]) => {
+    (window as any).__emitProviderUsage = (accounts: unknown[], sessions: unknown[] = []) => {
       socketRef?.emit({
         kind: "provider_usage",
         accounts,
-        sessions: [],
+        sessions,
         consumption: [],
       });
+    };
+    (window as any).__emitWorkspaceStateNotice = (notice: unknown) => {
+      socketRef?.emit({ kind: "workspace_state_notice", notice });
     };
 
     Object.defineProperty(window, "WebSocket", {
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, withSettings);
+  }, { withSettings, withAgents });
 }

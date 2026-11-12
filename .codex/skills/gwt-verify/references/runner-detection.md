@@ -56,11 +56,11 @@ approach explicitly.
    / expect-style TUI test, a `go test` CLI harness) instead of a browser /
    GUI runner.
 
-4. **Long-running runners and `--mode quick`.** Some runners (Unity Editor
+4. **Long-running runners during TDD.** Some runners (Unity Editor
    batch, large `mvn verify`, full `dotnet test` solution) take many
-   minutes. In `--mode quick`, narrow the invocation to a single
-   project / module / `-k` filter relevant to the changed surface, or
-   skip the runner with a recorded `skipped(quick-mode-budget)` reason.
+   minutes. During TDD, run a single project / module / `-k` filter
+   relevant to the changed surface directly. This narrow check does not
+   replace the complete canonical verification matrix before delivery.
 
 5. **Plugin / module testing in Unity.** If the project ships under
    `Packages/<id>` Unity package layout, prefer scoping the test runner

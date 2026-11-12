@@ -1,4 +1,4 @@
-//! Exact-runtime duplicate recovery for Issue Monitor (Issue #4466).
+//! Exact-runtime duplicate recovery for Issues (Issue #4466).
 
 use super::*;
 

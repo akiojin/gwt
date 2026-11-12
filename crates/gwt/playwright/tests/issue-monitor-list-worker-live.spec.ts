@@ -10,7 +10,7 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const CHECK_HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
 type Fixture = { project: string; repo_hash: string; gate_root: string; pid: number; label: string };
 
-test.describe("Issue Monitor list worker (live backend)", () => {
+test.describe("Issues list worker (live backend)", () => {
   test.skip(!BASE || !CHECK_HOME || process.platform !== "win32", "requires the isolated Windows browser-check fixture");
   test.setTimeout(90_000);
   test.use({ viewport: { width: 1440, height: 1000 } });

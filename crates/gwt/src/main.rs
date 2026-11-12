@@ -967,23 +967,28 @@ fn admit_prepared_update(
 }
 
 fn spawn_gui_exit_backstop(reason: GuiShutdownReason, grace: Duration) {
-    thread::Builder::new()
-        .name("gwt-gui-exit-backstop".to_string())
-        .spawn(move || {
-            thread::sleep(grace);
-            eprintln!(
-                "gwt gui: {} shutdown timed out after {grace:?}; exiting now",
-                reason.label()
-            );
-            tracing::error!(
-                target: "gwt::shutdown",
-                reason = reason.label(),
-                grace_ms = grace.as_millis() as u64,
-                "gui shutdown timed out; forcing process exit"
-            );
-            std::process::exit(0);
-        })
-        .expect("spawn gui exit backstop thread");
+    // Native Quit may arm this before delivery; the eventual shutdown handler
+    // and startup cleanup share the same process-wide deadline.
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        thread::Builder::new()
+            .name("gwt-gui-exit-backstop".to_string())
+            .spawn(move || {
+                thread::sleep(grace);
+                eprintln!(
+                    "gwt gui: {} shutdown timed out after {grace:?}; exiting now",
+                    reason.label()
+                );
+                tracing::error!(
+                    target: "gwt::shutdown",
+                    reason = reason.label(),
+                    grace_ms = grace.as_millis() as u64,
+                    "gui shutdown timed out; forcing process exit"
+                );
+                std::process::exit(0);
+            })
+            .expect("spawn gui exit backstop thread");
+    });
 }
 
 /// Report a fatal front-door startup failure on every surface that can still
@@ -1637,7 +1642,7 @@ impl BoardDaemonSubscriberRegistry {
                     materializer_ready,
                 ) {
                     tracing::info!(project_root = %context.project_root.display(), materializer_ready,
-                        "Issue Monitor subscriber role changed");
+                        "Issues subscriber role changed");
                     entry.insert((context, materializer_ready, subscriber));
                 }
             }
@@ -1664,6 +1669,14 @@ impl BoardDaemonSubscriberRegistry {
                 let subscriber = spawn_project_owner_subscriber(context.clone(), proxy.clone());
                 (context, subscriber)
             });
+        }
+    }
+
+    fn request_quit(&self) {
+        // Notify every project before joining any subscriber or synchronous
+        // cleanup. One stalled project must not hide Quit from the others.
+        for (_, subscriber) in self.owner_subscribers.values() {
+            subscriber.request_quit();
         }
     }
 
@@ -2195,7 +2208,7 @@ enum UserEvent {
         local_branches: Option<std::collections::HashSet<String>>,
     },
     /// Issue #4378 AC-2: the startup generation reaper finished on the
-    /// blocking worker; Issue Monitor launch deliveries held meanwhile replay.
+    /// blocking worker; Issues launch deliveries held meanwhile replay.
     StartupGenerationReaperCompleted,
     WorkspaceProjectionChanged {
         project_root: PathBuf,
@@ -2308,7 +2321,7 @@ enum UserEvent {
     PmWakeDeliveryComplete(app_runtime::pm::PmWakeDelivery),
     IssueMonitorScheduledScanPrepared(Box<app_runtime::PreparedScheduledIssueMonitorScan>),
     /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
-    /// Issue Monitor launch the daemon already released (daemon → GUI).
+    /// Issues launch the daemon already released (daemon → GUI).
     IssueMonitorIdlePaneClose {
         window_id: String,
         issue_number: Option<u64>,
@@ -2420,6 +2433,7 @@ enum UserEvent {
         reports: Vec<gwt::protocol::PmReportView>,
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
+        current_error: Option<String>,
     },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -2640,6 +2654,22 @@ mod tests {
             .rsplit_once("event_loop.run(move |event, _, control_flow| {")
             .expect("GUI event loop")
             .1;
+        let installed = event_loop
+            .split_once("Ok(Ok(pending)) => {")
+            .unwrap()
+            .1
+            .split_once("Ok(Err(error)) => {")
+            .unwrap()
+            .0;
+        let subscribed = installed.find("board_daemon_subscribers.sync(").unwrap();
+        let owned = installed.find("app = Some(ready);").unwrap();
+        let resume = installed
+            .find("resume_bootstrapped_runtimes()")
+            .expect("Continue resumes without browser readiness");
+        assert!(
+            subscribed < owned && owned < resume,
+            "physical startup restores require installed GUI ownership and its subscriber registry"
+        );
         let startup_stopped = event_loop
             .split_once("Event::UserEvent(UserEvent::StartupStopped) => {")
             .expect("startup cleanup exit")
@@ -2719,6 +2749,57 @@ mod tests {
         assert_eq!((normal.1, normal.2), (error.1, error.2));
         assert_ne!(normal.0, error.0);
         assert_eq!(super::load_tray_icon_rgba_for_state(false).unwrap(), normal);
+    }
+
+    #[test]
+    fn quit_backstop_precedes_queue_delivery_and_dispatch_maintenance() {
+        let source = include_str!("main.rs");
+        let menu_callback = source
+            .rsplit_once("MenuEvent::set_event_handler(Some(")
+            .unwrap()
+            .1
+            .split_once("let clients = ClientHub::default();")
+            .unwrap()
+            .0;
+        assert!(
+            menu_callback
+                .find("spawn_gui_exit_backstop(")
+                .is_some_and(|arm| { arm < menu_callback.find("menu_proxy.send_event(").unwrap() }),
+            "tray Quit must arm its backstop before queue delivery can block"
+        );
+        let dispatch = source
+            .rsplit_once("event_loop.run(move |event, _, control_flow| {")
+            .unwrap()
+            .1;
+        assert!(
+            dispatch.find("app.daemon_supervisor.shutdown()").unwrap()
+                < dispatch
+                    .find("board_daemon_subscribers.request_quit()")
+                    .unwrap(),
+            "Quit must stop daemon creation before its bounded existing-owner notification"
+        );
+        assert!(
+            dispatch
+                .find("board_daemon_subscribers.request_quit()")
+                .unwrap()
+                < dispatch
+                    .find("app.reconcile_project_view_connections(")
+                    .unwrap()
+        );
+        let arm = dispatch.find("spawn_gui_exit_backstop(").unwrap();
+        assert!(
+            arm < dispatch.find("app.flush_runtime_output_batches(").unwrap(),
+            "Quit must arm its backstop before dispatch maintenance"
+        );
+        let backstop = source
+            .split_once("fn spawn_gui_exit_backstop(")
+            .unwrap()
+            .1
+            .split_once("/// Report a fatal")
+            .unwrap()
+            .0;
+        assert!(backstop.contains("static STARTED: std::sync::Once"));
+        assert!(backstop.contains("STARTED.call_once("));
     }
 
     #[test]
@@ -3265,6 +3346,7 @@ mod tests {
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some(project_root.display().to_string()),
             branch: Some("work/runtime".to_string()),
@@ -3452,7 +3534,7 @@ mod tests {
                 assert_eq!(actual_project_root, project_root);
                 assert_eq!(*actual, status);
             }
-            other => panic!("unexpected issue monitor status event: {other:?}"),
+            other => panic!("unexpected Issues status event: {other:?}"),
         }
 
         let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
@@ -3487,7 +3569,7 @@ mod tests {
                     gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
                 );
             }
-            other => panic!("unexpected issue monitor launch event: {other:?}"),
+            other => panic!("unexpected Issues launch event: {other:?}"),
         }
 
         let legacy_launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
@@ -3537,7 +3619,7 @@ mod tests {
                 assert_eq!(actual_project_root, project_root);
                 assert_eq!(actual_dispatch, dispatch);
             }
-            other => panic!("unexpected issue monitor review event: {other:?}"),
+            other => panic!("unexpected Issues review event: {other:?}"),
         }
     }
 
@@ -4122,6 +4204,7 @@ mod tests {
                 source_event: Some("PreToolUse".to_string()),
                 gwt_session_id: Some("session-1".to_string()),
                 continuation_readiness_nonce: None,
+                native_prompt_id: None,
                 agent_session_id: Some("agent-1".to_string()),
                 project_root: Some("E:/gwt/test-repo".to_string()),
                 branch: Some("feature/runtime".to_string()),
@@ -4889,6 +4972,7 @@ mod tests {
             pending_launch_delivery_acks: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_launch_attempts: std::collections::HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
@@ -5116,6 +5200,7 @@ mod tests {
             live_window_id: live_window_id.map(str::to_string),
             skip_permissions: true,
             codex_fast_mode: true,
+            codex_speed: Default::default(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
@@ -6438,6 +6523,7 @@ mod tests {
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: None,
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/test".to_string()),
@@ -10166,7 +10252,7 @@ fn main() -> std::io::Result<()> {
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
     // of file descriptors at roughly 80 concurrent agents — after which PTY
-    // creation, daemon connect, Issue Monitor prefs reads and tokio runtime
+    // creation, daemon connect, Issues prefs reads and tokio runtime
     // builds all fail with `Too many open files`. Raise the ceiling before any
     // pane can spawn, and record the value the process actually ended up with.
     log_startup_fd_limit(gwt_core::fd_limit::raise_soft_fd_limit());
@@ -10302,9 +10388,16 @@ fn main() -> std::io::Result<()> {
     // the single cross-platform callback. The legacy macOS native
     // menubar was removed alongside the wry WebView.
     let menu_proxy = proxy.clone();
-    tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
-        let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
-    }));
+    tray_icon::menu::MenuEvent::set_event_handler(Some(
+        move |event: tray_icon::menu::MenuEvent| {
+            if gwt::cli::tray::menu::MenuAction::from_id(event.id.as_ref())
+                == Some(gwt::cli::tray::menu::MenuAction::Quit)
+            {
+                spawn_gui_exit_backstop(GuiShutdownReason::QuitApp, GUI_SHUTDOWN_BACKSTOP_GRACE);
+            }
+            let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
+        },
+    ));
     let clients = ClientHub::default();
     let attachment_uploads = AttachmentUploadStore::in_system_temp();
     let bootstrap_proxy = proxy.clone();
@@ -10348,7 +10441,7 @@ fn main() -> std::io::Result<()> {
                 }
             })
         {
-            tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+            tracing::error!(%error, "failed to start Issues scheduled tick thread");
         }
     }
     {
@@ -10368,7 +10461,7 @@ fn main() -> std::io::Result<()> {
                 std::thread::sleep(interval);
             })
         {
-            tracing::error!(%error, "failed to start Issue Monitor claim renewal tick thread");
+            tracing::error!(%error, "failed to start Issues claim renewal tick thread");
         }
     }
     // Issue #3633: the GUI is the subject that keeps a runtime daemon alive.
@@ -10728,14 +10821,8 @@ fn main() -> std::io::Result<()> {
         }));
     }
 
-    // SPEC #2920: there is no headless route anymore — the
-    // tray-resident process is the only front door. The bounded
-    // shutdown backstop is still useful when graceful cleanup stalls,
-    // so always arm it (the legacy headless-only gate is gone).
-    let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
     let mut update_apply_admission = update_front_door::UpdateApplyAdmission::default();
-    let mut gui_shutdown_backstop_armed = false;
     let mut board_refresh_queue = BoardRefreshQueue::default();
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
@@ -10746,11 +10833,6 @@ fn main() -> std::io::Result<()> {
         *control_flow = ControlFlow::Wait;
         let mut dispatch_timer = EventLoopDispatchTimer::start(&event, &mut dispatch_perf, &proxy);
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
-        if let Some(app) = app.as_mut() {
-            clients.dispatch(app.flush_runtime_output_batches(std::time::Instant::now()));
-            *control_flow = app.next_runtime_output_deadline()
-                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
-        }
         let event = match event {
             Event::UserEvent(UserEvent::DrainAppEvents) => {
                 let Some(event) = proxy.take_next() else { return; };
@@ -10772,6 +10854,13 @@ fn main() -> std::io::Result<()> {
                 Event::UserEvent(UserEvent::QuitApp { reason: GuiShutdownReason::QuitApp }),
             event => event,
         };
+        if let Event::UserEvent(UserEvent::QuitApp { reason }) = &event {
+            spawn_gui_exit_backstop(reason.clone(), GUI_SHUTDOWN_BACKSTOP_GRACE);
+        } else if let Some(app) = app.as_mut() {
+            clients.dispatch(app.flush_runtime_output_batches(std::time::Instant::now()));
+            *control_flow = app.next_runtime_output_deadline()
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        }
         // Quit wins even when the completed initializer and queued work race it.
         if app.is_none() {
             match &event {
@@ -10862,6 +10951,7 @@ fn main() -> std::io::Result<()> {
 
                     tray_open.set_text("Open in browser");
                     app = Some(ready);
+                    app.as_mut().expect("installed startup app").resume_bootstrapped_runtimes();
                 }
                 Ok(Err(error)) => {
                     proxy.close();
@@ -10908,7 +10998,12 @@ fn main() -> std::io::Result<()> {
             }
         };
         let app = app.as_mut().expect("startup complete");
-        clients.dispatch(app.reconcile_project_view_connections(&clients));
+        if matches!(&event, Event::UserEvent(UserEvent::QuitApp { .. })) {
+            app.daemon_supervisor.shutdown();
+            board_daemon_subscribers.request_quit();
+        } else {
+            clients.dispatch(app.reconcile_project_view_connections(&clients));
+        }
         dispatch_timer.label = event_loop_dispatch_label(&event);
         watchdog_guard.set_event(dispatch_timer.label.as_str());
         // Issue #3611 AC-4: every dispatch on this thread is timed, not just
@@ -10949,17 +11044,11 @@ fn main() -> std::io::Result<()> {
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     reason,
-                    |reason, grace| {
-                        if !is_headless && !gui_shutdown_backstop_armed {
-                            spawn_gui_exit_backstop(reason, grace);
-                            gui_shutdown_backstop_armed = true;
-                        }
-                    },
+                    spawn_gui_exit_backstop,
                     || {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        app.daemon_supervisor.shutdown();
                         board_daemon_subscribers.shutdown();
                         // Shared owner lifetime follows Rust GUI presence, not parent Child ownership.
                         server.shutdown();
@@ -11647,7 +11736,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error }) => {
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error, current_error }) => {
                 clients.dispatch(app.pm_reports_loaded_events(client_id, BackendEvent::PmReports {
                     id: window_id,
                     session_id: Some(session_id),
@@ -11657,6 +11746,7 @@ fn main() -> std::io::Result<()> {
                     reports,
                     current,
                     error,
+                    current_error,
                 }));
             }
             Event::UserEvent(UserEvent::ProjectObservationInvalidationCompleted(completed)) => {

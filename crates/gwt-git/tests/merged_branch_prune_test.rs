@@ -2,7 +2,7 @@
 //! `work/issue-*` remote branches.
 //!
 //! The candidate rules (AC-2) and the batched delete (AC-4) are exercised
-//! through the public API both the Issue Monitor delivery hook and the
+//! through the public API both Issues delivery hook and the
 //! `branch.prune_merged` bulk operation call, so a divergence between the two
 //! entrances would fail here.
 

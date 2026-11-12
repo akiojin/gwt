@@ -28,6 +28,8 @@ export function createProviderUsageSurface({
       const usageModel = createUiStateStore(null);
       const latestProviderUsage = () => usageModel.read() || emptyUsage;
       const usagePanelSubscriptions = new Map();
+      let codexCreditObservation = null;
+      let codexCreditRate = null;
 
       const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
       const USAGE_WINDOW_LABEL = {
@@ -109,6 +111,23 @@ export function createProviderUsageSurface({
       }
 
       function applyProviderUsageUi(snapshot) {
+        const account = (snapshot?.accounts || []).find(item => item.provider === "codex");
+        const balance = account?.credits?.balance;
+        const timestamp = Date.parse(account?.fetched_at);
+        if (!account?.account_id || !["ok", "stale"].includes(account.state?.kind) ||
+            !Number.isFinite(timestamp) || !Number.isFinite(balance) || balance < 0 ||
+            account.credits.unlimited) {
+          codexCreditObservation = null;
+          codexCreditRate = null;
+        } else {
+          const previous = codexCreditObservation;
+          const sameAccount = previous?.accountId === account.account_id;
+          if (!sameAccount || timestamp !== previous.timestamp || balance !== previous.balance) {
+            codexCreditRate = sameAccount && timestamp > previous.timestamp && balance <= previous.balance
+              ? (previous.balance - balance) * 3600000 / (timestamp - previous.timestamp) : null;
+            codexCreditObservation = { accountId: account.account_id, timestamp, balance };
+          }
+        }
         usageModel.update(() => snapshot || emptyUsage);
       }
 
@@ -186,15 +205,19 @@ export function createProviderUsageSurface({
         const lbl = document.createElement("span");
         lbl.className = "op-usage-win__lbl";
         applyUsageWindowLabel(lbl, w);
-        const bar = buildUsageBar(w.used_percent, limitReached);
-        bar.classList.add("op-usage-win__bar");
+        const raw = w.used_percent;
+        const number = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "")
+          ? Number(raw) : NaN;
+        const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : null;
         const pct = document.createElement("span");
         pct.className = "op-usage-win__pct";
-        pct.textContent = `${Math.round(w.used_percent)}%`;
+        pct.textContent = percent == null ? "—" : `${Math.round(percent)}%`;
         const reset = document.createElement("span");
         reset.className = "op-usage-win__reset";
         reset.textContent = w.resets_at ? `↻ ${usageFmtResetShort(w.resets_at)}` : "";
         row.appendChild(lbl);
+        const bar = percent == null ? document.createElement("span") : buildUsageBar(percent, limitReached);
+        bar.classList.add("op-usage-win__bar");
         row.appendChild(bar);
         row.appendChild(pct);
         row.appendChild(reset);
@@ -418,10 +441,16 @@ export function createProviderUsageSurface({
           plan.textContent = account.plan;
           head.appendChild(plan);
         }
-        if (account.limit_reached) {
+        const credits = account.provider === "codex" ? account.credits : null;
+        const creditStateReadable = ["ok", "stale"].includes(account.state?.kind);
+        const full = creditStateReadable && (account.windows || []).some(w =>
+          ["five_hour", "weekly"].includes(w.kind) && Number(w.used_percent) >= 100);
+        const usingCredits = full && credits?.has_credits === true;
+        const displayLimit = !usingCredits && (account.limit_reached || (full && credits?.has_credits === false));
+        if (displayLimit || usingCredits) {
           const limit = document.createElement("span");
-          limit.className = "op-usage-card__limit";
-          limit.textContent = "Limit reached";
+          limit.className = usingCredits ? "op-usage-card__plan" : "op-usage-card__limit";
+          limit.textContent = usingCredits ? "Using credits" : "Limit reached";
           head.appendChild(limit);
         }
         card.appendChild(head);
@@ -438,10 +467,13 @@ export function createProviderUsageSurface({
           const wins = document.createElement("div");
           wins.className = "op-usage-wins";
           for (const w of windows) {
-            wins.appendChild(buildUsageWindowRow(w, account.limit_reached));
+            const modelWindow = account.provider === "claude_code" &&
+              (w.kind === "fable_weekly" || w.kind === "opus_weekly");
+            wins.appendChild(buildUsageWindowRow(w, !modelWindow && displayLimit));
           }
           card.appendChild(wins);
-        } else {
+        }
+        {
           const reason = usageStateReason(account.state);
           if (reason) {
             const isDisabled = (account.state && account.state.kind) === "disabled";
@@ -467,6 +499,19 @@ export function createProviderUsageSurface({
 
         if (account.provider === "claude_code" && account.extra_usage?.is_enabled === true) {
           card.appendChild(buildUsageCreditsRow(account.extra_usage));
+        }
+        if (credits && creditStateReadable) {
+          const row = document.createElement("div");
+          row.className = "op-usage-card__account";
+          row.dataset.codexCredits = "true";
+          const amount = credits.unlimited ? "unlimited"
+            : Number.isFinite(credits.balance) && credits.balance >= 0
+              ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
+          row.textContent = `Balance: ${amount}`;
+          if (Number.isFinite(codexCreditRate)) {
+            row.textContent += ` · ${codexCreditRate.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits/hour (observed)`;
+          }
+          card.appendChild(row);
         }
 
         const pc = usageConsumptionFor(account.provider);
