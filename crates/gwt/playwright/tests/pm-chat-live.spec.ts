@@ -29,6 +29,13 @@ async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepT
   if (!keepTasks) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
 }
 
+// A reload reopens the PM window in its default Chat view (T-CHAT-DEFAULT),
+// so reselect Reports before asserting the persisted history.
+async function reloadPmReports(page: Page) {
+  await page.reload();
+  await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
+}
+
 async function refreshPmReports(page: Page) {
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
 }
@@ -146,6 +153,11 @@ test.describe('PM reports', () => {
   test('T-CHAT-VIEW Chat renders the PM conversation as user-right and PM-left bubbles', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
+      const sendResults: any[] = [];
+      page.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === 'pane_send_result') sendResults.push(event);
+      }));
       page.on('pageerror', error => errors.push(error.message));
       page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
@@ -154,7 +166,10 @@ test.describe('PM reports', () => {
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       await expect(pane.getByRole('button', { name: 'Home', exact: true })).toHaveAttribute('aria-pressed', 'true');
       await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeVisible();
+      // AC-3431-CHAT-1: one action from the default Home opens Chat.
       await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+      await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeHidden();
       const chat = pane.getByRole('region', { name: 'PM conversation' });
       await expect(chat).toBeVisible();
       // The real host answers for the stopped fixture PM; it has no native record yet.
@@ -191,13 +206,22 @@ test.describe('PM reports', () => {
       expect(userBox.y).toBeLessThan(assistantBox.y);
       expect(await pane.locator('.pm-chat__transcript').textContent()).not.toContain('Ship');
       // T-CHAT-INPUT: the composer submits through the real host's pane input path.
-      await page.evaluate(() => {
+      await page.evaluate(id => {
         const sent: any[] = (window as any).__gwtChatSent = [];
         for (const socket of (window as any).__gwtPlaywrightSockets as WebSocket[]) {
           const original = socket.send.bind(socket);
-          socket.send = (data: any) => { const message = JSON.parse(String(data)); if (message.kind === 'pane_send_input') sent.push(message); original(data); };
+          socket.send = (data: any) => {
+            const message = JSON.parse(String(data));
+            if (message.kind === 'pane_send_input') {
+              sent.push(message);
+              // A Palette/CLI success on the same pane is unrelated to this draft.
+              socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+                kind: 'pane_send_result', window_id: id, ok: true, error: null }) }));
+            }
+            original(data);
+          };
         }
-      });
+      }, id);
       const composer = chat.getByRole('form', { name: 'Message PM' });
       const draft = composer.getByRole('textbox', { name: 'Message to PM' });
       await expect(composer.getByRole('button', { name: 'Send' })).toBeDisabled();
@@ -206,7 +230,9 @@ test.describe('PM reports', () => {
       await draft.pressSequentially('next');
       await draft.press('Enter');
       await expect.poll(() => page.evaluate(() => (window as any).__gwtChatSent)).toEqual([
-        { kind: 'pane_send_input', session_id: SESSION, text: 'Plan #3431\nnext\r' }]);
+        { kind: 'pane_send_input', session_id: SESSION, text: 'Plan #3431\nnext\r', request_id: expect.any(Number) }]);
+      const requestId = await page.evaluate(() => (window as any).__gwtChatSent[0].request_id);
+      await expect.poll(() => sendResults.find(result => result.request_id === requestId)).toMatchObject({ ok: false, request_id: requestId });
       // The fixture PM has no live runtime, so the real host refuses and the draft is kept.
       await expect(composer.locator('.pm-chat__composer-status')).toHaveText(/^Not sent: .+[^.]\. Your message is kept\.$/, { timeout: 30_000 });
       await expect(draft).toHaveValue('Plan #3431\nnext');
@@ -219,6 +245,177 @@ test.describe('PM reports', () => {
       await pane.screenshot({ path: screenshot });
       await info.attach('PM chat view', { path: screenshot, contentType: 'image/png' });
       expect(errors).toEqual([]);
+    });
+  });
+
+  test('T-CHAT-WORKS Chat opens the same PM terminal in Works', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      let retainPm = false;
+      let retainedWindowId: string | null = null;
+      // Preserve the owned stopped fixture through every real focus reply.
+      // All requests reach the real host; only this exact display flag changes.
+      await page.routeWebSocket(url => url.pathname === '/ws', route => {
+        const server = route.connectToServer();
+        server.onMessage(message => {
+          if (retainPm) {
+            const payload = JSON.parse(String(message));
+            if (payload.kind === 'workspace_state') {
+              const pm = payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
+                .find((window: any) => window.id === retainedWindowId && window.session_id === SESSION && window.is_pm);
+              if (pm) {
+                pm.persist = false;
+                route.send(JSON.stringify(payload));
+                return;
+              }
+            }
+          }
+          route.send(message);
+        });
+      });
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page, undefined, BASE, true);
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+      retainedWindowId = id;
+      try {
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const initialDraft = pane.getByRole('textbox', { name: 'Message to PM' });
+        await initialDraft.fill('Keep this unsent PM draft');
+        await pane.getByRole('button', { name: 'Open terminal in Works', exact: true }).click();
+        await expect(pane.locator('.pm-chat__terminal-status')).toContainText('Terminal unavailable in Works');
+        await expect(initialDraft).toBeVisible();
+        await expect(initialDraft).toHaveValue('Keep this unsent PM draft');
+        retainPm = true;
+        await sendLiveGwtEvent(page, { kind: 'frontend_ready' });
+        await expect.poll(() => page.evaluate(id => {
+          const workspace = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+            .findLast((event: any) => event.kind === 'workspace_state')?.workspace;
+          return workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
+            .find((window: any) => window.id === id)?.persist;
+        }, id)).toBe(false);
+        await page.evaluate(id => {
+          const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+            candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+          socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ kind: 'terminal_snapshot', id,
+            data_base64: btoa('PM Works terminal identity\r\n') }) }));
+        }, id);
+        // Capture the native xterm before using the new cross-surface entry.
+        await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+        await expect(pane.locator('.xterm')).toHaveCount(1);
+        await pane.locator('.xterm').evaluate(node => { (window as any).__gwtChatWorksTerminal = node; });
+        await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id))
+          .toContain('PM Works terminal identity');
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const chat = pane.getByRole('region', { name: 'PM conversation' });
+        const draft = chat.getByRole('textbox', { name: 'Message to PM' });
+        await draft.fill('Keep this unsent PM draft');
+        await chat.getByRole('button', { name: 'Open terminal in Works', exact: true }).click();
+        const main = page.getByRole('region', { name: 'Main pane', exact: true });
+        const works = main.locator('.works-surface:not(.works-surface--preview)');
+        const full = works.getByRole('region', { name: 'Work terminal', exact: true });
+        await expect(main).toHaveAttribute('data-surface', 'works');
+        await expect(full).toBeVisible();
+        await expect(full.locator('.window-role-badge')).toHaveText('PM');
+        await expect(full.locator(`.terminal-root[data-window-id="${id}"] .xterm`)).toBeVisible();
+        expect(await full.locator('.xterm').evaluate(node => node === (window as any).__gwtChatWorksTerminal)).toBe(true);
+        await expect(chat).toBeHidden();
+        const screenshot = info.outputPath(`chat-works-${theme}.png`);
+        await page.screenshot({ path: screenshot });
+        await info.attach('Chat opens the same PM terminal in Works', { path: screenshot, contentType: 'image/png' });
+
+        await page.locator('#op-pm-entry').click();
+        await expect(chat).toBeVisible();
+        await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(draft).toHaveValue('Keep this unsent PM draft');
+        await info.attach(`Chat terminal action ${theme}`, { body: await pane.screenshot(), contentType: 'image/png' });
+        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await full.getByRole('button', { name: 'Back to Works' }).click();
+        const row = works.locator(`.work-row[data-window-id="${id}"]`);
+        await expect(row.locator('.window-role-badge')).toHaveText('PM');
+        await row.getByRole('button', { name: 'Open terminal', exact: true }).click();
+        await expect(full).toBeVisible();
+        expect(await full.locator('.xterm').evaluate(node => node === (window as any).__gwtChatWorksTerminal)).toBe(true);
+        await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id))
+          .toContain('PM Works terminal identity');
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        expect(errors).toEqual([]);
+      } finally {
+        retainPm = false;
+        if (!page.isClosed()) await sendLiveGwtEvent(page, { kind: 'frontend_ready' })
+          .catch(error => { if (!page.isClosed()) throw error; });
+        if (!page.isClosed()) await page.evaluate(() => {
+          delete (window as any).__gwtChatWorksTerminal;
+        }).catch(error => { if (!page.isClosed()) throw error; });
+      }
+    });
+  });
+
+  test('AC-3431-CHAT-2 Chat shows only conversation text from native Claude and Codex records', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      // The checkout host inherits these; a set value would move its native store off the isolated HOME.
+      expect(process.env.CLAUDE_CONFIG_DIR ?? '', 'Claude store follows the isolated HOME').toBe('');
+      expect(process.env.CODEX_HOME ?? '', 'Codex store follows the isolated HOME').toBe('');
+      expect(ROOT, 'native records are bound to the fixture PM checkout').not.toBe('');
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      const sessionPath = join(HOME, '.gwt', 'sessions', `${SESSION}.toml`);
+      const originalSession = readFileSync(sessionPath, 'utf8');
+      const fixtures = resolve(ROOT, 'crates/gwt/src/pm_conversation/fixtures');
+      // Anonymized native records (see fixtures/README.md) bound to this fixture PM's checkout and identity.
+      const seed = (agent: 'ClaudeCode' | 'Codex', fixture: string, path: string) => {
+        const id = `chat-noise-${agent.toLowerCase()}-${theme}`;
+        const records = readFileSync(join(fixtures, fixture), 'utf8')
+          .replaceAll('"/work/project"', JSON.stringify(ROOT))
+          .replaceAll('"conversation"', JSON.stringify(id));
+        const file = join(HOME, path.replace('<id>', id));
+        mkdirSync(join(file, '..'), { recursive: true });
+        writeFileSync(file, records);
+        // The seeded stopped-PM Session is intentionally minimal; the reader needs a loadable one.
+        const session = originalSession.replace(/^agent_id = .*$/m, `agent_id = { type = "${agent}" }`);
+        writeFileSync(sessionPath, `${session}\ndisplay_name = "PM"\nagent_session_id = "${id}"\n`);
+        return file;
+      };
+      const seeded: string[] = [];
+      try {
+        seeded.push(seed('ClaudeCode', 'claude-chat.jsonl', '.claude/projects/chat-noise/<id>.jsonl'));
+        await gotoPmReports(page, undefined, BASE, true);
+        const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const chat = pane.getByRole('region', { name: 'PM conversation' });
+        const conversation = chat.locator('.pm-chat__conversation');
+        const expectOnlyVisibleConversation = async (userText: string) => {
+          await expect(chat.locator('.pm-chat__bubble--user')).toHaveText([userText], { timeout: 30_000 });
+          await expect(chat.locator('.pm-chat__bubble--assistant')).toHaveText(['Assistant reply']);
+          await expect(chat.locator('details.pm-chat__collapsed')).toHaveCount(0);
+          const shown = (await conversation.textContent()) ?? '';
+          for (const hidden of ['\u001b', '⏺', '⎿', 'Bash(', 'internal tool output', 'fixture command', 'Internal',
+            'Stop hook feedback', 'Scheduled supervision tick', 'Private reasoning', 'Duplicate human event']) {
+            expect(shown, `chat must not show ${JSON.stringify(hidden)}`).not.toContain(hidden);
+          }
+        };
+        // Claude: thinking, tool use/result (ANSI + terminal decoration), meta, Stop feedback, stop hook summary,
+        // the scheduled tick and a task notification are in the record but never in the chat.
+        await expectOnlyVisibleConversation('Human question');
+        // Codex: developer message, tool call/output, reasoning and the duplicate event record are excluded.
+        seeded.push(seed('Codex', 'codex-chat.jsonl', '.codex/sessions/2026/11/12/rollout-2026-11-12T00-00-00-<id>.jsonl'));
+        await expectOnlyVisibleConversation('Human question\nAdditional context');
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        const screenshot = info.outputPath(`chat-native-records-${theme}.png`);
+        await pane.screenshot({ path: screenshot });
+        await info.attach('PM chat from native records', { path: screenshot, contentType: 'image/png' });
+        expect(errors).toEqual([]);
+      } finally {
+        writeFileSync(sessionPath, originalSession);
+        for (const file of seeded) rmSync(file, { force: true });
+      }
     });
   });
 
@@ -802,7 +999,7 @@ test.describe('PM reports', () => {
         await info.attach(`Inactive Reports after ${phase}`, { path: screenshot, contentType: 'image/png' });
         lastMarker = marker;
       }
-      await page.reload();
+      await reloadPmReports(page);
       await expect(reports.getByRole('heading', { name: lastMarker, exact: true })).toBeVisible();
       expect(errors).toEqual([]);
     });
@@ -874,7 +1071,7 @@ test.describe('PM reports', () => {
       await refreshPmReports(page);
       await expect(outgoingReport).toHaveCount(1);
       await expect(incomingReport).toHaveCount(1);
-      await page.reload();
+      await reloadPmReports(page);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(outgoingReport).toHaveCount(1);
       await expect(incomingReport).toHaveCount(1);
@@ -956,7 +1153,7 @@ test.describe('PM reports', () => {
       await expect(reports.locator('article').filter({ hasText: action })).toHaveCount(1);
       await expect(reports.locator('article').filter({ hasText: answer })).toHaveCount(1);
       await expect(reports.getByText(question, { exact: true })).toBeVisible();
-      await page.reload();
+      await reloadPmReports(page);
       await expect(reports.locator('article')).toHaveCount(originalRows + 2);
       await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
       const screenshot = info.outputPath(`automatic-prompt-reports-${info.project.name}.png`);
@@ -1048,7 +1245,9 @@ test.describe('PM reports', () => {
       await expect(report.locator('li')).toHaveCount(2);
       await expect(report.locator('pre code')).toHaveText('cargo test -p gwt-core\n');
       await expect(report.locator('time')).toHaveAttribute('datetime', /T/);
-      await expect(pane.locator('.pm-chat').locator('input, textarea, form, [contenteditable], button[type="submit"]')).toHaveCount(0);
+      // Reports stay read-only; the Chat composer exists but is hidden here.
+      await expect(reports.locator('input, textarea, form, [contenteditable], button[type="submit"]')).toHaveCount(0);
+      await expect(pane.getByRole('form', { name: 'Message PM', exact: true })).toBeHidden();
       const attachments = await page.evaluate(() => {
         const calls: string[] = [];
         (window as any).__gwtAttachmentUploader = async () => { calls.push('upload'); return { upload_id: 'blocked' }; };
@@ -1124,7 +1323,7 @@ test.describe('PM reports', () => {
       await pane.getByRole('button', { name: 'Reports', exact: true }).click();
       await expect(report).toBeVisible();
       expect(await page.evaluate(() => (window as any).__pmReportAttachmentCalls)).toEqual([]);
-      await page.reload();
+      await reloadPmReports(page);
       await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
       await expect(report).toBeVisible();
       await expect(qaReport.locator('.pm-chat__question')).toHaveText(question);
@@ -1726,6 +1925,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await gotoPmReports(page, undefined, target.url, true);
       const chat = page.locator('.pm-chat');
       const tasksView = chat.getByRole('region', { name: 'Request tasks' });
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       await expect(chat.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
       await expect(tasksView).toBeVisible();
       await expect(tasksView.locator('.pm-chat__task')).toHaveCount(2);

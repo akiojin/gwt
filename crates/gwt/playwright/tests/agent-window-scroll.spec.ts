@@ -152,6 +152,9 @@ test.describe("Agent window scrollback lifecycle", () => {
 
     await expect(agentTile(page, "agent-1")).toBeVisible();
     await emitTerminalStatus(page, "agent-1", "error", "Stop-block hit an error");
+    // SPEC #5016 AC-HS1: the backend publishes the project aggregate the strip renders.
+    await emitBackendEvent(page, { kind: "project_agent_aggregate", aggregate: {
+      running_count: 0, block_count: 1, idle_count: 0, error_count: 1, unread: true, revision: 1 } });
 
     // SPEC-2014 US-36 (FR-120/121): the raw TTY must never be covered by a
     // foreground status/error overlay. Error detail surfaces in the window

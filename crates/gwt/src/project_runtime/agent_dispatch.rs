@@ -1770,13 +1770,32 @@ pub fn pm_successor_recovery_checkout(
             }
         }
     }
+    // Issue #7102: portable history records only the owner branch and its
+    // member Sessions may be gone. Resolve such branch-only evidence through
+    // this project's own worktree list; the checks below still prove it.
+    let local_worktrees = if containers
+        .iter()
+        .any(|candidate| candidate.worktree_path.is_none() && candidate.branch.is_some())
+    {
+        gwt_git::worktree::main_worktree_root(project_root)
+            .and_then(|main| gwt_git::WorktreeManager::new(&main).list())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut selected = None;
     for candidate in containers {
-        let Some(path) = candidate
-            .worktree_path
-            .as_deref()
-            .and_then(|path| dunce::canonicalize(path).ok())
-        else {
+        let recorded_path = match candidate.worktree_path.as_deref() {
+            Some(path) => Some(path.to_path_buf()),
+            None => candidate.branch.as_deref().and_then(|branch| {
+                let branch = branch.trim_start_matches("refs/heads/");
+                local_worktrees
+                    .iter()
+                    .find(|entry| entry.branch.as_deref() == Some(branch))
+                    .map(|entry| entry.path.clone())
+            }),
+        };
+        let Some(path) = recorded_path.and_then(|path| dunce::canonicalize(path).ok()) else {
             continue;
         };
         let Ok(repo) = gwt_git::repository::Repository::discover(&path) else {
@@ -2921,7 +2940,7 @@ impl AgentDispatchCapture {
                                 },
                             )]
                         }
-                        AgentFrontendRequest::SendInput { text } => {
+                        AgentFrontendRequest::SendInput { text, request_id } => {
                             let target = principal_session_window(&self.panes, &principal);
                             let result = target.as_ref().map_err(Clone::clone).and_then(|id| {
                                 let entry = self
@@ -2939,6 +2958,7 @@ impl AgentDispatchCapture {
                                     ok: result.is_ok(),
                                     window_id: target.ok(),
                                     error: result.err(),
+                                    request_id,
                                 },
                             )]
                         }

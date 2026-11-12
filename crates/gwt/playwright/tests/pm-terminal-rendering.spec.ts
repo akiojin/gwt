@@ -74,6 +74,44 @@ test("PM spinner redraw queued before resize keeps its original wrap grid", asyn
   expect(errors).toEqual([]);
 });
 
+// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once.
+// After a decision is answered in Decide, Home asks for the remaining one only.
+test("Home and Decide read one waiting-decision count after an answer", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    const decision = (id: string, question: string) => ({ id, kind: "decision", created_at: "2026-11-12T00:00:00Z",
+      structured: { summary: { result: question, impact: null, owner: "PM",
+        decision: { question, recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } }, details: "", refs: [] } });
+    (window as any).__pmFixtureReports = [decision("hs1-a", "Retry the launch?"), decision("hs1-b", "Ship the fix now?")];
+    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(pm.locator(".task-home")).toContainText("2 decisions need your attention");
+  await pm.getByRole("button", { name: "Decide", exact: true }).click();
+  await pm.locator(".task-decisions__card").first().getByRole("button", { name: "1. Retry" }).click();
+  const send = await page.evaluate(() => (window as any).__pmTerminalFixture.sent.find((packet: any) => packet.kind === "pane_send_input"));
+  expect(send, "the answer travels the chat reply path").toBeTruthy();
+  await page.evaluate(requestId => (window as any).__pmTerminalFixture.emit({ kind: "pane_send_result", id: "pm-terminal",
+    window_id: "pm-terminal", request_id: requestId, ok: true, error: null }), send.request_id);
+  await expect(pm.locator(".task-decisions__card").first()).toContainText("Answer sent: Retry");
+  await info.attach(`hs1-decide-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await pm.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(pm.locator(".task-home")).toContainText("1 decision needs your attention");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hs1-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
 // from a particular Codex version. browser-check still serves every UI asset.
 test("PM terminal keeps redraw, grid and input consistent across view changes", async ({ page }, info) => {
@@ -428,7 +466,7 @@ async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void
       send(raw: string) {
         const packet = JSON.parse(raw);
         fixture.sent.push(packet);
-        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: [], current: null });
+        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: (window as any).__pmFixtureReports ?? [], current: (window as any).__pmFixtureCurrent ?? null });
       }
       emit(packet: unknown) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(packet) })); }
       close() { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }

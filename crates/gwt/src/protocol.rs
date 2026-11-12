@@ -782,6 +782,9 @@ pub enum FrontendEvent {
     PaneSendInput {
         session_id: String,
         text: String,
+        /// Origin-connection correlation only; never pane access authority.
+        #[serde(default)]
+        request_id: Option<u64>,
     },
     /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
     /// agent pane of the same project. Caller identity comes only from the
@@ -2261,10 +2264,14 @@ pub enum UpdateAutoApplyPhase {
 }
 
 /// Server-owned project attention summary. It describes runtime state, not Work completion.
+/// SPEC #5016 AC-HS1: the only source of the RUN / BLOCK / IDLE / ERROR counts. The tab
+/// title, the status strip and the Works heading render these values and never recount.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAgentAggregate {
     pub running_count: usize,
     pub block_count: usize,
+    #[serde(default)]
+    pub idle_count: usize,
     pub error_count: usize,
     pub unread: bool,
     pub revision: u64,
@@ -2578,6 +2585,8 @@ pub enum BackendEvent {
         ok: bool,
         window_id: Option<String>,
         error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
     },
     /// A refused window operation carries no child/PTY lifecycle evidence.
     WindowCommandError {
@@ -4641,8 +4650,18 @@ mod tests {
 
         assert!(matches!(
             event,
-            FrontendEvent::PaneSendInput { session_id, text }
+            FrontendEvent::PaneSendInput { session_id, text, request_id: None }
                 if session_id == "session-1" && text == "/goal all tests pass\r"
+        ));
+        let correlated: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "pane_send_input", "session_id": "session-1", "text": "hello\r", "request_id": 17
+        })).unwrap();
+        assert!(matches!(
+            correlated,
+            FrontendEvent::PaneSendInput {
+                request_id: Some(17),
+                ..
+            }
         ));
     }
 
@@ -4874,9 +4893,14 @@ mod tests {
             ok: false,
             window_id: None,
             error: Some("no pane bound to session session-1".to_string()),
+            request_id: None,
         };
 
         let value = serde_json::to_value(&event).expect("serialize pane_send_result");
+        assert!(
+            value.get("request_id").is_none(),
+            "legacy reply shape is unchanged"
+        );
         assert_eq!(
             value.get("kind").and_then(Value::as_str),
             Some("pane_send_result")

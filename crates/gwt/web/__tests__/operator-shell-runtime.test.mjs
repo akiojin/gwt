@@ -940,3 +940,59 @@ test("Issue #6992: wedged recovery requires a current explicit confirmation", as
   unsubscribe();
   assert.equal(document.querySelector("#owner-restart-modal"), null);
 });
+
+test("SPEC #5016 AC-HS2: one server aggregate renders the same RUN/BLOCK/IDLE/ERROR on the title, strip and Works heading", async () => {
+  const { applyTelemetryCounts } = await importOperatorShell();
+  const { createProjectPageMetadata } = await import("../project-page-metadata.js");
+  const { createWorksSurface } = await import("../works-surface.js");
+  const { document, window: domWindow } = parseHTML(html);
+  const frames = new Set();
+  const scheduleFrame = fn => { frames.add(fn); return () => frames.delete(fn); };
+  const flush = () => { while (frames.size) for (const fn of [...frames]) { frames.delete(fn); fn(); } };
+  document.hasFocus = () => false;
+  const window = { addEventListener() {}, navigator: {}, getComputedStyle: () => ({ getPropertyValue: () => "" }) };
+  const metadata = createProjectPageMetadata({ document, window, scheduleFrame, send() {} });
+  metadata.setProjectName("Repo");
+  // The census disagrees with the server on purpose: no surface may recount it.
+  const windows = [{ id: "a", session_id: "s", preset: "codex", status: "running" }];
+  const activity = { count: 1, agents: [{ window_id: "a", session_id: "s", runtime_incarnation: 1 }] };
+  const catalog = { version: 1, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows } }] } };
+  const store = value => createUiStateStore(value, { scheduleFrame });
+  const works = createWorksSurface({ document, windowCatalogModel: store({ catalog }), activityModel: store(activity),
+    rosterModel: store({ members: [] }), systemSettingsModel: store({ worksPreviewLines: 3 }), summaryModel: metadata.summary,
+    windowDisplayTitle: () => "Agent", mountTerminal() {}, mountPreview: () => () => {} });
+  document.body.append(works.element);
+  const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+  const start = appSource.indexOf("function recomputeOperatorTelemetry() {");
+  let depth = 0, end = appSource.indexOf("{", start);
+  do { if (appSource[end] === "{") depth += 1; else if (appSource[end] === "}") depth -= 1; end += 1; } while (depth > 0);
+  const definition = appSource.slice(start, end);
+  const dependencies = { window: { __operatorShell: { applyTelemetryCounts: () => {} } },
+    projectAgentSummaryModel: metadata.summary, projectAgentSummary: () => null,
+    agentActivityModel: { read: () => activity }, windowCatalogModel: { read: () => ({ catalog }) },
+    presetSupportsWaitingStatus: () => true, activeWorkItemsFromProjection: () => [],
+    applyOperatorTelemetryCounts: counts => applyTelemetryCounts(document, counts) };
+  const recomputeStrip = Function(...Object.keys(dependencies), `${definition}; return recomputeOperatorTelemetry;`)(...Object.values(dependencies));
+  const surfaces = () => {
+    const [, run, block] = document.title.match(/RUN (\d+) · BLOCK (\d+)/);
+    const strip = id => document.getElementById(`op-strip-${id}`).textContent;
+    const heading = key => works.element.querySelector(`[data-count="${key}"]`).textContent;
+    return {
+      title: { running: run, block },
+      strip: { running: strip("running"), block: strip("waiting"), idle: strip("idle"), error: strip("error") },
+      works: { running: heading("running"), block: heading("block"), idle: heading("idle"), error: heading("error") },
+    };
+  };
+  for (const [revision, aggregate] of [[1, { running_count: 3, block_count: 2, idle_count: 1, error_count: 1 }],
+    [2, { running_count: 0, block_count: 4, idle_count: 0, error_count: 0 }]]) {
+    metadata.update({ ...aggregate, unread: false, revision });
+    flush(); recomputeStrip();
+    const { title, strip, works: heading } = surfaces();
+    const expected = { running: String(aggregate.running_count), block: String(aggregate.block_count),
+      idle: String(aggregate.idle_count), error: String(aggregate.error_count) };
+    assert.deepEqual(strip, expected, "the status strip renders the server summary");
+    assert.deepEqual(heading, expected, "the Works heading renders the server summary");
+    assert.deepEqual(title, { running: expected.running, block: expected.block }, "the tab title renders the server summary");
+  }
+  works.dispose();
+});
