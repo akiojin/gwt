@@ -948,7 +948,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await assertAggregates();
       await expect.poll(async () => Number(await first.locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
       await expect.poll(() => first.locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
-      const pmWorktree = tomlString(await sessionRecord(fixture.home, pm.session_id), "worktree_path");
+      const registration = JSON.parse(await readFile(join(fixture.preferences, "pm.json"), "utf8")).registration;
+      expect(registration.session_id).toBe(pm.session_id);
+      const pmWorktree = registration.worktree_path;
       expect(pmWorktree).toBeTruthy();
       const pmBranch = execFileSync("git", ["-C", pmWorktree!, "branch", "--show-current"], { encoding: "utf8" }).trim();
       await expect(first.locator('[data-stat="branch"]')).toHaveText(pmBranch);

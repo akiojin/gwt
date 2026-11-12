@@ -684,7 +684,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches, start, stopGui, stop,
     async restart(options: { coldOwnerDrain?: boolean; disconnectBrowser?: () => Promise<unknown> } = {}) {
       await stop(options.coldOwnerDrain, options.disconnectBrowser); return start();
     } };
