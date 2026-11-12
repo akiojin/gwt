@@ -32,6 +32,11 @@ test("Issues strip reads shared attention summaries on model-only updates", asyn
   model.update(state => ({ ...state, steeringAttention: { count: 0, summary: "PM steering 0", byIssue: {} } }));
   assert.match(cell.title, /PM steering 0/);
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Off");
+  model.update(state => ({ ...state, status: { enabled: true, state: "active" },
+    counts: { queue: 3, active: 1, maxActive: 2 } }));
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q3 A1/2");
+  model.update(state => ({ ...state, counts: { queue: 0, active: 0, maxActive: 0 } }));
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q0 A0/0");
   unsubscribe();
 });
 

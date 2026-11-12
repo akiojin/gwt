@@ -226,20 +226,20 @@ export function subscribeIssueMonitorStatus(doc, model) {
     const summary = state.humanAttention?.summary;
     const reviewSummary = state.reviewAttention?.summary;
     const steeringSummary = state.steeringAttention?.summary;
-    if (!selected || selected.status !== state.status || selected.summary !== summary || selected.reviewSummary !== reviewSummary || selected.steeringSummary !== steeringSummary) {
-      selected = { status: state.status, summary, reviewSummary, steeringSummary };
+    if (!selected || selected.status !== state.status || selected.counts !== state.counts || selected.summary !== summary || selected.reviewSummary !== reviewSummary || selected.steeringSummary !== steeringSummary) {
+      selected = { status: state.status, counts: state.counts, summary, reviewSummary, steeringSummary };
     }
     return selected;
-  }, state => renderIssueMonitorStatus(doc, state.status, state.summary, state.reviewSummary, state.steeringSummary));
+  }, state => renderIssueMonitorStatus(doc, state, state.summary, state.reviewSummary, state.steeringSummary));
 }
 
-export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "", reviewSummary = "", steeringSummary = "") {
+export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0, active: 0, maxActive: 1 } } = {}, humanSummary = "", reviewSummary = "", steeringSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
 
   wireIssueMonitorStatusCell(doc, cell);
-  const view = issueMonitorStatusStripView(status);
+  const view = issueMonitorStatusStripView(status, counts);
   value.textContent = view.value;
   cell.dataset.state = view.state;
   cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(". "));
@@ -271,7 +271,7 @@ function normalizedIssueMonitorQuotaHold(status) {
   return provider && resetAt ? { provider, reset_at: resetAt } : null;
 }
 
-function issueMonitorStatusStripView(status = {}) {
+function issueMonitorStatusStripView(status, counts) {
   const enabled = Boolean(status.enabled);
   const quotaHold = normalizedIssueMonitorQuotaHold(status);
   const rawState = String(status.state || (enabled ? "idle" : "disabled"));
@@ -288,9 +288,7 @@ function issueMonitorStatusStripView(status = {}) {
   } else if (state === "quota_hold") {
     state = "idle";
   }
-  const queue = Math.max(0, Number(status.queue_len || 0));
-  const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(0, Number(status.max_active_agents ?? 1));
+  const { queue, active, maxActive } = counts;
 
   if (state === "disabled") {
     return {
