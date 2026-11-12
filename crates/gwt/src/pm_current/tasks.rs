@@ -24,6 +24,8 @@ pub enum PmTaskOverview {
 pub struct PmTaskSummary {
     pub key: String,
     pub parent_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
     pub title: String,
     pub status: TaskStatus,
     pub assignee: Option<String>,
@@ -69,6 +71,7 @@ pub(super) fn load(repo: &Path) -> PmTaskOverview {
         .map(|task| PmTaskSummary {
             key: key(&task.draft.id),
             parent_key: task.parent_id.as_deref().map(key),
+            source_key: Some(key(&task.source_id)),
             title: short(&task.draft.title),
             status: task.status,
             assignee: task.draft.assignee.as_deref().map(short),

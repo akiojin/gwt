@@ -224,7 +224,8 @@ the tray menu:
 
 Project browser tabs show agent RUN / BLOCK counts in their titles and a
 status favicon. BLOCK includes waiting, stopped, and error states; shell
-windows are excluded. An unread marker clears when the project tab is visible
+windows are excluded. The status strip and the Works heading show the same
+RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
@@ -2147,7 +2148,15 @@ several messages in one turn, only the latest stays open; the earlier ones fold
 into an **N earlier messages** line you can expand. Type a message in
 the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
 line). Your text stays in the box until delivery is confirmed, and the reason is
-shown if it could not be sent. Use **Execution log** to attach images.
+shown if it could not be sent. Select **Open terminal in Works** in Chat to open
+the same PM session's terminal. The PM entry brings you back to Chat with your
+unsent draft preserved. You can also open the terminal from the PM row in
+**Works**. Use **Execution log** to attach images.
+
+Chat also shows the same **Tasks** preview beside the conversation (above it in
+narrow windows). **Show in conversation** returns to a task's original message
+and keeps your unsent draft. If that message is outside the current conversation
+preview, the button is unavailable and the reason is shown.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from

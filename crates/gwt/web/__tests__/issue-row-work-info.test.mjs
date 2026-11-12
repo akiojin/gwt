@@ -15,6 +15,7 @@ import { parseHTML } from "linkedom";
 
 import {
   attentionForWorkspace,
+  createActiveWorkProjectionModel,
   formatLifecycleStateLabel,
 } from "../issue-other-surface.js";
 
@@ -201,12 +202,14 @@ test("issueWorkRowForEntry joins the Issue row to the active Work projection", a
 
 // FR-012.
 test("the Issue row shows Work lifecycle, attention reason, and PR state", async (t) => {
+  const { model, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+  t.after(() => model.dispose());
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: {
+    active_works: [workRow({ status_category: "idle", lifecycle_state: "paused",
+      blocked_agents: 1, next_action: "Waiting on review" })],
+  } });
   const fixture = await makeFixture({
-    projection: {
-      active_works: [
-        workRow({ status_category: "blocked", blocked_reason: "Waiting on review" }),
-      ],
-    },
+    projection: model.read().projection,
   });
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   applyEntries(fixture.surface, fixture.load, [

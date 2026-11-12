@@ -24,7 +24,8 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows), init
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
   const runtimes = new Map(), mounts = [], layouts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
   const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
-  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
+  const summaryModel = createUiStateStore({ running: 0, block: 0, idle: 0, error: 0 }, options);
+  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel, summaryModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); input.className = "xterm"; runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
     mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
@@ -32,7 +33,7 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows), init
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
-  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, layouts, previews, previewMounts, systemSettingsModel, selected, focused };
+  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, summaryModel, frames, flush, runtimes, mounts, layouts, previews, previewMounts, systemSettingsModel, selected, focused };
 }
 
 test("Works implements the approved list and native terminal API", () => {
@@ -41,12 +42,14 @@ test("Works implements the approved list and native terminal API", () => {
 });
 
 test("Works joins exact local-live sessions, places PM first and keeps unknown telemetry fields", async () => {
-  const { surface, document, selected, activityModel, flush } = await fixture();
+  const { surface, document, selected, activityModel, summaryModel, flush } = await fixture();
   const rows = [...surface.element.querySelectorAll(".work-row")];
   assert.deepEqual(rows.map(row => row.dataset.windowId), ["pm", "one"]);
   assert.equal(surface.contains("old"), false);
-  assert.equal(surface.element.querySelector('[data-count="running"]').textContent, "1");
-  assert.equal(surface.element.querySelector('[data-count="waiting"]').textContent, "1");
+  // SPEC #5016 AC-HS1: the heading reads the server summary, not the listed rows.
+  summaryModel.update(() => ({ running: 5, block: 2, idle: 1, error: 0 })); flush();
+  assert.deepEqual(["running", "block", "idle", "error"].map(key => surface.element.querySelector(`[data-count="${key}"]`).textContent), ["5", "2", "1", "0"]);
+  assert.match(surface.element.querySelector(".works-counts").textContent, /RUNNING 5\s*BLOCK 2\s*IDLE 1\s*ERROR 0/);
   assert.match(surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
   assert.equal(surface.element.querySelector('[data-metric="today-cost"]').textContent, "—");
   assert.equal(surface.element.querySelector('[data-metric="today-total"]')?.textContent, "—");
@@ -65,7 +68,7 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   assert.ok(document.querySelector(".work-runtime-cache").hasAttribute("inert"));
   activityModel.update(() => ({ agents: [], count: null })); flush();
   assert.equal(surface.element.querySelector(".works-empty").textContent, "Local agent activity is unavailable.");
-  assert.equal(surface.element.querySelector('[data-count="running"]').textContent, "—");
+  assert.equal(surface.element.querySelector('[data-count="running"]').textContent, "5", "an unavailable census does not hide the server summary");
   surface.dispose();
 });
 
@@ -273,13 +276,12 @@ test("Works retains native input and fixed names when runtime state and purpose 
   assert.equal(f.surface.element.querySelector(".works-full-name").textContent, "One");
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /New purpose.*Error.*Input unavailable/);
   assert.equal(f.runtimes.get("one"), input);
-  assert.equal(f.surface.element.querySelector('[data-count="error"]').textContent, "1");
+  assert.equal(f.surface.element.querySelector('[data-count="error"]').textContent, "0", "a row state change never recounts the heading");
   for (const [status, label] of [["stopped", "Stopped"], ["exited", "Stopped"], ["interrupted", "Interrupted"]]) {
     f.windowCatalogModel.update(() => ({ catalog: { ...catalog(windows, 3), runtimeStates: { one: status } } }));
     f.flush();
     assert.match(f.surface.element.querySelector(".works-full-meta").textContent, new RegExp(`${label}.*Input unavailable`));
     assert.equal(f.surface.element.querySelector('[data-window-id="one"] .work-state').textContent, label);
-    assert.equal(f.surface.element.querySelector('[data-count="error"]').textContent, status === "interrupted" ? "1" : "0");
     assert.equal(f.runtimes.get("one"), input);
   }
   f.windowCatalogModel.update(() => ({ catalog: { ...catalog(windows.map(w => w.id === "one" ? { ...w, status: "interrupted" } : w), 3), runtimeStates: { one: "running" } } }));
