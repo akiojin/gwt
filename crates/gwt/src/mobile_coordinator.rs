@@ -12,7 +12,8 @@ pub mod storage;
 pub mod admin;
 
 mod config;
-pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits};
+pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits, TlsError};
+pub mod listener;
 
 use gwt_core::repo_hash::ProjectKey;
 use ring::rand::{SecureRandom, SystemRandom};
