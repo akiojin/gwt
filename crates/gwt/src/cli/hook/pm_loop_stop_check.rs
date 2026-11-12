@@ -33,24 +33,10 @@ const PM_LOOP_MAX_CONSECUTIVE: u32 = 12;
 // not cause the same expensive failed refresh on every cycle (#5391).
 const PM_PROMPT_REFRESH_RETRY_SECS: i64 = 300;
 
-/// Finalize a protected PM delivery only when the exact target Session's
-/// UserPromptSubmit hook observes the self-authenticating operation marker.
-/// Invalid or unrelated prompts are ordinary user input and remain silent.
+/// Observe protected input for the exact target Session. Grok's prompt hook
+/// precedes user blocking hooks, so its receipt waits for an accepted-turn event.
 pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
-    let Some(prompt) = serde_json::from_str::<serde_json::Value>(input)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("prompt")
-                .and_then(|prompt| prompt.as_str())
-                .map(str::to_string)
-        })
-    else {
-        return;
-    };
-    let Some((operation_id, body_sha256)) =
-        pm_registry::parse_protected_pm_delivery_prompt(&prompt)
-    else {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
         return;
     };
     let Some(target_session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
@@ -60,6 +46,36 @@ pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
         return;
     };
     let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(worktree);
+    let session = delivery_hook_session(&target_session_id);
+    if session
+        .as_ref()
+        .is_some_and(|session| session.agent_id == gwt_agent::AgentId::GrokBuild)
+        || (session.is_none()
+            && (value.get("promptId").is_some() || value.get("sessionId").is_some()))
+    {
+        let identity = session
+            .as_ref()
+            .and_then(|session| grok_prompt_identity(session, &value));
+        if let Err(error) = pm_registry::observe_grok_pm_delivery_prompt(
+            &receipt_path,
+            &target_session_id,
+            identity.as_ref(),
+            value
+                .get("prompt")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        ) {
+            tracing::warn!(%error, "Grok PM prompt observation was rejected");
+        }
+        return;
+    }
+    let Some((operation_id, body_sha256)) = value
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .and_then(pm_registry::parse_protected_pm_delivery_prompt)
+    else {
+        return;
+    };
     if let Err(error) = pm_registry::finish_pm_delivery_receipt(
         &receipt_path,
         &operation_id,
@@ -69,6 +85,63 @@ pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
         None,
     ) {
         tracing::warn!(%error, operation_id, "PM delivery acknowledgement was rejected");
+    }
+}
+
+fn delivery_hook_session(session_id: &str) -> Option<gwt_agent::Session> {
+    gwt_agent::validate_session_id_path_component(session_id).ok()?;
+    gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()
+}
+
+fn grok_prompt_identity(
+    session: &gwt_agent::Session,
+    value: &serde_json::Value,
+) -> Option<pm_registry::GrokPmPromptIdentity> {
+    let native_session_id = value.get("sessionId")?.as_str()?.trim();
+    let prompt_id = value.get("promptId")?.as_str()?.trim();
+    if native_session_id.is_empty()
+        || prompt_id.is_empty()
+        || session.agent_session_id.as_deref() != Some(native_session_id)
+    {
+        return None;
+    }
+    Some(pm_registry::GrokPmPromptIdentity {
+        native_session_id: native_session_id.into(),
+        prompt_id: prompt_id.into(),
+    })
+}
+
+/// A matching normal-turn Stop proves Grok accepted the prompt after its gates.
+pub fn handle_grok_delivery_acceptance(worktree: &Path, event: &str, input: &str) {
+    if event != "Stop" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return;
+    };
+    if value.get("promptId").is_none() {
+        return;
+    }
+    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
+        return;
+    };
+    let Some(session) = delivery_hook_session(&session_id)
+        .filter(|session| session.agent_id == gwt_agent::AgentId::GrokBuild)
+    else {
+        return;
+    };
+    let Some(identity) = grok_prompt_identity(&session, &value) else {
+        return;
+    };
+    if let Err(error) = pm_registry::acknowledge_grok_pm_delivery_prompt(
+        &pm_registry::pm_delivery_receipts_path_for_repo_path(worktree),
+        &session_id,
+        &identity,
+    ) {
+        tracing::warn!(%error, "Grok accepted-turn acknowledgement was rejected");
     }
 }
 
@@ -1880,6 +1953,7 @@ mod tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &pm_registry::PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.to_string(),
                 recorded_at: "2026-08-13T00:00:00Z".to_string(),
                 status: pm_registry::PmDeliveryReceiptStatus::Prepared,
@@ -1910,6 +1984,177 @@ mod tests {
     }
 
     #[test]
+    fn issue_3706_grok_prompt_hook_cannot_ack_a_later_blocked_turn() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let _gwt_home = set_fixture_gwt_home(&home);
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/issue-3706", gwt_agent::AgentId::GrokBuild);
+        session.agent_session_id = Some("grok-native-session".into());
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135763706";
+        let body = "report exact Grok status";
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        pm_registry::prepare_pm_delivery_receipt(
+            &receipt_path,
+            &pm_registry::PmDeliveryReceipt {
+                grok_prompt: None,
+                operation_id: operation_id.into(),
+                recorded_at: "2026-11-11T00:00:00Z".into(),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".into(),
+                target_window_id: "tab-1::grok".into(),
+                target_session_id: session.id.clone(),
+                body_sha256: pm_registry::pm_delivery_prompt_sha256(body),
+                reason: None,
+            },
+        )
+        .unwrap();
+        let input = serde_json::json!({
+            "sessionId": "grok-native-session",
+            "promptId": "grok-prompt-1",
+            "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body).unwrap(),
+        })
+        .to_string();
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+        std::fs::remove_file(&session_path).unwrap();
+        handle_delivery_acknowledgement(
+            &repo,
+            &serde_json::json!({
+                "sessionId": "grok-native-session",
+                "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body).unwrap(),
+            })
+            .to_string(),
+        );
+        session.agent_session_id = None;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        handle_delivery_acknowledgement(&repo, &input);
+        let unbound = pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unbound.status,
+            pm_registry::PmDeliveryReceiptStatus::Prepared
+        );
+        assert!(unbound.grok_prompt.is_none());
+        session.agent_session_id = Some("grok-native-session".into());
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        handle_delivery_acknowledgement(&repo, &input);
+        // A later user hook can still block: no accepted-turn event follows.
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Prepared,
+        );
+        let accepted = serde_json::json!({
+            "sessionId": "grok-native-session", "promptId": "unrelated-prompt",
+        });
+        handle_grok_delivery_acceptance(&repo, "Stop", &accepted.to_string());
+        // Editing the blocked row may reuse its promptId. The new ordinary
+        // prompt must clear the old protected body's correlation.
+        handle_delivery_acknowledgement(
+            &repo,
+            &serde_json::json!({
+                "sessionId": "grok-native-session", "promptId": "grok-prompt-1",
+                "prompt": "a different ordinary prompt",
+            })
+            .to_string(),
+        );
+        handle_grok_delivery_acceptance(
+            &repo,
+            "Stop",
+            &serde_json::json!({
+                "sessionId": "grok-native-session", "promptId": "grok-prompt-1",
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Prepared,
+        );
+
+        pm_registry::finish_pm_delivery_receipt(
+            &receipt_path,
+            operation_id,
+            &session.id,
+            &pm_registry::pm_delivery_prompt_sha256(body),
+            pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+            None,
+        )
+        .unwrap();
+        // A delayed/retried submission still supports same-operation readback.
+        handle_delivery_acknowledgement(
+            &repo,
+            &serde_json::json!({
+                "sessionId": "grok-native-session", "promptId": "grok-prompt-2",
+                "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body).unwrap(),
+            })
+            .to_string(),
+        );
+        handle_grok_delivery_acceptance(
+            &repo,
+            "Stop",
+            &serde_json::json!({
+                "sessionId": "foreign-native-session", "promptId": "grok-prompt-2",
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+        );
+        // Native PreToolUse and session-end Stop have no promptId. Neither
+        // can acknowledge this exact operation before normal turn completion.
+        let without_prompt = serde_json::json!({
+            "sessionId": "grok-native-session", "toolName": "read_file",
+        })
+        .to_string();
+        handle_grok_delivery_acceptance(&repo, "PreToolUse", &without_prompt);
+        handle_grok_delivery_acceptance(&repo, "Stop", &without_prompt);
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+        );
+        let accepted = serde_json::json!({
+            "sessionId": "grok-native-session", "promptId": "grok-prompt-2",
+        })
+        .to_string();
+        handle_grok_delivery_acceptance(&repo, "Stop", &accepted);
+        handle_grok_delivery_acceptance(&repo, "Stop", &accepted);
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Verified,
+        );
+        assert_eq!(
+            pm_registry::load_pm_delivery_receipts(&receipt_path)
+                .unwrap()
+                .iter()
+                .filter(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn wrong_session_or_body_hash_cannot_verify_a_delivery_receipt() {
         let _env_lock = gwt_core::test_support::env_lock()
             .lock()
@@ -1925,6 +2170,7 @@ mod tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &pm_registry::PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.to_string(),
                 recorded_at: "2026-08-13T00:00:00Z".to_string(),
                 status: pm_registry::PmDeliveryReceiptStatus::Prepared,

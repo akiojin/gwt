@@ -1339,6 +1339,12 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             "generated guidance must distinguish GitHub reads from mutations"
         );
         assert!(
+            content.contains("Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`")
+                && content.contains("Return results to the parent")
+                && content.contains("Do not commit or push"),
+            "both provider assets must keep delegated helpers out of parent delivery"
+        );
+        assert!(
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );

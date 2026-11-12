@@ -343,7 +343,7 @@ fn handle_connection(
         return Ok(());
     };
     match frame {
-        ClientFrame::Subscribe { channels } if channels == ["issue_monitor"] => {
+        ClientFrame::Subscribe { channels, .. } if channels == ["issue_monitor"] => {
             subscriptions.fetch_add(1, Ordering::AcqRel);
             write_json_line(&mut stream, &DaemonFrame::Ack)?;
             write_json_line(

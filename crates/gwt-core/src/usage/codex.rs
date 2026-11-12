@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 
 use super::state::{apply_staleness, DEFAULT_STALE_AFTER_SECS};
 use super::types::{
-    ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
+    CodexCredits, ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
 };
 
 /// Parsed account-level fields from a `rate_limits` object.
@@ -34,7 +34,24 @@ use super::types::{
 pub struct CodexAccount {
     pub windows: Vec<UsageWindow>,
     pub plan: Option<String>,
+    pub credits: Option<CodexCredits>,
     pub limit_reached: bool,
+}
+
+fn parse_credits(value: &Value) -> Option<CodexCredits> {
+    let object = value.as_object()?;
+    let balance = object
+        .get("balance")
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+        .filter(|balance| balance.is_finite() && *balance >= 0.0);
+    Some(CodexCredits {
+        has_credits: object.get("has_credits").and_then(Value::as_bool)?,
+        unlimited: object
+            .get("unlimited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        balance,
+    })
 }
 
 fn parse_reset(window: &Value, observed_at: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
@@ -115,6 +132,7 @@ pub(super) fn parse_rate_limits_at(
     Some(CodexAccount {
         windows,
         plan,
+        credits: rate_limits.get("credits").and_then(parse_credits),
         limit_reached,
     })
 }
@@ -508,6 +526,7 @@ pub(super) fn read_codex_account_with(
         account_label,
         plan: acc.plan,
         extra_usage: None,
+        credits: acc.credits,
         windows: acc.windows,
         limit_reached: acc.limit_reached,
         state: if let Some(at) = fetched_at {
@@ -760,6 +779,57 @@ mod tests {
             parse_rate_limits(&limits, now()).unwrap().limit_reached,
             "an explicit provider refusal still takes precedence"
         );
+    }
+
+    #[test]
+    fn codex_credits_survive_direct_and_cached_account_readers() {
+        let home = tempfile::tempdir().unwrap();
+        write_auth_fixture(home.path());
+        fs::create_dir(home.path().join("sessions")).unwrap();
+        let rollout = home.path().join("sessions/rollout-credits.jsonl");
+        let mut event = serde_json::json!({
+            "timestamp": now().to_rfc3339(),
+            "payload": {"type":"token_count", "rate_limits": {
+                "primary":{"used_percent":100,"window_minutes":10080},
+                "rate_limit_reached_type":null,
+                "credits":{"has_credits":true,"unlimited":false,"balance":"37669.9"}
+            }}
+        });
+        fs::write(&rollout, event.to_string()).unwrap();
+        let account = read_codex_account(home.path(), now());
+        let mut cache = super::super::cache::UsageCache::default();
+        assert_eq!(
+            cache.codex_account_since(home.path(), now(), auth_modified_at(home.path())),
+            account
+        );
+        assert!(!account.limit_reached);
+        assert_eq!(
+            serde_json::to_value(account).unwrap()["credits"],
+            serde_json::json!({
+                "has_credits":true,"unlimited":false,"balance":37669.9
+            })
+        );
+
+        event["payload"]["rate_limits"]["credits"] = serde_json::json!({
+            "has_credits":false,"unlimited":false,"balance":0
+        });
+        fs::write(&rollout, event.to_string()).unwrap();
+        assert_eq!(
+            serde_json::to_value(read_codex_account(home.path(), now())).unwrap()["credits"],
+            serde_json::json!({"has_credits":false,"unlimited":false,"balance":0.0})
+        );
+        event["payload"]["rate_limits"]["credits"] = serde_json::json!({"balance":200});
+        fs::write(&rollout, event.to_string()).unwrap();
+        assert!(serde_json::to_value(read_codex_account(home.path(), now()))
+            .unwrap()
+            .get("credits")
+            .is_none());
+        event["payload"]["rate_limits"]["credits"] = Value::Null;
+        fs::write(&rollout, event.to_string()).unwrap();
+        assert!(serde_json::to_value(read_codex_account(home.path(), now()))
+            .unwrap()
+            .get("credits")
+            .is_none());
     }
 
     #[test]

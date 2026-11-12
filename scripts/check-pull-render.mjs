@@ -5,10 +5,11 @@
 // of being silently trusted; their internals are outside this guard's scope.
 // Known data API spellings are trusted. Event/subscription handlers are not
 // executed here; synchronous and scheduled callbacks are followed explicitly.
-import { parse } from "acorn";
+import { parse, Parser } from "acorn";
+import jsx from "acorn-jsx";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -265,10 +266,112 @@ export function checkRepository({ writeBaseline = false, base = process.env.GWT_
   const baseline = writeBaseline ? receiverKeys(findings)
     : JSON.parse(readFileSync(join(repoRoot, baselineFile), "utf8"));
   assertBaseline(findings, baseline, ceiling, baseFindings);
+  assertMigrationContract(checkMigrationContract({ base }));
   if (writeBaseline) writeFileSync(join(repoRoot, baselineFile), JSON.stringify(baseline, null, 2) + "\n");
   return { findings: findings.length, base };
 }
 
+// SPEC #6943 AC-7 / AC-8: inspect original JS/JSX syntax, never comments or
+// string contents. Only hosts/ owns imperative DOM. This is a syntax guard,
+// not DOM type inference or whole-program analysis.
+const reactSourceDirectory = "crates/gwt/web-react/src/";
+const jsxParser = Parser.extend(jsx());
+const renderingCalls = new Set([...domCalls, "createElementNS", "createDocumentFragment",
+  "insertAdjacentElement", "insertAdjacentText", "toggleAttribute", "write", "writeln"]);
+const allowlistFile = "scripts/react-migration-allowlist.json";
+export const isReactBoundary = file => /^crates\/gwt\/web-react\/src\/hosts\//.test(file);
+
+export function scanReactSource(source, file) {
+  const findings = [];
+  let ast;
+  try {
+    ast = jsxParser.parse(source, { ecmaVersion: "latest", sourceType: "module", locations: true });
+  } catch (error) {
+    throw new Error(`${file}:${error.loc?.line || 1}: ${error.message}\nRecovery: correct the source syntax before checking DOM ownership.`);
+  }
+  (function walk(node) {
+    let kind;
+    if (node.type === "CallExpression") {
+      const callee = node.callee.type === "ChainExpression" ? node.callee.expression : node.callee;
+      const path = memberPath(callee);
+      if ((renderingCalls.has(property(callee)) && path !== "React.createElement")
+        || /\.(style|classList)\./.test(path)) kind = "DOM call";
+    }
+    if (["AssignmentExpression", "UpdateExpression", "ForOfStatement", "ForInStatement"].includes(node.type)) {
+      if (bindingTargets(node.left || node.argument).some(target =>
+        domWrites.has(property(target)) || /\.(style|dataset)(\.|$)/.test(memberPath(target)))) kind = "DOM property write";
+    }
+    if (kind) {
+      const line = node.loc.start.line;
+      findings.push({ file, line, kind, message: `${file}:${line}: ${kind} outside src/hosts/`
+        + "\nRecovery: render through JSX from useStoreSelector state, or move imperative DOM ownership into src/hosts/." });
+    }
+    childNodes(node).forEach(walk);
+  })(ast);
+  return findings;
+}
+
+// The committed list names every remaining imperative web module. A migrated
+// adapter that only builds a model and mounts an island has no direct writes.
+export function isRenderingModule(source, file) {
+  return scanReactSource(source, file).length > 0;
+}
+
+export function assertMigrationAllowlist(renderingModules, allowlist, ceiling, { renderingLines = {}, allowlistLines = {} } = {}) {
+  const allowed = new Set(allowlist), live = new Set(renderingModules), base = new Set(ceiling);
+  const fresh = renderingModules.filter(file => !allowed.has(file));
+  const stale = allowlist.filter(file => !live.has(file));
+  const growth = allowlist.filter(file => !base.has(file));
+  const errors = [];
+  if (fresh.length) errors.push("new imperative rendering module(s) in crates/gwt/web/:\n" + fresh.map(file => `${file}:${renderingLines[file] || 1}`).join("\n")
+    + "\nRecovery: implement the surface as a React component in crates/gwt/web-react/src/surfaces/ and mount it"
+    + " with mountIsland(); the allowlist cannot accept new rows.");
+  const rows = files => files.map(file => `${allowlistFile}:${allowlistLines[file] || 1}: ${file}`).join("\n");
+  if (stale.length) errors.push("stale allowlist:\n" + rows(stale) + "\nRecovery: remove these migrated/deleted module rows from the allowlist.");
+  if (growth.length) errors.push(`${allowlistFile} cannot grow beyond the Git base:\n` + rows(growth)
+    + "\nRecovery: remove added rows and implement the new surface in React.");
+  if (errors.length) throw new Error(errors.join("\n"));
+}
+
+function treeFiles(base, directory, pattern) {
+  const files = base ? git("ls-tree", "-r", "--name-only", base, "--", directory).split("\n")
+    : git("ls-files", "--cached", "--others", "--exclude-standard", "--", directory).split("\n");
+  return [...new Set(files)].filter(file => pattern.test(file) && (base || existsSync(join(repoRoot, file)))).sort();
+}
+const webModule = /^crates\/gwt\/web\/(?!vendor\/|react\/islands\.js$|__tests__\/).+\.m?js$/;
+const read = (base, file) => base ? git("show", base + ":" + file) : readFileSync(join(repoRoot, file), "utf8");
+const renderingLinesAt = base => Object.fromEntries(treeFiles(base, "crates/gwt/web/", webModule).flatMap(file => {
+  const first = scanReactSource(read(base, file), file)[0];
+  return first ? [[file, first.line]] : [];
+}));
+
+export function checkMigrationContract({ base = process.env.GWT_PULL_RENDER_BASE_SHA } = {}) {
+  base = git("rev-parse", "--verify", (base || git("merge-base", "HEAD", "origin/develop")) + "^{commit}");
+  const reactFindings = treeFiles(null, reactSourceDirectory, /\.(m?js|jsx|tsx?)$/).filter(file => !isReactBoundary(file))
+    .flatMap(file => scanReactSource(read(null, file), file));
+  const renderingLines = renderingLinesAt(null);
+  const renderingModules = Object.keys(renderingLines);
+  const allowlistSource = readFileSync(join(repoRoot, allowlistFile), "utf8");
+  const allowlist = JSON.parse(allowlistSource);
+  const allowlistLines = Object.fromEntries(allowlist.map(file =>
+    [file, allowlistSource.slice(0, allowlistSource.indexOf(JSON.stringify(file))).split("\n").length]));
+  const hasBase = git("ls-tree", "--name-only", base, "--", allowlistFile) === allowlistFile;
+  const ceiling = hasBase ? JSON.parse(git("show", base + ":" + allowlistFile)) : Object.keys(renderingLinesAt(base));
+  return { base, reactFindings, renderingModules, renderingLines, allowlist, allowlistLines, ceiling };
+}
+
+export function assertMigrationContract(state = checkMigrationContract()) {
+  if (state.reactFindings.length) throw new Error("React DOM write(s):\n" + state.reactFindings.map(finding => finding.message).join("\n"));
+  assertMigrationAllowlist(state.renderingModules, state.allowlist, state.ceiling, state);
+  return state;
+}
+
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  console.log(JSON.stringify(checkRepository({ writeBaseline: process.argv.includes("--write-baseline") })));
+  // The default command enforces both contracts; `--json` prints the migration
+  // state (React findings, rendering modules, allowlist, ceiling).
+  if (process.argv.includes("--json")) console.log(JSON.stringify(checkMigrationContract(), null, 2));
+  else if (process.argv.includes("--migration")) {
+    const { reactFindings, renderingModules } = assertMigrationContract();
+    console.log(JSON.stringify({ reactFindings: reactFindings.length, renderingModules: renderingModules.length }));
+  } else console.log(JSON.stringify(checkRepository({ writeBaseline: process.argv.includes("--write-baseline") })));
 }

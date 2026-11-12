@@ -1256,6 +1256,7 @@ impl AppRuntime {
             if let Some(key) = key {
                 let mut public = event.clone();
                 public.continuation_readiness_nonce = None;
+                public.native_prompt_id = None;
                 events.push(OutboundEvent::project(
                     key,
                     BackendEvent::RuntimeHookEvent { event: public },
