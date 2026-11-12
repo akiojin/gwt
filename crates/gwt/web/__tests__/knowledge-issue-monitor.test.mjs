@@ -360,6 +360,48 @@ function monitorBand(body) {
   };
 }
 
+test("Monitor Queue and slots read one immutable model projection in both views", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  const assertCounts = (queue, active, maxActive) => {
+    assert.equal(body.querySelector('[data-metric="queue"]').textContent, `Queue ${queue}`);
+    assert.equal(body.querySelector('[data-metric="capacity"]').textContent, `${active} of ${maxActive}`);
+    assert.match(body.querySelector('[data-metric="active"]').getAttribute("aria-description"),
+      new RegExp(`Issues agent capacity: ${active}/${maxActive}`));
+    assert.equal(strip.textContent, `Run Q${queue} A${active}/${maxActive}`);
+  };
+  surface.applyIssueMonitorStatus({ enabled: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
+    counts: { queue: 99, active: 99, maxActive: 99 } });
+  const first = surface.issueMonitorModel.read().counts;
+  assert.deepEqual(first, { queue: 3, active: 1, maxActive: 2 });
+  assert.ok(Object.isFrozen(first));
+  assertCounts(3, 1, 2);
+  // A view that recounts the raw status must fail this structural regression.
+  surface.issueMonitorModel.update(model => ({ ...model, status: { ...model.status,
+    queue_len: 77, active_count: 77, max_active_agents: 77 } }));
+  assertCounts(3, 1, 2);
+  assert.equal(body.querySelector(".knowledge-monitor-pill").textContent, "Running");
+  surface.applyIssueMonitorStatus({ queue_len: 0, active_count: 0, max_active_agents: 0 });
+  assertCounts(0, 0, 0);
+  assert.equal(body.querySelector(".knowledge-monitor-pill").textContent, "Waiting · Empty");
+  surface.applyIssueMonitorStatus({ queue_len: 4 });
+  assertCounts(4, 0, 0);
+  assert.equal(body.querySelector(".knowledge-monitor-pill").textContent, "Waiting · Full");
+  assert.deepEqual(first, { queue: 3, active: 1, maxActive: 2 }, "older snapshots stay unchanged");
+  assert.match(body.querySelector('[data-metric="active"]').textContent, /^Active 0 · 0 issues · PM 0$/,
+    "the live-agent census keeps its separate meaning");
+});
+
 test("needs_human derives one immutable count and reason for shared Issue views", async (t) => {
   const { body, surface, sent, mod } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -763,7 +805,8 @@ test("Issue #3620: the Operator strip preserves a zero effective worker cap", as
     .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
   const { renderIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
   const { document } = parseHTML('<div id="op-strip-issue-monitor"><span id="op-strip-issue-monitor-value"></span></div>');
-  renderIssueMonitorStatus(document, { enabled: true, state: "idle", queue_len: 2, active_count: 0, max_active_agents: 0 });
+  renderIssueMonitorStatus(document, { status: { enabled: true, state: "idle" },
+    counts: { queue: 2, active: 0, maxActive: 0 } });
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
 });
 

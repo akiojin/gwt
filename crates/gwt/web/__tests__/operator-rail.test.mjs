@@ -41,7 +41,8 @@ test("Issues strip batches the latest status while model reads and other subscri
     cell.setAttribute = (...args) => { if (args[0] === "aria-label") renders++; return setAttribute(...args); };
     const previous = model.read();
     for (let index = 0; index < 50; index++) {
-      model.update(state => ({ ...state, status: { enabled: true, state: "active", queue_len: index, active_count: 1 } }));
+      model.update(state => ({ ...state, status: { enabled: true, state: "active", queue_len: index, active_count: 1 },
+        counts: { queue: index, active: 1, maxActive: 1 } }));
     }
     assert.equal(model.read().status.queue_len, 49);
     assert.equal(synchronousStatus.queue_len, 49);
@@ -59,7 +60,8 @@ test("Issues strip batches the latest status while model reads and other subscri
     model.update(state => ({ ...state, status: { enabled: true, state: "error", last_error: "scan failed" } }));
     flush();
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
-    model.update(state => ({ ...state, status: { enabled: true, state: "idle" } }));
+    model.update(state => ({ ...state, status: { enabled: true, state: "idle" },
+      counts: { queue: 0, active: 0, maxActive: 1 } }));
     flush();
     assert.equal(value.textContent, "Idle Q0 A0/1");
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
@@ -449,5 +451,10 @@ async function importOperatorShell() {
     .replace('from "/theme-manager.js"', `from "${pathToFileURL(resolve(here, "../theme-manager.js")).href}"`)
     .replace('from "/hotkey.js"', `from "${pathToFileURL(resolve(here, "../hotkey.js")).href}"`)
     .replace('from "/theme-toggle.js"', `from "${pathToFileURL(resolve(here, "../theme-toggle.js")).href}"`);
-  return import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const module = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  // Standalone view fixtures supply the same snapshot contract as the app model.
+  return { ...module, renderIssueMonitorStatus: (doc, status) => module.renderIssueMonitorStatus(doc, {
+    status, counts: { queue: status.queue_len ?? 0, active: status.active_count ?? 0,
+      maxActive: status.max_active_agents ?? 1 },
+  }) };
 }

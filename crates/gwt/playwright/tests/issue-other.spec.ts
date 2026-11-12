@@ -201,7 +201,23 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
   await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  await expect(page.locator('[data-metric="queue"]')).toHaveText("Queue 3");
+  await expect(page.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
+  for (const [status, queue] of [
+    [{ queue_len: 0, active_count: 0, max_active_agents: 0 }, 0],
+    [{ queue_len: 4 }, 4],
+  ] as const) {
+    await page.evaluate(status => (window as any).__otherEmit({ kind: "issue_monitor_status", status }), status);
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Run Q${queue} A0/0`);
+    await expect(page.locator('[data-metric="queue"]')).toHaveText(`Queue ${queue}`);
+    await expect(page.locator('[data-metric="capacity"]')).toHaveText("0 of 0");
+    await expect(page.locator('[data-metric="active"]')).toHaveAttribute("aria-description", /Issues agent capacity: 0\/0/);
+    await expect(search).toBeFocused();
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
+  }
   expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
+  expect(await messages(page, "set_issue_monitor_max_active_agents")).toEqual([]);
   await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
   if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
     await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });
