@@ -968,6 +968,35 @@ body::after {
   .project-actions .op-theme-toggle {
     height: auto;
   }
+
+  /* T-005r: wrapped rail groups took three rows of a phone screen. Keep one
+     row that scrolls sideways so the terminal keeps the height. */
+  .op-rail,
+  .op-rail__group,
+  .op-rail__group--surfaces {
+    flex-wrap: nowrap;
+  }
+
+  .op-rail {
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+  }
+
+  .op-rail__group--surfaces {
+    max-width: none;
+  }
+
+  .op-rail__spacer {
+    flex: 0 0 var(--space-2);
+  }
+
+  .op-rail__item {
+    flex-shrink: 0;
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 @media (forced-colors: active) {

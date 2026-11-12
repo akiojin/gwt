@@ -269,6 +269,51 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     viewport: { width: 390, height: 844 },
   });
 
+  // SPEC #6476 T-005r (AC-1): the Command Rail wrapped into three rows on a
+  // phone (213px at 390px) and left the agent terminal 312px. It must stay one
+  // row that scrolls sideways, with every entry still a 44px tap target.
+  test("command rail stays one row on a phone and leaves the screen to the terminal", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const rail = (await page.locator(".op-rail").boundingBox())!;
+      const bar = (await page.locator(".project-bar").boundingBox())!;
+      // One ~52px row plus a thin classic scrollbar where the platform draws one.
+      expect(rail.height, `rail height at ${width}px`).toBeLessThanOrEqual(72);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+        "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      const items = page.locator(".op-rail__item:visible");
+      expect(await items.count()).toBeGreaterThanOrEqual(11);
+      for (const item of await items.all()) {
+        await item.scrollIntoViewIfNeeded();
+        await expect(item).toBeInViewport({ ratio: 1 });
+        const box = (await item.boundingBox())!;
+        expect(box.width, await item.innerText()).toBeGreaterThanOrEqual(44);
+        expect(box.height, await item.innerText()).toBeGreaterThanOrEqual(44);
+        expect(box.y).toBeGreaterThanOrEqual(rail.y - 1);
+        expect(box.y + box.height).toBeLessThanOrEqual(rail.y + rail.height + 1);
+        expect(await item.evaluate(element => {
+          const r = element.getBoundingClientRect();
+          return element.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }), "rail entry must be tappable").toBe(true);
+      }
+      const surface = (await page.locator(".surface-area").boundingBox())!;
+      expect(surface.y, "the surface starts right below the one-row rail").toBeLessThanOrEqual(bar.y + bar.height + 72 + 1);
+      if (width === 390) {
+        const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
+        expect(screen.height, "the terminal gains the rows the wrapped rail took (312px before)").toBeGreaterThanOrEqual(412);
+      }
+      await page.screenshot({ path: info.outputPath(`mobile-rail-${width}.png`) });
+    }
+    await page.getByRole("button", { name: "Logs", exact: true }).tap();
+    await page.getByRole("button", { name: "Works", exact: true }).tap();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
+    await page.setViewportSize({ width: 1360, height: 900 });
+    const desktop = (await page.locator(".op-rail").boundingBox())!;
+    expect(desktop.height, "desktop rail remains a vertical column").toBeGreaterThan(desktop.width);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     await setActiveAgentTab(page, "agent-2");
