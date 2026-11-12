@@ -259,6 +259,7 @@ mod tests {
         // Send a Subscribe frame and confirm it also acks.
         let subscribe = ClientFrame::Subscribe {
             channels: vec!["board".to_string()],
+            gui_window: false,
         };
         client.send_frame(&subscribe).await.expect("send subscribe");
         let ack2: DaemonFrame = client.read_frame().await.expect("read second ack");
@@ -436,6 +437,7 @@ mod tests {
         subscriber
             .send_frame(&ClientFrame::Subscribe {
                 channels: vec!["board".to_string()],
+                gui_window: false,
             })
             .await
             .expect("subscribe send");
@@ -510,6 +512,7 @@ mod tests {
             client
                 .send_frame(&ClientFrame::Subscribe {
                     channels: vec!["board".to_string()],
+                    gui_window: false,
                 })
                 .await
                 .expect("subscribe send");
@@ -588,6 +591,7 @@ mod tests {
         // publish.
         let subscribe = ClientFrame::Subscribe {
             channels: vec!["board".to_string()],
+            gui_window: false,
         };
         client.send_frame(&subscribe).await.expect("send subscribe");
         let subscribe_ack: DaemonFrame = client.read_frame().await.expect("subscribe ack");

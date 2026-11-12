@@ -970,18 +970,20 @@ fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let mut event = runtime_hook_coordination_event("session-1");
     event.continuation_readiness_nonce = Some("private-ready-nonce".to_string());
+    event.native_prompt_id = Some("private-native-turn".into());
 
     let events = runtime.handle_runtime_hook_event(event);
 
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::RuntimeHookEvent { event }
-            if event.continuation_readiness_nonce.is_none()
+            if event.continuation_readiness_nonce.is_none() && event.native_prompt_id.is_none()
     )));
     let encoded =
         serde_json::to_string(&events.iter().map(|event| &event.event).collect::<Vec<_>>())
             .expect("serialize browser events");
     assert!(!encoded.contains("private-ready-nonce"));
+    assert!(!encoded.contains("private-native-turn"));
 }
 
 pub(super) fn runtime_state_hook_fixture(temp: &Path) -> (AppRuntime, String) {

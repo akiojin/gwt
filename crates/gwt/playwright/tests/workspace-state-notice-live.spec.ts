@@ -169,6 +169,20 @@ test.describe("Workspace state diagnostics", () => {
   test("real read failure names the file, survives reconnect, and Retry reloads repaired state", async ({ page }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
       const statePath = await isolatedStatePath();
+      let repairBeforeRetry: (() => Promise<void>) | undefined;
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        const server = socket.connectToServer();
+        socket.onMessage(async message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "retry_workspace_state_load" && repairBeforeRetry) {
+            const repair = repairBeforeRetry;
+            repairBeforeRetry = undefined;
+            await repair();
+          }
+          server.send(message);
+        });
+        server.onMessage(message => socket.send(message));
+      });
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => {
@@ -198,14 +212,20 @@ test.describe("Workspace state diagnostics", () => {
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await page.screenshot({ path: join(CHECK_HOME, `workspace-state-notice-${testInfo.project.name}.png`), fullPage: true });
         expect(await readFile(backup)).toEqual(original);
-        await rmdir(statePath);
-        blockedPath = false;
-        await rename(backup, statePath);
-        restored = true;
+        // Keep the read failure until the actual click: a background projection
+        // recheck may otherwise recover and remove Retry before it is clicked.
+        repairBeforeRetry = async () => {
+          await rmdir(statePath);
+          blockedPath = false;
+          await rename(backup, statePath);
+          restored = true;
+        };
         await banner.getByRole("button", { name: "Retry", exact: true }).click();
         await expect(page.locator(".workspace-state-notice")).toHaveCount(0);
+        expect(restored, "the real Retry request repaired the isolated fixture").toBe(true);
         await expect(page.locator("#close-project-button")).toBeVisible();
       } finally {
+        repairBeforeRetry = undefined;
         if (blockedPath) await rmdir(statePath);
         if (!restored) await rename(backup, statePath);
         if (!page.isClosed()) await sendLiveGwtEvent(page, { kind: "retry_workspace_state_load" });

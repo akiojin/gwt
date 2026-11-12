@@ -1,6 +1,77 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.162.0] - 2026-11-12
+
+### Bug Fixes
+
+- **workspace:** 親 Work の終端権限を保護し同一世代の復旧を追加
+- **workspace:** 終端時の認可再検証とテストのHOME隔離を修正
+- **ci:** Ubuntu ミラー到達不能時に別ミラー・キャッシュ・指数バックオフで回復する
+- **execution:** Preserve authority during PM fence repair
+- **execution:** Finish interrupted and legacy fence recovery
+- **ui:** 集約した通知行で最新の jump-to を有効にする
+- **launch:** Admit Grok panes to exact PM delivery
+- **grok:** Guard PM input and acknowledge accepted turns
+- **grok:** Preserve composer ownership across prompt redraws
+- **grok:** Keep startup watchdog until accepted work
+- **execution:** Accept workspace home during PM fence recovery
+- **execution:** Resume audited workspace recovery safely
+- **workspace:** Recover missing legacy successor ancestry
+- **workspace:** Preserve legacy batch order and snapshot identity
+- **workspace:** Restore missing host session container anchors
+- **pm:** Keep navigation boundary stable across launch directories
+- **monitor:** Reconnect the Issues materializer while the window is open
+
+### Features
+
+- **usage:** Show Codex credit balance and consumption pace
+- **pm:** PM ウィンドウを Chat 表示で開く
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 5542 PR delivery
+- **work:** Issue #7081 の Work イベントを記録
+- **work:** Record PR #7089 delivery metadata
+- **work:** Record jump-to fix verification progress
+- **work:** Record Codex credits delivery handoff
+- **work:** Checkpoint Codex credits PR metadata
+- **work:** Record PR #7099 delivery metadata
+- **work:** Record PR #7100 delivery metadata
+- **work:** Record Issue 5542 after-measurement handoff
+- **work:** Record host delivery compatibility diagnosis
+- **work:** Record canonical verification evidence
+- **work:** Record PR 7104 delivery metadata
+- **work:** PM チャット既定表示 slice の Work イベントを記録する
+- **work:** Home から Chat 導線 slice の Work イベントを記録する
+- **work:** Home から Chat 導線 slice の Work 更新を記録する
+- **work:** Home から Chat 導線 slice の検証イベントを記録する
+- **work:** PR #7107 の関連付けを記録
+- **work:** Record issue 6989 delivery blocker
+- **work:** Record PR 7105 delivery metadata
+- **work:** Record issue 6989 delivery recovery
+
+### Performance
+
+- **monitor:** Skip gate reads until review verdict arrives
+
+### Refactor
+
+- **ui:** Toast push の JSDoc を push の直上へ戻す
+
+### Testing
+
+- **workspace:** Reopen の競合検証を決定的にする
+- **runtime:** Preserve fixture operation clocks across threads
+- **workspace:** Use native absolute paths in anchor fixture
+- **pm:** Home からの切替検証と Work 記録を揃える
+- **gui:** Retry 要求に合わせて隔離状態ファイルを復元
+- **pm:** Recover poisoned environment lock in boundary regression
+
+### Ci
+
+- **frontend:** React 描画境界と未移行モジュールの増加を検査
+
 ## [9.161.1] - 2026-11-11
 
 ### Bug Fixes

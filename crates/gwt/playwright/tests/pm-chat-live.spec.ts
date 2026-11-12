@@ -154,7 +154,10 @@ test.describe('PM reports', () => {
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       await expect(pane.getByRole('button', { name: 'Home', exact: true })).toHaveAttribute('aria-pressed', 'true');
       await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeVisible();
+      // AC-3431-CHAT-1: one action from the default Home opens Chat.
       await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+      await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(pane.getByRole('region', { name: 'Home', exact: true })).toBeHidden();
       const chat = pane.getByRole('region', { name: 'PM conversation' });
       await expect(chat).toBeVisible();
       // The real host answers for the stopped fixture PM; it has no native record yet.
@@ -1726,6 +1729,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await gotoPmReports(page, undefined, target.url, true);
       const chat = page.locator('.pm-chat');
       const tasksView = chat.getByRole('region', { name: 'Request tasks' });
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       await expect(chat.getByRole('button', { name: 'Tasks', exact: true })).toHaveAttribute('aria-pressed', 'true');
       await expect(tasksView).toBeVisible();
       await expect(tasksView.locator('.pm-chat__task')).toHaveCount(2);

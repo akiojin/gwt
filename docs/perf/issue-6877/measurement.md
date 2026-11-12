@@ -18,6 +18,63 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-12: independent review verdict 待ちの gate readback（サチ）
+
+fresh launch の HEAD / fetched `origin/develop` はともに
+`c65e99b9be8bc2c896623d45678f3185513d70a2`。PR #7088 の source と merge は
+base に含まれ、未配信 source は0だった。AC-1/3 の配信状態を保持し、
+残る AC-2/4/5 を現 base に対して再評価した。
+
+03:30〜03:40 JST（2026-11-11T18:30:00Z〜18:40:00Z）の完全な600秒区間を、
+既存 `gwt.log.2026-11-11` の JSON から `fields.kind=gh` / `phase=start` /
+`span.name=issue_monitor_scan` で集計した。gwt は210件（protection43、
+rollup38、head36、mergeability34、timeline14、issues17、open pulls3、
+closed pulls3、full PR view22）、unity-cli は112件、vr-cabin-exposure は5件。
+timeline の延べ完了は29 Issue、全回 `pending=true`。対象番号や cursor が
+未記録なので、これを重複読みと断定しない。
+
+これは installed v9.160.0 / GUI PID52136（2026-11-11T11:40:47Z 起動）の
+旧 runtime 観測である。分割 gate と毎回の protection 読みは配信済み
+PR #7058 の集約・cache を反映しておらず、PR #7088 も未ロード。
+この件数や、その一部を差し引いた推計を現 develop の性能証拠にはしない。
+
+現 source に残る根因は別に確認した。`Reviewing` の worker は
+branch protection と gate を取得した後、`autonomous_gate_inputs` が
+reviewed SHA / verdict 未着で `None` を返すと読み取りを破棄していた。
+CI hold は verdict 後にしか作られず、結果待ちの各 scan で再取得する。
+
+最小 Plan は、この既存のローカル readiness 条件を readback 前へ移すこと。
+新 cache / TTL 延長との比較では、新状態を加えず既存契約を保つ案を採用した。
+対象は `issue_monitor_worker.rs` と既存 worker fixture、本記録、Work shards。
+`Some(false)` は完成した拒否 verdict として従来の live gate へ通す。
+空文字 SHA の意味、CI hold、acceptance/head 比較、permission / effect /
+review authority、slot、deadline、UI、稼働 fleet は変更しない。
+
+受け入れは、既存 review-backoff fixture の待機区間を使う決定的な
+RED/GREEN、既存 gate/cache/worker 回帰、hygiene、fresh canonical pre-pr、
+必須 CI / coverage と通常の Ready Refs PR / auto-merge / develop 包含。
+readback budget を既に消費した時計を注入し、未着待機は readback を試みず、
+成功・拒否 verdict 後は従来の BranchProtection stage に戻ることを検証する。
+配備後の AC-2/4/5 は対応する実 fleet 計測まで未証明・unchecked を維持する。
+
+既存 review-backoff 1件と CI-wait 1件は変更前に成功。拡張 fixture は
+`BranchProtection: scan budget reserved for the launch stage` で RED となり、
+未着待ちでも readback に進むことを確認した。production の修正は5行。
+独立実差分レビューは阻害0で、verdict の受信・復旧はこの readback と独立し、
+空文字 SHA や完成した拒否 verdict の意味は変わらないことも確認した。
+
+GREEN は `cargo test -p gwt --lib issue_monitor_worker:: -- --test-threads=1`
+で98成功（既存の実環境用1 ignored）、`issue_monitor_gate::` で40成功。
+追加待機区間、CI hold/cache、review backoff、acceptance/head drift と
+拒否 verdict の routing が成功した。test hygiene は37成功（既存の
+baseline 再生成 helper 1 ignored）、fmt / diff check も成功。
+
+Acceptance Surface: non-user-facing (ordering of remote gate discovery only).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## GUI の stale refresh 迂回（2026-11-10、次スライス）
 
 アヤ・ミウラ / Codex。開始時の fetch 後 HEAD と origin/develop はともに

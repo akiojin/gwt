@@ -276,8 +276,14 @@ export function createNotificationCenter({
     const existing = occurrenceRows.get(identity);
     if (existing?.item.isConnected) {
       existing.count += 1;
-      existing.onActivate = notice.onActivate;
       const { item } = existing;
+      // The latest jump-to wins; an occurrence without one keeps the previous.
+      if (typeof notice.onActivate === "function") {
+        if (typeof existing.onActivate !== "function") {
+          stack.enableActivation(item, () => existing.onActivate?.());
+        }
+        existing.onActivate = notice.onActivate;
+      }
       item.parentNode?.insertBefore(item, item.parentNode.firstChild);
       const time = item.querySelector(".notification-center__time");
       if (time) {
