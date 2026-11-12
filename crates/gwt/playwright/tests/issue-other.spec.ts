@@ -246,6 +246,49 @@ test("review holds share counts and reasons across Issue views", async ({ page }
   await expect(detailReason).toHaveCount(0);
 });
 
+test("PM steering shares counts and reasons across Issue views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const emit = (steering: boolean, closed = false, failure = "") => page.evaluate(({ steering, closed, failure }) => {
+    const fixture = window as any;
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: {
+      enabled: true, state: "active", autonomous_issues: [{
+        issue_number: 4556, phase: "idle", needs_human: false,
+        ...(steering ? { steering: { reason: "Retry budget needs PM steering",
+          requested_at: "2026-11-13T00:00:00Z", count: 9 } } : {}),
+      }],
+    } });
+    fixture.__otherEmit({ kind: "issue_monitor_inbox", items: [{
+      issue: { number: 4556, title: "Issue 4556", state: closed ? "closed" : "open" },
+      state: failure ? "launch_failed" : "queued", error_message: failure || null,
+    }] });
+  }, { steering, closed, failure });
+  const pill = page.locator(".knowledge-monitor-pill");
+  const strip = page.locator("#op-strip-issue-monitor");
+  const rowReason = page.locator('.knowledge-row[data-issue-number="4556"] [data-key="reason"]');
+  const detailReason = page.locator('.issue-detail-status [data-key="reason"]');
+  await emit(true);
+  await expect(pill).toHaveAttribute("title", /PM steering 1/);
+  await expect(strip).toHaveAttribute("title", /PM steering 1/);
+  await expect(rowReason).toHaveText("Retry budget needs PM steering");
+  await expect(detailReason).toHaveText("Retry budget needs PM steering");
+  await page.screenshot({ path: info.outputPath("pm-steering-shared-state.png"), fullPage: true });
+  await emit(true, false, "Latest launch failure");
+  await expect(pill).toHaveAttribute("title", /PM steering 1/);
+  await expect(rowReason).toHaveText("Latest launch failure");
+  await expect(detailReason).toHaveText("Latest launch failure");
+  await emit(false);
+  await expect(pill).toHaveAttribute("title", /PM steering 0/);
+  await expect(strip).toHaveAttribute("title", /PM steering 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+  await emit(true, true);
+  await expect(pill).toHaveAttribute("title", /PM steering 0/);
+  await expect(strip).toHaveAttribute("title", /PM steering 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+});
+
 test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {
   await boot(page);
   await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
