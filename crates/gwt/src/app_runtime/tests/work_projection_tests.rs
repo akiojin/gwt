@@ -2112,7 +2112,7 @@ fn attachment_completion_requires_typed_original_receipt_and_timeout_is_unknown(
         pending.len() == 1
             && matches!(pending.front(), Some((OwnerCommand::Input {
         id: pane_id, incarnation, data,
-    }, RemoteRuntimeCommandKind::Input { reply_client: None }))
+    }, RemoteRuntimeCommandKind::Input { reply_client: None, .. }))
         if pane_id == &operation.owner_pane_id
             && *incarnation == operation.expected_target.runtime_incarnation
             && data.as_slice() == b"second")

@@ -484,7 +484,7 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         .iter()
         .rev()
         .find_map(|event| match recorded_project_payload(event) {
-            UserEvent::ProjectDispatch { events, .. } => {
+            UserEvent::AgentRosterDispatchPrepared { events, .. } => {
                 events.iter().find_map(|event| match &event.event {
                     BackendEvent::AgentRoster { roster, request_id } => {
                         assert_eq!(request_id.as_deref(), Some("read-successor"));

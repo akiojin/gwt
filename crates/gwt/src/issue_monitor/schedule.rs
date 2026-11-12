@@ -700,9 +700,6 @@ impl IssueMonitorState {
                 .iter()
                 .find(|member| member.agent_member_id == id)
         });
-        if let Some(reason) = selected_member_tool_exclusion(&self.launch_profiles, member, id) {
-            return Some(format!("scheduled_member_unavailable: {reason}; read issue.monitor.schedule.read and reassign to a matching selected member"));
-        }
         let selected = self
             .launch_profiles
             .first()
@@ -713,6 +710,17 @@ impl IssueMonitorState {
                 .iter()
                 .any(|profile| profile.agent_member_id.as_deref() == Some(id))
         });
+        // Issue #7027 AC-3: name why the scheduled member itself cannot launch.
+        let own = member
+            .filter(|_| !tool_matches)
+            .and_then(|member| {
+                automatic_member_ineligibility(&self.prefs().launch_profile_pool(), member)
+            })
+            .map(|reason| format!("; scheduled member {id} not eligible: {reason}"))
+            .unwrap_or_default();
+        if let Some(reason) = selected_member_tool_exclusion(&self.launch_profiles, member, id) {
+            return Some(format!("scheduled_member_unavailable: {reason}{own}; read issue.monitor.schedule.read and reassign to a matching selected member"));
+        }
         let available = tool_matches && member.is_some_and(|member| member.implementation_eligible() && match &member.assignment {
             None => member.enabled,
             Some(assignment) => assignment.issue_number == Some(number)
@@ -734,14 +742,6 @@ impl IssueMonitorState {
                 )
             })
             .unwrap_or_else(|| "absent".into());
-        // Issue #7027 AC-3: name why the scheduled member itself cannot launch.
-        let own = member
-            .filter(|_| !tool_matches)
-            .and_then(|member| {
-                automatic_member_ineligibility(&self.prefs().launch_profile_pool(), member)
-            })
-            .map(|reason| format!("; scheduled member {id} not eligible: {reason}"))
-            .unwrap_or_default();
         let current = format!("{current}{own}");
         let excluded = self
             .agent_schedule_ineligible
