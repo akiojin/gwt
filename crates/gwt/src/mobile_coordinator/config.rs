@@ -116,6 +116,9 @@ impl CoordinatorConfig {
         fn storage_error(error: StoreError) -> ConfigError {
             match error {
                 StoreError::UnsafeStorage => ConfigError::UnsafeStorage,
+                StoreError::Io(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                    ConfigError::UnsafeStorage
+                }
                 StoreError::UnsupportedPrivateStorage => ConfigError::UnsupportedPrivateStorage,
                 _ => ConfigError::StorageUnavailable,
             }
@@ -505,7 +508,10 @@ mod tests {
         let saved = path.join("saved.json");
         std::fs::rename(&file, &saved).unwrap();
         symlink(&saved, &file).unwrap();
-        assert!(CoordinatorConfig::load(&path).is_err());
+        assert!(matches!(
+            CoordinatorConfig::load(&path),
+            Err(ConfigError::UnsafeStorage)
+        ));
         std::fs::remove_file(&file).unwrap();
         std::fs::rename(&saved, &file).unwrap();
         assert!(CoordinatorConfig::load(&path).is_ok());
