@@ -804,21 +804,78 @@ const at = new Date().toISOString();`);
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
-  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
+  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_BEGIN_MISSED', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
     const event = line.trim() === 'GWT_FIXTURE_IDLE' ? 'Stop' : 'UserPromptSubmit';
-    const hook = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH,
-      ['hook', 'event', event], {cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
-        input:JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()})});
-    if (hook.status !== 0) { console.log('WORKS_HOOK_FAILED'); return; }
-    if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
-      const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
-        cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
-        input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
-          items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
-          next_trigger:'Agent update'}})});
-      if (result.status !== 0 || !JSON.parse(result.stdout).ok) { console.log('WORKS_STATUS_FAILED'); return; }
+    const missed = line.trim() === 'GWT_FIXTURE_BEGIN_MISSED';
+    const receipt = (stage, extra = {}) => fs.appendFileSync(
+      path.join(process.env.HOME,'works-hook-receipts.jsonl'),JSON.stringify({
+        session:process.env.GWT_SESSION_ID,command:line.trim(),stage,...extra})+'\\n');
+    let phase = 'native-hook';
+    try {
+      const runtimePath = process.env.GWT_SESSION_RUNTIME_PATH;
+      const journalPath = path.join(path.dirname(path.dirname(path.dirname(runtimePath))),
+        'hook-live',path.basename(path.dirname(runtimePath)),path.basename(runtimePath));
+      const completedBefore = JSON.parse(fs.readFileSync(runtimePath,'utf8')).last_completed_hook_event_at;
+      const payload = JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()});
+      const invoke = (args, env = process.env, input = payload) => require('node:child_process').spawnSync(
+        process.env.GWT_BIN_PATH,args,{cwd:process.cwd(),env,encoding:'utf8',timeout:30000,input});
+      const hook = invoke(['hook','event',event],missed
+        ? {...process.env,GWT_HOOK_FORWARD_TOKEN:'works-fixture-rejected-token'} : process.env);
+      const output = hook.stdout.trim() ? JSON.parse(hook.stdout) : {};
+      if (hook.error || hook.status !== 0 || output.decision === 'block'
+        || output.hookSpecificOutput?.decision === 'block' || output.continue === false)
+        throw new Error('managed hook rejected');
+      phase = 'native-completion';
+      const nativeRuntime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      if (nativeRuntime.status !== (event === 'Stop' ? 'Idle' : 'Running') || nativeRuntime.source_event !== event
+        || !nativeRuntime.last_completed_hook_event_at || nativeRuntime.last_completed_hook_event_at === completedBefore
+        || nativeRuntime.last_completed_hook_outcome !== 'normal') throw new Error('native event did not complete normally');
+      if (missed) {
+        phase = 'pending-proof';
+        const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
+        if (!journal.health.pending_runtime_state || journal.health.consecutive_failures < 1
+          || journal.pending?.gwt_session_id !== process.env.GWT_SESSION_ID
+          || journal.pending?.source_event !== event || journal.pending?.status !== 'Running')
+          throw new Error('missing real pending Running event');
+        receipt('pending');
+      }
+      // Report the real Read above through the public provider hook. It
+      // coalesces to the latest Running and invokes the normal Forward path;
+      // it does not promise delivery of the earlier prompt event itself.
+      let completionBefore = completedBefore;
+      if (event === 'UserPromptSubmit') {
+        phase = 'provider-follow-up';
+        const followUp = invoke(['hook','event','PostToolUse'],process.env,JSON.stringify({
+          session_id:native,hook_event_name:'PostToolUse',cwd:process.cwd(),
+          tool_name:'Read',tool_input:{file_path:runtimePath}}));
+        if (followUp.error || followUp.status !== 0) throw new Error('provider follow-up failed');
+        completionBefore = nativeRuntime.last_completed_hook_event_at;
+      }
+      phase = 'ack-state';
+      const runtime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
+      if (runtime.status !== (event === 'Stop' ? 'Idle' : 'Running')
+        || runtime.source_event !== (event === 'Stop' ? 'Stop' : 'PostToolUse')
+        || !runtime.last_completed_hook_event_at || runtime.last_completed_hook_event_at === completionBefore
+        || runtime.last_completed_hook_outcome !== 'normal' || journal.pending !== null
+        || journal.health.pending_runtime_state !== false || journal.health.consecutive_failures !== 0
+        || !journal.health.last_success_at) throw new Error('runtime or delivery ACK missing');
+      if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
+        phase = 'pm-status';
+        const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+          cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
+          input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
+            items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
+            next_trigger:'Agent update'}})});
+        if (result.error || result.status !== 0 || !JSON.parse(result.stdout).ok) throw new Error('PM status failed');
+      }
+      receipt('ack');
+      console.log('WORKS_STATE ' + event);
+    } catch {
+      receipt('failed',{phase});
+      console.log('WORKS_HOOK_FAILED ' + phase);
     }
-    console.log('WORKS_STATE ' + event); return;
+    return;
   }
   if (line.trim() === 'GWT_FIXTURE_EXIT')`);
         let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
@@ -875,7 +932,19 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     });
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
-    const input = (id: string, command: string) => sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+    const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
+      .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; }))
+      .split("\n").slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
+    const input = async (id: string, command: string) => {
+      const session = (await windows()).find((window: any) => window.id === id)?.session_id;
+      const matches = (receipt: any) => receipt.session === session && receipt.command === command && receipt.stage !== "pending";
+      const before = (await receipts()).filter(matches).length;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+      await expect.poll(async () => (await receipts()).filter(matches).length,
+        { timeout: 60_000, message: "the native hook and ordinary provider follow-up finish before UI assertions" }).toBe(before + 1);
+      const receipt = (await receipts()).filter(matches).at(-1);
+      expect(receipt.stage, `native hook/provider follow-up failed at ${receipt.phase}`).toBe("ack");
+    };
     const assertAggregates = async () => {
       await expect.poll(() => usage?.filter((session: any) => session.state.kind === "ok"
         && session.telemetry?.quality === "measured").length, { timeout: 45_000 }).toBe(5);
@@ -928,7 +997,8 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       const pmName = pm.agent_name;
       expect(typeof pmName === "string" && pmName.trim().length > 0).toBe(true);
       await expect.poll(async () => (await fixture.launches()).length).toBe(5);
-      for (const worker of live.filter((window: any) => !window.is_pm)) await input(worker.id, "GWT_FIXTURE_BEGIN");
+      for (const [index, worker] of live.filter((window: any) => !window.is_pm).entries())
+        await input(worker.id, index === 0 ? "GWT_FIXTURE_BEGIN_MISSED" : "GWT_FIXTURE_BEGIN");
       await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 60_000 });
