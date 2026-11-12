@@ -224,7 +224,8 @@ the tray menu:
 
 Project browser tabs show agent RUN / BLOCK counts in their titles and a
 status favicon. BLOCK includes waiting, stopped, and error states; shell
-windows are excluded. An unread marker clears when the project tab is visible
+windows are excluded. The status strip and the Works heading show the same
+RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone

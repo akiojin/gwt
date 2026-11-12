@@ -214,6 +214,7 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
 表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
+ステータスバーと Works 見出しは、タブタイトルと同じ RUNNING / BLOCK / IDLE / ERROR 件数を表示します。
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
 
