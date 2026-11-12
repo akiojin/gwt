@@ -382,11 +382,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   // views read, so every surface reports the same numbers (SPEC #7007 AC-6).
   // Unknown stays unknown: decisions are counted only once reports have
   // loaded, and no completed-today source exists yet, so it stays null.
-  function renderHome(state) {
+  function renderHome(state, decisions) {
     const overview = state?.requestTasks ?? null;
-    const decisionsWaiting = state?.loaded
-      ? (state.reports || []).filter(report => report.kind === 'decision').length : null;
-    taskHome.receive({ overview, decisionsWaiting, completedToday: null,
+    taskHome.receive({ overview, decisionsWaiting: decisions.waiting, completedToday: null,
       stale: Boolean(state?.requestTasksError) && overview !== null });
   }
   // Decide aggregates the same decision reports Home counts (AC-6), newest
@@ -445,15 +443,28 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       pendingDecision = null;
     }
   }
-  function renderDecisions(state) {
+  // SPEC #5016 AC-HS1: the one derivation of the waiting-decision count.
+  // A decision answered in this session no longer waits: Home reads this
+  // count, and Decide lists the same items with the same answered map.
+  function deriveDecisions(state) {
     observeDecisionSend(state?.chatSend ?? null);
     observePaneResult(state?.paneResult ?? null);
+    const items = decisionItems(state);
     const answered = {};
     for (const [id, optionText] of answeredDecisions) answered[id] = optionText;
+    const waiting = state?.loaded ? items.filter(item => !answered[item.id]).length : null;
+    return { items, answered, waiting };
+  }
+  function renderDecisionSurfaces(state) {
+    const decisions = deriveDecisions(state);
+    renderHome(state, decisions);
+    renderDecisions(state, decisions);
+  }
+  function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
       loaded: Boolean(state?.loaded),
       error: state?.error ?? null,
-      decisions: decisionItems(state),
+      decisions: items,
       // The island's in-flight flag follows the answer's own lifecycle; the
       // shared composer send slot is guarded separately in answerDecision.
       sending: pendingDecision != null,
@@ -479,7 +490,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         message: 'The answer could not be sent. Reconnect, then try again.' };
       pendingDecision = null;
     }
-    renderDecisions(latestState);
+    renderDecisionSurfaces(latestState);
   }
   function renderTasks(state) {
     const overview = state?.requestTasks;
@@ -679,8 +690,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
-    renderHome(state);
-    renderDecisions(state);
+    renderDecisionSurfaces(state);
     renderTasks(state);
     renderChat(state.conversation);
     renderComposer(state.chatSend);

@@ -1056,6 +1056,24 @@ test('Home Review decisions opens the Decide surface', async () => {
   assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
 });
 
+// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once,
+// so answering a decision in Decide cannot leave Home still asking for it.
+test('Home and Decide read one waiting-decision count after an answer', async () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const home = () => root.querySelector('.task-home')?.textContent ?? '';
+  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.match(home(), /1 decision needs your attention/, 'Home does not count the answered decision');
+  const actionable = [...root.querySelectorAll('.task-decisions__card')]
+    .filter(card => card.querySelector('.task-decisions__option'));
+  assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
+});
+
 test('Decide forgets session answers when the PM session changes', () => {
   const { root, model, view, update } = fixture({ tasksDefault: true });
   update([decisionReport()]);
