@@ -516,7 +516,10 @@ thread_local! {
 fn defers_serialization(event: &BackendEvent) -> bool {
     matches!(
         event,
-        BackendEvent::ActiveWorkProjectionPatch { .. } | BackendEvent::TerminalSnapshot { .. }
+        BackendEvent::ActiveWorkProjectionPatch { .. }
+            | BackendEvent::TerminalSnapshot { .. }
+            | BackendEvent::IssueMonitorInbox { .. }
+            | BackendEvent::IssueMonitorStatus { .. }
     )
 }
 
@@ -4442,6 +4445,13 @@ mod tests {
                 window_id: "pane".into(),
                 state: crate::WindowProcessStatus::Stopped,
             },
+            BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            BackendEvent::IssueMonitorStatus {
+                status: Box::new(
+                    crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
+                        .status_view(),
+                ),
+            },
             BackendEvent::TerminalStatus {
                 id: "pane".into(),
                 status: crate::WindowProcessStatus::Stopped,
@@ -4467,7 +4477,24 @@ mod tests {
             "GUI producer must enqueue the patch without encoding it"
         );
 
-        for (queue, encodings) in [(first, 1), (second, 0)] {
+        // The counter only observes events already allowed to defer. Inspect
+        // these new kinds directly so eager encoding cannot pass with zero.
+        for queue in [&first, &second] {
+            let state = queue.state.lock().unwrap();
+            for kind in ["issue_monitor_inbox", "issue_monitor_status"] {
+                let queued = state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.kind == kind)
+                    .unwrap();
+                assert!(
+                    matches!(&queued.payload, SharedOutboundPayload::Deferred(_)),
+                    "GUI producer must defer {kind} encoding"
+                );
+            }
+        }
+
+        for (queue, encodings) in [(first, 3), (second, 0)] {
             let expected = expected.clone();
             std::thread::spawn(move || {
                 DEFERRED_SERIALIZATIONS.with(|count| count.set(0));
