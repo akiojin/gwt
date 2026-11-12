@@ -6086,6 +6086,11 @@ button.workspace-board-ref:focus-visible {
 .pm-chat__task-criteria > summary { cursor: pointer; color: var(--color-text); border-radius: var(--radius-sm); }
 .pm-chat__task-criteria > summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .pm-chat__task-criteria ol { padding-inline-start: var(--space-5); }
+.pm-chat__task-detail { margin: var(--space-2) var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); max-height: 28rem; overflow: auto; }
+.pm-chat__task-detail h3, .pm-chat__task-detail h4 { margin: var(--space-2) 0; font-size: var(--type-sm); }
+.pm-chat__task-detail-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--space-2) 0; }
+.pm-chat__task-detail ol { padding-inline-start: var(--space-5); }
+.pm-chat__task-detail :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 @container (max-width: 760px) {
   .pm-chat--chat .pm-chat__workspace { flex-direction: column; }
   .pm-chat--chat .pm-chat__tasks { order: -1; flex-basis: 35%; max-height: 40%; max-width: none; border-inline-start: 0; border-bottom: 1px solid var(--color-border); }

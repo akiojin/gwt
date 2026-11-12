@@ -1724,7 +1724,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -2033,6 +2033,20 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       const rootKey = createHash('sha256').update(rootTask.draft.id).digest('hex');
       const rootRow = tasksView.locator(`[data-task-key="${rootKey}"]`);
+      const detailButton = rootRow.getByRole('button', { name: 'View task details', exact: true });
+      await detailButton.focus();
+      await page.keyboard.press('Enter');
+      const taskDetail = tasksView.getByRole('region', { name: 'Selected task details' });
+      await expect(taskDetail).toBeVisible();
+      await expect(taskDetail).toContainText(original);
+      await expect(taskDetail).toContainText('Showing 6 of 6 completion criteria');
+      await expect(taskDetail).toContainText('SIXTH_CRITERION_NOT_IN_PREVIEW');
+      await expect(taskDetail).toContainText('Showing 1 of 1 recorded changes');
+      await expect(taskDetail).toContainText('Synthetic overview fixture only');
+      await expect(taskDetail.locator('literal')).toHaveCount(0);
+      expect(readFileSync(statePath, 'utf8')).toBe(overviewBytes, 'detail reads never write the store');
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
+      await expect(detailButton).toBeFocused();
       const progress = rootRow.locator('.pm-chat__task-meta').filter({ hasText: 'Direct subtasks:' });
       await expect(progress).toHaveText('Direct subtasks: 1 completed · 0 cancelled · 1 unfinished (2 total)');
       await expect(rootRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
@@ -2076,6 +2090,10 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(rootRow).toContainText('PM reviewer');
       await expect(criteria).toHaveAttribute('open');
       await expect(criteriaSummary).toBeFocused();
+      await detailButton.click();
+      await expect(taskDetail).toContainText('Showing 2 of 2 recorded changes');
+      await expect(taskDetail).toContainText('Refresh the saved Task summary');
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).focus();
       try {
         writeFileSync(statePath, 'broken task store');
         await refreshPmReports(page);
@@ -2083,14 +2101,39 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(tasksView.locator('.pm-chat__task')).toHaveCount(4);
         await expect(progress).toHaveText('Direct subtasks: 1 completed · 0 cancelled · 1 unfinished (2 total)');
         await expect(criteria).toHaveAttribute('open');
-        await expect(criteriaSummary).toBeFocused();
+        await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
         await expect(criteria.locator('ol li')).toHaveCount(5);
         await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+        const detailErrorCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+        await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).click();
+        const detailError = await page.waitForFunction(({ cursor, id }) =>
+          (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+            && entry.payload.kind === 'pm_request_task' && entry.payload.id === id)?.payload,
+        { cursor: detailErrorCursor, id: scopedWindowId }).then(handle => handle.jsonValue());
+        expect(detailError.result).toMatchObject({ state: 'error', code: 'unreadable_store' });
+        await expect(taskDetail).toContainText('Request task details could not be read.');
+        await expect(taskDetail).not.toContainText('Loading task details');
+        await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
+        await expect(taskDetail).toContainText('last confirmed');
+        await expect(taskDetail).toContainText(original);
+        await expect(taskDetail).not.toContainText('broken task store');
       } finally {
         writeFileSync(statePath, overviewBytes);
       }
       await refreshPmReports(page);
       await expect(tasksView.getByRole('status')).toContainText('4 of 4 recorded tasks shown');
+      const detailRecoveryCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).click();
+      const detailRecovery = await page.waitForFunction(({ cursor, id }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+          && entry.payload.kind === 'pm_request_task' && entry.payload.id === id)?.payload,
+      { cursor: detailRecoveryCursor, id: scopedWindowId }).then(handle => handle.jsonValue());
+      expect(detailRecovery.result).toMatchObject({ state: 'detail', revision: criteriaUpdate.revision, key: rootKey });
+      await expect(taskDetail).toContainText('Selected snapshot revision');
+      await expect(taskDetail).not.toContainText('last confirmed');
+      await expect(taskDetail).not.toContainText('Loading task details');
+      await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
       await chat.getByRole('button', { name: 'Chat', exact: true }).click();
       const conversation = chat.getByRole('region', { name: 'PM conversation' });
       await expect(conversation).toBeVisible();
@@ -2138,6 +2181,27 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await page.setViewportSize({ width: 404, height: 1000 });
       const criteriaPane = page.locator('.workspace-window').filter({ has: chat });
       await expect.poll(async () => Math.round((await criteriaPane.boundingBox())!.width)).toBe(400);
+      const doneKey = createHash('sha256').update(doneChild.draft.id).digest('hex');
+      await tasksView.locator(`[data-task-key="${doneKey}"]`).getByRole('button', { name: 'View task details', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await expect(taskDetail).toContainText('synthetic:verified-child-outcome');
+      await expect(taskDetail).toContainText('Showing 1 of 1 evidence references');
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).focus();
+      await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeInViewport({ ratio: 1 });
+      expect(await taskDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const detailScreenshot = info.outputPath(`task-detail-${theme}-400.png`);
+      await chat.screenshot({ path: detailScreenshot });
+      await info.attach(`T-TASK-DETAIL ${theme} 400px`, { path: detailScreenshot, contentType: 'image/png' });
+      const evidenceText = taskDetail.getByText('synthetic:verified-child-outcome', { exact: true });
+      await evidenceText.scrollIntoViewIfNeeded();
+      const historyHeading = taskDetail.getByRole('heading', { name: 'Recent recorded changes', exact: true });
+      await historyHeading.scrollIntoViewIfNeeded();
+      await expect(evidenceText).toBeInViewport({ ratio: 1 });
+      await expect(historyHeading).toBeInViewport({ ratio: 1 });
+      const evidenceScreenshot = info.outputPath(`task-detail-evidence-${theme}-400.png`);
+      await chat.screenshot({ path: evidenceScreenshot });
+      await info.attach(`T-TASK-DETAIL ${theme} evidence 400px`, { path: evidenceScreenshot, contentType: 'image/png' });
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
       await criteriaSummary.scrollIntoViewIfNeeded();
       await criteriaSummary.focus();
       await expect(criteriaSummary).toBeFocused();

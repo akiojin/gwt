@@ -20,6 +20,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const visibility = [], copied = [], sent = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
@@ -72,6 +73,96 @@ const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revi
 const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task ${key}`,
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
+
+const bounded = text => ({ text, total_chars: [...text].length });
+const selectedDetail = () => ({ original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
+  completion_conditions: [bounded('Verify <criterion>')], completion_condition_total: 2,
+  evidence: [bounded('proof:<literal>')], evidence_total: 2, history_total: 2,
+  history: [{ revision: 4, action: 'complete', actor_kind: 'pm', actor_id: bounded('PM reviewer'),
+    at: '2026-11-13T00:00:00Z', reason: bounded('Verified <outcome>') }] });
+const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+  result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
+
+test('selected Task reads correlate key, request and Session and retain confirmed stale data', () => {
+  const { model, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one'), trackedTask('two')]) });
+  assert.equal(typeof model.requestPmTaskDetail, 'function');
+  const first = model.requestPmTaskDetail('pm', 'one');
+  assert.deepEqual(first, { kind: 'load_pm_request_task', id: 'pm', request_id: first.request_id, task_key: 'one' });
+  const second = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent(detailReply(first));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'loading');
+  model.applyPmWindowReceiveEvent(detailReply(second, { key: 'one' }));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'loading');
+  model.applyPmWindowReceiveEvent(detailReply(second));
+  const confirmed = model.readPmWindowState().windows.pm.taskDetail.data;
+  assert.equal(confirmed.original.text, 'Exact <original>\nrequest');
+  update([], null, { request_tasks: { ...taskOverview([]), revision: 5 } });
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  const reload = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent(detailReply(reload));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'error', 'older revision cannot refresh detail');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+  const retry = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent({ ...detailReply(retry), result: { state: 'error', message: 'Restore saved data.' } });
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+  const pending = model.requestPmTaskDetail('pm', 'two');
+  model.bindPmWindowState('pm', 'replacement');
+  model.applyPmWindowReceiveEvent(detailReply(pending));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail, null);
+});
+
+test('Tasks and Chat expose literal bounded selected detail with reload, Close and retained draft', () => {
+  const { root, view, model, sent, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep my draft';
+  const button = [...root.querySelectorAll('.pm-chat__task button')].find(node => node.textContent === 'View task details');
+  assert.ok(button, 'selected details are reachable from the shared row');
+  button.click();
+  const request = sent.at(-1);
+  model.applyPmWindowReceiveEvent(detailReply(request));
+  const detail = root.querySelector('.pm-chat__task-detail');
+  assert.equal(detail.getAttribute('aria-label'), 'Selected task details');
+  assert.match(detail.textContent, /Exact <original>\nrequest/);
+  assert.match(detail.textContent, /Showing 1 of 2 completion criteria/);
+  assert.match(detail.textContent, /Showing 1 of 2 evidence references/);
+  assert.match(detail.textContent, /Showing 1 of 2 recorded changes/);
+  assert.match(detail.textContent, /Verified <outcome>/);
+  assert.equal(detail.querySelectorAll('original,criterion,literal,outcome').length, 0);
+  assert.equal(draft.value, 'Keep my draft');
+  const tasks = [...root.querySelectorAll('.pm-chat__toolbar button')].find(node => node.textContent === 'Tasks');
+  tasks.click();
+  assert.equal(detail.hidden, false);
+  const reload = [...detail.querySelectorAll('button')].find(node => node.textContent === 'Reload details');
+  reload.click();
+  model.markPmTaskDetailUnavailable('pm');
+  assert.match(detail.textContent, /last confirmed|stale/i);
+  assert.match(detail.textContent, /Exact <original>/);
+  [...detail.querySelectorAll('button')].find(node => node.textContent === 'Close details').click();
+  assert.equal(detail.hidden, true);
+  assert.equal(draft.value, 'Keep my draft');
+});
+
+test('selected detail reload cannot roll back a confirmed revision ahead of the overview', () => {
+  const { model, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const first = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(first, { revision: 6 }));
+  const confirmed = model.readPmWindowState().windows.pm.taskDetail.data;
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'error');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.revision, 6);
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+});
+
+test('selected Task detail styles use Operator tokens and preserve literal whitespace', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  assert.match(css, /\.pm-chat__task-detail\s*\{[^}]*var\(--color-border\)/);
+  assert.match(css, /\.pm-chat__task-detail-text\s*\{[^}]*white-space:\s*pre-wrap/);
+});
 
 test('Home opens Chat in one action and rebinds without showing the previous conversation (AC-3431-CHAT-1)', () => {
   const { root, model, view } = fixture({ tasksDefault: true });
