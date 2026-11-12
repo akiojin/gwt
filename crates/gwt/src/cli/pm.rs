@@ -1144,12 +1144,6 @@ fn request_tasks(
     Ok(code)
 }
 
-fn native_request_source_id(provider: &str, conversation: &str, message: &str) -> String {
-    let identity = serde_json::to_vec(&(provider, conversation, message))
-        .expect("native identity is a serializable string tuple");
-    format!("native:{}", gwt_core::pm_authorization::digest(&identity))
-}
-
 /// Native selection never consumes a hook observation or accepts authored text.
 fn native_request_tasks(
     actor: &str,
@@ -1158,7 +1152,9 @@ fn native_request_tasks(
     selector: Option<&RequestTaskSelector>,
     capture: Option<&NativeCaptureRequest>,
 ) -> Result<serde_json::Value, gwt_core::pm_request_tasks::TaskError> {
-    use crate::pm_conversation::{PmConversationAvailability, PmConversationRole};
+    use crate::pm_conversation::{
+        native_request_source_id, PmConversationAvailability, PmConversationRole,
+    };
     use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, IntakeSource, Request, TaskError};
     use serde_json::json;
 

@@ -1665,7 +1665,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1897,7 +1897,9 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       // Extend this owned, receipt-consistent fixture for read-only overview
       // coverage. This scaffolding does not prove native intake or PM actions.
       const overviewState = JSON.parse(updatedBytes);
-      const overviewSource = { ...seed.sources[pendingTask.source_id], id: 'overview-source',
+      const nativeConversation = `task-link-${theme}`;
+      const sourceId = `native:${createHash('sha256').update(JSON.stringify(['codex', nativeConversation, 'task-human'])).digest('hex')}`;
+      const overviewSource = { ...seed.sources[pendingTask.source_id], id: sourceId,
         authority: { ...seed.sources[pendingTask.source_id].authority, turn_id: 'synthetic-overview-turn' } };
       const rootTask = { ...pendingTask, source_id: overviewSource.id,
         draft: { ...draft, id: 'overview-root', title: 'Original request still pending', assignee: 'PM' } };
@@ -1922,6 +1924,20 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       overviewState.tasks[childTask.draft.id] = waitingChild;
       const overviewBytes = JSON.stringify(overviewState);
       writeFileSync(statePath, overviewBytes);
+      // Real native-reader projection plus synthetic TaskStore scaffolding:
+      // this proves source navigation, not live provider intake/classification.
+      const nativePath = join(target.home, '.codex/sessions/2026/11/12', `rollout-${nativeConversation}.jsonl`);
+      mkdirSync(join(nativePath, '..'), { recursive: true });
+      const nativeRecords = [
+        { type: 'session_meta', payload: { id: nativeConversation, cwd: target.project } },
+        { type: 'response_item', payload: { type: 'message', id: 'task-human', role: 'user', content: [{ type: 'input_text', text: original }] } },
+        ...Array.from({ length: 20 }, (_, index) => ({ type: 'response_item', payload: {
+          type: 'message', id: `followup-${index}`, role: 'user', content: [{ type: 'input_text', text: `Followup ${index}` }],
+        } })),
+      ];
+      writeFileSync(nativePath, nativeRecords.map(record => JSON.stringify(record)).join('\n') + '\n');
+      const sessionPath = join(target.home, '.gwt/sessions', `${SESSION}.toml`);
+      appendFileSync(sessionPath, `\ndisplay_name = "PM"\nagent_session_id = "${nativeConversation}"\n`);
       await gotoPmReports(page, undefined, target.url, true);
       const chat = page.locator('.pm-chat');
       const tasksView = chat.getByRole('region', { name: 'Request tasks' });
@@ -1949,6 +1965,40 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       }
       await refreshPmReports(page);
       await expect(tasksView.getByRole('status')).toContainText('3 of 3 recorded tasks shown');
+      await chat.getByRole('button', { name: 'Chat', exact: true }).click();
+      const conversation = chat.getByRole('region', { name: 'PM conversation' });
+      await expect(conversation).toBeVisible();
+      await expect(tasksView).toBeVisible();
+      const sourceMessage = conversation.locator('[data-message-id="task-human"]');
+      await expect(sourceMessage).toHaveText(original);
+      const link = tasksView.locator('.pm-chat__task').filter({ hasText: 'Verify remaining outcome' })
+        .getByRole('button', { name: 'Show in conversation', exact: true });
+      await expect(link).toBeEnabled();
+      const composerDraft = conversation.getByRole('textbox', { name: 'Message to PM' });
+      await composerDraft.fill('Keep this draft while reviewing the original request');
+      await link.focus();
+      await page.keyboard.press('Enter');
+      await expect(sourceMessage).toBeFocused();
+      await expect(sourceMessage).toBeInViewport();
+      await expect(composerDraft).toHaveValue('Keep this draft while reviewing the original request');
+      await info.attach(`T-CHAT-TASK-LINK ${theme} wide`, { body: await chat.screenshot(), contentType: 'image/png' });
+      // A rewritten native window cannot retain the prior source link, even
+      // when another human message repeats the original request verbatim.
+      nativeRecords[1].payload.id = 'different-human';
+      writeFileSync(`${nativePath}.replacement`, nativeRecords.map(record => JSON.stringify(record)).join('\n') + '\n');
+      renameSync(`${nativePath}.replacement`, nativePath);
+      await sendLiveGwtEvent(page, { kind: 'load_pm_conversation', id: windowId });
+      await expect(conversation.locator('[data-message-id="different-human"]')).toHaveText(original);
+      await expect(link).toBeDisabled();
+      await expect(tasksView).toContainText('The original message is not in the current conversation preview.');
+      await expect(composerDraft).toHaveValue('Keep this draft while reviewing the original request');
+      await page.setViewportSize({ width: 720, height: 1000 });
+      await expect(conversation).toBeVisible();
+      await expect(tasksView).toBeVisible();
+      expect(await chat.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const tasksBox = (await tasksView.boundingBox())!, conversationBox = (await conversation.boundingBox())!;
+      expect(tasksBox.y + tasksBox.height).toBeLessThanOrEqual(conversationBox.y + 1);
+      await info.attach(`T-CHAT-TASK-LINK ${theme} narrow`, { body: await chat.screenshot(), contentType: 'image/png' });
       await chat.getByRole('button', { name: 'Reports', exact: true }).click();
       await expect(chat.locator('.pm-chat__body')).toBeVisible();
       await chat.getByRole('button', { name: 'Execution log', exact: true }).click();
