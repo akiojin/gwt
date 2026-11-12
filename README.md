@@ -308,8 +308,8 @@ integration and validation; the existing LAN bind example is not that setup.
 
 #### Offline Host credential administration (Unix, from source)
 
-`cargo build -p gwt --bin gwt-mobile-coordinator` builds the offline registry
-administrator. It provides no listener or phone connection. Use a trusted user
+`cargo build -p gwt --bin gwt-mobile-coordinator` builds the registry
+administrator. Without arguments it handles offline requests. Use a trusted user
 home outside repositories, with non-replaceable ancestors. Provision
 `$HOME/.gwt`, `$HOME/.gwt/mobile`, and `$HOME/.gwt/mobile/coordinator` as directories
 owned by your OS user with mode `0700`. Symlinks and macOS extended ACL entries
@@ -349,6 +349,53 @@ current records before deciding what to do; do not automatically repeat issuance
 For private-storage or clock errors, repair the reported prerequisite and retry
 without deleting the registry or its revocation records. `--help` lists the
 supported request fields and storage requirements.
+
+#### Coordinator HTTPS startup (Unix, from source)
+
+The same binary provides an explicit `serve` command for deployment checks.
+It currently returns **404 for every HTTP request**: registration, signaling,
+client assets, and phone connections are not available.
+
+Prepare the private directories above, initialize the registry, and place a
+matching PEM certificate chain and private key in private storage outside any
+repository. Each TLS file must be owned by your OS user, a single-link regular
+file with mode `0600`, in an owned `0700` directory, without symlinks or macOS
+extended ACL entries. Keep the home and all storage ancestors trusted and
+non-replaceable, and do not edit files in place while loading or serving.
+
+Write `$HOME/.gwt/mobile/coordinator/config.json` as an owned, single-link
+`0600` file. Replace the example TLS paths with your absolute private paths:
+
+```json
+{
+  "schema_version": 1,
+  "origin": "https://coordinator.example",
+  "bind": "127.0.0.1:8443",
+  "tls_certificate": "/private/coordinator/cert.pem",
+  "tls_private_key": "/private/coordinator/key.pem",
+  "limits": {
+    "registrations": 64,
+    "peers_per_host": 8,
+    "device_messages_per_second": 32,
+    "device_burst": 64,
+    "host_messages_per_second": 256,
+    "host_burst": 512
+  }
+}
+```
+
+Run `target/debug/gwt-mobile-coordinator serve`. Only this explicit command
+starts the listener; a configuration file alone does not enable it. A successful
+startup writes one JSON `listening` receipt with the bound address to stdout.
+Missing or invalid configuration, TLS, registry, or a busy registry fails with a
+fixed diagnostic and nonzero exit. Correct the cause and explicitly retry;
+startup does not initialize the registry or repair permissions.
+
+SIGINT or SIGTERM stops accepting connections and drains existing HTTP
+connections before releasing the registry lock and exiting. There is no forced
+drain deadline or total HTTP connection limit yet. Stop the server before
+offline administration. This is a deployment foundation, not a complete public
+mobile service; the normal desktop listener remains unchanged.
 
 #### Offline PC credential import and inspection (Unix, from source)
 

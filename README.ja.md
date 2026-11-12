@@ -293,8 +293,8 @@ iOS Safari / Android Chrome から安全に操作する接続機能を
 
 #### 停止中の Host 資格管理（Unix・ソースからビルド）
 
-`cargo build -p gwt --bin gwt-mobile-coordinator` で停止中の台帳管理コマンドを
-ビルドできます。待受やスマートフォン接続は提供しません。祖先が信頼でき、置換されない、
+`cargo build -p gwt --bin gwt-mobile-coordinator` で台帳管理コマンドを
+ビルドできます。引数なしでは停止中の管理要求を処理します。祖先が信頼でき、置換されない、
 repository 外のユーザー home を使ってください。`$HOME/.gwt`、`$HOME/.gwt/mobile`、
 `$HOME/.gwt/mobile/coordinator` は、OS ユーザーが所有する mode `0700` の directory として
 事前に用意します。symlink と macOS の拡張 ACL entry は拒否します。既存の権限を確認し、
@@ -330,6 +330,50 @@ path・secret・時計上書きは request field にありません。発行成�
 停止して再試行します。`commit_uncertain` なら `status` で現在の記録を確認してから判断し、
 自動再発行しないでください。私有保存や時計の error は表示された前提条件を修復して
 再試行し、台帳や失効記録は削除しないでください。`--help` でも field と保存条件を確認できます。
+
+#### Coordinator の HTTPS 起動（Unix・ソースからビルド）
+
+同じ binary の明示的な `serve` コマンドで配置を点検できます。現在は**すべての
+HTTP 要求に 404 を返します**。登録・signaling・client asset・スマートフォン接続は
+まだ利用できません。
+
+上記の私有 directory を用意して台帳を初期化し、対応する PEM 証明書チェーンと秘密鍵を
+repository 外の私有領域に配置してください。各 TLS file は OS ユーザー所有の
+single-link regular file、mode `0600` とし、親 directory は同じユーザー所有の
+`0700` にします。symlink と macOS の拡張 ACL entry は使えません。home と保存先の
+全祖先を信頼できる非置換の状態に保ち、読込み中・稼働中は file を直接書き換えないでください。
+
+`$HOME/.gwt/mobile/coordinator/config.json` をユーザー所有・single-link・`0600` で
+配置します。例の TLS path は実際の私有 file の絶対 path に置き換えてください。
+
+```json
+{
+  "schema_version": 1,
+  "origin": "https://coordinator.example",
+  "bind": "127.0.0.1:8443",
+  "tls_certificate": "/private/coordinator/cert.pem",
+  "tls_private_key": "/private/coordinator/key.pem",
+  "limits": {
+    "registrations": 64,
+    "peers_per_host": 8,
+    "device_messages_per_second": 32,
+    "device_burst": 64,
+    "host_messages_per_second": 256,
+    "host_burst": 512
+  }
+}
+```
+
+`target/debug/gwt-mobile-coordinator serve` を実行します。この明示コマンドだけが
+待受を開始し、設定 file が存在するだけでは起動しません。起動成功時は待受 address を
+含む JSON の `listening` receipt を標準出力へ 1 行出力します。設定・TLS・台帳の
+欠損や不正、台帳 lock の競合では固定診断と非 0 終了を返します。原因を修復して明示的に
+再実行してください。起動処理は台帳の初期化や権限修復を行いません。
+
+SIGINT または SIGTERM で新規接続の受入を止め、既存 HTTP 接続の終了後に台帳 lock を
+解放して終了します。強制 drain 期限や HTTP 総接続数の上限はまだありません。
+停止中の台帳管理を行う前に server を停止してください。これは配置用の基盤であり、
+公開モバイル service の完成版ではありません。通常の desktop 待受は変更しません。
 
 #### PC 資格の offline import と点検（Unix、source build）
 
