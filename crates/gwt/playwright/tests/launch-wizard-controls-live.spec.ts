@@ -12,6 +12,7 @@
  * Like the Fast mode live spec, the whole suite is gated on
  * GWT_PLAYWRIGHT_BASE_URL and stops before any real launch.
  */
+import { randomUUID } from "node:crypto";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   acquireLiveGwtBackendLock,
@@ -30,10 +31,18 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
   let cleanupLaunchFixture: (() => Promise<void>) | undefined;
+  let pmEditorRequests: any[] = [];
 
   test.beforeEach(async ({ page }, testInfo) => {
     cleanupLaunchFixture = undefined;
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
+    pmEditorRequests = [];
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      try {
+        const request = JSON.parse(String(payload));
+        if (["agent_roster", "set_pm_launch_profile", "open_pm_agent", "restart_pm_agent"].includes(request.kind)) pmEditorRequests.push(request);
+      } catch { /* Unrelated frames are not retained. */ }
+    }));
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
@@ -170,116 +179,154 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     expect(consoleErrors).toEqual([]);
   });
 
-  test("PM settings persist a Grok launch profile and render pending restart state", async ({
-    page,
-  }) => {
-    const pageErrors: string[] = [];
-    const consoleErrors: string[] = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
-
-    const settingsWindow = page.locator(
-      '.workspace-window[data-preset="settings"]',
-    );
-    const panel = settingsWindow.locator(
-      '[data-settings-panel="project-manager"]',
-    );
-    await page.getByRole("button", { name: "Project Manager settings" }).click();
-    await expect(settingsWindow).toBeVisible();
-    await expect(
-      settingsWindow.locator('[data-settings-tab="project-manager"]'),
-    ).toHaveAttribute("aria-selected", "true");
-    await expect(panel).toBeVisible();
-
-    const agent = panel.locator('[data-role="pm-agent-select"]');
-    const model = panel.locator('[data-role="pm-model-input"]');
-    const effort = panel.locator('[data-role="pm-effort-select"]');
-    await expect(agent.locator('option[value="grok"]')).toHaveText("Grok Build");
-
-    await agent.selectOption("claude");
-    await expect(effort.locator('option[value="ultracode"]')).toHaveText(
-      "Ultracode",
-    );
-    await agent.selectOption("grok");
+  test("PM settings persist a Grok launch profile and render pending restart state", async ({ page }, testInfo) => {
+    const pageErrors: string[] = [], consoleErrors: string[] = [];
+    page.on("pageerror", error => pageErrors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+    const currentPmStatus = async (target: Page) => target.evaluate(() => ((window as any).__gwtPlaywrightMessages || [])
+      .filter(({ payload }: any) => payload.kind === "pm_status").at(-1)?.payload);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    const detail = surface.locator(".roster-detail");
+    const projectKey = new URL(page.url()).pathname.slice(3);
+    expect(projectKey).toMatch(/^[a-f0-9]+$/);
+    await expect.poll(() => currentPmStatus(page)).toMatchObject({ project_key: projectKey, auto_start: false, is_running: false });
+    const rosterMutation = async (kind: string, submit: () => Promise<void>) => {
+      const start = pmEditorRequests.length;
+      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      await submit();
+      await expect.poll(() => pmEditorRequests.slice(start).find(request => request.kind === "agent_roster" && request.action?.kind === kind)?.request_id).toBeTruthy();
+      const request = pmEditorRequests.slice(start).find(request => request.kind === "agent_roster" && request.action?.kind === kind);
+      expect(request.project_key).toBe(projectKey);
+      const reply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === requestId && ["agent_roster", "agent_roster_error"].includes(entry.payload.kind))?.payload,
+      { after, requestId: request.request_id }).then(handle => handle.jsonValue());
+      expect(reply.kind, reply.message || reply.roster?.error).toBe("agent_roster");
+      expect(reply.roster.project_key).toBe(projectKey); expect(reply.roster.error).toBeNull();
+      return reply.roster;
+    };
+    const memberName = `PM editor Grok ${testInfo.project.name}-${randomUUID().slice(0, 8)}`;
+    await surface.getByRole("textbox", { name: "Name for new member", exact: true }).fill(memberName);
+    await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("claude");
+    await surface.getByRole("checkbox", { name: "PM eligible for new member", exact: true }).check();
+    const registered = await rosterMutation("add", () => surface.locator('.roster-capacity [data-action="add"]').click());
+    const member = registered.members.find((value: any) => value.name === memberName);
+    expect(member).toMatchObject({ agent_id: "claude", enabled: true, pm_eligible: true, assignment: null });
+    const memberId = member.agent_member_id;
+    expect(memberId).toMatch(/^[0-9a-f-]{36}$/i);
+    await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+    const selected = await rosterMutation("select_pm", () => detail.locator('[data-action="select-pm"]').click());
+    expect(selected.members.find((value: any) => value.agent_member_id === memberId)?.pm_project_key).toBe(projectKey);
+    await expect.poll(() => currentPmStatus(page)).toMatchObject({ project_key: projectKey, configured_member_id: memberId, is_running: false });
+    let profileRevision = (await currentPmStatus(page)).profile_revision;
+    expect(profileRevision).toBeTruthy();
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    const saveProfile = async (field: string, value: string) => {
+      const start = pmEditorRequests.length;
+      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      const input = detail.locator(`[data-member-tuning-field="${field}"]`);
+      const wireField = field;
+      const expected = value || null;
+      const before = await currentPmStatus(page);
+      expect(before).toMatchObject({ project_key: projectKey, configured_member_id: memberId, profile_revision: profileRevision, is_running: false });
+      if ((before[`configured_${wireField}`] ?? null) === expected) {
+        await expect(input).toHaveValue(value);
+        await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+        await expect(detail.locator('[data-member-tuning-revision]')).toHaveText(`Revision: ${profileRevision}`);
+        expect(pmEditorRequests.slice(start).filter(request => request.kind === "set_pm_launch_profile"), "an unchanged saved field needs no write").toEqual([]);
+        return;
+      }
+      await input.fill(value);
+      await expect.poll(() => pmEditorRequests.slice(start).find(request => request.kind === "set_pm_launch_profile")?.request_id).toBeTruthy();
+      const request = pmEditorRequests.slice(start).find(request => request.kind === "set_pm_launch_profile");
+      expect(request).toMatchObject({ project_key: projectKey, member_id: memberId, expected_profile_revision: profileRevision });
+      expect(request[wireField] ?? null).toBe(expected);
+      const reply = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "pm_launch_profile_result" && entry.payload.request_id === requestId)?.payload,
+      { after, requestId: request.request_id }).then(handle => handle.jsonValue());
+      expect(reply, reply.message).toMatchObject({ success: true, project_key: projectKey, member_id: memberId });
+      expect(reply.profile[wireField] ?? null).toBe(expected);
+      expect(reply.profile_revision).toBeTruthy(); profileRevision = reply.profile_revision;
+      await expect.poll(async () => {
+        const status = await currentPmStatus(page);
+        return { project: status?.project_key, member: status?.configured_member_id, revision: status?.profile_revision,
+          value: status?.[`configured_${wireField}`] ?? null, running: status?.is_running };
+      }).toEqual({ project: projectKey, member: memberId, revision: profileRevision, value: expected, running: false });
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(detail.locator('[data-member-tuning-revision]')).toHaveText(`Revision: ${profileRevision}`);
+    };
+    const agent = detail.locator('[data-member-tuning-field="agent_id"]');
+    const model = detail.locator('[data-member-tuning-field="model"]');
+    const effort = detail.locator('[data-member-tuning-field="reasoning"]');
+    await saveProfile("agent_id", "claude");
+    const claudeStatus = await currentPmStatus(page);
+    const claudeCatalog = await page.evaluate(project => ((window as any).__gwtPlaywrightMessages || [])
+      .filter(({ payload }: any) => payload.kind === "agent_roster" && payload.roster.project_key === project).at(-1)?.payload.roster.tuning_choices
+      ?.find((choice: any) => choice.id === "claude"), projectKey);
+    expect(claudeCatalog, "the shared roster supplies Claude's current catalog").toBeTruthy();
+    const claudeModel = claudeCatalog.models.find((choice: any) => choice.value === claudeStatus.configured_model);
+    const claudeEfforts = (claudeModel?.reasoning_options || claudeCatalog.reasoning_options).map((choice: any) => choice.value);
+    expect(claudeEfforts).toEqual(expect.arrayContaining(["auto", "low", "medium", "high"]));
+    for (const foreign of ["none", "minimal", "ultra"]) expect(claudeEfforts).not.toContain(foreign);
+    await expect.poll(() => effort.locator("..").locator("datalist option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value)))
+      .toEqual(claudeEfforts);
+    await saveProfile("agent_id", "grok");
     await expect(agent).toHaveValue("grok");
-    // The select updates locally before the backend's pm_status round-trip.
-    // Wait for the Grok-specific effort catalog so a fast model edit cannot
-    // be overwritten by the preceding profile snapshot.
-    await expect(effort.locator('option[value="none"]')).toHaveText("None");
-    await model.fill("team/grok-code-fast");
-    await model.blur();
-    await expect(async () => {
-      await expect(model).toHaveValue("team/grok-code-fast");
-      await page.waitForTimeout(250);
-      await expect(model).toHaveValue("team/grok-code-fast");
-    }).toPass({ timeout: 5_000 });
-    await effort.selectOption("high");
-    await expect(async () => {
-      await expect(effort).toHaveValue("high");
-      await expect(model).toHaveValue("team/grok-code-fast");
-      await page.waitForTimeout(250);
-      await expect(effort).toHaveValue("high");
-      await expect(model).toHaveValue("team/grok-code-fast");
-    }).toPass({ timeout: 5_000 });
-    await expect(effort.locator("option")).toHaveText([
-      "Auto",
-      "None",
-      "Minimal",
-      "Low",
-      "Medium",
-      "High",
-      "Extra high",
-      "Max",
-    ]);
-
-    // Restore the backend profile before using a synthetic running snapshot
-    // to exercise the otherwise destructive pending/restart presentation.
-    await model.fill("");
-    await model.blur();
-    await effort.selectOption("");
-    await agent.selectOption("claude");
-    await expect(agent).toHaveValue("claude");
-    await expect(effort.locator('option[value="ultracode"]')).toHaveText(
-      "Ultracode",
-    );
-
-    await page.evaluate(() => {
-      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
-        detail: {
-          kind: "pm_status",
-          auto_start: false,
-          agent_options: [
-            { id: "claude", name: "Claude Code" },
-            { id: "codex", name: "Codex" },
-            { id: "grok", name: "Grok Build" },
-          ],
-          configured_agent_id: "grok",
-          configured_model: "team/grok-code-fast",
-          configured_reasoning: "high",
-          running_agent_id: "claude",
-          running_model: "sonnet",
-          running_reasoning: "medium",
-          is_running: true,
-        },
-      }));
-    });
-    await expect(panel.locator('[data-role="pm-running-as"]')).toContainText(
-      "Running as: Claude Code · Model: sonnet · Effort: medium",
-    );
-    await expect(panel.locator('[data-role="pm-pending-chip"]')).toBeVisible();
-
+    expect((await currentPmStatus(page)).agent_options).toContainEqual({ id: "grok", name: "Grok Build" });
+    await expect(agent.locator("..").locator('datalist option[value="grok"]')).toHaveCount(1);
+    await expect.poll(() => effort.locator("..").locator("datalist option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value)))
+      .toEqual(["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    await saveProfile("model", "team/grok-code-fast");
+    await saveProfile("reasoning", "high");
+    await expect(model).toHaveValue("team/grok-code-fast");
+    await expect(effort).toHaveValue("high");
+    await page.reload();
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    // Navigation needs the current project's hydrated PM identity.
+    await expect.poll(() => currentPmStatus(page)).toMatchObject({ project_key: projectKey, configured_member_id: memberId,
+      profile_revision: profileRevision, configured_agent_id: "grok", configured_model: "team/grok-code-fast", configured_reasoning: "high", is_running: false });
+    await page.locator(".pm-launcher-shell").hover();
+    await page.getByRole("button", { name: "Project Manager settings" }).click();
+    await expect(surface).toBeVisible();
+    await expect(surface.locator(`.roster-row[data-member-id="${memberId}"]`)).toHaveAttribute("aria-selected", "true");
+    await expect(agent).toHaveValue("grok");
+    await expect(model).toHaveValue("team/grok-code-fast");
+    await expect(effort).toHaveValue("high");
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    await expect(detail.locator('[data-member-tuning-revision]')).toHaveText(`Revision: ${profileRevision}`);
+    const saved = await currentPmStatus(page);
+    // Only running facts are synthetic: the saved identity/profile stays the
+    // real backend readback, and dismissing Restart performs no paid launch.
+    // Isolate this presentation fixture from real stopped PM snapshots. Drain
+    // already-queued messages first; the final reload restores live delivery.
+    const liveSockets = await page.evaluate(project => {
+      const sockets: WebSocket[] = ((window as any).__gwtPlaywrightSockets || [])
+        .filter((socket: WebSocket) => socket.readyState === WebSocket.OPEN);
+      for (const socket of sockets) socket.addEventListener("message", event => {
+        let payload;
+        try { payload = JSON.parse(String(event.data)); } catch { return; }
+        if (payload.kind === "pm_status" && payload.project_key === project) event.stopImmediatePropagation();
+      }, { capture: true });
+      return sockets.length;
+    }, projectKey);
+    expect(liveSockets).toBeGreaterThan(0);
+    await expect.poll(() => page.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("pm-presentation-probe").outputPending)).toBe(false);
+    await page.evaluate(status => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      ...status, running_agent_id: "claude", running_model: "sonnet", running_reasoning: "medium", is_running: true,
+    } })), saved);
+    const operations = surface.locator('[data-role="pm-project-operations"]');
+    await expect(operations.locator('[data-role="pm-running-as"]')).toContainText("Running as: Claude Code · Model: sonnet · Effort: medium");
+    await expect(operations.locator('[data-role="pm-pending-chip"]')).toBeVisible();
     let restartPrompt = "";
-    page.once("dialog", async (dialog) => {
-      restartPrompt = dialog.message();
-      await dialog.dismiss();
-    });
-    await panel.locator('[data-role="pm-restart"]').click();
+    page.once("dialog", async dialog => { restartPrompt = dialog.message(); await dialog.dismiss(); });
+    await operations.locator('[data-role="pm-restart"]').click();
     await expect.poll(() => restartPrompt).toContain("new conversation");
-    await page.evaluate(() => new Promise(requestAnimationFrame));
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    await page.reload();
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await expect.poll(() => currentPmStatus(page)).toMatchObject({ configured_member_id: memberId, configured_agent_id: "grok",
+      configured_model: "team/grok-code-fast", configured_reasoning: "high", is_running: false });
+    expect(pmEditorRequests.filter(request => ["open_pm_agent", "restart_pm_agent"].includes(request.kind))).toEqual([]);
+    expect(pageErrors).toEqual([]); expect(consoleErrors).toEqual([]);
   });
 
   test("Claude model rows preserve versionless labels and alias selections", async ({
