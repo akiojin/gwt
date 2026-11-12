@@ -213,6 +213,13 @@ export function applyTelemetryCounts(doc, counts = {}) {
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
 }
 
+export function subscribeWorkAttentionSummary(doc, model) {
+  return model.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+    const cell = doc.querySelector(".op-status-strip__cell--waiting");
+    if (cell) cell.title = summary;
+  });
+}
+
 export function subscribeIssueMonitorStatus(doc, model) {
   let selected;
   return model.subscribeFrame(state => {
