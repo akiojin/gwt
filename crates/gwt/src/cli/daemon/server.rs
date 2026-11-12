@@ -24248,6 +24248,9 @@ exit 1
 
     #[test]
     fn attempting_claim_and_settlement_resume_same_intent_after_project_readmission() {
+        // Issue #7125: the fence transaction asserts selection order, not how
+        // fast a loaded coverage runner commits prefs within 250ms.
+        let _prefs_budget = super::pin_prefs_hang_guard();
         let temp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let prefs_path = temp.path().join("issue-monitor.json");

@@ -8,8 +8,38 @@ import { parseHTML } from "linkedom";
 import {
   createActiveWorkProjectionModel,
   createIssueOtherSurface,
+  attentionForWorkspace,
   mergeActiveWorkProjectionPatch,
 } from "../issue-other-surface.js";
+
+test("Work attention is shared before view normalization and recomputed after a patch", () => {
+  const { model, applyActiveWorkProjectionReceiveEvent: receive } = createActiveWorkProjectionModel();
+  const fixture = createFixture();
+  const surface = createSurface(fixture, null, { getActiveWorkProjection: () => model.read()?.projection });
+  const work = { id: "blocked-work", title: "Await token", linked_issue_numbers: [],
+    lifecycle_state: "paused", status_category: "idle", blocked_agents: 1, next_action: "Await token" };
+  const legacy = { id: "legacy-work", summary: "Checking input", status_category: "idle", linked_issue_numbers: [] };
+  receive({ kind: "active_work_projection", projection: { id: "project", active_works: [work, legacy] } });
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  const row = fixture.body.querySelector('[data-workspace-id="blocked-work"]');
+  assert.equal(row.dataset.attention, "needs_attention", "normalization must not lose blocked-agent attention");
+  const stored = model.read().projection.active_works[0].attention;
+  assert.deepEqual(stored, { lane: "needs_attention", label: "Needs Attention", reason: "Await token" });
+  assert.equal(Object.isFrozen(stored), true);
+  assert.equal(attentionForWorkspace(model.read().projection.active_works[0]) === stored, true,
+    "Issues and Other must read the stored derivation, not calculate another object");
+  assert.equal(row.querySelector('.workspace-attention-reason').textContent, stored.reason);
+  assert.deepEqual(model.read().projection.active_works[1].attention,
+    { lane: "running", label: "Running", reason: "Checking input" }, "legacy normalization defaults are preserved");
+  receive({ kind: "active_work_projection_patch", projection: { id: "project",
+    active_works: [{ ...work, blocked_agents: 0, next_action: "", attention: stored }] } });
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector('[data-workspace-id="blocked-work"]').dataset.attention, "paused");
+  assert.equal(fixture.body.querySelector('.workspace-attention-reason'), null, "a cleared blocker must not survive a patch");
+  assert.equal(model.read().projection.active_works[0].attention.reason, "", "wire attention is never authoritative");
+  assert.equal(stored.reason, "Await token", "the previous snapshot remains immutable");
+  model.dispose();
+});
 
 test("Active Work model commits immutable merged snapshots and clears on null", () => {
   const { model, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
@@ -19,9 +49,11 @@ test("Active Work model commits immutable merged snapshots and clears on null", 
   applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: initial });
   assert.notEqual(model.read().projection, initial);
   assert.ok(Object.isFrozen(model.read().projection.journal_entries[0]));
+  const history = model.read().projection.journal_entries;
   applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "p", title: "Changed" } });
   assert.equal(model.read().projection.title, "Changed");
-  assert.deepEqual(model.read().projection.journal_entries, initial.journal_entries);
+  assert.deepEqual(model.read().projection.journal_entries, history);
+  assert.equal(model.read().projection.journal_entries === history, true, "unchanged history keeps its immutable derivation");
   applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "other" } });
   assert.equal(model.read().projection.journal_entries, undefined, "project identity fences history");
   applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });

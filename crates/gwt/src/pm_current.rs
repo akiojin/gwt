@@ -366,8 +366,18 @@ mod tests {
         assert!(rows.iter().any(|row| row["key"] == beyond_id_limit));
         assert!(rows.iter().all(|row| row["status"] != "cancelled"));
         assert_eq!(rows[0]["key"].as_str().unwrap().len(), 64);
+        let source_key = format!("{:x}", Sha256::digest(b"private-source"));
+        assert!(rows.iter().all(|row| row["source_key"] == source_key));
         assert!(rows[0]["title"].as_str().unwrap().chars().count() <= 241);
         assert!(rows[0]["parent_key"].as_str().is_some());
+        let mut legacy = overview.clone();
+        for row in legacy["tasks"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("source_key");
+        }
+        let legacy: PmTaskOverview = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["tasks"][0]
+            .get("source_key")
+            .is_none());
         let text = overview.to_string();
         for private in [
             "private-root",

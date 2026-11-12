@@ -5,3 +5,11 @@ export function createIslandContainer(parent) {
   parent.appendChild(container);
   return container;
 }
+
+// Create an island container the caller attaches itself: some shells order
+// their surfaces only after every surface has been created.
+export function createDetachedIslandContainer(document) {
+  const container = document.createElement("div");
+  container.className = "react-island";
+  return container;
+}

@@ -1537,14 +1537,6 @@ fn emit_runtime_state_notice(event: &str, input: &str, session: Option<Session>)
         Duration::ZERO,
         "ok",
     );
-    // Hook-live is a best-effort notification after the authoritative runtime
-    // state write. A missing GUI must not consume half of the aggregate
-    // UserPromptSubmit budget before the Board and obligation handlers run.
-    let _live_deadline = (event == "UserPromptSubmit").then(|| {
-        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() + USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET.resolve(),
-        )
-    });
     let live_started = Instant::now();
     let notice = RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
@@ -2711,10 +2703,36 @@ mod tests {
             url: std::env::var("GWT_MEASURE_HOOK_URL").expect("measurement receiver"),
             token: "measurement-only".into(),
         };
-        let event = hook_live_test_event("PreToolUse", None);
+        let mode = std::env::var("GWT_MEASURE_HOOK_MODE").unwrap_or_default();
+        let event = hook_live_test_event(
+            if mode == "journal" {
+                "UserPromptSubmit"
+            } else {
+                "PreToolUse"
+            },
+            None,
+        );
         crate::cli::hook::diagnostics::begin_event();
         let started = Instant::now();
-        let result = if std::env::var("GWT_MEASURE_HOOK_MODE").as_deref() == Ok("plain") {
+        let result = if mode == "journal" {
+            let home = tempfile::tempdir().unwrap();
+            let runtime_path = home.path().join("runtime/123/gwt-session-test.json");
+            let _aggregate = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                // test-hygiene: allow-wall-clock-deadline Measure the real unchanged UserPromptSubmit aggregate deadline.
+                Instant::now() + Duration::from_millis(200),
+            );
+            hook_delivery::deliver(&runtime_path, &event, |event| {
+                emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+            })
+            .and_then(|()| {
+                let health = hook_live_delivery_health(&runtime_path).unwrap();
+                if health.pending_runtime_state || health.last_success_at.is_none() {
+                    Err("journal did not record the transport ACK".into())
+                } else {
+                    Ok(())
+                }
+            })
+        } else if mode == "plain" {
             bounded_plain_http_hook_live_attempt(
                 &event,
                 &target,
@@ -2726,7 +2744,7 @@ mod tests {
         };
         let elapsed = started.elapsed();
         crate::cli::hook::diagnostics::record_event_total(
-            "PreToolUse",
+            event.source_event.as_deref().unwrap(),
             elapsed,
             if result.is_ok() { "ok" } else { "error" },
             crate::cli::hook::diagnostics::event_metrics(0),

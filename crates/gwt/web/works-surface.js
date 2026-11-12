@@ -75,12 +75,14 @@ function drawSpark(document, svg, input, maximum) {
   sparkStates.set(svg, { values, maximum: max });
 }
 
+const summaryCells = [["running", "RUNNING"], ["block", "BLOCK"], ["idle", "IDLE"], ["error", "ERROR"]];
+
 export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+  summaryModel, mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
-    ${["running", "waiting", "idle", "error"].map(state => `<span>${state.toUpperCase()} <b data-count="${state}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
+    ${summaryCells.map(([key, label]) => `<span>${label} <b data-count="${key}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
     <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b> · Cost <b data-metric="today-cost">—</b> · Landed PRs <b data-metric="today-landed">—</b>
       <small class="works-availability" data-availability="today"></small><small class="works-availability works-source-note"></small></div>
     <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
@@ -235,6 +237,12 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     previewElement = document.createElement("section"); previewElement.className = "works-surface works-surface--preview";
     previewElement.setAttribute("aria-label", "Works read-only preview"); host.append(previewElement); syncPreview();
   }
+  // SPEC #5016 AC-HS1: the heading renders the server aggregate summary that
+  // the tab title and status strip read; the listed rows never recount it.
+  function renderSummary() {
+    const summary = summaryModel?.read();
+    for (const [key] of summaryCells) element.querySelector(`[data-count="${key}"]`).textContent = summary ? String(summary[key]) : "—";
+  }
   function render(rehost) {
     if (disposed) return;
     const header = selected && isPresented() ? full.querySelector(".works-full-header") : null;
@@ -256,7 +264,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       updateEntry(entry, work, maximum);
       if (list.children[index] !== entry.row) list.insertBefore(entry.row, list.children[index] || null);
     });
-    for (const state of ["running", "waiting", "idle", "error"]) element.querySelector(`[data-count="${state}"]`).textContent = activity.count === null ? "—" : String(works.filter(work => work.state === state || (state === "error" && work.state === "interrupted")).length);
+    renderSummary();
     element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
     for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens), cost: finite(today.cost_usd) ? `$${today.cost_usd.toFixed(2)}` : "—", landed: number(today.landed_pr_count) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
     for (const key of ["today", "fleet"]) {
@@ -303,6 +311,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     activityModel.subscribeFrame(state => state, value => { if (value !== renderedActivity) render(false); }),
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
+    summaryModel?.subscribeFrame(state => state, () => { if (!disposed) renderSummary(); }),
   ];
   return { element, sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),

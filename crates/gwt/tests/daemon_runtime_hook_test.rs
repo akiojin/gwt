@@ -231,6 +231,115 @@ fn runtime_state_owner_forwards_live_event_to_loopback_target() {
 }
 
 #[test]
+fn user_prompt_submit_journal_wait_preserves_transport_budget_and_ack() {
+    use gwt::daemon_runtime::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET;
+    use gwt_core::{
+        deadline_budget::HANG_GUARD, operation_deadline::ScopedOperationDeadline,
+        test_support::ScopedGwtHome,
+    };
+    use std::time::Instant;
+
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(home.path().join(".gwt"));
+    env.set("HOME", home.path().as_os_str().to_os_string());
+    env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+    env.unset("CODEX_THREAD_ID");
+    let sessions_dir = home.path().join(".gwt/sessions");
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).unwrap();
+    let session = Session::new(&worktree, "work/issue-5542", AgentId::Codex);
+    session.save(&sessions_dir).unwrap();
+    let runtime_path = runtime_state_path(&sessions_dir, &session.id);
+    let journal_path = sessions_dir
+        .join("hook-live")
+        .join(runtime_path.parent().unwrap().file_name().unwrap())
+        .join(runtime_path.file_name().unwrap());
+    fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    let journal_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(journal_path.with_extension("lock"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&journal_lock).unwrap();
+
+    let server = CaptureServer::start();
+    let profile_path = home.path().join("hook-profile.jsonl");
+    env.set("GWT_SESSION_ID", session.id.clone());
+    env.set("GWT_SESSION_RUNTIME_PATH", runtime_path.as_os_str());
+    env.set("GWT_HOOK_FORWARD_URL", server.url.clone());
+    env.set("GWT_HOOK_FORWARD_TOKEN", "secret-token");
+    env.set("GWT_HOOK_PROFILE_PATH", profile_path.as_os_str());
+    let input = serde_json::json!({
+        "session_id": "provider-session-5542",
+        "cwd": worktree,
+        "prompt": "continue the current work",
+    })
+    .to_string();
+    const LIVE_BUDGET: Duration = Duration::from_secs(1);
+    let worker = std::thread::spawn(move || {
+        let _attempt = ScopedDeadlineBudget::hang_guard(&HOOK_LIVE_ATTEMPT_BUDGET);
+        let _readiness = ScopedDeadlineBudget::hang_guard(&HOOK_LIVE_READINESS_BUDGET);
+        let _live = ScopedDeadlineBudget::pin(&USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET, LIVE_BUDGET);
+        let _aggregate = ScopedOperationDeadline::enter(
+            // test-hygiene: allow-wall-clock-deadline Exercise the real journal/transport boundary while the outer deadline is only a hang guard.
+            Instant::now() + HANG_GUARD,
+        );
+        handle_runtime_state("UserPromptSubmit", &input).map_err(|error| error.to_string())
+    });
+
+    // Observe journal preparation before holding it past the local transport
+    // budget. Loaded runners may take longer to reach this phase; elapsed time
+    // before the phase is not evidence that the journal caused the delay.
+    let waiting_started = Instant::now();
+    let journal_prepared = loop {
+        let prepared = fs::read_to_string(&profile_path).is_ok_and(|profile| {
+            profile.lines().any(|line| {
+                serde_json::from_str::<Value>(line)
+                    .is_ok_and(|record| record["handler"] == "hook-live/journal-prepare")
+            })
+        });
+        // test-hygiene: allow-wall-clock-deadline Hang guard only; the observed journal phase triggers release timing.
+        if prepared || worker.is_finished() || waiting_started.elapsed() >= Duration::from_secs(30)
+        {
+            break prepared;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if journal_prepared {
+        let held_since_prepare = Instant::now();
+        // test-hygiene: allow-wall-clock-deadline Prove the real journal wait outlives the transport cap before releasing it.
+        while held_since_prepare.elapsed() <= LIVE_BUDGET {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    // Always release the owned lock and join before assertions or environment
+    // restoration, including when preparation failed to reach the journal.
+    drop(journal_lock);
+    let outcome = worker.join().expect("hook worker");
+    assert!(journal_prepared, "hook did not reach journal preparation");
+    outcome.expect("runtime-state hook remains fail-open");
+
+    let (auth, payload) = server.recv();
+    assert_eq!(auth, "Bearer secret-token");
+    assert_eq!(payload["source_event"], "UserPromptSubmit");
+    assert_eq!(payload["gwt_session_id"], session.id);
+    assert_eq!(payload["agent_session_id"], "provider-session-5542");
+    let health = gwt::daemon_runtime::hook_live_delivery_health(&runtime_path).unwrap();
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(
+        health.last_success_at.is_some(),
+        "POST must receive its ACK"
+    );
+    assert!(!health.pending_runtime_state);
+    let journal: Value = serde_json::from_slice(&fs::read(journal_path).unwrap()).unwrap();
+    assert!(journal["pending"].is_null());
+}
+
+#[test]
 fn coordination_event_owner_forwards_live_event_to_loopback_target() {
     let _lock = env_lock();
     let mut env = EnvGuard::new();

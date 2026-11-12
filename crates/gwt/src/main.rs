@@ -1686,6 +1686,18 @@ impl BoardDaemonSubscriberRegistry {
     }
 }
 
+fn dispatch_startup_auto_resume_admission_prepared(
+    app: &mut AppRuntime,
+    prepared: app_runtime::StartupAutoResumeAdmissionPrepared,
+    board_daemon_subscribers: &mut BoardDaemonSubscriberRegistry,
+    proxy: AppEventProxy,
+    dispatch: impl FnOnce(Vec<OutboundEvent>),
+) {
+    // Admission flips readiness; dispatch its events before promoting the subscriber.
+    dispatch(app.startup_auto_resume_admission_prepared_events(prepared));
+    board_daemon_subscribers.sync(app, proxy);
+}
+
 fn spawn_project_owner_subscriber(
     context: app_runtime::ProjectContext,
     proxy: AppEventProxy,
@@ -2735,10 +2747,18 @@ mod tests {
             .split_once("IssueMonitorPreflightRejected")
             .expect("next handler")
             .0;
-        let drain = handler
+        assert!(handler.contains("dispatch_startup_auto_resume_admission_prepared("));
+        let admission = source
+            .split_once("fn dispatch_startup_auto_resume_admission_prepared(")
+            .expect("shared admission dispatch")
+            .1
+            .split_once("fn spawn_project_owner_subscriber(")
+            .expect("next helper")
+            .0;
+        let drain = admission
             .find("startup_auto_resume_admission_prepared_events")
             .expect("admission drain");
-        let sync = handler
+        let sync = admission
             .find("board_daemon_subscribers.sync(")
             .expect("admission must resync the Issues subscriber");
         assert!(
@@ -4172,6 +4192,7 @@ mod tests {
             gwt::FrontendEvent::PaneSendInput {
                 session_id: "session-b".to_string(),
                 text: "/goal all tests pass\r".to_string(),
+                request_id: None,
             },
         );
         assert_eq!(rejected.len(), 1);
@@ -4181,6 +4202,7 @@ mod tests {
                 ok,
                 window_id,
                 error,
+                ..
             } => {
                 assert!(!ok);
                 assert!(window_id.is_none());
@@ -4196,6 +4218,7 @@ mod tests {
             gwt::FrontendEvent::PaneSendInput {
                 session_id: "session-a".to_string(),
                 text: "/goal all tests pass\r".to_string(),
+                request_id: None,
             },
         );
         assert_eq!(no_runtime.len(), 1);
@@ -4204,6 +4227,7 @@ mod tests {
                 ok,
                 window_id,
                 error,
+                ..
             } => {
                 assert!(!ok);
                 assert_eq!(window_id.as_deref(), Some("tab-1::claude-1"));
@@ -11095,16 +11119,17 @@ fn main() -> std::io::Result<()> {
                 let Some(scope) = clients.scope(&client_id) else {
                     return;
                 };
-                if let FrontendEvent::PaneSendInput { session_id, text } = &event {
+                if let FrontendEvent::PaneSendInput { session_id, text, request_id } = &event {
                     let events = match &scope {
                         app_runtime::ClientScope::Project(key) => app.pane_send_input_for_project_events(
-                            client_id.clone(), key, session_id, text,
+                            client_id.clone(), key, session_id, text, *request_id,
                         ),
                         app_runtime::ClientScope::Hub => vec![OutboundEvent::reply(
                             client_id.clone(), BackendEvent::PaneSendResult {
                                 ok: false,
                                 window_id: None,
                                 error: Some("a project-scoped connection is required".to_string()),
+                                request_id: *request_id,
                             },
                         )],
                     };
@@ -11480,11 +11505,13 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
             }
             Event::UserEvent(UserEvent::StartupAutoResumeAdmissionPrepared(prepared)) => {
-                // Issue #7087: this drain is what flips materializer readiness.
-                // Sync after it so the open window replaces its observer
-                // subscriber with the materializer role.
-                clients.dispatch(app.startup_auto_resume_admission_prepared_events(*prepared));
-                board_daemon_subscribers.sync(app, proxy.clone());
+                dispatch_startup_auto_resume_admission_prepared(
+                    app,
+                    *prepared,
+                    &mut board_daemon_subscribers,
+                    proxy.clone(),
+                    |events| clients.dispatch(events),
+                );
             }
             Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
                 clients.dispatch(app.handle_monitor_preflight_rejected(*completion));
