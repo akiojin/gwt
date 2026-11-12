@@ -2264,10 +2264,14 @@ pub enum UpdateAutoApplyPhase {
 }
 
 /// Server-owned project attention summary. It describes runtime state, not Work completion.
+/// SPEC #5016 AC-HS1: the only source of the RUN / BLOCK / IDLE / ERROR counts. The tab
+/// title, the status strip and the Works heading render these values and never recount.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAgentAggregate {
     pub running_count: usize,
     pub block_count: usize,
+    #[serde(default)]
+    pub idle_count: usize,
     pub error_count: usize,
     pub unread: bool,
     pub revision: u64,
