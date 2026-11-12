@@ -1,6 +1,7 @@
 //! Deployment configuration for the future coordinator listener.
 //!
 //! `from_json` performs no I/O; `load` validates only private config storage.
+//! `load_from_home` also checks the fixed private coordinator directory chain.
 //! Neither grants registration or device authority.
 //! Before serving, the caller must independently validate private storage,
 //! certificate/key contents, permissions, ownership, ACLs and symlinks, and
@@ -15,6 +16,21 @@ use std::{
 };
 
 const MAX_CONFIG_BYTES: usize = 16 * 1024;
+
+#[cfg(unix)]
+fn storage_error(error: super::storage::StoreError) -> ConfigError {
+    use super::storage::StoreError;
+    match error {
+        StoreError::UnsafeStorage => ConfigError::UnsafeStorage,
+        StoreError::Io(error)
+            if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) =>
+        {
+            ConfigError::UnsafeStorage
+        }
+        StoreError::UnsupportedPrivateStorage => ConfigError::UnsupportedPrivateStorage,
+        _ => ConfigError::StorageUnavailable,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -100,6 +116,47 @@ pub struct CoordinatorConfig {
 }
 
 impl CoordinatorConfig {
+    /// Read only `HOME/.gwt/mobile/coordinator/config.json`.
+    ///
+    /// The caller selects a trusted home with non-replaceable ancestors and
+    /// prevents concurrent in-place edits. The three existing private directory
+    /// descriptors remain held until after the read and identity recheck. HOME
+    /// itself need not be 0700. No files or permissions are created or changed;
+    /// TLS validation and the registry lock remain separate caller obligations.
+    #[cfg(unix)]
+    pub fn load_from_home(home: &Path) -> Result<Self, ConfigError> {
+        use super::storage::{open_directory, same_file};
+        if !home.is_absolute() || home.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(ConfigError::UnsafeStorage);
+        }
+        let paths = [
+            home.join(".gwt"),
+            home.join(".gwt/mobile"),
+            home.join(".gwt/mobile/coordinator"),
+        ];
+        let guards = paths
+            .iter()
+            .map(|path| open_directory(path).map_err(storage_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        let directory = paths[2]
+            .canonicalize()
+            .map_err(|_| ConfigError::StorageUnavailable)?;
+        let config = Self::load(&directory)?;
+        for (path, guard) in paths.iter().zip(&guards) {
+            if !same_file(guard, &open_directory(path).map_err(storage_error)?)
+                .map_err(storage_error)?
+            {
+                return Err(ConfigError::UnsafeStorage);
+            }
+        }
+        Ok(config)
+    }
+
+    #[cfg(not(unix))]
+    pub fn load_from_home(_: &Path) -> Result<Self, ConfigError> {
+        Err(ConfigError::UnsupportedPrivateStorage)
+    }
+
     /// Read fixed `config.json` from a trusted canonical private directory.
     ///
     /// The caller must keep ancestors trusted and non-replaceable and prevent
@@ -108,21 +165,8 @@ impl CoordinatorConfig {
     /// Missing/unsafe files are errors; no files or permissions are changed.
     #[cfg(unix)]
     pub fn load(directory: &Path) -> Result<Self, ConfigError> {
-        use super::storage::{
-            has_repository_marker, open_directory, open_private_file, same_file, StoreError,
-        };
+        use super::storage::{has_repository_marker, open_directory, open_private_file, same_file};
         use std::io::Read;
-
-        fn storage_error(error: StoreError) -> ConfigError {
-            match error {
-                StoreError::UnsafeStorage => ConfigError::UnsafeStorage,
-                StoreError::Io(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-                    ConfigError::UnsafeStorage
-                }
-                StoreError::UnsupportedPrivateStorage => ConfigError::UnsupportedPrivateStorage,
-                _ => ConfigError::StorageUnavailable,
-            }
-        }
 
         if !directory.is_absolute()
             || directory
@@ -552,10 +596,90 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn loads_only_fixed_home_config_and_requires_private_ancestors() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let (_directory, home) = private_config();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            CoordinatorConfig::load_from_home(&home),
+            Err(ConfigError::StorageUnavailable)
+        ));
+        assert!(!home.join(".gwt").exists());
+        let paths = [
+            home.join(".gwt"),
+            home.join(".gwt/mobile"),
+            home.join(".gwt/mobile/coordinator"),
+        ];
+        for path in &paths {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(matches!(
+            CoordinatorConfig::load_from_home(&home),
+            Err(ConfigError::StorageUnavailable)
+        ));
+        let file = paths[2].join("config.json");
+        std::fs::rename(home.join("config.json"), &file).unwrap();
+        let original = std::fs::read(&file).unwrap();
+        write_config(&paths[2], b"secret-sentinel");
+        assert_eq!(
+            CoordinatorConfig::load_from_home(&home).err(),
+            Some(ConfigError::InvalidJson)
+        );
+        write_config(&paths[2], &original);
+        assert!(CoordinatorConfig::load_from_home(&home).is_ok());
+        for invalid in [Path::new("relative").to_owned(), home.join("missing/..")] {
+            assert!(matches!(
+                CoordinatorConfig::load_from_home(&invalid),
+                Err(ConfigError::UnsafeStorage)
+            ));
+        }
+        for path in &paths {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(
+                CoordinatorConfig::load_from_home(&home),
+                Err(ConfigError::UnsafeStorage)
+            ));
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let saved = home.join("saved");
+            std::fs::rename(path, &saved).unwrap();
+            symlink(&saved, path).unwrap();
+            assert!(matches!(
+                CoordinatorConfig::load_from_home(&home),
+                Err(ConfigError::UnsafeStorage)
+            ));
+            std::fs::remove_file(path).unwrap();
+            std::fs::rename(&saved, path).unwrap();
+            assert_eq!(
+                CoordinatorConfig::load_from_home(&home).unwrap().origin(),
+                "https://coordinator.example"
+            );
+        }
+        symlink("missing-git", home.join(".git")).unwrap();
+        assert!(matches!(
+            CoordinatorConfig::load_from_home(&home),
+            Err(ConfigError::RepositoryStorage)
+        ));
+        std::fs::remove_file(home.join(".git")).unwrap();
+        assert!(CoordinatorConfig::load_from_home(&home).is_ok());
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&paths[2]).unwrap().count(), 1);
+    }
+
+    #[test]
     #[cfg(not(unix))]
     fn config_loading_requires_supported_private_storage() {
         assert!(matches!(
             CoordinatorConfig::load(Path::new("unused")),
+            Err(ConfigError::UnsupportedPrivateStorage)
+        ));
+        assert!(matches!(
+            CoordinatorConfig::load_from_home(Path::new("unused")),
             Err(ConfigError::UnsupportedPrivateStorage)
         ));
     }
