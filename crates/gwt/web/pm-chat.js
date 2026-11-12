@@ -213,6 +213,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let tasksDigest = '';
   let chatDigest;
   let chatSend = null;
+  let draftSend = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -272,6 +273,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const chatLog = element('div', 'pm-chat__conversation');
   chatLog.setAttribute('role', 'log');
   chatLog.setAttribute('aria-label', 'PM conversation messages');
+  const chatDecisionReports = element('section', 'pm-chat__decision-reports');
+  chatDecisionReports.setAttribute('aria-label', 'Decision reports');
+  const chatDecisionList = element('div', 'pm-chat__decision-list');
+  chatDecisionReports.append(element('h2', '', 'Decision reports'),
+    element('p', '', 'Saved PM reports, separate from the native conversation.'), chatDecisionList);
   const composer = element('form', 'pm-chat__composer');
   composer.setAttribute('aria-label', 'Message PM');
   const draft = element('textarea', 'pm-chat__draft');
@@ -399,6 +405,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let pendingDecision = null;
   let decisionSendError = null;
   let observedPaneReceipt = 0;
+  const chatDecisionRows = new Map();
+  const decisionControls = new WeakMap();
   function decisionItems(state) {
     return (state?.reports || []).filter(report => report.kind === 'decision').map(report => {
       const summary = report.structured?.summary ?? null;
@@ -464,6 +472,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     const decisions = deriveDecisions(state);
     renderHome(state, decisions);
     renderDecisions(state, decisions);
+    renderReportDecisions(decisions);
+    return decisions;
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
@@ -479,7 +489,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     });
   }
   function answerDecision(item, optionIndex) {
-    if (disposed || chatSend?.status === 'pending' || pendingDecision) return;
+    if (disposed || answeredDecisions.has(item.id) || chatSend?.status === 'pending' || pendingDecision) return;
     const optionText = item.options?.[optionIndex];
     if (optionText == null) return;
     pendingDecision = { id: item.id, optionText, afterSequence: chatSend?.sequence ?? 0,
@@ -496,6 +506,99 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       pendingDecision = null;
     }
     renderDecisionSurfaces(latestState);
+  }
+  function replyInChat() {
+    if (disposed || latestState?.chatSend?.status === 'pending' || pendingDecision) return;
+    showChat();
+    draft.focus();
+  }
+  function renderDecisionControls(controls, item, answered) {
+    const busy = pendingDecision != null || latestState?.chatSend?.status === 'pending';
+    const error = decisionSendError?.id === item.id ? decisionSendError.message : null;
+    const itemDigest = JSON.stringify(item);
+    let view = decisionControls.get(controls);
+    if (!view || view.itemDigest !== itemDigest) {
+      const nodes = [];
+      if (item.recommendation) nodes.push(element('p', '',
+        `Recommended: ${item.recommendation}${item.reason ? ` — ${item.reason}` : ''}`));
+      const status = element('p', '');
+      status.setAttribute('role', 'status');
+      status.setAttribute('tabindex', '-1');
+      const alert = element('p', 'pm-chat__decision-error');
+      alert.setAttribute('role', 'alert');
+      const retry = element('p', '', 'Choose an option to try again.');
+      const options = element('div', 'pm-chat__decision-options');
+      for (const [index, option] of (item.options || []).entries()) {
+        const button = element('button', 'pm-chat__decision-option', `${index + 1}. ${option}`);
+        button.type = 'button';
+        button.addEventListener('click', () => answerDecision(item, index));
+        options.append(button);
+      }
+      const reply = element('button', '', 'Other: reply in chat');
+      reply.type = 'button';
+      reply.addEventListener('click', replyInChat);
+      options.append(reply);
+      controls.replaceChildren(...nodes, status, alert, retry, options);
+      view = { itemDigest, status, alert, retry, options, busy: false, focusedControl: null };
+      decisionControls.set(controls, view);
+    }
+    const active = document.activeElement;
+    const ownsFocus = view.options.contains(active);
+    if (busy && !view.busy) view.focusedControl = ownsFocus ? active : null;
+    // Native disabled buttons may blur. Restore only the interaction that
+    // started here, while leaving a deliberate move to another control alone.
+    const focusStayed = ownsFocus || (view.focusedControl && (!active || active === document.body));
+    const statusText = answered ? `Answer sent: ${answered}`
+      : pendingDecision?.id === item.id ? 'Sending answer…' : '';
+    if (view.status.textContent !== statusText) view.status.textContent = statusText;
+    if (view.alert.textContent !== (error || '')) view.alert.textContent = error || '';
+    view.alert.hidden = view.retry.hidden = !error;
+    if (answered) {
+      if (view.options.parentNode === controls) {
+        view.options.remove();
+        if (focusStayed) view.status.focus({ preventScroll: true });
+      }
+      view.focusedControl = null;
+    } else {
+      if (view.options.parentNode !== controls) controls.append(view.options);
+      for (const button of view.options.children) if (button.disabled !== busy) button.disabled = busy;
+      if (!busy && view.busy) {
+        if (focusStayed) view.focusedControl?.focus({ preventScroll: true });
+        view.focusedControl = null;
+      }
+    }
+    view.busy = busy;
+  }
+  function renderReportDecisions({ items, answered }) {
+    chatDecisionReports.hidden = !items.length;
+    if (items.length && chatDecisionReports.parentNode !== chatLog) chatLog.append(chatDecisionReports);
+    else if (!items.length) chatDecisionReports.remove();
+    const nodes = items.map(item => {
+      let row = chatDecisionRows.get(item.id);
+      if (!row) {
+        row = element('div', 'pm-chat__decision-report');
+        row.dataset.decisionId = item.id;
+        row.append(element('h3', ''), element('p', ''), element('div', 'pm-chat__decision-controls'));
+        chatDecisionRows.set(item.id, row);
+      }
+      if (row.firstChild.textContent !== item.question) row.firstChild.textContent = item.question;
+      const summary = row.children[1];
+      if (summary.textContent !== (item.result || '')) summary.textContent = item.result || '';
+      summary.hidden = !item.result;
+      renderDecisionControls(row.lastChild, item, answered[item.id]);
+      return row;
+    });
+    if (nodes.length !== chatDecisionList.children.length
+      || nodes.some((node, index) => chatDecisionList.children[index] !== node)) chatDecisionList.replaceChildren(...nodes);
+    const ids = new Set(items.map(item => item.id));
+    for (const id of chatDecisionRows.keys()) if (!ids.has(id)) chatDecisionRows.delete(id);
+    // Answer-only updates do not change report content. Refresh its controls
+    // independently so Copy, disclosure and reading position stay intact.
+    for (const row of transcript.children) {
+      const item = items.find(item => item.id === row.dataset.reportId);
+      const controls = row.querySelector('.pm-chat__decision-controls');
+      if (item && controls) renderDecisionControls(controls, item, answered[item.id]);
+    }
   }
   function renderTasks(state) {
     const overview = state?.requestTasks;
@@ -605,7 +708,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       nodes.push(bubbleFor(messages[end - 1]));
       start = end;
     }
-    chatLog.replaceChildren(...nodes);
+    // Keep the report-derived section attached while replacing native messages;
+    // native order stays intact and a focused report control keeps its focus.
+    for (const node of [...chatLog.children]) if (node !== chatDecisionReports) node.remove();
+    for (const node of nodes) chatLog.insertBefore(node, chatDecisionReports.parentNode === chatLog ? chatDecisionReports : null);
     chatNotice.textContent = !conversation ? 'Loading PM conversation…'
       : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
@@ -622,15 +728,21 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (composerStatus.textContent !== text) composerStatus.textContent = text;
   }
   function renderComposer(next) {
+    if (next?.status === 'pending' && draftSend?.sequence === null) draftSend.sequence = next.sequence;
     // A confirmed delivery clears only the draft that was sent.
-    if (next?.status === 'sent' && chatSend?.status === 'pending' && chatSend.sequence === next.sequence) draft.value = '';
+    if (next?.status === 'sent' && chatSend?.status === 'pending' && draftSend?.sequence === next.sequence) {
+      draft.value = '';
+    }
+    if (next?.status !== 'pending') draftSend = null;
     chatSend = next || null;
     syncComposer();
   }
   function submitDraft(event) {
     event?.preventDefault();
     if (disposed || chatSend?.status === 'pending' || !draft.value.trim()) return;
+    draftSend = { sequence: null };
     onSend(draft.value);
+    if (draftSend?.sequence === null) draftSend = null;
   }
   function draftKeydown(event) {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
@@ -716,7 +828,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
-    renderDecisionSurfaces(state);
+    const decisions = renderDecisionSurfaces(state);
     renderTasks(state);
     renderChat(state.conversation);
     renderComposer(state.chatSend);
@@ -774,6 +886,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
             row.append(details);
           }
         }
+        const decision = decisions.items.find(item => item.id === String(report.id));
+        if (decision) {
+          const controls = element('div', 'pm-chat__decision-controls');
+          renderDecisionControls(controls, decision, decisions.answered[decision.id]);
+          row.append(controls);
+        }
         return row;
       });
       transcript.replaceChildren(...nodes);
@@ -795,6 +913,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     pendingDecision = null;
     decisionSendError = null;
     observedPaneReceipt = 0;
+    chatDecisionRows.clear();
+    chatDecisionList.replaceChildren();
+    chatDecisionReports.hidden = true;
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
@@ -802,6 +923,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     expandedChatGroups.clear();
     chatLog.replaceChildren();
     draft.value = '';
+    draftSend = null;
     renderComposer(null);
     includeCompleted = false;
     completedButton.setAttribute('aria-pressed', 'false');

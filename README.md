@@ -2174,8 +2174,14 @@ including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
 Decision reports show two to four numbered choices with the recommendation and
-its reason. Use **Execution log** to reply with a choice number or your own answer;
-**Copy** includes the numbered choices and complete details.
+its reason. Choose an option directly in **Reports**, **Decide**, or Chat's
+**Decision reports** section. These views share sending, failure, and confirmed
+answer state for the current PM session. **Other: reply in chat** keeps your draft
+and opens the composer for a free-text answer. A confirmed send does not mark the
+decision resolved or save a human Q&A by itself. Chat's decision section comes
+from Reports, separately from the native conversation bubbles. **Execution log**
+also accepts choice numbers or your own answer; **Copy** includes the numbered
+choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected
