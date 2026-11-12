@@ -1096,6 +1096,32 @@ fn assert_grok_startup_progress(accepted: Option<&str>) {
     );
     commit_owner_fresh_readiness(&fixture);
     wait_owner_monitor_fresh_ack(&fixture);
+    // The durable ACK precedes MonitorCommitted in the owner's mailbox.
+    // Await the applied exact source before explicitly advancing the deadline.
+    let receipt = fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the real actor ACK; the startup deadline is advanced explicitly below.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            fixture
+                .owner
+                .command(OwnerCommand::AcknowledgeMonitorLaunch {
+                    id: fixture.captured.id.clone(),
+                    incarnation: fixture.captured.incarnation,
+                    issue_number: fixture.authority.number,
+                    delivery_id: fixture
+                        .pending
+                        .launch_feedback_context
+                        .as_ref()
+                        .unwrap()
+                        .issue_monitor_delivery_id
+                        .clone(),
+                }),
+        )
+        .await
+        .expect("owner Monitor ACK")
+        .expect("exact Monitor delivery")
+    });
+    assert_eq!(receipt["acknowledged"], true);
     let id = fixture.captured.id.clone();
     let incarnation = fixture.captured.incarnation;
     let pane = fixture
