@@ -539,7 +539,9 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       if (!signalFree) current.kill("SIGTERM");
-      const deadline = Date.now() + 8_000;
+      // A signal-free stop waits for the browser-disconnect QuitApp, which only
+      // starts after the 5 s reconnect grace; 8 s would leave ~3 s for cleanup.
+      const deadline = Date.now() + (signalFree ? 15_000 : 8_000);
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
       if (current.exitCode === null && current.signalCode === null) {
         timedOut = true;
