@@ -396,7 +396,7 @@ pub(crate) fn open_directory(path: &Path) -> Result<File, StoreError> {
 }
 
 #[cfg(unix)]
-fn open_private_file(path: &Path, create: bool) -> Result<File, StoreError> {
+pub(super) fn open_private_file(path: &Path, create: bool) -> Result<File, StoreError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = OpenOptions::new()
         .read(true)
@@ -489,7 +489,7 @@ pub(crate) fn open_directory(_: &Path) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]
-fn open_private_file(_: &Path, _: bool) -> Result<File, StoreError> {
+pub(super) fn open_private_file(_: &Path, _: bool) -> Result<File, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 #[cfg(not(unix))]

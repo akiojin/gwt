@@ -248,6 +248,113 @@ test.describe('PM reports', () => {
     });
   });
 
+  test('T-CHAT-WORKS Chat opens the same PM terminal in Works', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      let retainPm = false;
+      let retainedWindowId: string | null = null;
+      // Preserve the owned stopped fixture through every real focus reply.
+      // All requests reach the real host; only this exact display flag changes.
+      await page.routeWebSocket(url => url.pathname === '/ws', route => {
+        const server = route.connectToServer();
+        server.onMessage(message => {
+          if (retainPm) {
+            const payload = JSON.parse(String(message));
+            if (payload.kind === 'workspace_state') {
+              const pm = payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
+                .find((window: any) => window.id === retainedWindowId && window.session_id === SESSION && window.is_pm);
+              if (pm) {
+                pm.persist = false;
+                route.send(JSON.stringify(payload));
+                return;
+              }
+            }
+          }
+          route.send(message);
+        });
+      });
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page, undefined, BASE, true);
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+      retainedWindowId = id;
+      try {
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const initialDraft = pane.getByRole('textbox', { name: 'Message to PM' });
+        await initialDraft.fill('Keep this unsent PM draft');
+        await pane.getByRole('button', { name: 'Open terminal in Works', exact: true }).click();
+        await expect(pane.locator('.pm-chat__terminal-status')).toContainText('Terminal unavailable in Works');
+        await expect(initialDraft).toBeVisible();
+        await expect(initialDraft).toHaveValue('Keep this unsent PM draft');
+        retainPm = true;
+        await sendLiveGwtEvent(page, { kind: 'frontend_ready' });
+        await expect.poll(() => page.evaluate(id => {
+          const workspace = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+            .findLast((event: any) => event.kind === 'workspace_state')?.workspace;
+          return workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
+            .find((window: any) => window.id === id)?.persist;
+        }, id)).toBe(false);
+        await page.evaluate(id => {
+          const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+            candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+          socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ kind: 'terminal_snapshot', id,
+            data_base64: btoa('PM Works terminal identity\r\n') }) }));
+        }, id);
+        // Capture the native xterm before using the new cross-surface entry.
+        await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+        await expect(pane.locator('.xterm')).toHaveCount(1);
+        await pane.locator('.xterm').evaluate(node => { (window as any).__gwtChatWorksTerminal = node; });
+        await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id))
+          .toContain('PM Works terminal identity');
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const chat = pane.getByRole('region', { name: 'PM conversation' });
+        const draft = chat.getByRole('textbox', { name: 'Message to PM' });
+        await draft.fill('Keep this unsent PM draft');
+        await chat.getByRole('button', { name: 'Open terminal in Works', exact: true }).click();
+        const main = page.getByRole('region', { name: 'Main pane', exact: true });
+        const works = main.locator('.works-surface:not(.works-surface--preview)');
+        const full = works.getByRole('region', { name: 'Work terminal', exact: true });
+        await expect(main).toHaveAttribute('data-surface', 'works');
+        await expect(full).toBeVisible();
+        await expect(full.locator('.window-role-badge')).toHaveText('PM');
+        await expect(full.locator(`.terminal-root[data-window-id="${id}"] .xterm`)).toBeVisible();
+        expect(await full.locator('.xterm').evaluate(node => node === (window as any).__gwtChatWorksTerminal)).toBe(true);
+        await expect(chat).toBeHidden();
+        const screenshot = info.outputPath(`chat-works-${theme}.png`);
+        await page.screenshot({ path: screenshot });
+        await info.attach('Chat opens the same PM terminal in Works', { path: screenshot, contentType: 'image/png' });
+
+        await page.locator('#op-pm-entry').click();
+        await expect(chat).toBeVisible();
+        await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(draft).toHaveValue('Keep this unsent PM draft');
+        await info.attach(`Chat terminal action ${theme}`, { body: await pane.screenshot(), contentType: 'image/png' });
+        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await full.getByRole('button', { name: 'Back to Works' }).click();
+        const row = works.locator(`.work-row[data-window-id="${id}"]`);
+        await expect(row.locator('.window-role-badge')).toHaveText('PM');
+        await row.getByRole('button', { name: 'Open terminal', exact: true }).click();
+        await expect(full).toBeVisible();
+        expect(await full.locator('.xterm').evaluate(node => node === (window as any).__gwtChatWorksTerminal)).toBe(true);
+        await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id))
+          .toContain('PM Works terminal identity');
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        expect(errors).toEqual([]);
+      } finally {
+        retainPm = false;
+        if (!page.isClosed()) await sendLiveGwtEvent(page, { kind: 'frontend_ready' })
+          .catch(error => { if (!page.isClosed()) throw error; });
+        if (!page.isClosed()) await page.evaluate(() => {
+          delete (window as any).__gwtChatWorksTerminal;
+        }).catch(error => { if (!page.isClosed()) throw error; });
+      }
+    });
+  });
+
   test('AC-3431-CHAT-2 Chat shows only conversation text from native Claude and Codex records', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       // The checkout host inherits these; a set value would move its native store off the isolated HOME.
