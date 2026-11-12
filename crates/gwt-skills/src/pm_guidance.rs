@@ -597,6 +597,14 @@ Approved existing operations:
   naming Issue numbers created, changed, or launched. If none were taken,
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
+- A user question or instruction that arrived while you were working, or whose
+  response deadline has passed, still gets its Q&A report. Post it with the
+  same `instruction` object and no `authorizations`; with no current human turn
+  to bind, it is saved as a display-only Q&A that grants no authority.
+- Never let a report disappear silently. When `pm.report.post` fails, read
+  `pm.report.list`; if the report is absent, retry once with the same payload,
+  and if it still fails, tell the user in the conversation that the report was
+  not saved and why.
 - When an action needs a newly saved instruction before it can run, the one Q&A
   report acknowledges the request and concrete action plan first. Save its
   `instruction.authorizations`, obtain the instruction ID, then perform the
@@ -1490,9 +1498,18 @@ same profile to try again.
 ### Stop during blocked authority recovery
 
 When `issue.monitor.status` reports `authority recovery is blocked`,
-`issue.monitor.config.set` remains fail-closed, including OFF and
-`max_active` changes. Record the error and its preferences/fence paths;
-do not delete the fence or hand-edit the preferences to bypass it.
+the registered PM may use `issue.monitor.config.set` for OFF and capacity changes
+through the typed emergency transaction. ON and unrelated configuration changes
+remain refused. A malformed/unreadable authority fence can also prevent transport
+before this reply; use the direct stop fallback below in that case. Record the
+error and its preferences/fence paths; do not delete the fence or hand-edit the
+preferences to bypass it.
+
+For a launch storm, five launches of one Issue within 300 seconds exhaust its
+budget. The next launch stops Monitor and parks that Issue in `needs_human`.
+Inspect the recorded reason, resolve the cause, then use `issue.monitor.requeue`
+and enable Monitor after the five-minute window expires. Restarting the app does
+not reset this budget.
 
 - Apply `issue.label {number, action:"add", labels:["hold"]}` to each
   affected owner and require successful GitHub readback. A `hold` label
@@ -1920,8 +1937,10 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   unattended work, use `issue.monitor.config.set` under the existing
   registered-PM authority and `expected_config_token` rules, then read back
   status before attempting a launch. Respect an explicit instruction to keep
-  the Monitor off; the standing mandate does not override it. Config success
-  alone is not proof of launch availability or launch success.
+  the Monitor off; the standing mandate does not override it.
+  A launch-storm shutdown stays off until its cause is resolved, the affected Issue is explicitly
+  requeued, and the five-minute window expires; do not auto-enable it for other work.
+  Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
   approval/owner-handoff rules before asking the user to act. When recovery
@@ -2677,6 +2696,8 @@ a quiet queue or a handed-off PR alone does not finish the PM role.
 ## References
 
 Choose the reference for the current action; read only the relevant sections.
+Read references and project memory by absolute path (the file-read tool or
+`cat <absolute path>`); do not `cd` into them.
 
 - At startup or before an authority decision: [Role, boundaries, and user instructions](references/role-and-boundaries.md).
 - For request intake, Issue ownership, queue order, or launches: [Intake and priority](references/intake-and-priority.md).
@@ -2885,6 +2906,10 @@ mod tests {
             assert!(
                 root.contains("## Completion"),
                 "completion must be visible at entry"
+            );
+            assert!(
+                root.contains("do not `cd` into them"),
+                "Issue #6989: references are read by absolute path"
             );
             assert!(
                 root.len() <= 2500,
@@ -3409,7 +3434,8 @@ mod tests {
         let guidance = unwrapped(&render_contract());
         for phrase in [
             "authority recovery is blocked",
-            "`issue.monitor.config.set` remains fail-closed",
+            "registered PM may use `issue.monitor.config.set` for OFF and capacity changes",
+            "A launch-storm shutdown stays off",
             "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
             "The direct `issue.monitor.stop` path still works when typed preferences are readable",
             "preserves the authority fence",

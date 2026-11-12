@@ -68,7 +68,6 @@ short-wall-clock|crates/gwt-git/src/worktree.rs|run_command_with_timeout_reports
 short-wall-clock|crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expiry_and_caps_connect_time
 short-wall-clock|crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline
 short-wall-clock|crates/gwt-github/src/client/http.rs|delayed_loopback_request
-short-wall-clock|crates/gwt-github/src/client/http.rs|reqwest_execute_rejects_expired_scoped_deadline_before_submission
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|accept_loopback_with_timeout
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|expired_owner_deadline_performs_no_http_request
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|expired_owner_deadline_rejects_auth_before_spawning_gh

@@ -148,6 +148,7 @@ mod tests {
             source_event: Some("PreToolUse".into()),
             gwt_session_id: Some("session-test".into()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("provider-session".into()),
             project_root: Some("/project".into()),
             branch: Some("work/test".into()),

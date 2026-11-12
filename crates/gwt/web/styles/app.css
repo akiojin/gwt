@@ -6596,7 +6596,8 @@ body.route-body {
   font-size: var(--type-xs);
 }
 .project-owner-health[data-state="healthy"] { color: var(--color-state-active); }
-.project-owner-health[data-state="degraded"] { color: var(--color-state-blocked); }
+.project-owner-health[data-state="degraded"],
+.project-owner-health[data-state="wedged"] { color: var(--color-state-blocked); }
 
 .gwt-hub__orphan {
   display: flex;

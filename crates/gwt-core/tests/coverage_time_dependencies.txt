@@ -82,7 +82,6 @@ crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expir
 crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline|letdeadline=ResolutionDeadline::at(std::time::Instant::now()-Duration::from_millis(1),Duration::from_secs(1),)|1
 crates/gwt-github/src/client/http.rs|delayed_loopback_request|Ok((stream,_))=>breakstream,Err(error)iferror.kind()==std::io::ErrorKind::WouldBlock&&Instant::now()<accept_deadline=>|1
 crates/gwt-github/src/client/http.rs|delayed_loopback_request|letaccept_deadline=Instant::now()+Duration::from_secs(2)|1
-crates/gwt-github/src/client/http.rs|reqwest_execute_rejects_expired_scoped_deadline_before_submission|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1),)|1
 crates/gwt-github/src/client/http.rs|reqwest_execute_stops_delayed_loopback_response_at_scoped_deadline|assert!(elapsed<Duration::from_millis(750),)|1
 crates/gwt-github/src/client/http.rs|reqwest_execute_with_deadline_uses_earlier_scoped_deadline|assert!(elapsed<Duration::from_millis(750),)|1
 crates/gwt-github/tests/http_client_test.rs|accept_loopback_with_timeout|Ok((stream,_))=>returnstream,Err(error)iferror.kind()==ErrorKind::WouldBlock&&Instant::now()<deadline=>|1
@@ -240,7 +239,6 @@ crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime
 crates/gwt/src/app_runtime/tests/work_projection_tests.rs|file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|workspace_cleanup_failure_does_not_emit_done_work_item|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/board_read_receipts.rs|issue_3713_corrupt_receipt_and_expired_prompt_budget_warn_without_false_zero_or_denial|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_secs(1),)|1
-crates/gwt/src/board_read_receipts.rs|issue_3713_expired_prompt_budget_is_silent_without_exact_pm_registration|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-std::time::Duration::from_secs(1),)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_child_inherits_deadline_and_preserves_completed_results|letdeadline=Instant::now()+std::time::Duration::from_secs(5)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_deadline_returns_while_controlled_decoder_is_blocked|entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_deadline_returns_while_controlled_decoder_is_blocked|letdeadline=Instant::now()+std::time::Duration::from_millis(100)|1

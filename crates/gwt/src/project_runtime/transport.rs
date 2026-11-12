@@ -159,10 +159,11 @@ async fn command(
 struct GuiPresenceLease {
     owner: OwnerHandle,
     id: u64,
+    quit: bool,
 }
 impl Drop for GuiPresenceLease {
     fn drop(&mut self) {
-        self.owner.detach_gui(self.id);
+        self.owner.detach_gui(self.id, self.quit);
     }
 }
 
@@ -180,10 +181,24 @@ async fn events(
         .get("x-gwt-gui-presence")
         .is_some_and(|value| value == "1")
     {
-        match state.owner.attach_gui().await {
+        let gui_instance = match headers.get(super::presence::GUI_INSTANCE_HEADER) {
+            Some(value) => match value
+                .to_str()
+                .ok()
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            {
+                Some(instance) => instance,
+                None => return StatusCode::BAD_REQUEST.into_response(),
+            },
+            // Older clients supply no grouping evidence. Keep each legacy
+            // connection independent instead of inheriting another GUI's Quit.
+            None => uuid::Uuid::new_v4(),
+        };
+        match state.owner.attach_gui(gui_instance).await {
             Ok(id) => Some(GuiPresenceLease {
                 owner: state.owner.clone(),
                 id,
+                quit: false,
             }),
             Err(error) => {
                 return (
@@ -203,7 +218,7 @@ async fn events(
 async fn event_socket(
     socket: WebSocket,
     mut receiver: tokio::sync::broadcast::Receiver<OwnerEvent>,
-    _presence: Option<GuiPresenceLease>,
+    mut presence: Option<GuiPresenceLease>,
     project_key: String,
 ) {
     use futures_util::{SinkExt, StreamExt};
@@ -211,7 +226,13 @@ async fn event_socket(
     loop {
         tokio::select! {
             message = reader.next() => match message {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(Message::Close(frame))) => {
+                    if let Some(presence) = presence.as_mut() {
+                        presence.quit = frame.is_some_and(|frame| frame.reason == super::presence::GUI_QUIT_CLOSE_REASON);
+                    }
+                    return;
+                },
+                None | Some(Err(_)) => return,
                 _ => {},
             },
             event = receiver.recv() => {
@@ -236,7 +257,13 @@ async fn event_socket(
                     tokio::select! {
                         result = &mut send => { if result.is_err() { return; } break; },
                         message = reader.next() => match message {
-                            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                            Some(Ok(Message::Close(frame))) => {
+                                if let Some(presence) = presence.as_mut() {
+                                    presence.quit = frame.is_some_and(|frame| frame.reason == super::presence::GUI_QUIT_CLOSE_REASON);
+                                }
+                                return;
+                            },
+                            None | Some(Err(_)) => return,
                             _ => {},
                         },
                     }

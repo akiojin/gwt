@@ -1681,6 +1681,13 @@ pub fn reconcile_unindexed_prepared_fresh_launches(
             || attempt.predecessor.generation_id != ledger.current_generation_id
             || !crate::cli::execution_state::is_owner_launch_successor_attempt(attempt)
             || durable_launch_recovery_exists(sessions_dir, &attempt.request.initial_session_id)
+                .map_err(|error| {
+                    format!(
+                        "launch recovery probe failed for Session {} ({:?}): {error}",
+                        attempt.request.initial_session_id,
+                        error.kind()
+                    )
+                })?
         {
             continue;
         }

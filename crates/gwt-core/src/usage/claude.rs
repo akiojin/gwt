@@ -312,6 +312,7 @@ pub async fn fetch_claude_account(
                     account_label,
                     plan,
                     extra_usage: acc.extra_usage,
+                    credits: None,
                     windows: acc.windows,
                     limit_reached: acc.limit_reached,
                     state: UsageState::Ok,
@@ -323,6 +324,7 @@ pub async fn fetch_claude_account(
                     account_label,
                     plan,
                     extra_usage: None,
+                    credits: None,
                     windows: Vec::new(),
                     limit_reached: false,
                     state: UsageState::Unavailable {
@@ -338,6 +340,7 @@ pub async fn fetch_claude_account(
             account_label,
             plan,
             extra_usage: None,
+            credits: None,
             windows: Vec::new(),
             limit_reached: false,
             state: map_status_to_state(r.status().as_u16()),
@@ -349,6 +352,7 @@ pub async fn fetch_claude_account(
             account_label,
             plan,
             extra_usage: None,
+            credits: None,
             windows: Vec::new(),
             limit_reached: false,
             state: UsageState::Unavailable {

@@ -58,6 +58,7 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -475,6 +476,7 @@ mod tests {
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 gwt_core::usage::WindowKind::Weekly,
                 100.0,

@@ -104,7 +104,9 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            if super::feedback::safe_intake_required(env.repo_path()) {
+            if !matches!(err, CliParseError::InvalidVerificationMode)
+                && super::feedback::safe_intake_required(env.repo_path())
+            {
                 // A malformed envelope cannot reliably identify its operation.
                 // Never echo serde's caller-controlled keys/values in Auto.
                 let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
@@ -210,6 +212,28 @@ pub(super) fn dispatch_input<E: CliEnv>(
             if !warnings.is_empty() {
                 payload["warnings"] =
                     serde_json::to_value(&warnings).expect("operation warnings must serialize");
+            }
+            if code != 0 && (operation.starts_with("workspace.") || operation.starts_with("build."))
+            {
+                if let Ok(error) = serde_json::from_str::<crate::AgentWorkspaceUpdateError>(&output)
+                {
+                    payload["error_code"] = serde_json::to_value(error.code).unwrap_or(Value::Null);
+                    payload["error"] = Value::String(error.message);
+                    if let Some(reason) = error.diagnostic_reason {
+                        payload["diagnostic_reason"] = Value::String(reason);
+                    }
+                    if !error.mismatched_fields.is_empty() {
+                        payload["mismatched_fields"] =
+                            serde_json::to_value(error.mismatched_fields).unwrap();
+                    }
+                    if !error.recovery_operations.is_empty() {
+                        payload["recovery_operations"] =
+                            serde_json::to_value(error.recovery_operations).unwrap();
+                    }
+                    if let Some(details) = error.details {
+                        payload["details"] = serde_json::to_value(details).unwrap_or(Value::Null);
+                    }
+                }
             }
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
@@ -546,6 +570,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
             })
         }
+        "workspace.reopen" => CliCommand::Workspace(WorkspaceCommand::Reopen {
+            reason: required_nonempty_workspace_reopen_string(params, "reason")?,
+            observed_done_event_id: required_nonempty_workspace_reopen_string(
+                params,
+                "observed_done_event_id",
+            )?,
+        }),
         "workspace.projection_list" | "workspace.projection-list" => {
             CliCommand::Workspace(WorkspaceCommand::ProjectionList {
                 stale: optional_bool(params, "stale")?.unwrap_or(false),
@@ -982,6 +1013,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 expected_queue_revision: required_string(params, "expected_queue_revision")?,
                 expected_schedule_revision: required_u64(params, "expected_schedule_revision")?,
             },
+        }),
+        "issue.monitor.queue.adopt" => CliCommand::Issue(IssueCommand::MonitorQueueAdopt {
+            project_root: optional_path(params, "project_root")?,
+            terminal: required_string(params, "terminal")?,
         }),
         "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
             project_root: optional_path(params, "project_root")?,
@@ -1560,7 +1595,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             let quarantines = verification_quarantine_requests(params)?;
-            let mode = optional_string(params, "mode")?.unwrap_or_else(|| "full".into());
+            let mode = optional_string(params, "mode")
+                .map_err(|_| CliParseError::InvalidVerificationMode)?
+                .unwrap_or_else(|| "full".into());
+            if mode != "full" && mode != "pre-pr" {
+                return Err(CliParseError::InvalidVerificationMode);
+            }
             let acceptance_commands = optional_string_vec(params, "acceptance_commands")?;
             if mode == "pre-pr" {
                 if !derive {
@@ -1575,8 +1615,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     quarantines,
                 })
             } else {
-                if mode != "full" || !acceptance_commands.is_empty() {
-                    return Err(CliParseError::InvalidJson("verify.plan mode must be full or pre-pr; acceptance_commands requires mode pre-pr".into()));
+                if !acceptance_commands.is_empty() {
+                    return Err(CliParseError::InvalidJson(
+                        "acceptance_commands requires mode pre-pr".into(),
+                    ));
                 }
                 if commands.is_empty() && !derive {
                     return Err(CliParseError::MissingFlag("commands"));
@@ -1682,9 +1724,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "execution.repair" => {
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair {
-                reason: required_string(params, "reason")?,
-            })
+            let reason = required_string(params, "reason")?;
+            let command = match lookup(params, "session_id")
+                .map(|_| required_string(params, "session_id"))
+                .transpose()?
+            {
+                Some(session_id) => crate::cli::execution_state::ExecutionCommand::RepairSession {
+                    session_id,
+                    reason,
+                },
+                None => crate::cli::execution_state::ExecutionCommand::Repair { reason },
+            };
+            CliCommand::Execution(command)
         }
         "execution.continue" => {
             let operation_id = required_string(params, "operation_id")?;
@@ -2268,6 +2319,20 @@ fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         topic: optional_string(params, "topic")?,
         boundary: optional_string(params, "boundary")?,
     }))
+}
+
+fn required_nonempty_workspace_reopen_string(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<String, CliParseError> {
+    let value = required_string(params, key)?;
+    if value.trim().is_empty() {
+        return Err(CliParseError::InvalidValue {
+            flag: key,
+            reason: "must not be empty",
+        });
+    }
+    Ok(value)
 }
 
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -8176,6 +8241,29 @@ mod tests {
     }
 
     #[test]
+    fn workspace_reopen_requires_observed_terminal_event_and_reason() {
+        let input = envelope(
+            "workspace.reopen",
+            json!({
+                "reason": "Recover unintended helper completion",
+                "observed_done_event_id": "done-event-3725"
+            }),
+        );
+        assert!(
+            parse(&input).is_ok(),
+            "explicit Work recovery must be reachable"
+        );
+        assert!(parse(&envelope("workspace.reopen", json!({"reason": "recover"}))).is_err());
+        assert!(parse(&envelope(
+            "workspace.reopen",
+            json!({
+                "observed_done_event_id": "done-event-3725", "reason": "  "
+            })
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn pm_status_variants() {
         assert!(matches!(
             ok("pm.status", json!({})),
@@ -8732,6 +8820,15 @@ mod tests {
             err("execution.repair", json!({})),
             CliParseError::MissingFlag("reason")
         ));
+        for session_id in ["", "  "] {
+            assert!(matches!(
+                err(
+                    "execution.repair",
+                    json!({"reason": "repair target", "session_id": session_id})
+                ),
+                CliParseError::MissingFlag("session_id")
+            ));
+        }
         assert!(matches!(
             ok("execution.reopen", json!({"reason": "blocker resolved"})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen { .. })
@@ -8900,6 +8997,39 @@ mod tests {
             json!({"mode": "pretend-fast", "derive": true}),
         );
         assert!(error.to_string().contains("mode"));
+    }
+
+    #[test]
+    fn verification_plan_invalid_mode_diagnostic_is_safe_and_actionable() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        for autonomous_mode in [false, true] {
+            crate::save_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo.path()),
+                &crate::IssueMonitorPrefs {
+                    autonomous_mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            let input = envelope(
+                "verify.plan",
+                json!({"mode": "private-mode-value", "derive": true}),
+            );
+            assert_eq!(crate::cli::dispatch_json_input(&mut env, "gwtd", &input), 2);
+            let stderr = String::from_utf8_lossy(&env.stderr);
+            assert!(
+                stderr.contains("verify.plan mode must be full or pre-pr"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("private-mode-value"), "{stderr}");
+            assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+        }
     }
 
     #[test]

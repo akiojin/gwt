@@ -1398,13 +1398,11 @@ V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
 ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
-# Issue #6979: an Issue refresh publishes a small delta generation over an
-# immutable base instead of copying every unchanged record into a new store.
-# The delta is compacted into a new base once it outgrows this bound.
+ISSUE_RECORD_PROTOCOL = "issues-records-v1"
+ISSUE_MEMBERSHIP_FILENAME = "membership.json"
+# Historical base/delta generations remain readable during lazy migration.
 ISSUE_DELTA_FILENAME = "delta.json"
 ISSUE_BASE_MANIFEST_FILENAME = "base-manifest.json"
-ISSUE_DELTA_MIN_RECORDS = 128
-ISSUE_DELTA_MAX_FRACTION = 0.05
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
@@ -2074,11 +2072,16 @@ def _make_chroma_collection(db_path: Path, collection_name: str):
     db_path.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
-    return client, client.get_or_create_collection(
-        name=collection_name,
-        embedding_function=ef,
-        metadata={"hnsw:space": "cosine"},
-    )
+    try:
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
 
 
 def _make_chroma_collection_repairing(db_path: Path, collection_name: str):
@@ -4664,13 +4667,32 @@ def active_pointer_path(db_path: Path) -> Path:
     return generations_root(db_path) / ACTIVE_POINTER_FILENAME
 
 
+def _unknown_issue_pointer_contract(db_path: Path) -> bool:
+    try:
+        payload = json.loads(active_pointer_path(db_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and (
+        (type(payload.get("schema_version")) is int and payload["schema_version"] not in (1, 2))
+        or ("writer_protocol" in payload and (
+            payload.get("schema_version") != 2 or payload["writer_protocol"] != ISSUE_RECORD_PROTOCOL))
+    )
+
+
 def _read_active_pointer(db_path: Path) -> Optional[Dict[str, Any]]:
     pointer_path = active_pointer_path(db_path)
     try:
         payload = json.loads(pointer_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("generation"), str):
+    if (not isinstance(payload, dict)
+            or not isinstance(payload.get("generation"), str)
+            or re.fullmatch(r"gen-[A-Za-z0-9_-]+", payload["generation"]) is None
+            or type(payload.get("schema_version")) is not int
+            or payload["schema_version"] not in (1, 2)
+            or (payload["schema_version"] == 1 and "writer_protocol" in payload)
+            or (payload["schema_version"] == 2
+                and payload.get("writer_protocol") != ISSUE_RECORD_PROTOCOL)):
         return None
     return payload
 
@@ -4706,6 +4728,8 @@ def _issue_delta_state(db_path: Path) -> Optional[Dict[str, Any]]:
     pointer = _read_active_pointer(db_path)
     if pointer is None or not isinstance(pointer.get("delta"), str):
         return None
+    if re.fullmatch(r"gen-[A-Za-z0-9_-]+", pointer["delta"]) is None:
+        raise ValueError("invalid Issue delta generation")
     store = generations_root(db_path) / pointer["delta"]
     try:
         payload = json.loads((store / ISSUE_DELTA_FILENAME).read_text(encoding="utf-8"))
@@ -4727,6 +4751,8 @@ def _issue_delta_state(db_path: Path) -> Optional[Dict[str, Any]]:
 
 def _active_store_layers(db_path: Path) -> List[tuple]:
     """`(store, hidden_ids)` layers readers combine, base first."""
+    if _active_pointer_corrupt(db_path):
+        raise ValueError("invalid active generation pointer")
     base = resolve_active_store(db_path)
     delta = _issue_delta_state(db_path)
     if delta is None:
@@ -4734,42 +4760,131 @@ def _active_store_layers(db_path: Path) -> List[tuple]:
     return [(base, delta["shadowed"]), (delta["store"], frozenset())]
 
 
-def _issue_base_hashes(db_path: Path) -> Optional[Dict[str, str]]:
-    """Content hashes of the records stored in the active base generation."""
+def _issue_record_pool(db_path: Path) -> Path:
+    return generations_root(db_path) / "record-stores" / ISSUE_RECORD_PROTOCOL / "store"
+
+
+def _read_issue_membership(generation: Path) -> Dict[str, str]:
+    payload = json.loads((generation / ISSUE_MEMBERSHIP_FILENAME).read_text(encoding="utf-8"))
+    members = payload.get("members") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict)
+            or set(payload) != {"schema_version", "writer_protocol", "record_layout", "members", "members_digest"}
+            or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+            or payload["writer_protocol"] != ISSUE_RECORD_PROTOCOL
+            or payload["record_layout"] != ISSUE_RECORD_LAYOUT
+            or not isinstance(members, dict)
+            or not all(isinstance(key, str) and key and key.isascii() and _is_sha256(value)
+                       for key, value in members.items())
+            or len(set(members.values())) != len(members)
+            or payload["members_digest"] != _sha256_json(members)):
+        raise ValueError("invalid Issue generation membership")
+    return members
+
+
+def _active_issue_members(db_path: Path) -> Optional[Dict[str, str]]:
+    if _active_pointer_corrupt(db_path):
+        raise ValueError("invalid active Issue pointer")
     pointer = _read_active_pointer(db_path)
-    if pointer is None:
+    if pointer is None or pointer["schema_version"] == 1:
         return None
-    path = generations_root(db_path) / pointer["generation"] / ISSUE_BASE_MANIFEST_FILENAME
+    members = _read_issue_membership(generations_root(db_path) / pointer["generation"])
+    if (type(pointer.get("document_count")) is not int
+            or pointer["document_count"] != len(members)
+            or pointer.get("membership_digest") != _sha256_json(members)
+            or pointer.get("scope") != "issues"
+            or "delta" in pointer):
+        raise ValueError("Issue pointer and membership disagree")
+    return members
+
+
+def _verified_issue_members(collection, members: Dict[str, str]) -> set[str]:
+    """Only reuse records whose persisted payload still matches their address."""
+    logical_ids = {value: key for key, value in members.items()}
+    ids = list(logical_ids)
+    verified: set[str] = set()
+    for start in range(0, len(ids), FILE_INDEX_V2_VECTOR_BATCH):
+        got = collection.get(ids=ids[start:start + FILE_INDEX_V2_VECTOR_BATCH],
+                             include=["documents", "metadatas"])
+        for record_id, document, metadata in zip(got["ids"], got["documents"], got["metadatas"]):
+            record = {"id": logical_ids[record_id], "document": document, "metadata": metadata}
+            if _record_source_fingerprint([record]) == record_id:
+                verified.add(record_id)
+    return verified
+
+
+def _open_issue_pool_for_build(db_path: Path, repair: bool):
+    pool = _issue_record_pool(db_path)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
-    ):
-        return None
-    return payload
+        return _make_chroma_collection(pool, V2_ISSUES_COLLECTION)
+    except Exception as open_error:
+        if not repair:
+            raise
+        # Explicit repair may replace an unreadable *known* store. Exclude
+        # readers, preserve the original bytes, and never reset a future pool.
+        with acquire_lock(db_path, exclusive=True):
+            if _unknown_issue_pointer_contract(db_path):
+                raise ValueError("unsupported Issue writer contract")
+            # An unavailable healthy store (permissions, locks, disk full)
+            # must not be mistaken for corruption and lose its old versions.
+            import sqlite3
+            corrupt = False
+            try:
+                with contextlib.closing(sqlite3.connect(
+                    (pool / "chroma.sqlite3").resolve().as_uri() + "?mode=ro", uri=True
+                )) as database:
+                    corrupt = database.execute("PRAGMA quick_check").fetchone() != ("ok",)
+            except sqlite3.DatabaseError as error:
+                if getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                    corrupt = True
+            if not corrupt:
+                raise open_error
+            for generation in generations_root(db_path).glob("gen-*"):
+                if (generation / ISSUE_MEMBERSHIP_FILENAME).exists():
+                    _read_issue_membership(generation)
+                elif not (generation / "chroma.sqlite3").is_file():
+                    raise ValueError("unknown retained Issue generation")
+            from chromadb.api.shared_system_client import SharedSystemClient
+            # Chroma registers a System before native startup. A failed
+            # constructor leaves that exact path cached without bindings;
+            # release only this broken store, never the process-wide cache.
+            with contextlib.suppress(Exception):
+                SharedSystemClient._release_system(_chroma_store_path(pool))
+            quarantine = pool.with_name(f".store.quarantine-{time.time_ns()}")
+            _replace_staging_generation(pool, quarantine)
+            _fsync_directory(pool.parent)
+            return _make_chroma_collection(pool, V2_ISSUES_COLLECTION)
 
 
-def _plan_issue_delta(db_path: Path, new_hashes: Dict[str, str]) -> Optional[Dict[str, Any]]:
-    """Plan a delta over the active base, or None when a new base is due."""
-    pointer = _read_active_pointer(db_path)
-    base_hashes = _issue_base_hashes(db_path)
-    if pointer is None or base_hashes is None:
-        return None
-    changed = {
-        record_id for record_id, content_hash in new_hashes.items()
-        if base_hashes.get(record_id) != content_hash
-    }
-    deleted = set(base_hashes) - set(new_hashes)
-    limit = max(ISSUE_DELTA_MIN_RECORDS, int(len(base_hashes) * ISSUE_DELTA_MAX_FRACTION))
-    if len(changed) + len(deleted) > limit:
-        return None
-    return {
-        "base_generation": pointer["generation"],
-        "changed": changed,
-        "shadowed": sorted((changed & set(base_hashes)) | deleted),
-    }
+def _prune_issue_record_pool(db_path: Path) -> int:
+    """Caller holds build + exclusive scope locks, excluding writers/readers."""
+    try:
+        marks: set[str] = set()
+        for generation in generations_root(db_path).iterdir():
+            if not generation.is_dir() or not generation.name.startswith("gen-"):
+                continue
+            if (generation / ISSUE_MEMBERSHIP_FILENAME).exists():
+                marks.update(_read_issue_membership(generation).values())
+            elif not ((generation / ISSUE_BASE_MANIFEST_FILENAME).is_file()
+                      or (generation / ISSUE_DELTA_FILENAME).is_file()):
+                # Unknown retained contract: it might name this pool.
+                return 0
+        pool = _issue_record_pool(db_path)
+        if not (pool / "chroma.sqlite3").is_file():
+            return 0
+        client, collection = _open_chroma_collection(pool, V2_ISSUES_COLLECTION)
+        try:
+            for offset in range(0, collection.count(), FILE_INDEX_V2_VECTOR_BATCH):
+                ids = collection.get(limit=FILE_INDEX_V2_VECTOR_BATCH, offset=offset, include=[])["ids"]
+                unused = [record_id for record_id in ids if record_id not in marks]
+                if unused:
+                    collection.delete(ids=unused)
+                    return len(unused)
+        finally:
+            _close_chroma_client(client)
+    except Exception:
+        # Cleanup never makes a published generation unavailable.
+        return 0
+    return 0
 
 
 def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
@@ -4780,7 +4895,7 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
     exclusive target lock, and `acquire_lock` is not reentrant.
     """
     store = resolve_active_store(db_path)
-    if not (store / "chroma.sqlite3").exists():
+    if scope != "issues" and not (store / "chroma.sqlite3").exists():
         return None
     try:
         return _layered_document_count(db_path, scope)
@@ -4815,6 +4930,7 @@ def _publish_generation(
     source_fingerprint: Optional[str] = None,
     after_publish=None,
     delta_of: Optional[str] = None,
+    issue_membership: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Atomically publish `staging` as the new active generation (FR-390).
 
@@ -4842,6 +4958,9 @@ def _publish_generation(
     try:
         gen_root.mkdir(parents=True, exist_ok=True)
         with acquire_lock(db_path, exclusive=True):
+            if scope == "issues" and _unknown_issue_pointer_contract(db_path):
+                return {"ok": False, "error_code": "INDEX_INCOMPATIBLE", "scope": scope,
+                        "error": "unsupported Issue writer contract; existing generation preserved"}
             previous = _read_active_pointer(db_path)
             if document_count == 0:
                 active_documents = _active_store_document_count(db_path, scope)
@@ -4858,7 +4977,11 @@ def _publish_generation(
                         "retryable": True,
                     }
             generation_dir = gen_root / generation_name
+            if issue_membership is not None:
+                _fsync_file_index_v2_directory(staging)
             _replace_staging_generation(staging, generation_dir)
+            if issue_membership is not None:
+                _fsync_directory(gen_root)
             for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
                 with contextlib.suppress(OSError):
                     (generation_dir / residue).unlink()
@@ -4872,11 +4995,12 @@ def _publish_generation(
             }
             if source_fingerprint is not None:
                 pointer_payload["source_fingerprint"] = source_fingerprint
-            pointer_tmp = gen_root / f".{ACTIVE_POINTER_FILENAME}.tmp-{os.getpid()}"
-            pointer_tmp.write_text(
-                json.dumps(pointer_payload, ensure_ascii=True), encoding="utf-8"
-            )
-            os.replace(pointer_tmp, active_pointer_path(db_path))
+            if issue_membership is not None:
+                pointer_payload.update(schema_version=2, writer_protocol=ISSUE_RECORD_PROTOCOL,
+                                       membership_digest=_sha256_json(issue_membership))
+                _write_durable_json_atomic(active_pointer_path(db_path), pointer_payload)
+            else:
+                _write_json_atomic(active_pointer_path(db_path), pointer_payload)
             if after_publish is not None:
                 # PR #3301 review: manifest / meta belong to the same
                 # publication as the pointer swap, so run them while the
@@ -4898,6 +5022,8 @@ def _publish_generation(
                     previous.get("delta") if previous else None,
                 },
             )
+            if issue_membership is not None:
+                _prune_issue_record_pool(db_path)
     except OSError as error:
         return {
             "ok": False,
@@ -6056,6 +6182,34 @@ def _issue_source_revision(repo_hash: str) -> Optional[str]:
     except (OSError, ValueError, UnicodeDecodeError):
         # Legacy/unversioned sources still use the complete read on every call.
         return None
+
+
+def _legacy_issue_source_snapshot(repo_hash: str) -> str:
+    """Match Rust's legacy source probe, including complete SPEC payloads."""
+    root = _issue_cache_root(repo_hash)
+    digest = hashlib.sha256(_issue_source_fingerprint(
+        _load_cached_issue_documents(repo_hash)).encode("utf-8"))
+    paths = []
+    for issue in root.iterdir() if root.is_dir() else []:
+        if (not issue.is_dir() or issue.is_symlink()
+                or re.fullmatch(r"\+?[0-9]+", issue.name) is None
+                or int(issue.name) > 2**64 - 1):
+            continue
+        body = issue / "body.md"
+        if body.is_file():
+            paths.append(body)
+        sections = issue / "sections"
+        if sections.is_dir():
+            paths.extend(path for path in sections.iterdir()
+                         if path.is_file() and not path.is_symlink() and path.suffix == ".md")
+    for path in sorted(paths, key=lambda path: path.parts):
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as source:
+            digest.update(os.fstat(source.fileno()).st_size.to_bytes(8, "little"))
+            while chunk := source.read(64 * 1024):
+                digest.update(chunk)
+    return "source:" + digest.hexdigest()
 
 
 def _cached_issue_source(repo_hash: str, kind: str, load: Callable[[], Any]) -> Any:
@@ -7932,12 +8086,15 @@ def _close_chroma_client(client) -> None:
 
 
 def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
-    store = resolve_active_store(db_path)
-    chroma_sqlite = store / "chroma.sqlite3"
-    if not chroma_sqlite.exists():
-        return False, 0
     try:
+        # Acquiring the scope lock creates its directory; a status probe must not.
+        if not db_path.is_dir():
+            return False, 0
         with acquire_lock(db_path, exclusive=False):
+            store = resolve_active_store(db_path)
+            if (scope not in ("issues", "specs") or _active_issue_members(db_path) is None):
+                if not (store / "chroma.sqlite3").exists():
+                    return False, 0
             return True, _layered_document_count(db_path, scope)
     except Exception:
         return False, 0
@@ -7945,6 +8102,15 @@ def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
 
 def _layered_document_count(db_path: Path, scope: str) -> int:
     """Documents visible through the active layers. Caller holds a lock."""
+    members = _active_issue_members(db_path) if scope in ("issues", "specs") else None
+    if members is not None:
+        client, collection = _open_chroma_collection(_issue_record_pool(db_path), V2_ISSUES_COLLECTION)
+        try:
+            if len(_verified_issue_members(collection, members)) != len(members):
+                raise ValueError("missing Issue generation member")
+            return len(members)
+        finally:
+            _close_chroma_client(client)
     total = 0
     for store, hidden in _active_store_layers(db_path):
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
@@ -7971,6 +8137,22 @@ def _query_active_layers(
     """
     items: List[Dict[str, Any]] = []
     count = 0
+    members = _active_issue_members(db_path) if scope in ("issues", "specs") else None
+    if members is not None:
+        client, collection = _open_chroma_collection(_issue_record_pool(db_path), V2_ISSUES_COLLECTION)
+        try:
+            if len(_verified_issue_members(collection, members)) != len(members):
+                raise ValueError("missing Issue generation member")
+            items = _search_collection_v2(
+                collection, query, fetch_n, query_embedding=query_embedding,
+                ids=list(members.values()), **_scope_record_filter(scope),
+            )
+            logical_ids = {value: key for key, value in members.items()}
+            for item in items:
+                item["id"] = logical_ids[item["id"]]
+            return items, len(members)
+        finally:
+            _close_chroma_client(client)
     layers = _active_store_layers(db_path)
     for store, hidden in layers:
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
@@ -8307,6 +8489,9 @@ def _index_issues_v2_locked(
     """
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
 
+    if _unknown_issue_pointer_contract(db_path):
+        return {"ok": False, "scope": "issues", "error_code": "INDEX_INCOMPATIBLE",
+                "error": "unsupported Issue writer contract; existing generation preserved"}
     if repair:
         for name in ("cancel-requested", "repair.json"):
             (db_path / name).unlink(missing_ok=True)
@@ -8314,6 +8499,9 @@ def _index_issues_v2_locked(
         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
 
     source_revision = _issue_source_revision(repo_hash)
+    source_content_fingerprint = (
+        _legacy_issue_source_snapshot(repo_hash) if source_revision is None else None
+    )
     records = _load_issue_records(repo_hash)
     issue_cache_fingerprint = _issue_source_fingerprint(_load_cached_issue_documents(repo_hash))
     if source_revision != _issue_source_revision(repo_hash):
@@ -8331,10 +8519,15 @@ def _index_issues_v2_locked(
     health = _issue_status_v2(repo_hash, db_root=db_root, source=source)
     if respect_ttl and not repair and health.get("healthy"):
         meta = _read_issue_meta(db_path) or {}
+        source_acknowledged = (
+            meta.get("source_cache_revision") == source_revision if source_revision is not None
+            else source_content_fingerprint is not None
+            and meta.get("source_content_fingerprint") == source_content_fingerprint
+        )
         last = _parse_iso(meta.get("last_full_refresh", ""))
         if last is not None:
             age = (_now_utc() - last).total_seconds()
-            if age < ttl_minutes * 60:
+            if age < ttl_minutes * 60 and source_acknowledged:
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
@@ -8353,17 +8546,10 @@ def _index_issues_v2_locked(
     new_entries = [{"path": record["id"],
                     "content_hash": _record_source_fingerprint([record])} for record in records]
     new_hashes = {entry["path"]: entry["content_hash"] for entry in new_entries}
-    delta_plan = _plan_issue_delta(db_path, new_hashes) if mode == "incremental" else None
-    # Stage only what the new generation holds: the delta's changed records,
-    # or every record for a new base.
-    staged_records = (
-        [record for record in records if record["id"] in delta_plan["changed"]]
-        if delta_plan is not None else records
-    )
-    staging_fingerprint = (
-        f"{fingerprint}:delta:{delta_plan['base_generation']}"
-        if delta_plan is not None else fingerprint
-    )
+    # Record identity includes the complete persisted input (logical ID,
+    # document and metadata). The versioned pool fixes the embedding contract.
+    members = new_hashes
+    staging_fingerprint = f"{ISSUE_RECORD_PROTOCOL}:{fingerprint}"
 
     # Persist before staging. The held build lock distinguishes a live build
     # from an orphan left by process death. Normal yield/success clear it.
@@ -8381,7 +8567,7 @@ def _index_issues_v2_locked(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(staged_records)
+    total = len(records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
@@ -8400,22 +8586,15 @@ def _index_issues_v2_locked(
     yielded = False
     staged_count = 0
     try:
+        pool = _issue_record_pool(db_path)
         with acquire_lock(staging, exclusive=True):
-            client, collection = _make_chroma_collection_repairing(staging, V2_ISSUES_COLLECTION)
+            # Never reset a shared pool when open fails: retained generations
+            # may still name it. Explicit repair fills missing members below.
+            client, collection = _open_issue_pool_for_build(db_path, repair)
             try:
-                staged_ids: set = set()
-                if continuation is None and mode == "incremental":
-                    _copy_unchanged_records(db_path, "issues", collection, V2_ISSUES_COLLECTION,
-                                            {record["id"]: new_hashes[record["id"]]
-                                             for record in staged_records})
-                    staged_ids = set(collection.get().get("ids") or [])
-                if continuation is not None:
-                    try:
-                        staged_ids = set(collection.get().get("ids") or [])
-                    except Exception:  # pragma: no cover - defensive chroma fallback
-                        staged_ids = set()
+                staged_ids = _verified_issue_members(collection, members)
                 pending: List[Dict[str, Any]] = [
-                    record for record in staged_records if record["id"] not in staged_ids
+                    record for record in records if members[record["id"]] not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
                 _write_heavy_progress(
@@ -8426,7 +8605,7 @@ def _index_issues_v2_locked(
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
                     batch_records = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
-                    ids = [record["id"] for record in batch_records]
+                    ids = [members[record["id"]] for record in batch_records]
                     documents = [record["document"] for record in batch_records]
                     metadatas = [record["metadata"] for record in batch_records]
                     collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
@@ -8460,11 +8639,16 @@ def _index_issues_v2_locked(
                     if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
                         yielded = True
                         break
-                staged_count = _safe_collection_count(collection)
+                staged_count = (len(staged_ids) + newly_embedded if yielded
+                                else len(_verified_issue_members(collection, members)))
                 if not yielded and staged_count != total:
                     return _issue_build_failure(db_path, fingerprint, mode, "COUNT_MISMATCH", staged_count, total)
             finally:
                 _close_chroma_client(client)
+            if not yielded:
+                _fsync_file_index_v2_directory(pool)
+                for parent in (pool.parent, pool.parent.parent, generations_root(db_path), db_path.parent):
+                    _fsync_directory(parent)
     except Exception as error:
         result = _issue_build_failure(db_path, fingerprint, mode, "BUILD_FAILED", staged_count, total)
         result["error"] = str(error)
@@ -8520,6 +8704,8 @@ def _index_issues_v2_locked(
                     "source_cache_fingerprint": source["fingerprint"],
                     "issue_cache_fingerprint": issue_cache_fingerprint,
                     **({"source_cache_revision": source_revision} if source_revision is not None else {}),
+                    **({"source_content_fingerprint": source_content_fingerprint}
+                       if source_content_fingerprint is not None else {}),
                     "source_document_count": source["document_count"],
                     "source_cache_refresh_at": source.get("cache_refresh_at"),
                 },
@@ -8532,28 +8718,18 @@ def _index_issues_v2_locked(
             publication_error = error
 
     try:
-        # The layer descriptor travels inside the generation directory: a
-        # delta names its base and the base records it hides; a base records
-        # its content hashes so the next refresh can plan a delta over it.
-        if delta_plan is not None:
-            layer_name, layer_payload = ISSUE_DELTA_FILENAME, {
-                "schema_version": 1,
-                "base_generation": delta_plan["base_generation"],
-                "shadowed": delta_plan["shadowed"],
-                "document_count": staged_count,
-            }
-        else:
-            layer_name, layer_payload = ISSUE_BASE_MANIFEST_FILENAME, new_hashes
-        (staging / layer_name).write_text(
-            json.dumps(layer_payload, sort_keys=True, ensure_ascii=True), encoding="utf-8"
-        )
+        _write_durable_json_atomic(staging / ISSUE_MEMBERSHIP_FILENAME, {
+            "schema_version": 1, "writer_protocol": ISSUE_RECORD_PROTOCOL,
+            "record_layout": ISSUE_RECORD_LAYOUT, "members": members,
+            "members_digest": _sha256_json(members),
+        })
         publish = _publish_generation(
             db_path,
             staging,
             scope="issues",
             document_count=len(records),
             after_publish=_commit_issue_meta,
-            delta_of=delta_plan["base_generation"] if delta_plan is not None else None,
+            issue_membership=members,
         )
         if publication_error is not None:
             raise publication_error

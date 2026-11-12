@@ -9682,7 +9682,27 @@ impl AppRuntime {
             idle_kind,
             "closing an idle agent window released by Issues daemon"
         );
-        self.close_window_after_issue_monitor_finalize_events(window_id)
+        // Issue #7035 AC-2: with a native project owner connected, the daemon's
+        // canvas names panes in the owner namespace, not by their GUI alias.
+        let alias = if self.window_lookup.contains_key(window_id) {
+            Some(window_id.to_string())
+        } else {
+            self.runtimes
+                .iter()
+                .find(|(_, runtime)| runtime.owner_pane_id == window_id)
+                .map(|(alias, _)| alias.clone())
+        };
+        let Some(alias) = alias else {
+            tracing::warn!(
+                target: "gwt.pane.teardown",
+                window_id,
+                ?issue_number,
+                idle_kind,
+                "Issues daemon idle close names no window known to this GUI"
+            );
+            return Vec::new();
+        };
+        self.close_window_after_issue_monitor_finalize_events(&alias)
     }
 
     fn issue_monitor_snapshot_events_for(
@@ -10270,6 +10290,23 @@ impl AppRuntime {
                 if !gwt::window_state::uses_agent_hook_state(window.preset) {
                     return None;
                 }
+                // A saved GUI alias is not proof of a physical pane. Failed
+                // launches can leave Starting rows without an owner runtime.
+                // Protect the actual launch interval before its runtime arrives.
+                let live_runtime = self
+                    .runtimes
+                    .get(window_id)
+                    .is_some_and(|runtime| runtime.child_pid.is_some() && !runtime.exit_confirmed);
+                let pending_launch =
+                    self.pending_launch_completions
+                        .get(window_id)
+                        .is_some_and(|pending| {
+                            pending.launch_in_flight
+                                && pending.current.load(std::sync::atomic::Ordering::Acquire)
+                        });
+                if !live_runtime && !pending_launch {
+                    return None;
+                }
                 let resident_pm =
                     self.pm_session_for_root(&tab.project_root)
                         .is_some_and(|pm_session| {
@@ -10282,7 +10319,11 @@ impl AppRuntime {
                         tab.title,
                         window.purpose_title.as_deref().unwrap_or(&window.title)
                     ),
-                    state: self.window_status(window_id).unwrap_or(window.status),
+                    state: if pending_launch {
+                        WindowProcessStatus::Starting
+                    } else {
+                        self.window_status(window_id).unwrap_or(window.status)
+                    },
                     resident_pm,
                 })
             })
@@ -10671,17 +10712,36 @@ impl AppRuntime {
             return Vec::new();
         }
         let (panes, worktrees) = self.capture_update_quiescence_inputs();
+        let sessions_dir = self.sessions_dir.clone();
+        let restoring_session_ids = self.restoring_session_ids();
         let proxy = self.proxy.clone();
         self.update_drain_scan_in_flight = true;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 gwt_core::operation_deadline::now() + std::time::Duration::from_secs(2),
             );
-            let observations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                contexts
-                    .into_iter()
-                    .filter_map(|context| {
-                        let drain = Self::read_project_auto_update_drain(&context);
+            let observations =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let drains: Vec<_> = contexts
+                        .into_iter()
+                        .map(|context| {
+                            let drain = Self::read_project_auto_update_drain(&context);
+                            (context, drain)
+                        })
+                        .collect();
+                    // Update recovery cannot depend on enabled Issues scans. Use
+                    // the same exact holder/runtime revalidation on this worker,
+                    // retaining admitted restores until their launch completes.
+                    if drains.iter().any(|(_, drain)| drain.is_some()) {
+                        startup::reap_defunct_active_generations(
+                            &sessions_dir,
+                            &worktrees,
+                            &[],
+                            &restoring_session_ids,
+                            startup::GenerationReaperFailureLog::Debug,
+                        );
+                    }
+                    drains.into_iter().filter_map(|(context, drain)| {
                         let monitor = gwt::IssueMonitorState::with_prefs(
                             gwt::IssueMonitorConfig::default(),
                             drain
@@ -10707,11 +10767,11 @@ impl AppRuntime {
                         })
                     })
                     .collect()
-            }))
-            .unwrap_or_else(|_| {
-                tracing::warn!("update drain observer panicked; automatic apply deferred");
-                Vec::new()
-            });
+                }))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("update drain observer panicked; automatic apply deferred");
+                    Vec::new()
+                });
             proxy.send(UserEvent::UpdateDrainObserved { now, observations });
         });
         if let Err(error) = spawn {
@@ -11535,6 +11595,7 @@ impl AppRuntime {
             // These operations target the authenticated project connection.
             FrontendEvent::CreateWindow { .. }
             | FrontendEvent::RetryWorkspaceStateLoad
+            | FrontendEvent::RestartWedgedOwner { .. }
             | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
             | FrontendEvent::RunWorkspaceCleanup { .. }
             | FrontendEvent::CycleFocus { .. }
@@ -12034,6 +12095,49 @@ impl AppRuntime {
                     },
                 )]
             }
+            FrontendEvent::RestartWedgedOwner {
+                confirmed,
+                recovery_id,
+            } => {
+                let key = context.project_key.to_string();
+                let wedged = self
+                    .project_state(context)
+                    .and_then(|state| state.project_owner_health.as_ref())
+                    .is_some_and(|health| {
+                        health.state == gwt::protocol::ProjectOwnerHealthState::Wedged
+                            && health.recovery_id.as_deref() == Some(recovery_id.as_str())
+                    });
+                if !confirmed || !wedged {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorToast {
+                            notification_transition: None,
+                            notification_transition_id: None,
+                            level: "error".into(),
+                            message:
+                                "Owner restart requires confirmation of the current wedged owner"
+                                    .into(),
+                            issue_number: None,
+                        },
+                    )];
+                }
+                let supervisor = self.daemon_supervisor.clone();
+                let root = context.project_root.clone();
+                let proxy = self.proxy.for_project(context.clone());
+                self.blocking_tasks.spawn(move || {
+                    let result = gwt::daemon_subscriber::restart_wedged_owner(&key, confirmed, &recovery_id)
+                        .and_then(|()| supervisor.ensure_running(&root).map(|_| ()));
+                    let (level, message) = match result {
+                        Ok(()) => ("info", "Daemon stopped after saving diagnostics; reconnecting to its replacement".to_string()),
+                        Err(error) => ("error", format!("Daemon restart: {error}")),
+                    };
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(client_id, BackendEvent::IssueMonitorToast {
+                        notification_transition: None, notification_transition_id: None,
+                        level: level.into(), message, issue_number: None,
+                    })]));
+                });
+                Vec::new()
+            }
             FrontendEvent::RetryWorkspaceStateLoad => {
                 spawn_workspace_projection_reload(
                     &self.blocking_tasks,
@@ -12109,7 +12213,16 @@ impl AppRuntime {
                 agent_id,
                 model,
                 reasoning,
-            } => self.set_pm_launch_profile_events(context, &agent_id, model, reasoning),
+                codex_speed,
+                fast_mode,
+            } => self.set_pm_launch_profile_events(
+                context,
+                &agent_id,
+                model,
+                reasoning,
+                codex_speed,
+                fast_mode,
+            ),
             FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(context),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(&client_id),
             FrontendEvent::SelectCloneProjectParent => {
@@ -13775,7 +13888,9 @@ impl AppRuntime {
                 && gwt::window_state::uses_agent_hook_state(preset)
                 && !matches!(
                     base,
-                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    WindowProcessStatus::Stopped
+                        | WindowProcessStatus::Error
+                        | WindowProcessStatus::Interrupted
                 )
             {
                 WindowProcessStatus::Waiting
@@ -15168,6 +15283,7 @@ impl AppRuntime {
                 id,
                 incarnation,
                 error,
+                explicit_stop,
                 final_screen,
             } => {
                 let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
@@ -15213,6 +15329,19 @@ impl AppRuntime {
                 runtime.exit_confirmed = true;
                 runtime.status = status;
                 runtime.detail = detail.clone();
+                if explicit_stop {
+                    if let Some(address) = self.window_lookup.get(&id).cloned() {
+                        if let Some(tab) = self.tab_mut(&address.tab_id) {
+                            if tab
+                                .workspace
+                                .window(&address.raw_id)
+                                .is_some_and(crate::runtime_support::window_is_agent_pane)
+                            {
+                                tab.workspace.set_persist(&address.raw_id, false);
+                            }
+                        }
+                    }
+                }
                 self.active_agent_sessions.remove(&id);
                 let mut events = Vec::new();
                 if let Some(snapshot) = final_snapshot {
@@ -15220,6 +15349,11 @@ impl AppRuntime {
                     events.push(snapshot);
                 }
                 events.extend(self.apply_owner_status_projection(&id, status, detail));
+                if explicit_stop {
+                    // Status alone cannot update the catalog's snapshot
+                    // eligibility after this pane leaves the live census.
+                    events.push(self.workspace_state_broadcast(context));
+                }
                 events
             }
             OwnerEvent::LaunchProgress {
@@ -15424,7 +15558,13 @@ fn read_owner_session(
     sessions_dir: &Path,
 ) -> Option<gwt_agent::Session> {
     let id = snapshot.session_id.as_ref()?;
-    if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, id) {
+    if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, id).unwrap_or_else(
+        |error| {
+            tracing::warn!(session_id = %id, error_kind = ?error.kind(), %error,
+            "excluding owner snapshot with unreadable launch recovery receipt");
+            true
+        },
+    ) {
         return None;
     }
     let session = gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()?;
@@ -15737,6 +15877,7 @@ impl AppRuntime {
                 generation,
                 context: Some(context.clone()),
                 current: current.clone(),
+                launch_in_flight: true,
                 operation_id: operation_id.clone(),
                 owner_pane_id: owner_pane_id.clone(),
                 client_cell: client_cell.clone(),
@@ -15988,10 +16129,11 @@ impl AppRuntime {
             });
             return Vec::new();
         }
-        let pending = self
+        let mut pending = self
             .pending_launch_completions
             .remove(&window_id)
             .expect("current exact owner completion");
+        pending.launch_in_flight = false;
         self.pending_auto_resume_sources.remove(&window_id);
         self.inflight_launches.retain(|_, (id, _)| id != &window_id);
         let mut wizard_events = Vec::new();

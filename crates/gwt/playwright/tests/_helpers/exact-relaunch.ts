@@ -60,6 +60,7 @@ export type ExactRelaunchInvocation = {
  * Each invocation owns a fresh HOME, retained as evidence after cleanup.
  */
 export type ExactRelaunchSetup = {
+  exitNotice?: string;
   freshNativeIds?: boolean;
   terminalConvergence?: boolean;
   switching?: { sourceIssueNumber: number; positive: boolean };
@@ -391,7 +392,10 @@ ${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
   ${setup.switching ? "if (line.includes('GWT checkpoint request ')) { checkpoint(line).catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
-  if (line.trim() === 'GWT_FIXTURE_EXIT') process.exit(0);
+  if (line.trim() === 'GWT_FIXTURE_EXIT') {
+    ${setup.exitNotice ? `process.stdout.write(${JSON.stringify(setup.exitNotice)}, () => process.exit(0));` : "process.exit(0);"}
+    return;
+  }
   ${setup.terminalConvergence ? "if (line.trim() === 'GWT_FIXTURE_PREPARE_TERMINAL_WARNING') { try { prepareTerminalWarning(); } catch (error) { terminalActorFailure(error); } return; }" : ""}
   ${setup.terminalConvergence ? "if (line.trim() === 'GWT_FIXTURE_TERMINAL_WARNING') { try { completeTerminalWarning(); } catch (error) { terminalActorFailure(error); } return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_DONE') {

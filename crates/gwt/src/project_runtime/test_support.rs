@@ -289,9 +289,11 @@ impl ProjectOwnerHarness {
         let fixture_root = root.clone();
         let home = gwt_config::home::user_home().ok_or("fixture user home unavailable")?;
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let clock = gwt_core::operation_deadline::ScopedOperationClock::current();
         let mut fixture = tokio::task::spawn_blocking(move || {
             let _dispatch = tracing::dispatcher::set_default(&dispatch);
             let _home = gwt_core::test_support::ScopedGwtHome::set(&home);
+            let _clock = clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
             Self::bind(&fixture_root, with_monitor, control_budget)
         })
         .await

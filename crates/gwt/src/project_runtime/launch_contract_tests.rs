@@ -2597,10 +2597,7 @@ mod agent_endpoint_env_tests {
             session_before,
             "the failed write must retain the pre-binding Session byte-identically",
         );
-        assert!(durable_launch_recovery_exists(
-            &launch.sessions_dir,
-            &launch.session.id,
-        ));
+        assert!(durable_launch_recovery_exists(&launch.sessions_dir, &launch.session.id,).unwrap());
         assert!(
             gwt_core::workspace_projection::load_workspace_work_items(&launch.project)
                 .expect("read absent Work projection")
@@ -2763,7 +2760,8 @@ mod agent_endpoint_env_tests {
             !crate::session_launch::durable_launch_recovery_exists(
                 &sessions_dir,
                 &genesis.session_id,
-            ),
+            )
+            .unwrap(),
             "the receipt may clear only after exact Session cleanup"
         );
     }

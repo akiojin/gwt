@@ -965,6 +965,23 @@ pub(super) fn finish_managed_exit(
     runtime: &mut AppRuntime,
     events: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
 ) -> Vec<OutboundEvent> {
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Input {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            data: if cfg!(windows) { b"exit\r" } else { b"exit\n" }.to_vec(),
+        }),
+    )
+    .expect("release the actual provider exit gate");
+    observe_managed_exit(owner, probe, runtime, events)
+}
+
+fn observe_managed_exit(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    probe: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    runtime: &mut AppRuntime,
+    events: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+) -> Vec<OutboundEvent> {
     use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
     let identity = owner.client().identity().unwrap().clone();
     let context = runtime
@@ -980,14 +997,6 @@ pub(super) fn finish_managed_exit(
         })
         .expect("the exact owner runtime's project context");
     owner_fixture_block_on(async {
-        owner
-            .command(OwnerCommand::Input {
-                id: probe.id.clone(),
-                incarnation: probe.incarnation,
-                data: if cfg!(windows) { b"exit\r" } else { b"exit\n" }.to_vec(),
-            })
-            .await
-            .expect("release the actual provider exit gate");
         let mut projected = Vec::new();
         let mut closed_count = 0;
         loop {
@@ -2830,6 +2839,7 @@ fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
                 generation,
                 context: Some(context.clone()),
                 current: Arc::new(AtomicBool::new(true)),
+                launch_in_flight: true,
                 operation_id: "actual-pre-pty-failure".into(),
                 owner_pane_id: captured.id.clone(),
                 client_cell: client_cell.clone(),
@@ -4914,6 +4924,47 @@ fn a_claude_usage_limit_exit_is_attributed_to_the_panes_own_agent() {
 /// has to stay resumable rather than look complete.
 #[test]
 fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    };
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    // Park the real reader outside the Pane mutex, before it can read the
+    // final refusal. Arm only after READY so ConPTY startup queries proceed.
+    struct ReaderGate {
+        armed: Arc<AtomicBool>,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReaderGate {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            #[derive(Default)]
+            struct Stage(bool);
+            impl tracing::field::Visit for Stage {
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0 |= field.name() == "stage" && value == "owner_cursor_response";
+                }
+            }
+            let mut stage = Stage::default();
+            event.record(&mut stage);
+            if stage.0 && self.armed.swap(false, Ordering::AcqRel) {
+                let _ = self.entered.send(());
+                let _ = self.release.lock().unwrap().recv();
+            }
+        }
+    }
+    struct ReleaseReader(mpsc::Sender<()>);
+    impl Drop for ReleaseReader {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4948,7 +4999,7 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
             "powershell -NoProfile -Command \"[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit 0\"\r\n",
         )
         } else {
-            "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit 0\n"
+            "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; printf '\\033[6n'; read finish; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit 0\n"
         },
     );
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
@@ -4960,8 +5011,20 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
         "GWT_EXIT_FIXTURE_OUTPUT".into(),
         CODEX_USAGE_LIMIT_SCREEN.into(),
     );
-    let window_id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let armed = Arc::new(AtomicBool::new(false));
+    let (entered, query) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let _unscoped = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(ReaderGate {
+        armed: armed.clone(),
+        entered,
+        release: Mutex::new(resume),
+    }));
+    let window_id = tracing::dispatcher::with_default(&dispatch, || {
+        spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None)
+    });
     let owner = project_owner_fixture(&mut runtime, &window_id);
+    let release = ReleaseReader(release);
     let probe = owner_runtime_probe(&runtime, &window_id);
     assert_eq!(
         probe.session.as_ref().unwrap().agent_id,
@@ -4997,7 +5060,56 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
     ))
     .unwrap();
     let mut observed = owner.subscribe();
-    let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+    if cfg!(windows) {
+        // ConPTY consumes a Console-written cursor query internally. Keep
+        // the original native Windows acceptance; POSIX controls the race.
+        let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+    } else {
+        armed.store(true, Ordering::Release);
+        let input = || gwt::project_runtime::events::OwnerCommand::Input {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            data: if cfg!(windows) { b"exit\r" } else { b"exit\n" }.to_vec(),
+        };
+        owner_fixture_block_on(owner.command(input())).unwrap();
+        query
+            // test-hygiene: allow-wall-clock-deadline The channel proves reader ordering; timeout only bounds a broken fixture.
+            .recv_timeout(gwt_core::deadline_budget::HANG_GUARD)
+            .expect("reader parked before final output");
+        owner_fixture_block_on(owner.command(input())).unwrap();
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Observe owner writer revocation, not an elapsed-latency assertion.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                while probe.current.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let inventory = owner
+                .command(gwt::project_runtime::events::OwnerCommand::ListPanes)
+                .await
+                .unwrap();
+            assert!(probe.pane.lock().unwrap().last_exit().is_some());
+            assert!(!probe
+                .pane
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("usage limit"));
+            assert!(
+                inventory["panes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|pane| pane["id"] == probe.id),
+                "physical exit must retain the exact pane until its final output is drained"
+            );
+        });
+        drop(release);
+        let _ = observe_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+    }
 
     assert_eq!(
         runtime.window_status(&window_id),
