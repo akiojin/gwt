@@ -216,6 +216,23 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
     await expect(other).toHaveAttribute("open");
     expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
   }
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__stripMutations = 0;
+    fixture.__stripObserver = new MutationObserver(records => { fixture.__stripMutations += records.length; });
+    fixture.__stripObserver.observe(document.getElementById("op-strip-issue-monitor"), {
+      subtree: true, attributes: true, childList: true, characterData: true,
+    });
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: { total_candidates: 73, allowed_labels: ["ready"] } });
+  });
+  await expect(page.locator('[data-metric="queue"]')).toHaveAttribute("title", "Total 73");
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  expect(await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__stripObserver.disconnect();
+    return fixture.__stripMutations;
+  }), "an unrelated status update reaches Issues without redrawing the strip").toBe(0);
   expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
   expect(await messages(page, "set_issue_monitor_max_active_agents")).toEqual([]);
   await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
