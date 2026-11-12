@@ -679,8 +679,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       : [];
     const nextDigest = JSON.stringify([includeCompleted, rows, sources.map(message => [message.sourceKey, message.id])]);
     if (nextDigest !== tasksDigest) {
-      const focusedCriteriaKey = taskList.contains(document.activeElement)
-        && document.activeElement?.matches('.pm-chat__task-criteria > summary')
+      const focusedTaskControl = document.activeElement?.matches('.pm-chat__task-detail-button')
+        ? '.pm-chat__task-detail-button' : '.pm-chat__task-criteria > summary';
+      const focusedTaskKey = taskList.contains(document.activeElement)
+        && document.activeElement?.matches(focusedTaskControl)
         ? document.activeElement.closest('.pm-chat__task')?.dataset.taskKey : null;
       tasksDigest = nextDigest;
       const parents = new Map(rows.map(task => [task.key, task.title]));
@@ -752,8 +754,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       if (nodes.length !== taskList.children.length || nodes.some((node, index) => taskList.children[index] !== node)) {
         taskList.replaceChildren(...nodes);
       }
-      if (focusedCriteriaKey) nodes.find(node => node.dataset.taskKey === focusedCriteriaKey)
-        ?.querySelector('.pm-chat__task-criteria > summary')?.focus();
+      if (focusedTaskKey) nodes.find(node => node.dataset.taskKey === focusedTaskKey)
+        ?.querySelector(focusedTaskControl)?.focus();
       const keys = new Set(rows.map(task => task.key));
       for (const key of taskRows.keys()) if (!keys.has(key)) taskRows.delete(key);
     }

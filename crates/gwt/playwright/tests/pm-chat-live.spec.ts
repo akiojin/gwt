@@ -2134,6 +2134,21 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(taskDetail).not.toContainText('Loading task details');
       await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
       await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
+      await expect(detailButton).toBeFocused();
+      const detailFocusUpdate = await exchange('update_pm_request_task', { request: {
+        operation_id: `detail-focus-update-${theme}`, expected_revision: criteriaUpdate.revision,
+        reason: 'Keep keyboard focus on the detail action during a Task update.',
+        task: { ...rootTask.draft, assignee: 'PM keyboard reviewer' },
+      } });
+      expect(detailFocusUpdate).toMatchObject({ state: 'ready' });
+      await refreshPmReports(page);
+      await expect(rootRow).toContainText('PM keyboard reviewer');
+      await expect(detailButton).toBeFocused();
+      await expect(detailButton).toBeInViewport({ ratio: 1 });
+      await page.keyboard.press('Enter');
+      await expect(taskDetail).toContainText('Showing 3 of 3 recorded changes');
+      await expect(taskDetail).toContainText('Keep keyboard focus on the detail action during a Task update.');
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
       await chat.getByRole('button', { name: 'Chat', exact: true }).click();
       const conversation = chat.getByRole('region', { name: 'PM conversation' });
       await expect(conversation).toBeVisible();
