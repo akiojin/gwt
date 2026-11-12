@@ -182,7 +182,13 @@ ENV_ARGS=(HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" GIT_TERMINAL_PROMPT=0 GH_
 
 # browser-check-process-cleanup-begin
 CHECK_PID=""
+CHECK_KEEPALIVE_PID=""
 cleanup_browser_check() {
+  if [ -n "$CHECK_KEEPALIVE_PID" ]; then
+    kill -TERM "$CHECK_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$CHECK_KEEPALIVE_PID" 2>/dev/null || true
+    CHECK_KEEPALIVE_PID=""
+  fi
   if [ -z "$CHECK_PID" ]; then return 0; fi
   if kill -0 "$CHECK_PID" 2>/dev/null; then
     kill -TERM "$CHECK_PID" 2>/dev/null || true
@@ -258,6 +264,32 @@ printf '%s' "$HOOK_HEALTH_JSON" > "$CHECK_HOME/hook-health.json"
 printf '%s' "$HOOK_HEALTH_JSON" | assert_hook_health
 # browser-check-hook-audit-end
 
+# Issue #5219: a --no-tray instance exits once no GUI client is connected, which
+# happens between tests that close their page. Retain one read-only Hub
+# connection until the suite ends. This client and the server belong to this shell.
+CHECK_KEEPALIVE_READY="$CHECK_HOME/keepalive-ready"
+node --input-type=module - "$CHECK_URL" "$CHECK_KEEPALIVE_READY" \
+  > "$CHECK_HOME/keepalive.log" 2>&1 <<'JS' &
+import { writeFileSync } from "node:fs";
+const url = new URL("/ws", process.argv[2]);
+url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+const socket = new WebSocket(url);
+socket.addEventListener("open", () => writeFileSync(process.argv[3], "ready"));
+socket.addEventListener("error", (event) => { console.error(event.error); process.exit(1); });
+socket.addEventListener("close", () => process.exit(1));
+JS
+CHECK_KEEPALIVE_PID=$!
+for ((CHECK_WAIT=0; CHECK_WAIT<100; CHECK_WAIT++)); do
+  if [ -s "$CHECK_KEEPALIVE_READY" ]; then break; fi
+  if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+if [ ! -s "$CHECK_KEEPALIVE_READY" ] || ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
+  cat "$CHECK_HOME/keepalive.log" >&2
+  echo 'browser-check Hub connection failed' >&2
+  exit 1
+fi
+
 # Keep the runner on the real HOME so its pinned browser cache is available.
 # Only the owned checkout process receives CHECK_HOME. Extra arguments include
 # canonical verify.run's --headed and embedded reporter.
@@ -267,3 +299,9 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
     --workers=1 --output "$CHECK_HOME/playwright-artifacts" \
     "crates/gwt/playwright/tests/$CHECK_SUITE-live.spec.ts" \
     --project="$CHECK_PROJECT" "$@"
+
+if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
+  cat "$CHECK_HOME/keepalive.log" >&2
+  echo 'browser-check Hub connection dropped during the suite' >&2
+  exit 1
+fi
