@@ -14,12 +14,12 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
     details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
   details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
 
-function fixture({ tasksDefault = false } = {}) {
+function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [], sent = [];
   let model;
-  const view = createPmChat({ document, root, sessionId: 'session',
+  const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
@@ -38,6 +38,34 @@ function fixture({ tasksDefault = false } = {}) {
   };
   return { root, model, view, visibility, copied, sent, update };
 }
+
+test('Chat opens its bound PM terminal in Works without losing the draft', () => {
+  const opened = [];
+  let available = false;
+  const { root, model, view } = fixture({ onOpenTerminal: session => { opened.push(session); return available; } });
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep this unfinished request';
+  const button = [...root.querySelectorAll('.pm-chat__chat button')]
+    .find(node => node.textContent === 'Open terminal in Works');
+  assert.ok(button, 'Chat offers a direct Works terminal action');
+  button.click();
+  assert.deepEqual(opened, ['session']);
+  assert.match(root.querySelector('.pm-chat__terminal-status').textContent, /unavailable.*current PM session/i);
+  assert.equal(draft.value, 'Keep this unfinished request');
+  assert.equal(view.isChatVisible(), true);
+  available = true;
+  button.click();
+  assert.equal(root.querySelector('.pm-chat__terminal-status').hidden, true);
+  assert.equal(draft.value, 'Keep this unfinished request');
+  model.bindPmWindowState('pm', 'replacement');
+  view.showChat();
+  button.click();
+  assert.deepEqual(opened, ['session', 'session', 'replacement']);
+  view.dispose();
+  button.click();
+  assert.equal(opened.length, 3);
+});
 
 const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
   pending_intake, tasks });
@@ -1075,6 +1103,47 @@ test('context-menu optional beforePaste runs once before clipboard awaits and pr
 const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: 'pm', session_id: 'session',
   snapshot: { conversation_id: 'c', availability: 'ready', detail: null, messages, ...extra } });
 
+test('Chat shares parent/child Tasks and returns only to their exact human source', () => {
+  const { root, model, view, update } = fixture();
+  const tasks = [trackedTask('parent', { source_key: 'source' }),
+    trackedTask('child', { parent_key: 'parent', source_key: 'source' })];
+  update([], null, { request_tasks: taskOverview(tasks, 0) });
+  view.showChat();
+  const preview = root.querySelector('.pm-chat__tasks');
+  const links = () => [...preview.querySelectorAll('button')].filter(node => node.textContent === 'Show in conversation');
+  assert.equal(preview.hidden, false);
+  assert.equal(links().length, 2);
+  assert.ok(links().every(button => button.disabled), 'a missing conversation never supplies a guessed target');
+  assert.match(preview.textContent, /original message.*not.*current conversation preview/i);
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep this unfinished request';
+  model.applyPmWindowReceiveEvent(conversation([
+    { id: 'same-text', role: 'user', text: 'Same request', source_key: 'foreign' },
+    { id: 'original', role: 'user', text: 'Same request', source_key: 'source' },
+    { id: 'answer', role: 'assistant', text: 'Same request', source_key: 'source' },
+  ]));
+  assert.ok(links().every(button => !button.disabled), 'late conversation arrival updates both parent and child');
+  const original = root.querySelector('[data-message-id="original"]');
+  const navigation = [];
+  original.scrollIntoView = () => navigation.push('scroll');
+  original.focus = () => navigation.push('focus');
+  view.showTasks();
+  links()[1].click();
+  assert.equal(view.isChatVisible(), true);
+  assert.deepEqual(navigation, ['scroll', 'focus']);
+  assert.equal(original.getAttribute('tabindex'), '-1');
+  assert.equal(draft.value, 'Keep this unfinished request');
+  assert.equal(preview.querySelectorAll('.pm-chat__task').length, 2);
+  model.applyPmWindowReceiveEvent(conversation([
+    { id: 'answer', role: 'assistant', text: 'Same request', source_key: 'source' },
+  ], { conversation_id: 'replacement' }));
+  assert.ok(links().every(button => button.disabled), 'a rotated conversation and assistant source cannot match');
+  links()[0].click();
+  assert.deepEqual(navigation, ['scroll', 'focus'], 'a stale button cannot navigate to the old bubble');
+  model.bindPmWindowState('pm', 'replacement-session');
+  assert.equal(preview.querySelectorAll('.pm-chat__task').length, 0);
+});
+
 test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
   const { root, model, view, update } = fixture({ tasksDefault: true });
   update([report()]);
@@ -1089,7 +1158,7 @@ test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-
   [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Chat').click();
   const chat = root.querySelector('.pm-chat__chat');
   assert.equal(chat.hidden, false);
-  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, false, 'Chat shares the existing Tasks preview');
   const bubbles = [...chat.querySelectorAll('.pm-chat__bubble')];
   assert.deepEqual(bubbles.map(bubble => [bubble.dataset.messageId, bubble.dataset.role]),
     [['u1', 'user'], ['a1', 'assistant'], ['u2', 'user']]);
@@ -1265,7 +1334,123 @@ test('Chat composer is Operator-styled and stays below the scrolling conversatio
   assert.match(rule('pm-chat__chat'), /display:\s*flex/);
   assert.match(rule('pm-chat__conversation'), /overflow-y:\s*auto/);
   assert.match(rule('pm-chat__composer'), /border-top:\s*1px solid var\(--color-border\)/);
+  assert.match(rule('pm-chat__workspace'), /display:\s*flex/);
+  assert.match(css, /@container\s*\(max-width:\s*760px\)[\s\S]*?\.pm-chat--chat\s+\.pm-chat__workspace\s*\{[^}]*flex-direction:\s*column/);
   for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status', 'pm-chat__collapsed', 'pm-chat__collapsed-summary']) {
     assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
   }
+});
+
+const decisionReport = (id = 'decision-1') => ({ ...structuredReport(id), kind: 'decision',
+  structured: { summary: { result: 'The launch error task is waiting for a wording choice.',
+      impact: 'The task stays stopped until you choose.', owner: 'Noah',
+      decision: { question: 'Which recovery message should the agent use?',
+        recommendation: 'Use the shorter message', reason: 'It names the next step without internal terms.',
+        options: ['Use the shorter message', 'Keep the detailed message'] } },
+    details: '', refs: [] } });
+
+test('Decide lists only decision reports and answers through the chat reply path', () => {
+  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
+  update([report(), decisionReport(), { ...report('blocker-1'), kind: 'blocker' }]);
+  view.showDecisions();
+  const decide = root.querySelector('.task-decisions');
+  assert.ok(decide, 'a Decide surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  const cards = root.querySelectorAll('.task-decisions__card');
+  assert.equal(cards.length, 1, 'progress and blocker reports are not promoted to decisions');
+  assert.match(decide.textContent, /1 decision/);
+  const options = [...cards[0].querySelectorAll('.task-decisions__option')];
+  assert.equal(options.length, 2);
+  options[1].click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'pane_send_input');
+  assert.match(sent[0].text,
+    /^Answer to "Which recovery message should the agent use\?": 2\. Keep the detailed message/);
+  options[0].click();
+  assert.equal(sent.length, 1, 'no second answer is sent while the first is in flight');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const card = root.querySelector('.task-decisions__card');
+  assert.match(card.textContent, /Answer sent: Keep the detailed message/);
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
+    'a confirmed answer cannot be answered again');
+});
+
+test('Decide keeps a decision actionable and shows the error when the answer send fails', () => {
+  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
+  update([decisionReport()]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  assert.equal(sent.length, 1);
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: false,
+    error: 'The PM pane refused the message.' });
+  const card = root.querySelector('.task-decisions__card');
+  assert.match(card.textContent, /The PM pane refused the message\./);
+  const options = card.querySelectorAll('.task-decisions__option');
+  assert.equal(options.length, 2, 'the decision stays actionable after a failed send');
+  assert.equal(options[0].disabled, false);
+});
+
+test('Decide offers the chat reply path for a decision report without a typed packet', () => {
+  const { root, view, update, sent } = fixture({ tasksDefault: true });
+  update([{ ...report('plain-decision'), kind: 'decision', body: 'Approve the release note wording?' }]);
+  view.showDecisions();
+  const card = root.querySelector('.task-decisions__card');
+  assert.ok(card, 'an untyped decision report is still listed');
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
+    'no options are invented without a typed packet');
+  const reply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Reply in chat');
+  assert.ok(reply);
+  reply.click();
+  assert.equal(sent.length, 0, 'the reply path never sends by itself');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, false, 'the chat view opens for the reply');
+});
+
+test('Home Review decisions opens the Decide surface', async () => {
+  const { root, update } = fixture({ tasksDefault: true });
+  update([decisionReport()], null, { request_tasks: taskOverview([]) });
+  // Home renders through the store's frame batching; wait for the frame to
+  // land instead of assuming a synchronous render.
+  let review = null;
+  for (let attempt = 0; attempt < 80 && !review; attempt++) {
+    review = [...root.querySelectorAll('.task-home button')]
+      .find(button => /Review 1 decision/.test(button.textContent));
+    if (!review) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(review, 'Home offers Review decisions while a decision waits');
+  review.click();
+  assert.equal(root.querySelector('.task-decisions').parentElement.hidden, false);
+  assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
+});
+
+// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once,
+// so answering a decision in Decide cannot leave Home still asking for it.
+test('Home and Decide read one waiting-decision count after an answer', async () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const home = () => root.querySelector('.task-home')?.textContent ?? '';
+  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.match(home(), /1 decision needs your attention/, 'Home does not count the answered decision');
+  const actionable = [...root.querySelectorAll('.task-decisions__card')]
+    .filter(card => card.querySelector('.task-decisions__option'));
+  assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
+});
+
+test('Decide forgets session answers when the PM session changes', () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([decisionReport()]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent/);
+  model.bindPmWindowState('pm', 'other-session');
+  update([decisionReport()]);
+  const card = root.querySelector('.task-decisions__card');
+  assert.doesNotMatch(card.textContent, /Answer sent/);
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 2,
+    'the same decision is actionable again in the new session');
 });

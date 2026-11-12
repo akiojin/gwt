@@ -2310,10 +2310,14 @@ pub enum UpdateAutoApplyPhase {
 }
 
 /// Server-owned project attention summary. It describes runtime state, not Work completion.
+/// SPEC #5016 AC-HS1: the only source of the RUN / BLOCK / IDLE / ERROR counts. The tab
+/// title, the status strip and the Works heading render these values and never recount.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAgentAggregate {
     pub running_count: usize,
     pub block_count: usize,
+    #[serde(default)]
+    pub idle_count: usize,
     pub error_count: usize,
     pub unread: bool,
     pub revision: u64,
@@ -5583,11 +5587,13 @@ mod tests {
                     id: "u1".to_owned(),
                     role: PmConversationRole::User,
                     text: "# not a heading <b>raw</b>".to_owned(),
+                    source_key: Some("b".repeat(64)),
                 },
                 PmConversationMessage {
                     id: "a1".to_owned(),
                     role: PmConversationRole::Assistant,
                     text: "# Plan\n\n- one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n\n<script>alert(1)</script>".to_owned(),
+                    source_key: None,
                 },
             ],
             detail: None,
@@ -5600,8 +5606,10 @@ mod tests {
         .unwrap();
         let messages = value["snapshot"]["messages"].as_array().unwrap();
         assert_eq!(messages[0]["text"], snapshot.messages[0].text);
+        assert_eq!(messages[0]["source_key"], "b".repeat(64));
         assert!(messages[0].get("text_html").is_none());
         assert_eq!(messages[1]["text"], snapshot.messages[1].text);
+        assert!(messages[1].get("source_key").is_none());
         let html = messages[1]["text_html"].as_str().unwrap();
         for tag in ["<h1>", "<li>", "<table>", "<pre>"] {
             assert!(html.contains(tag), "{tag} missing from {html}");

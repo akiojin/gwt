@@ -13522,13 +13522,19 @@ impl AppRuntime {
             .collect()
     }
 
+    /// SPEC #5016 AC-HS1 derived-state definition, kept in this one place:
+    /// RUN is a working or launching agent; BLOCK is every agent that needs the
+    /// operator, including stopped, interrupted and errored panes; IDLE waits for
+    /// new work; ERROR is the subset of BLOCK whose runtime failed.
     fn aggregate_counts(
         statuses: &HashMap<String, WindowProcessStatus>,
     ) -> gwt::protocol::ProjectAgentAggregate {
         let mut aggregate = gwt::protocol::ProjectAgentAggregate::default();
         for status in statuses.values() {
             match status {
-                WindowProcessStatus::Running => aggregate.running_count += 1,
+                WindowProcessStatus::Running | WindowProcessStatus::Starting => {
+                    aggregate.running_count += 1
+                }
                 WindowProcessStatus::Waiting
                 | WindowProcessStatus::Stopped
                 | WindowProcessStatus::Interrupted => aggregate.block_count += 1,
@@ -13536,7 +13542,7 @@ impl AppRuntime {
                     aggregate.block_count += 1;
                     aggregate.error_count += 1;
                 }
-                WindowProcessStatus::Idle | WindowProcessStatus::Starting => {}
+                WindowProcessStatus::Idle => aggregate.idle_count += 1,
             }
         }
         aggregate

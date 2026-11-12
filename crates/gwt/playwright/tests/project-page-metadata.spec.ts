@@ -228,3 +228,25 @@ test("live shared metadata renders one accepted revision in title, favicon, and 
   await page.screenshot({ path: testInfo.outputPath(`shared-metadata-${theme}.png`) });
   expect(errors).toEqual([]);
 });
+
+test("SPEC #5016 AC-HS2: live title, status strip and Works heading render one server aggregate", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated checkout server");
+  const errors = collectErrors(page);
+  await gotoLiveGwt(page, base!, { suppressProjectSurfaces: true });
+  await openLiveGwtProject(page, process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd());
+  const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
+  await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // The seeded stopped PM pane is the only agent: the server aggregate is RUN 0 / BLOCK 1.
+  await expect(page).toHaveTitle(/— RUN 0 · BLOCK 1 — gwt$/);
+  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  const heading = page.locator(".works-surface:not(.works-surface--preview) .works-counts");
+  for (const [strip, works, value] of [["running", "running", "0"], ["waiting", "block", "1"], ["idle", "idle", "0"], ["error", "error", "0"]]) {
+    await expect(page.locator(`#op-strip-${strip}`)).toHaveText(value);
+    await expect(heading.locator(`[data-count="${works}"]`)).toHaveText(value);
+  }
+  await expect(page.locator(".op-status-strip__cell--waiting .op-status-strip__label")).toHaveText("BLOCK");
+  await page.screenshot({ path: testInfo.outputPath(`live-hs2-${theme}.png`) });
+  expect(errors).toEqual([]);
+});

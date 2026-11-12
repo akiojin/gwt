@@ -461,6 +461,34 @@ fn project_aggregate_counts_hidden_agents_and_scopes_changes() {
 }
 
 #[test]
+fn project_aggregate_is_the_single_definition_of_run_block_idle_error() {
+    let statuses: std::collections::HashMap<String, WindowProcessStatus> = [
+        WindowProcessStatus::Running,
+        WindowProcessStatus::Starting,
+        WindowProcessStatus::Waiting,
+        WindowProcessStatus::Stopped,
+        WindowProcessStatus::Interrupted,
+        WindowProcessStatus::Error,
+        WindowProcessStatus::Idle,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, status)| (format!("agent-{index}"), status))
+    .collect();
+    let aggregate = AppRuntime::aggregate_counts(&statuses);
+    assert_eq!(
+        (
+            aggregate.running_count,
+            aggregate.block_count,
+            aggregate.idle_count,
+            aggregate.error_count
+        ),
+        (2, 4, 1, 1),
+        "RUN counts launching agents, BLOCK includes stopped and errored agents, IDLE is waiting for work"
+    );
+}
+
+#[test]
 fn project_aggregate_ack_requires_current_visible_focused_project_revision() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());

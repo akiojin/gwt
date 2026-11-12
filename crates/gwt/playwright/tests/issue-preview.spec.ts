@@ -965,6 +965,14 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
           window.__knowledgeLoadMessages.push(message);
           if (message.kind === "frontend_ready") {
             this.emit(workspaceState());
+            // SPEC #5016 AC-HS1: like the backend, publish the agent aggregate
+            // that the status strip renders.
+            const agentStatuses = windows.filter((entry) => entry.id.includes("agent")).map((entry) => entry.status);
+            const count = (...states) => agentStatuses.filter((status) => states.includes(status)).length;
+            this.emit({ kind: "project_agent_aggregate", aggregate: {
+              running_count: count("running", "starting"), block_count: count("waiting", "stopped", "interrupted", "error"),
+              idle_count: count("idle"), error_count: count("error"), unread: false, revision: 1,
+            } });
             this.emit({
               kind: "active_work_projection",
               projection: localActivityProjection(),

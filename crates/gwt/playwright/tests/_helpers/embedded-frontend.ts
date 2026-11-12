@@ -24,6 +24,8 @@ const ROOT_MODULES = new Set([
   "pm-chat.js",
   // SPEC #7007 — task-centered Home island host imported by pm-chat.js.
   "task-home.js",
+  // SPEC #7007 — task-centered Decide island host imported by pm-chat.js.
+  "task-decisions.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
   "frontend-bootstrap.js",
   "frontend-route.js",

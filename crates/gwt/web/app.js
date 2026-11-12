@@ -81,7 +81,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
-      import { createProjectPageMetadata } from "/project-page-metadata.js";
+      import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
@@ -2572,41 +2572,35 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         send({ kind: "open_pm_agent" });
       }
 
-      function recomputeOperatorTelemetry() {
+      // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
+      let projectAgentSummaryModel = null;
 
+      function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
+        // RUNNING / BLOCK / IDLE / ERROR come only from the server aggregate
+        // summary, the same value the tab title and the Works heading render.
+        const summary = projectAgentSummaryModel?.read() ?? projectAgentSummary();
         const counts = {
-          running: 0,
+          running: summary.running,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
           // them inside their owning surface — they live inside the Issue window.
           running_inline: 0,
-          idle: 0,
-          // FR-039 (anshin): waiting is its own LOUD telemetry state for
-          // agents waiting on the operator. It used to collapse into idle;
-          // now it drives the WAITING strip cell instead.
-          waiting: 0,
-          error: 0,
+          idle: summary.idle,
+          waiting: summary.block,
+          error: summary.error,
         };
-        // The same host census supplies Agents and Works membership. Catalog
-        // state enriches that proof; a historical Work never creates an agent.
+        // The host census only explains where running agents are placed.
         const activity = agentActivityModel.read();
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
-          if (!data || !presetSupportsWaitingStatus(data.preset)) { unknown = true; continue; }
-          const state = { starting: "running", running: "running", waiting: "waiting",
-            idle: "idle", ready: "idle", error: "error", interrupted: "error" }[catalog.runtimeStates[data.id] ?? data.status];
-          if (state) counts[state] += 1;
-          else unknown = true;
-          if (state === "running" && data.placement?.kind === "issue_preview") counts.running_inline += 1;
+          if (!data || !presetSupportsWaitingStatus(data.preset)) continue;
+          const status = catalog.runtimeStates[data.id] ?? data.status;
+          if ((status === "running" || status === "starting") && data.placement?.kind === "issue_preview") counts.running_inline += 1;
         }
-        if (unknown) {
-          for (const state of ["running", "waiting", "idle", "error"]) counts[state] = "—";
-          counts.running_inline = 0;
-        }
+        counts.running_inline = Math.min(counts.running_inline, counts.running);
         const activeWorks = activeWorkItemsFromProjection();
         if (activeWorks.length > 0) counts.branches = activeWorks.length;
         applyOperatorTelemetryCounts(counts);
@@ -4436,6 +4430,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onOpenTerminal: sessionId => {
+            if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
+            openSurface("works");
+            return true;
+          },
           onSend: text => {
             const request = requestPmChatSend(windowData.id, text);
             if (!request) return;
@@ -4978,6 +4977,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
 
       const { update: applyProjectAggregate, ...projectPageMetadata } = createProjectPageMetadata({ document, window, send });
+      projectAgentSummaryModel = projectPageMetadata.summary;
+      projectAgentSummaryModel.subscribe(summary => summary, () => recomputeOperatorTelemetry());
 
       const agentCompletionNotifier = createAgentCompletionNotifier({
         window,
@@ -5851,6 +5852,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       worksSurface = createWorksSurface({
         projectKey: routeProjectKey,
         systemSettingsModel,
+        summaryModel: projectAgentSummaryModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,
