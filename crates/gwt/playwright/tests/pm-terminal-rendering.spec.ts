@@ -598,6 +598,8 @@ test("owned actual Codex PM renderer profile retains genuine history and compose
   let monitor: Promise<void> | undefined;
   const sentInputs: string[] = [];
   let controlledWire = "", recordControlledWire = false;
+  let recordReentryGrid = false;
+  let reentryGrid: { cols: number; rows: number } | undefined;
   let marker = "", diagnosticPhase = "before-control", collectDiagnostics = false;
   let diagnosticSequence = 0, diagnosticBytes = 0, diagnosticDroppedEvents = 0, diagnosticDroppedBytes = 0;
   const diagnosticEvents: Record<string, unknown>[] = [];
@@ -633,6 +635,10 @@ test("owned actual Codex PM renderer profile retains genuine history and compose
         if (packet.kind === "terminal_input" && packet.id === id && typeof packet.data === "string") {
           sentInputs.push(packet.data);
           if (recordControlledWire) controlledWire += packet.data;
+        }
+        if (recordReentryGrid && packet.kind === "update_terminal_grid" && packet.id === id
+          && Number.isFinite(packet.cols) && packet.cols > 0 && Number.isFinite(packet.rows) && packet.rows > 0) {
+          reentryGrid = { cols: packet.cols, rows: packet.rows };
         }
         if (collectDiagnostics && packet.kind === "update_terminal_grid" && packet.id === id) {
           recordDiagnostic({ direction: "sent", kind: packet.kind, id, cols: packet.cols, rows: packet.rows });
@@ -958,33 +964,47 @@ exit 67
       markerNumbers: numberedLines(beforeReentry.lines),
       historyMarkerCount: responseHistory(beforeReentry).length });
     const sequenceBeforeReentry = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+    reentryGrid = undefined;
+    recordReentryGrid = true;
     diagnosticPhase = "reentry";
     await page.locator("#op-pm-entry").click();
-    // Returning from Works resizes the native TUI. Its clear-and-repaint can
-    // arrive after task_complete and the old composer is still visible until
-    // then. Establish the reading baseline only after that repaint finishes.
+    // A reveal can repaint only the composer or clear the whole screen. Wait
+    // for the newest erase and composer paint to finish on the fitted grid;
+    // the old composer or a cursor-only update cannot establish the baseline.
     await expect.poll(async () => {
       const rendered = await page.evaluate(({ id, after }) => {
         const api = (window as any).__gwtTerminalTestApi;
         const output = ((window as any).__gwtPlaywrightMessages ?? [])
           .filter((row: any) => row.sequence > after && row.payload.kind === "terminal_output" && row.payload.id === id)
           .map((row: any) => atob(row.payload.data_base64)).join("");
-        const clear = output.lastIndexOf("\x1b[3J");
+        const syncBegin = "\x1b[?2026h", syncEnd = "\x1b[?2026l";
+        const segments = output.split(syncEnd);
+        const pending = segments.pop()!;
+        const paint = segments.findLast((segment: string) => /\x1b\[[0-3]?J/.test(segment));
+        const start = paint?.indexOf(syncBegin) ?? -1;
+        const erase = paint && [...paint.matchAll(/\x1b\[[0-3]?J/g)].at(-1);
+        const repainted = !pending.includes(syncBegin) && !/\x1b\[[0-3]?J/.test(pending)
+          && !!paint && start >= 0 && !!erase
+          && paint.slice(Math.max(start + syncBegin.length, erase.index + erase[0].length)).includes("Ask Codex")
+          && (erase.index >= start + syncBegin.length
+            || /^\x1b\[[23]J(?:\x1b\[[0-?]*[ -/]*[@-~])*$/.test(paint.slice(erase.index, start)));
         return {
-          repainted: clear >= 0 && output.indexOf("\x1b[?2026l", clear) >= 0,
+          repainted,
           metrics: api.metrics(id),
           buffer: api.logicalBufferLines(id),
           composer: api.bufferText(id).includes("Ask Codex"),
         };
       }, { id, after: sequenceBeforeReentry });
       return {
-        repainted: rendered.repainted,
+        repainted: rendered.repainted && !!reentryGrid
+          && rendered.metrics.cols === reentryGrid.cols && rendered.metrics.rows === reentryGrid.rows,
         drained: rendered.metrics.outputPending === false && rendered.metrics.snapshotPending === false,
         composer: rendered.composer,
         historyCount: responseHistory(rendered.buffer).length,
         numbers: numberedLines(rendered.buffer.lines),
       };
     }, { timeout: 60_000 }).toEqual({ repainted: true, drained: true, composer: true, historyCount: 64, numbers: expectedNumbers });
+    recordReentryGrid = false;
     await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(0);
     const box = await pm.locator(".terminal-root").boundingBox();
     expect(box).not.toBeNull();
