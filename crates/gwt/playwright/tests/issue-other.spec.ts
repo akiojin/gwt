@@ -89,6 +89,33 @@ test("Work projection snapshots and patches update Other while retaining session
   const other = page.locator("details.issue-other-group");
   await other.locator("summary").click();
   await row(page, "other-paused").click();
+  await page.evaluate(() => {
+    const fixture = window as any;
+    for (const id of ["other-paused", "linked-visible"]) {
+      const work = fixture.__otherProjection.active_works.find((work: any) => work.id === id);
+      work.blocked_agents = 1;
+      work.next_action = "Await token";
+    }
+    fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+  });
+  await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "needs_attention");
+  await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveText("Await token");
+  const linkedReason = page.locator('[data-issue-number="4556"] .knowledge-row-secondary-item[data-kind="reason"]');
+  await expect(linkedReason).toHaveText("Await token");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    for (const id of ["other-paused", "linked-visible"]) {
+      const work = projection.active_works.find((work: any) => work.id === id);
+      work.blocked_agents = 0;
+      work.next_action = "";
+    }
+    fixture.__otherProjection = projection;
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection });
+  });
+  await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "paused");
+  await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveCount(0);
+  await expect(linkedReason).toHaveCount(0);
   await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
   await page.evaluate(() => {
     const fixture = window as any;
