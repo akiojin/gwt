@@ -14,12 +14,12 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
     details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
   details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
 
-function fixture({ tasksDefault = false } = {}) {
+function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [], sent = [];
   let model;
-  const view = createPmChat({ document, root, sessionId: 'session',
+  const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
@@ -38,6 +38,34 @@ function fixture({ tasksDefault = false } = {}) {
   };
   return { root, model, view, visibility, copied, sent, update };
 }
+
+test('Chat opens its bound PM terminal in Works without losing the draft', () => {
+  const opened = [];
+  let available = false;
+  const { root, model, view } = fixture({ onOpenTerminal: session => { opened.push(session); return available; } });
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep this unfinished request';
+  const button = [...root.querySelectorAll('.pm-chat__chat button')]
+    .find(node => node.textContent === 'Open terminal in Works');
+  assert.ok(button, 'Chat offers a direct Works terminal action');
+  button.click();
+  assert.deepEqual(opened, ['session']);
+  assert.match(root.querySelector('.pm-chat__terminal-status').textContent, /unavailable.*current PM session/i);
+  assert.equal(draft.value, 'Keep this unfinished request');
+  assert.equal(view.isChatVisible(), true);
+  available = true;
+  button.click();
+  assert.equal(root.querySelector('.pm-chat__terminal-status').hidden, true);
+  assert.equal(draft.value, 'Keep this unfinished request');
+  model.bindPmWindowState('pm', 'replacement');
+  view.showChat();
+  button.click();
+  assert.deepEqual(opened, ['session', 'session', 'replacement']);
+  view.dispose();
+  button.click();
+  assert.equal(opened.length, 3);
+});
 
 const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
   pending_intake, tasks });

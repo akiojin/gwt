@@ -183,7 +183,7 @@ export function createPmWindowModel() {
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onSend = () => {},
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onSend = () => {}, onOpenTerminal = () => false,
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -233,6 +233,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   });
   const chatBody = element('section', 'pm-chat__chat');
   chatBody.setAttribute('aria-label', 'PM conversation');
+  const chatActions = element('div', 'pm-chat__toolbar');
+  const terminalButton = element('button', '', 'Open terminal in Works');
+  terminalButton.type = 'button';
+  chatActions.append(terminalButton);
+  const terminalStatus = element('p', 'pm-chat__notice pm-chat__terminal-status');
+  terminalStatus.setAttribute('role', 'status');
+  terminalStatus.hidden = true;
   const chatNotice = element('p', 'pm-chat__notice');
   chatNotice.setAttribute('role', 'status');
   const chatLog = element('div', 'pm-chat__conversation');
@@ -249,7 +256,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const composerStatus = element('p', 'pm-chat__composer-status');
   composerStatus.setAttribute('aria-live', 'polite');
   composer.append(draft, sendButton, composerStatus);
-  chatBody.append(chatNotice, chatLog, composer);
+  chatBody.append(chatActions, chatNotice, chatLog, composer);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
   const tasksHeader = element('div', 'pm-chat__history-header');
@@ -288,7 +295,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   transcript.setAttribute('aria-label', 'PM reports');
   historyHeader.append(element('h2', '', 'Reports'), filter);
   body.append(currentCard, historyHeader, notice, transcript);
-  root.append(toolbar, taskHome.element, tasksBody, body, chatBody);
+  root.append(toolbar, terminalStatus, taskHome.element, tasksBody, body, chatBody);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -331,6 +338,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const showTasks = () => showView('tasks');
   const showReports = () => showView('reports');
   const showLog = () => showView('log');
+  const openTerminal = () => {
+    terminalStatus.hidden = onOpenTerminal(session) !== false;
+    terminalStatus.textContent = terminalStatus.hidden ? ''
+      : 'Terminal unavailable in Works. Wait for the current PM session to connect.';
+  };
   const filterReports = () => update(latestState);
   const filterTasks = () => {
     includeCompleted = !includeCompleted;
@@ -618,6 +630,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   function setSession(nextSession) {
     if (disposed || session === nextSession) return;
     session = nextSession;
+    terminalStatus.hidden = true;
+    terminalStatus.textContent = '';
     expandedReports.clear();
     taskRows.clear();
     taskList.replaceChildren();
@@ -652,6 +666,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     completedButton.removeEventListener('click', filterTasks);
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
+    terminalButton.removeEventListener('click', openTerminal);
     kindSelect.removeEventListener('change', filterReports);
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs');
@@ -665,6 +680,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   tasksButton.addEventListener('click', showTasks);
   completedButton.addEventListener('click', filterTasks);
   logButton.addEventListener('click', showLog);
+  terminalButton.addEventListener('click', openTerminal);
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();

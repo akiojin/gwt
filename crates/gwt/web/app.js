@@ -4264,6 +4264,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onOpenTerminal: sessionId => {
+            if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
+            openSurface("works");
+            return true;
+          },
           onSend: text => {
             const request = requestPmChatSend(windowData.id, text);
             if (!request) return;

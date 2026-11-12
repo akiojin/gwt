@@ -2147,7 +2147,10 @@ several messages in one turn, only the latest stays open; the earlier ones fold
 into an **N earlier messages** line you can expand. Type a message in
 the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
 line). Your text stays in the box until delivery is confirmed, and the reason is
-shown if it could not be sent. Use **Execution log** to attach images.
+shown if it could not be sent. Select **Open terminal in Works** in Chat to open
+the same PM session's terminal. The PM entry brings you back to Chat with your
+unsent draft preserved. You can also open the terminal from the PM row in
+**Works**. Use **Execution log** to attach images.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
