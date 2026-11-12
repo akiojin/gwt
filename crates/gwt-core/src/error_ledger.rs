@@ -274,10 +274,10 @@ thread_local! {
 }
 
 /// Observe each ledger lock description this thread acquires.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct ScopedLedgerLockObserver;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl ScopedLedgerLockObserver {
     fn set(observer: impl FnMut(&fs::File) + 'static) -> Self {
         TEST_LEDGER_LOCK_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
@@ -285,7 +285,7 @@ impl ScopedLedgerLockObserver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for ScopedLedgerLockObserver {
     fn drop(&mut self) {
         TEST_LEDGER_LOCK_OBSERVER.with(|slot| slot.borrow_mut().take());
