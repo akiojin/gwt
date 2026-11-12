@@ -450,7 +450,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   ${setup.terminalConvergence ? "if (line.trim() === 'GWT_FIXTURE_TERMINAL_WARNING') { try { completeTerminalWarning(); } catch (error) { terminalActorFailure(error); } return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_DONE') {
     const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
-      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000, windowsHide:true,
+      cwd:process.cwd(), env:{...process.env,CODEX_THREAD_ID:native}, encoding:'utf8', timeout:30000, windowsHide:true,
       input:JSON.stringify({schema_version:1,operation:'workspace.update',params:{status:'done'}}),
     });
     let done = false;
