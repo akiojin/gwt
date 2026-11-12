@@ -4537,6 +4537,7 @@ impl AppRuntime {
                     candidate.window_id == agent.window_id
                         && candidate.session_id == agent.session_id
                         && candidate.runtime_incarnation == agent.runtime_incarnation
+                        && candidate.is_pm == agent.is_pm
                 })
             });
         }
@@ -6761,7 +6762,25 @@ mod bounded_cache_merge_tests {
         let window_id = format!("tab-1::{}", window.id);
         runtime.register_window("tab-1", &window.id);
         super::super::tests::init_repo_with_initial_commit(&context.project_root);
+        runtime.blocking_tasks = super::super::BlockingTaskSpawner::queued().0;
         let _pane = super::super::tests::attach_live_pm_pane(&mut runtime, &window_id);
+        let captured = observe_local_agent_activity(
+            &context,
+            &runtime.local_agent_activity_candidates("tab-1"),
+            &runtime.sessions_dir,
+            None,
+        )
+        .unwrap();
+        assert_eq!(captured.agents.as_ref().unwrap().len(), 1);
+        assert!(!captured.agents.as_ref().unwrap()[0].is_pm);
+        // Hold the old census while PM registration reaches the GUI cache.
+        runtime
+            .active_work_projection_refresh
+            .borrow_mut()
+            .projects
+            .clear();
+        let (spawner, tasks) = super::super::BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
         let prefs = gwt::pm_registry::load_pm_prefs(
             &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
         )
@@ -6775,6 +6794,28 @@ mod bounded_cache_merge_tests {
         assert!(
             candidates[0].is_pm,
             "the registered PM must retain its role"
+        );
+        assert!(
+            runtime
+                .retain_current_local_agent_activity("tab-1", Some(captured))
+                .unwrap()
+                .agents
+                .unwrap()
+                .is_empty(),
+            "a census captured before PM synchronization must not restore the old role"
+        );
+        let refresh = runtime.active_work_projection_refresh.borrow();
+        let pending = lock_recover(&refresh.projects[&context.project_root].local_activity_refresh);
+        assert!(pending.pending.as_ref().unwrap().candidates[0].is_pm);
+        let scheduled = tasks.lock().unwrap().len();
+        assert!(scheduled > 0, "PM identity changes must recapture activity");
+        drop(pending);
+        drop(refresh);
+        runtime.sync_pm_session_cache(&context.project_root, prefs.registration.as_ref());
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            scheduled,
+            "unchanged PM identity must not enqueue another refresh"
         );
     }
 
