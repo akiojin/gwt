@@ -498,3 +498,50 @@ Acceptance Surface: non-user-facing (remote discovery/cache routing only)。
 User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
+
+## 2026-11-12 タイムライン続きページの集約（FR-6877-7）
+
+### 計測（変更前、installed v9.161.1）
+
+macOS の GUI PID 8114（06:56 JST 起動）の `~/.gwt/logs/gwt.log.2026-11-12`
+を 10 分窓で集計した。gwt project の `issue_monitor_scan` 内 gh start は
+定常 30〜37 本で、20 本を上回る。12:40〜12:50 JST の内訳は
+`gh api graphql issue timelines` 20 本（約 30 秒の scan ごとに 1 本）、
+`gh api issues` 5 本、`gh pr view` 9 本、pulls 一覧 1 本だった。
+
+同日の incremental timeline readback 544 回はすべて `pending=true` で、
+完了 Issue 数 0 が 147 回あった。10 分あたりの完了は約 43 件で、
+Issue ごとの 600 秒 TTL が順に切れるため、backlog は空にならない。
+深い timeline（release PR が全 Issue を参照するため、#5390 は 208 件）
+の続きページは 1 alias の chunk として queue に戻り、1 回の呼出を占有していた。
+
+Issue の `updatedAt` を timeline cache の検証子に使う案は棄却した。
+Issue #5390 の `updatedAt` は 2026-11-11T03:39Z だったが、PR #7088 による
+cross-reference は同日 17:43Z に追加されていた。cross-reference は
+`updatedAt` を更新しない。
+
+### 変更と境界
+
+`LinkedPrBulkRead::read_next` は、部分的なページを後続の同種 chunk で
+alias 上限まで埋める。同種とは、続きページ同士、または初回ページ同士を指す。
+cursor、既読 cursor、途中の要約も一緒に移す。
+ページあたり 5 alias の上限、完全な履歴だけを公開する規則、不正 cursor の
+再始動、transport retry は維持する。#6954 の「失敗する続きページは
+初回ページを待たせない」も維持する。
+TTL、deadline、UI、launch/claim の権限は変更しない。
+
+### 検証
+
+RED: `issue_6877_linked_pr_bulk_read_packs_continuations_into_one_page` は
+変更前に呼出 4 回（期待 3 回）で失敗した。後続 scan の初回ページを挟む形に
+拡張後の期待値は 4 回で、変更前は 5 回になる。GREEN: `linked_pr` 20 件、
+`issue_monitor_worker::` を含む 117 件が PASS した。
+`cargo clippy -p gwt --all-targets --all-features -- -D warnings` も PASS した。
+
+期待効果は timeline 呼出の約 20 本 → 約 11 本 / 600 秒で、配備後の
+実測ではない。AC-2（合計 20 本以下）は本スライスだけでは満たさない見込みで、
+未チェックのまま残す。AC-4/5（CPU）も未計測である。
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
