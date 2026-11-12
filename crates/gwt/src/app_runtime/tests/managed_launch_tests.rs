@@ -607,6 +607,70 @@ fn assert_registered_pm_successor_recovery(occupied_owner: &str, terminal: bool)
 }
 
 #[test]
+fn pm_successor_recovery_resolves_branch_only_history_to_the_local_owner_checkout() {
+    // Issue #7102: portable Work history records the owner branch without a
+    // path and the member Sessions are gone. The PM must still prove the
+    // owner's local checkout from the project's worktree list.
+    use gwt_core::workspace_projection as work;
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let checkout = temp.path().join("issue-42");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/issue-42",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let now = Utc::now();
+    let predecessor_id = work::canonical_work_id(&repo, Some("work/issue-42"), None).unwrap();
+    let occupied_id = work::successor_work_id(&predecessor_id);
+    let branch_only = work::WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    for id in [&predecessor_id, &occupied_id] {
+        let mut start = work::WorkEvent::new(work::WorkEventKind::Start, id, now);
+        start.owner = Some("Issue #42".to_string());
+        start.execution_container = Some(branch_only.clone());
+        start.agent_session_id = Some(format!("gone-{}", uuid::Uuid::new_v4()));
+        work::record_workspace_work_event(&repo, start).unwrap();
+    }
+    work::emit_workspace_done_event_if_absent(&repo, &predecessor_id, now).unwrap();
+    let items = work::load_workspace_work_items(&repo).unwrap().unwrap();
+    let find = |id: &str| items.work_items.iter().find(|item| item.id == id).unwrap();
+
+    let (owner, label, container) =
+        gwt::project_runtime::agent_dispatch::pm_successor_recovery_checkout(
+            &repo,
+            find(&predecessor_id),
+            find(&occupied_id),
+            &gwt_core::paths::gwt_sessions_dir(),
+        )
+        .expect("branch-only history resolves to the local owner checkout");
+    assert_eq!(owner.number, 42);
+    assert_eq!(label, "Issue #42");
+    assert_eq!(container.branch.as_deref(), Some("work/issue-42"));
+    assert_eq!(
+        container.worktree_path,
+        Some(dunce::canonicalize(&checkout).unwrap())
+    );
+}
+
+#[test]
 fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membership() {
     let _env_lock = env_test_lock()
         .lock()

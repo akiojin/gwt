@@ -2759,6 +2759,31 @@ mod tests {
         );
     }
 
+    /// Issue #7087 AC-1: restore admission flips materializer readiness on the
+    /// worker callback. The subscriber registry must sync after that drain, or
+    /// the GUI stays on the observer role and `gui_disconnected` never clears.
+    #[test]
+    fn startup_admission_promotes_materializer_subscriber_after_drain() {
+        let source = include_str!("main.rs");
+        let handler = source
+            .rsplit_once("StartupAutoResumeAdmissionPrepared(prepared)) => {")
+            .expect("admission handler")
+            .1
+            .split_once("IssueMonitorPreflightRejected")
+            .expect("next handler")
+            .0;
+        let drain = handler
+            .find("startup_auto_resume_admission_prepared_events")
+            .expect("admission drain");
+        let sync = handler
+            .find("board_daemon_subscribers.sync(")
+            .expect("admission must resync the Issues subscriber");
+        assert!(
+            drain < sync,
+            "admission must promote the materializer after the drain flips readiness"
+        );
+    }
+
     #[test]
     fn update_dispatch_closed_loop_records_stage_and_reason_without_restart() {
         let temp = tempfile::tempdir().unwrap();
@@ -11559,7 +11584,11 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
             }
             Event::UserEvent(UserEvent::StartupAutoResumeAdmissionPrepared(prepared)) => {
+                // Issue #7087: this drain is what flips materializer readiness.
+                // Sync after it so the open window replaces its observer
+                // subscriber with the materializer role.
                 clients.dispatch(app.startup_auto_resume_admission_prepared_events(*prepared));
+                board_daemon_subscribers.sync(app, proxy.clone());
             }
             Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
                 clients.dispatch(app.handle_monitor_preflight_rejected(*completion));

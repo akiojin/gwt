@@ -9,17 +9,13 @@
 // is one more occurrence of that row — the row keeps an occurrence count and
 // the latest time, and moves to the top. Different content stays separate.
 //
-// The list is the shared toast-host stack mounted inside the drawer body, so
-// cap / newest-on-top / dropped / per-item dismiss / clear-all come from the
-// primitive; this module adds the triage decoration (severity marker + clock,
-// Issue #3979). The only new state is the unread set (FR-014): rows recorded
-// while the drawer is closed, cleared when it opens.
-//
-// History is session-scoped and in-memory (FR-013); rows leave only through
-// ×, clear-all or the retained-count cap.
+// History is session-scoped and in-memory (FR-013). Its immutable model owns
+// aggregation, unread state and retention; the shared toast stack renders rows.
+// Only explicit dismiss, clear-all and the retained-count cap retire a row.
 
 import { createToastStack } from "./toast-host.js";
 import { createFocusTrap } from "./focus-trap.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 const DEFAULT_MAX_RETAINED = 100;
 const HISTORY_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
@@ -88,6 +84,93 @@ function formatClock(date) {
   }
 }
 
+/** Session history data, independent of the drawer or its DOM lifetime. */
+export function createNotificationHistory({ maxRetained = DEFAULT_MAX_RETAINED, now = () => new Date() } = {}) {
+  const store = createUiStateStore({ rows: [], dropped: 0, open: false, unreadCount: 0, unreadHasError: false });
+  // Commands stay outside snapshots; retained row IDs own their callbacks.
+  const activations = new Map();
+  let nextId = 0;
+
+  function publish(next) {
+    const dropped = maxRetained > 0 ? Math.max(0, next.rows.length - maxRetained) : 0;
+    const rows = dropped ? next.rows.slice(0, maxRetained) : next.rows;
+    const retained = new Set(rows.map(row => row.id));
+    for (const id of activations.keys()) if (!retained.has(id)) activations.delete(id);
+    store.update(() => ({ ...next, rows, dropped: next.dropped + dropped,
+      unreadCount: rows.filter(row => row.unread).length,
+      unreadHasError: rows.some(row => row.unread && row.level === "error") }));
+  }
+
+  function record(notice, surface = false, incrementOccurrence = false) {
+    if (!notice) return null;
+    const state = store.read();
+    const level = HISTORY_LEVELS.includes(notice.level) ? notice.level : "info";
+    const title = notice.title || "Notification";
+    const message = notice.message == null ? null : String(notice.message);
+    const key = surface && notice.key != null ? String(notice.key) : "";
+    const identity = surface ? null : JSON.stringify([
+      notice.kind == null ? "" : String(notice.kind), notice.id == null ? "" : String(notice.id),
+      level, title, notice.issueNumber || "", message,
+    ]);
+    const previous = state.rows.find(row => surface ? key && row.surface && row.key === key : !row.surface && row.identity === identity);
+    const id = previous?.id ?? ++nextId;
+    if (typeof notice.onActivate === "function") activations.set(id, notice.onActivate);
+    else if (surface) activations.delete(id);
+    const needsAttention = !surface || incrementOccurrence || !previous || previous.resolved
+      || previous.level !== level || previous.title !== title || (previous.message ?? "") !== (message ?? "");
+    const row = { id, surface, key, identity,
+      kind: surface ? incrementOccurrence ? "error" : "surface-notice" : notice.kind == null ? "" : String(notice.kind),
+      level,
+      title: previous && incrementOccurrence && notice.title == null ? previous.title : title,
+      message: previous && incrementOccurrence && notice.message == null ? previous.message : message,
+      issueNumber: surface ? null : notice.issueNumber || null,
+      details: surface && notice.details ? String(notice.details) : null,
+      latestAt: now().toISOString(), count: previous ? previous.count + (surface && !incrementOccurrence ? 0 : 1) : 1,
+      resolved: false, unread: !!previous?.unread || (!state.open && needsAttention),
+      activatable: activations.has(id) };
+    const rows = surface && previous
+      ? state.rows.map(entry => entry.id === id ? row : entry)
+      : [row, ...state.rows.filter(entry => entry.id !== id)];
+    publish({ ...state, rows });
+    return id;
+  }
+
+  function dismiss(id) {
+    const state = store.read();
+    if (!state.rows.some(row => row.id === id)) return false;
+    publish({ ...state, rows: state.rows.filter(row => row.id !== id) });
+    return true;
+  }
+
+  function keyedRow(key) {
+    return key == null || String(key) === "" ? null : store.read().rows.find(row => row.surface && row.key === String(key));
+  }
+
+  return Object.freeze({
+    read: store.read, subscribe: store.subscribe,
+    record: notice => record(notice),
+    recordSurfaceNotice: notice => record(notice, true),
+    recordError: notice => notice ? record({ ...notice, level: "error" }, true, true) : null,
+    activate: id => activations.get(id)?.(),
+    dismiss,
+    keyedRow,
+    resolveError(key) {
+      const row = keyedRow(key);
+      if (!row) return false;
+      const state = store.read();
+      publish({ ...state, rows: state.rows.map(entry => entry.id === row.id ? { ...entry, resolved: true, unread: false } : entry) });
+      return true;
+    },
+    removeNotice: key => { const row = keyedRow(key); return row ? dismiss(row.id) : false; },
+    setOpen(open) {
+      const state = store.read();
+      if (state.open === open) return;
+      publish({ ...state, open, rows: open ? state.rows.map(row => row.unread ? { ...row, unread: false } : row) : state.rows });
+    },
+    clearAll: () => publish({ ...store.read(), rows: [] }),
+  });
+}
+
 /**
  * @param {object} opts
  * @param {Document} opts.document
@@ -111,7 +194,7 @@ export function createNotificationCenter({
     ariaRole: "log",
     ariaLive: "polite",
     ariaLabel: "Notification history",
-    maxRetained,
+    maxRetained: 0, // Retention belongs to the history model, not the DOM.
     newestOnTop: true,
     levels: HISTORY_LEVELS,
     defaultLevel: "info",
@@ -122,41 +205,14 @@ export function createNotificationCenter({
   let drawer = null;
   let backdrop = null;
   let emptyState = null;
-  let isOpen = false;
+  const history = createNotificationHistory({ maxRetained, now });
+  const renderedRows = new Map();
   let focusReturn = null;
   let releaseFocusTrap = null;
-  // Rows recorded while the drawer was closed. Rows that left the DOM (×,
-  // clear-all, cap) are pruned lazily so every removal path counts.
-  const unread = new Set();
   const unreadListeners = new Set();
   const openListeners = new Set();
-  // FR-017 / Issue #5284: source-keyed surface notices update one history row.
-  // Only recurring errors increase its occurrence count.
-  const surfaceRows = new Map();
-  // Issue #5016 AC-HS3: content identity -> { item, count, onActivate }.
-  const occurrenceRows = new Map();
-
-  function liveUnread() {
-    for (const item of unread) {
-      if (!item.isConnected) {
-        unread.delete(item);
-      }
-    }
-    return unread;
-  }
-
-  function unreadCount() {
-    return liveUnread().size;
-  }
-
-  function unreadHasError() {
-    for (const item of liveUnread()) {
-      if (item.dataset.level === "error") {
-        return true;
-      }
-    }
-    return false;
-  }
+  const unreadCount = () => history.read().unreadCount;
+  const unreadHasError = () => history.read().unreadHasError;
 
   function notifyUnread() {
     const count = unreadCount();
@@ -172,7 +228,7 @@ export function createNotificationCenter({
 
   function syncEmptyState() {
     if (emptyState) {
-      emptyState.hidden = stack.count() > 0;
+      emptyState.hidden = history.read().rows.length > 0;
     }
   }
 
@@ -180,6 +236,7 @@ export function createNotificationCenter({
     if (!drawer || !backdrop) {
       return;
     }
+    const isOpen = history.read().open;
     drawer.dataset.open = isOpen ? "true" : "false";
     drawer.hidden = !isOpen;
     backdrop.dataset.open = isOpen ? "true" : "false";
@@ -189,7 +246,7 @@ export function createNotificationCenter({
   function notifyOpen() {
     for (const listener of openListeners) {
       try {
-        listener(isOpen);
+        listener(history.read().open);
       } catch (error) {
         console.error("notification-center open listener failed", error);
       }
@@ -249,7 +306,6 @@ export function createNotificationCenter({
 
     parent.appendChild(backdrop);
     parent.appendChild(drawer);
-    isOpen = false;
     syncDrawerState();
     syncEmptyState();
     return drawer;
@@ -262,105 +318,93 @@ export function createNotificationCenter({
    * the history never auto-expires; `id` only separates content identities.
    */
   function record(notice) {
-    if (!notice) {
-      return null;
-    }
-    const identity = JSON.stringify([
-      notice.kind == null ? "" : String(notice.kind),
-      notice.id == null ? "" : String(notice.id),
-      HISTORY_LEVELS.includes(notice.level) ? notice.level : "info",
-      notice.title || "Notification",
-      notice.issueNumber || "",
-      notice.message == null ? null : String(notice.message),
-    ]);
-    const existing = occurrenceRows.get(identity);
-    if (existing?.item.isConnected) {
-      existing.count += 1;
-      const { item } = existing;
-      // The latest jump-to wins; an occurrence without one keeps the previous.
-      if (typeof notice.onActivate === "function") {
-        if (typeof existing.onActivate !== "function") {
-          stack.enableActivation(item, () => existing.onActivate?.());
-        }
-        existing.onActivate = notice.onActivate;
-      }
-      item.parentNode?.insertBefore(item, item.parentNode.firstChild);
-      const time = item.querySelector(".notification-center__time");
-      if (time) {
-        const stamp = now();
-        time.dateTime = stamp.toISOString();
-        time.textContent = formatClock(stamp);
-      }
-      renderErrorCount(item, existing.count);
-      if (!isOpen) unread.add(item);
-      notifyUnread();
-      return item;
-    }
-    const entry = { item: null, count: 1, onActivate: notice.onActivate };
-    const item = pushRow({
-      ...notice,
-      onActivate: typeof notice.onActivate === "function" ? () => entry.onActivate?.() : undefined,
-    });
-    if (item) {
-      entry.item = item;
-      // Rows that left through ×, clear-all or the cap retire their identity.
-      for (const [key, row] of occurrenceRows) {
-        if (!row.item.isConnected) occurrenceRows.delete(key);
-      }
-      occurrenceRows.set(identity, entry);
-    }
-    return item;
+    return drawer ? renderedRows.get(history.record(notice))?.item ?? null : null;
   }
 
-  function pushRow(notice) {
-    const issue = notice.issueNumber ? ` #${notice.issueNumber}` : "";
-    const item = stack.push({
-      level: notice.level,
-      title: `${notice.title || "Notification"}${issue}`,
-      message: notice.message == null ? undefined : String(notice.message),
-      dismissible: true,
-      onActivate:
-        typeof notice.onActivate === "function" ? notice.onActivate : undefined,
-    });
-    if (!item) {
-      return null;
+  function renderRows(rows) {
+    if (!drawer) return;
+    const retained = new Set(rows.map(row => row.id));
+    for (const [id, view] of renderedRows) {
+      if (retained.has(id)) continue;
+      view.item.remove();
+      renderedRows.delete(id);
     }
-    if (notice.kind) {
-      item.dataset.kind = String(notice.kind);
-    }
-
-    // Triage marker leads the row in DOM order too, so the severity is the
-    // first thing a screen reader announces; the grid keeps it visually in the
-    // left gutter next to the severity stripe.
-    renderSeverity(item);
-
-    const stamp = now();
-    const time = document.createElement("time");
-    time.className = "notification-center__time";
-    time.dateTime = stamp.toISOString();
-    time.textContent = formatClock(stamp);
-    item.appendChild(time);
-
-    // × on a row also retires it from the unread set (toast-host removed the
-    // element before this listener runs, so the lazy prune sees it gone).
-    item
-      .querySelector(".notification-center__dismiss")
-      ?.addEventListener("click", () => {
-        unread.delete(item);
-        syncEmptyState();
-        notifyUnread();
-      });
-
-    if (!isOpen) {
-      unread.add(item);
+    let previous = null;
+    for (const row of rows) {
+      let view = renderedRows.get(row.id);
+      if (!view) {
+        const item = stack.push({ level: row.level, title: row.title, dismissible: true });
+        view = { item, activationBound: false, row: null };
+        renderedRows.set(row.id, view);
+        item.querySelector(".notification-center__dismiss")?.addEventListener("click", () => history.dismiss(row.id));
+      }
+      const { item } = view;
+      if (view.row !== row) {
+        item.dataset.level = row.level;
+        item.dataset.kind = row.kind;
+        if (row.surface) {
+          if (row.key) item.dataset.errorKey = row.key;
+          item.dataset.resolved = String(row.resolved);
+        }
+        item.querySelector(".notification-center__title").textContent = `${row.title}${row.issueNumber ? ` #${row.issueNumber}` : ""}`;
+        renderSeverity(item, row.level);
+        renderErrorCount(item, row.count);
+        let time = item.querySelector(".notification-center__time");
+        if (!time) {
+          time = document.createElement("time");
+          time.className = "notification-center__time";
+          item.appendChild(time);
+        }
+        time.dateTime = row.latestAt;
+        time.textContent = formatClock(new Date(row.latestAt));
+        let message = item.querySelector(".notification-center__message");
+        if (row.message != null) {
+          if (!message) {
+            message = document.createElement("div");
+            message.className = "notification-center__message";
+            item.insertBefore(message, item.querySelector(".notification-center__details, .notification-center__time"));
+          }
+          message.textContent = row.message;
+        } else message?.remove();
+        let details = item.querySelector(".notification-center__details");
+        if (row.details) {
+          if (!details) {
+            details = document.createElement("details");
+            details.className = "notification-center__details";
+            const summary = document.createElement("summary");
+            summary.textContent = "Details";
+            summary.setAttribute("tabindex", "0");
+            details.appendChild(summary);
+            const content = document.createElement("div");
+            content.className = "notification-center__details-content";
+            details.appendChild(content);
+            item.insertBefore(details, time);
+          }
+          details.querySelector(".notification-center__details-content").textContent = row.details;
+        } else details?.remove();
+        if (row.activatable && !view.activationBound) {
+          stack.enableActivation(item, () => history.activate(row.id));
+          view.activationBound = true;
+        } else if (row.activatable && !view.row?.activatable) {
+          item.setAttribute("role", "button");
+          item.setAttribute("tabindex", "0");
+        } else if (!row.activatable && view.row?.activatable) {
+          item.removeAttribute("role");
+          item.removeAttribute("tabindex");
+        }
+        view.row = row;
+      }
+      const next = previous ? previous.nextSibling : item.parentNode.firstChild;
+      if (item !== next) item.parentNode.insertBefore(item, next);
+      previous = item;
     }
     syncEmptyState();
     notifyUnread();
-    return item;
   }
+  history.subscribe(state => state.rows, renderRows);
 
-  function renderSeverity(item) {
-    const severity = severityForLevel(item.dataset.level);
+  function renderSeverity(item, level) {
+    const severity = severityForLevel(level);
     item.dataset.severity = severity;
     let marker = item.querySelector(".notification-center__severity");
     if (!marker) {
@@ -372,18 +416,6 @@ export function createNotificationCenter({
     marker.dataset.severity = severity;
     marker.setAttribute("aria-label", SEVERITY_LABEL[severity]);
     marker.textContent = SEVERITY_GLYPH[severity];
-  }
-
-  function liveSurfaceRow(key) {
-    const entry = surfaceRows.get(key);
-    if (!entry) {
-      return null;
-    }
-    if (!entry.item.isConnected) {
-      surfaceRows.delete(key);
-      return null;
-    }
-    return entry;
   }
 
   function renderErrorCount(item, count) {
@@ -401,122 +433,17 @@ export function createNotificationCenter({
     badge.setAttribute("title", `${count} occurrences`);
   }
 
-  function upsertSurfaceNotice(notice, incrementOccurrence) {
-    if (!notice) {
-      return null;
-    }
-    const key = notice.key == null ? "" : String(notice.key);
-    const existing = key ? liveSurfaceRow(key) : null;
-    const level = HISTORY_LEVELS.includes(notice.level) ? notice.level : "info";
-    const kind = incrementOccurrence ? "error" : "surface-notice";
-    // Live diagnostics refresh acknowledged rows without calling for triage again.
-    const needsAttention = incrementOccurrence || !existing
-      || existing.item.dataset.resolved === "true"
-      || existing.item.dataset.level !== level
-      || existing.item.querySelector(".notification-center__title")?.firstChild?.textContent !== (notice.title || "Notification")
-      || (existing.item.querySelector(".notification-center__message")?.textContent || "") !== (notice.message == null ? "" : String(notice.message));
-    let item;
-    if (existing) {
-      if (incrementOccurrence) existing.count += 1;
-      item = existing.item;
-      item.dataset.level = level;
-      item.dataset.kind = kind;
-      if (notice.title != null || !incrementOccurrence) {
-        item.querySelector(".notification-center__title").textContent = notice.title || "Notification";
-      }
-      renderSeverity(item);
-      if (notice.message != null) {
-        let message = item.querySelector(".notification-center__message");
-        if (!message) {
-          message = document.createElement("div");
-          message.className = "notification-center__message";
-          item.insertBefore(message, item.querySelector(".notification-center__details, .notification-center__time"));
-        }
-        message.textContent = String(notice.message);
-      } else if (!incrementOccurrence) {
-        item.querySelector(".notification-center__message")?.remove();
-      }
-      const time = item.querySelector(".notification-center__time");
-      if (time) {
-        const stamp = now();
-        time.dateTime = stamp.toISOString();
-        time.textContent = formatClock(stamp);
-      }
-      renderErrorCount(item, existing.count);
-    } else {
-      item = pushRow({ kind, level, title: notice.title, message: notice.message,
-        onActivate: key && typeof notice.onActivate === "function"
-          ? () => surfaceRows.get(key)?.onActivate?.() : notice.onActivate });
-      if (!item) return null;
-      if (key) {
-        item.dataset.errorKey = key;
-        surfaceRows.set(key, { item, count: 1 });
-      }
-    }
-    if (key) surfaceRows.get(key).onActivate = notice.onActivate;
-    item.dataset.resolved = "false";
-    let details = item.querySelector(".notification-center__details");
-    if (notice.details) {
-      if (!details) {
-        details = document.createElement("details");
-        details.className = "notification-center__details";
-        const summary = document.createElement("summary");
-        summary.textContent = "Details";
-        summary.setAttribute("tabindex", "0");
-        details.appendChild(summary);
-        const content = document.createElement("div");
-        content.className = "notification-center__details-content";
-        details.appendChild(content);
-        item.insertBefore(details, item.querySelector(".notification-center__time"));
-      }
-      details.querySelector(".notification-center__details-content").textContent = String(notice.details);
-    } else {
-      details?.remove();
-    }
-    if (existing) {
-      if (!isOpen && needsAttention) unread.add(item);
-      notifyUnread();
-    }
-    return item;
-  }
-
-  /** Upsert { key, title?, level?, message?, details? } without counting status updates as occurrences. */
   function recordSurfaceNotice(notice) {
-    return upsertSurfaceNotice(notice, false);
+    return drawer ? renderedRows.get(history.recordSurfaceNotice(notice))?.item ?? null : null;
   }
 
-  /** FR-017 compatibility: recurring surface errors count as new occurrences. */
-  function recordError(error) {
-    return error ? upsertSurfaceNotice({ ...error, level: "error" }, true) : null;
-  }
-
-  /** Mark the keyed surface row resolved and read. Returns whether one existed. */
-  function resolveError(key) {
-    const existing = key == null ? null : liveSurfaceRow(String(key));
-    if (!existing) {
-      return false;
-    }
-    existing.item.dataset.resolved = "true";
-    unread.delete(existing.item);
-    notifyUnread();
-    return true;
-  }
-
-  /** Remove a keyed notice when its attention target has recovered or closed. */
-  function removeNotice(key) {
-    const existing = key == null ? null : liveSurfaceRow(String(key));
-    if (!existing) return false;
-    existing.item.remove();
-    surfaceRows.delete(String(key));
-    unread.delete(existing.item);
-    syncEmptyState();
-    notifyUnread();
-    return true;
+  function recordError(notice) {
+    return drawer ? renderedRows.get(history.recordError(notice))?.item ?? null : null;
   }
 
   function open(key) {
-    if (!isOpen) {
-      isOpen = true;
+    if (!history.read().open) {
+      history.setOpen(true);
       focusReturn = document.activeElement;
       syncDrawerState();
       if (drawer) {
@@ -530,13 +457,11 @@ export function createNotificationCenter({
         }
         releaseFocusTrap = focusTrap(drawer, { document });
       }
-      // FR-014: opening the drawer reads everything.
-      unread.clear();
-      notifyUnread();
       notifyOpen();
     }
     if (key == null) return;
-    const entry = liveSurfaceRow(String(key));
+    const row = history.keyedRow(key);
+    const entry = row && renderedRows.get(row.id);
     if (!entry) return false;
     entry.item.setAttribute("tabindex", "-1");
     entry.item.scrollIntoView?.({ block: "nearest" });
@@ -549,10 +474,10 @@ export function createNotificationCenter({
   }
 
   function close() {
-    if (!isOpen) {
+    if (!history.read().open) {
       return;
     }
-    isOpen = false;
+    history.setOpen(false);
     syncDrawerState();
     if (typeof releaseFocusTrap === "function") {
       releaseFocusTrap();
@@ -570,7 +495,7 @@ export function createNotificationCenter({
   }
 
   function toggle() {
-    if (isOpen) {
+    if (history.read().open) {
       close();
     } else {
       open();
@@ -578,12 +503,7 @@ export function createNotificationCenter({
   }
 
   function clearAll() {
-    stack.clear();
-    unread.clear();
-    surfaceRows.clear();
-    occurrenceRows.clear();
-    syncEmptyState();
-    notifyUnread();
+    history.clearAll();
   }
 
   function onUnreadChange(listener) {
@@ -607,19 +527,21 @@ export function createNotificationCenter({
     record,
     recordSurfaceNotice,
     recordError,
-    resolveError,
-    removeNotice,
+    resolveError: history.resolveError,
+    removeNotice: history.removeNotice,
     open,
     close,
     toggle,
-    isOpen: () => isOpen,
+    isOpen: () => history.read().open,
     unreadCount,
     unreadHasError,
     clearAll,
     onUnreadChange,
     onOpenChange,
-    count: stack.count,
-    droppedCount: stack.droppedCount,
+    read: history.read,
+    subscribe: history.subscribe,
+    count: () => history.read().rows.length,
+    droppedCount: () => history.read().dropped,
     element: () => drawer,
   });
 }

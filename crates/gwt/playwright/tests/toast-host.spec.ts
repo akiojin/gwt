@@ -392,25 +392,26 @@ test("Issue #6932 Issues notifications group repeated failures and continued/sta
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
     }
   });
-  await expect(badge).toHaveText("6");
+  await expect(badge).toHaveText("5");
   await expect(badge).toHaveAttribute("data-has-error", "true");
   await bell.click();
-  await expect(rows).toHaveCount(6);
+  await expect(rows).toHaveCount(5);
   await expect(rows.first()).toContainText("Needs human #5016");
   await expect(rows.first()).toHaveAttribute("data-level", "error");
-  await expect(rows.filter({ hasText: "Repeated notice" })).toHaveCount(2);
+  await expect(rows.filter({ hasText: "Repeated notice" })).toHaveCount(1);
+  await expect(rows.filter({ hasText: "Repeated notice" }).locator(".notification-center__count")).toHaveText("×2");
   await expect(rows.filter({ hasText: "Issues launch requested" })).toHaveCount(3);
   await expect(rows.last()).toContainText("Issues #5016");
   await expect(badge).toBeHidden();
   const launchRow = drawer.locator('[data-error-key="issue-monitor:launch-requested:5016"]');
   await expect(launchRow).toHaveCount(1);
   await launchRow.locator(".notification-center__dismiss").click();
-  await expect(rows).toHaveCount(5);
+  await expect(rows).toHaveCount(4);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
     detail: { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 5016 },
   })));
   await expect(launchRow).toHaveCount(1);
-  await expect(rows).toHaveCount(6);
+  await expect(rows).toHaveCount(5);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const screenshot = testInfo.outputPath(`monitor-notifications-${theme}.png`);
   await page.screenshot({ path: screenshot, fullPage: true });
