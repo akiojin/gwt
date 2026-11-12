@@ -475,6 +475,11 @@ test("real PTY receives one input and converges with the visible terminal grid",
     try {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await gotoLiveGwt(page, liveBase!, { enableTestBridge: true });
+      const projectKey = new URL(page.url()).pathname.split("/").at(-1);
+      expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
+      await expect.poll(() => page.evaluate(key => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === "project_execution_status"
+          && entry.payload.status.project_key === key)?.payload.status.view_state, projectKey)).toBe("open");
       const windows = () => page.evaluate(() => {
         const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state");
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
@@ -898,6 +903,7 @@ exit 67
     }, id);
     const metrics = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.metrics(id), id);
     await expect.poll(buffer, { timeout: 60_000 }).toContain("Ask Codex");
+    await pm.locator(".terminal-root .xterm").evaluate(node => { (window as any).__ownedPmNative = node; });
     const input = pm.locator(".xterm-helper-textarea");
     await input.focus();
     marker = `GWT4777${randomBytes(8).toString("hex").toUpperCase()}`;
@@ -963,19 +969,35 @@ exit 67
       scrollbackLineCount: beforeReentry.scrollbackLineCount,
       markerNumbers: numberedLines(beforeReentry.lines),
       historyMarkerCount: responseHistory(beforeReentry).length });
-    const sequenceBeforeReentry = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+    const reentryBaseline = await page.evaluate(id => {
+      const state = (window as any).__gwtTerminalTestApi.metrics(id);
+      const connection = (window as any).__gwtPlaywrightSockets?.at(-1);
+      (window as any).__ownedPmConnection = connection;
+      return {
+        sequence: (window as any).__gwtPlaywrightMessageSequence ?? 0,
+        snapshotsBefore: state.snapshotAccepted,
+        settled: state.isReady === true && !state.outputPending && !state.snapshotPending
+          && state.snapshotAccepted === state.snapshotApplied,
+        connected: connection?.readyState === 1,
+      };
+    }, id);
+    expect(reentryBaseline.settled, "the reentry receipt boundary must start at a settled runtime").toBe(true);
+    expect(reentryBaseline.connected, "the reentry receipt boundary retains an open connection").toBe(true);
     reentryGrid = undefined;
     recordReentryGrid = true;
     diagnosticPhase = "reentry";
     await page.locator("#op-pm-entry").click();
-    // A reveal can repaint only the composer or clear the whole screen. Wait
-    // for the newest erase and composer paint to finish on the fitted grid;
-    // the old composer or a cursor-only update cannot establish the baseline.
+    // The owner transport can replace streamed bytes with a snapshot. A fresh
+    // applied snapshot or complete paint establishes the baseline; later
+    // destructive or unfinished output must not be hidden by an older one.
     await expect.poll(async () => {
-      const rendered = await page.evaluate(({ id, after }) => {
+      const rendered = await page.evaluate(({ id, after, snapshotsBefore }) => {
         const api = (window as any).__gwtTerminalTestApi;
-        const output = ((window as any).__gwtPlaywrightMessages ?? [])
-          .filter((row: any) => row.sequence > after && row.payload.kind === "terminal_output" && row.payload.id === id)
+        const received = ((window as any).__gwtPlaywrightMessages ?? []).filter((row: any) => row.sequence > after);
+        const messages = received.filter((row: any) => row.payload.id === id);
+        const snapshot = messages.findLast((row: any) => row.payload.kind === "terminal_snapshot");
+        const output = messages
+          .filter((row: any) => row.sequence > (snapshot?.sequence ?? after) && row.payload.kind === "terminal_output")
           .map((row: any) => atob(row.payload.data_base64)).join("");
         const syncBegin = "\x1b[?2026h", syncEnd = "\x1b[?2026l";
         const segments = output.split(syncEnd);
@@ -983,27 +1005,37 @@ exit 67
         const paint = segments.findLast((segment: string) => /\x1b\[[0-3]?J/.test(segment));
         const start = paint?.indexOf(syncBegin) ?? -1;
         const erase = paint && [...paint.matchAll(/\x1b\[[0-3]?J/g)].at(-1);
-        const repainted = !pending.includes(syncBegin) && !/\x1b\[[0-3]?J/.test(pending)
-          && !!paint && start >= 0 && !!erase
+        const completePaint = !!paint && start >= 0 && !!erase
           && paint.slice(Math.max(start + syncBegin.length, erase.index + erase[0].length)).includes("Ask Codex")
           && (erase.index >= start + syncBegin.length
             || /^\x1b\[[23]J(?:\x1b\[[0-?]*[ -/]*[@-~])*$/.test(paint.slice(erase.index, start)));
+        const metrics = api.metrics(id), buffer = api.logicalBufferLines(id);
+        const receipts = messages.filter((row: any) => row.payload.kind === "terminal_snapshot").length;
+        const correlated = received[0]?.sequence === after + 1
+          && metrics.snapshotAccepted - snapshotsBefore === receipts
+          && metrics.snapshotApplied === metrics.snapshotAccepted;
+        const freshSnapshot = !!snapshot && receipts > 0 && correlated;
         return {
-          repainted,
-          metrics: api.metrics(id),
-          buffer: api.logicalBufferLines(id),
-          composer: api.bufferText(id).includes("Ask Codex"),
+          fresh: metrics.isReady === true && correlated && !pending.includes(syncBegin) && !/\x1b\[[0-3]?J/.test(pending)
+            && !/\x1b(?:\[[0-?]*[ -/]*)?$/.test(pending)
+            && (completePaint || (freshSnapshot && !paint)),
+          metrics,
+          buffer,
+          composer: api.bufferText(id, metrics.rows).includes("Ask Codex"),
+          sameTerminal: document.querySelector(`.workspace-window[data-id="${id}"] .xterm`) === (window as any).__ownedPmNative,
+          sameConnection: (window as any).__gwtPlaywrightSockets?.at(-1) === (window as any).__ownedPmConnection
+            && (window as any).__ownedPmConnection?.readyState === 1,
         };
-      }, { id, after: sequenceBeforeReentry });
+      }, { id, after: reentryBaseline.sequence, snapshotsBefore: reentryBaseline.snapshotsBefore });
       return {
-        repainted: rendered.repainted && !!reentryGrid
+        fresh: rendered.fresh && rendered.sameTerminal && rendered.sameConnection && !!reentryGrid
           && rendered.metrics.cols === reentryGrid.cols && rendered.metrics.rows === reentryGrid.rows,
         drained: rendered.metrics.outputPending === false && rendered.metrics.snapshotPending === false,
         composer: rendered.composer,
         historyCount: responseHistory(rendered.buffer).length,
         numbers: numberedLines(rendered.buffer.lines),
       };
-    }, { timeout: 60_000 }).toEqual({ repainted: true, drained: true, composer: true, historyCount: 64, numbers: expectedNumbers });
+    }, { timeout: 60_000 }).toEqual({ fresh: true, drained: true, composer: true, historyCount: 64, numbers: expectedNumbers });
     recordReentryGrid = false;
     await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(0);
     const box = await pm.locator(".terminal-root").boundingBox();
@@ -1031,7 +1063,6 @@ exit 67
       return { history: responseHistory(state), numbers: numberedLines(state.lines) };
     };
     const expectedResponseState = { history: capturedResponseHistory, numbers: expectedNumbers };
-    await pm.locator(".terminal-root .xterm").evaluate(node => { (window as any).__ownedPmNative = node; });
     await pm.getByRole("button", { name: "Reports", exact: true }).click();
     await pm.getByRole("button", { name: "Execution log", exact: true }).click();
     const reentryMetrics = await metrics();
