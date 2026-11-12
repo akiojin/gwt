@@ -32,6 +32,15 @@ pub struct PmTaskSummary {
     pub wait_reason: Option<String>,
     pub next_action: Option<String>,
     pub review_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criteria_preview: Option<PmTaskCriteriaPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmTaskCriteriaPreview {
+    pub purpose: String,
+    pub completion_conditions: Vec<String>,
+    pub completion_condition_total: usize,
 }
 
 fn key(id: &str) -> String {
@@ -78,6 +87,17 @@ pub(super) fn load(repo: &Path) -> PmTaskOverview {
             wait_reason: task.wait_reason.as_deref().map(short),
             next_action: task.next_action.as_deref().map(short),
             review_required: task.review_required,
+            criteria_preview: Some(PmTaskCriteriaPreview {
+                purpose: short(&task.draft.purpose),
+                completion_conditions: task
+                    .draft
+                    .completion_conditions
+                    .iter()
+                    .take(5)
+                    .map(|condition| short(condition))
+                    .collect(),
+                completion_condition_total: task.draft.completion_conditions.len(),
+            }),
         })
         .collect();
     PmTaskOverview::Ready {
