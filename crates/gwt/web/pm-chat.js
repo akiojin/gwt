@@ -1,6 +1,7 @@
 import { createUiStateStore } from './ui-state-store.js';
 import { renderUiContent } from './ui-content.js';
 import { createTaskHome } from './task-home.js';
+import { createTaskDecisions } from './task-decisions.js';
 
 function reportDetailsMarkdown(structured) {
   return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
@@ -207,24 +208,31 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', 'PM view');
   const homeButton = element('button', '', 'Home');
+  const decideButton = element('button', '', 'Decide');
   const chatButton = element('button', '', 'Chat');
   const tasksButton = element('button', '', 'Tasks');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  homeButton.type = chatButton.type = tasksButton.type = reportsButton.type = logButton.type = 'button';
-  toolbar.append(homeButton, chatButton, tasksButton, reportsButton, logButton);
+  homeButton.type = decideButton.type = chatButton.type = tasksButton.type
+    = reportsButton.type = logButton.type = 'button';
+  toolbar.append(homeButton, decideButton, chatButton, tasksButton, reportsButton, logButton);
   // SPEC #7007: the task-centered Home island is the entry view. Its actions
   // reuse the existing surfaces: creating a task goes through the PM chat
-  // composer (the request-task intake path), decisions open the Reports
-  // decision filter, and progress is the Tasks view.
+  // composer (the request-task intake path), reviewing decisions opens the
+  // Decide surface, and progress is the Tasks view.
   const taskHome = createTaskHome({ document,
     onCreateTask: () => { showView('chat'); draft.focus(); },
-    onReviewDecisions: () => {
-      kindSelect.value = 'decision';
-      showView('reports');
-      update(latestState);
-    },
+    onReviewDecisions: () => showView('decide'),
     onViewProgress: () => showView('tasks'),
+  });
+  // SPEC #7007 T-010: the Decide island aggregates only decision reports.
+  // Answers travel the existing PM reply path (the chat send); the view
+  // tracks the in-flight answer and the answers this pane confirmed during
+  // the session, but never marks a decision resolved — only a later reports
+  // snapshot can retire it.
+  const taskDecisions = createTaskDecisions({ document,
+    onAnswerDecision: (item, optionIndex) => answerDecision(item, optionIndex),
+    onReplyInChat: () => { showView('chat'); draft.focus(); },
   });
   const chatBody = element('section', 'pm-chat__chat');
   chatBody.setAttribute('aria-label', 'PM conversation');
@@ -283,7 +291,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   transcript.setAttribute('aria-label', 'PM reports');
   historyHeader.append(element('h2', '', 'Reports'), filter);
   body.append(currentCard, historyHeader, notice, transcript);
-  root.append(toolbar, taskHome.element, tasksBody, body, chatBody);
+  root.append(toolbar, taskHome.element, taskDecisions.element, tasksBody, body, chatBody);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -308,8 +316,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     tasksBody.hidden = value !== 'tasks';
     chatBody.hidden = value !== 'chat';
     taskHome.element.hidden = value !== 'home';
+    taskDecisions.element.hidden = value !== 'decide';
     root.classList.toggle('pm-chat--logs', logs);
     homeButton.setAttribute('aria-pressed', String(value === 'home'));
+    decideButton.setAttribute('aria-pressed', String(value === 'decide'));
     chatButton.setAttribute('aria-pressed', String(value === 'chat'));
     tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
     reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
@@ -322,6 +332,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     }
   }
   const showHome = () => showView('home');
+  const showDecisions = () => showView('decide');
   const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
   const showReports = () => showView('reports');
@@ -342,6 +353,75 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       ? (state.reports || []).filter(report => report.kind === 'decision').length : null;
     taskHome.receive({ overview, decisionsWaiting, completedToday: null,
       stale: Boolean(state?.requestTasksError) && overview !== null });
+  }
+  // Decide aggregates the same decision reports Home counts (AC-6), newest
+  // first. Typed packets expose their options; untyped decision reports keep
+  // the plain reply path and carry their display text instead.
+  const answeredDecisions = new Map();
+  let pendingDecision = null;
+  let decisionSendError = null;
+  function decisionItems(state) {
+    return (state?.reports || []).filter(report => report.kind === 'decision').map(report => {
+      const summary = report.structured?.summary ?? null;
+      const packet = summary?.decision ?? null;
+      const displayText = reportDisplayText(report);
+      return {
+        id: String(report.id),
+        question: packet?.question || summary?.result || displayText.split('\n')[0] || 'Decision needed',
+        result: summary?.result ?? null,
+        impact: summary?.impact ?? null,
+        owner: summary?.owner ?? null,
+        recommendation: packet?.recommendation ?? null,
+        reason: packet?.reason ?? null,
+        options: packet ? [...packet.options] : null,
+        detailText: packet ? null : displayText,
+        createdAt: report.created_at ?? null,
+      };
+    }).reverse();
+  }
+  function observeDecisionSend(send) {
+    if (!pendingDecision || !send || send.sequence <= pendingDecision.afterSequence) return;
+    if (send.status === 'sent') {
+      answeredDecisions.set(pendingDecision.id, pendingDecision.optionText);
+      pendingDecision = null;
+      decisionSendError = null;
+    } else if (send.status === 'failed') {
+      decisionSendError = { id: pendingDecision.id,
+        message: send.error || 'The answer could not be sent.' };
+      pendingDecision = null;
+    }
+  }
+  function renderDecisions(state) {
+    observeDecisionSend(state?.chatSend ?? null);
+    const answered = {};
+    for (const [id, optionText] of answeredDecisions) answered[id] = optionText;
+    taskDecisions.receive({
+      loaded: Boolean(state?.loaded),
+      error: state?.error ?? null,
+      decisions: decisionItems(state),
+      sending: state?.chatSend?.status === 'pending',
+      pendingId: pendingDecision?.id ?? null,
+      sendError: decisionSendError,
+      answered,
+    });
+  }
+  function answerDecision(item, optionIndex) {
+    if (disposed || chatSend?.status === 'pending' || pendingDecision) return;
+    const optionText = item.options?.[optionIndex];
+    if (optionText == null) return;
+    pendingDecision = { id: item.id, optionText, afterSequence: chatSend?.sequence ?? 0 };
+    decisionSendError = null;
+    onSend(`Answer to "${item.question}": ${optionIndex + 1}. ${optionText}`);
+    const send = latestState?.chatSend ?? null;
+    if (pendingDecision && (!send || send.sequence <= pendingDecision.afterSequence
+      || send.status !== 'pending')) {
+      // The reply path refused the send (no session, or another send already
+      // in flight): keep the decision actionable and say why on its card.
+      decisionSendError = { id: item.id,
+        message: 'The answer could not be sent. Reconnect, then try again.' };
+      pendingDecision = null;
+    }
+    renderDecisions(latestState);
   }
   function renderTasks(state) {
     const overview = state?.requestTasks;
@@ -518,6 +598,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
     renderHome(state);
+    renderDecisions(state);
     renderTasks(state);
     renderChat(state.conversation);
     renderComposer(state.chatSend);
@@ -590,6 +671,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (disposed || session === nextSession) return;
     session = nextSession;
     expandedReports.clear();
+    answeredDecisions.clear();
+    pendingDecision = null;
+    decisionSendError = null;
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
@@ -613,7 +697,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     body.removeEventListener('scroll', rememberScroll);
     resizeObserver?.disconnect();
     taskHome.dispose();
+    taskDecisions.dispose();
     homeButton.removeEventListener('click', showHome);
+    decideButton.removeEventListener('click', showDecisions);
     chatButton.removeEventListener('click', showChat);
     composer.removeEventListener('submit', submitDraft);
     draft.removeEventListener('keydown', draftKeydown);
@@ -627,6 +713,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }
   homeButton.addEventListener('click', showHome);
+  decideButton.addEventListener('click', showDecisions);
   chatButton.addEventListener('click', showChat);
   composer.addEventListener('submit', submitDraft);
   draft.addEventListener('keydown', draftKeydown);
@@ -638,6 +725,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showChat, showTasks, showReports, dispose,
+  return { update, setSession, showHome, showDecisions, showChat, showTasks, showReports, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }
