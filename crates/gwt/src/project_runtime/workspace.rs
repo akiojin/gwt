@@ -472,7 +472,7 @@ pub fn apply_workspace_launch_for_current_work(
                             continue;
                         }
                         return Err(gwt_core::error::GwtError::Other(format!(
-                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage; the registered PM can use workspace.close with work_id {successor_id}, close_kind superseded, then issue.monitor.requeue", current.id)));
+                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage; the registered PM can use workspace.close with work_id {successor_id}, close_kind superseded, then issue.monitor.requeue (issue.monitor.launch_now when requeue answers not_held)", current.id)));
                     }
                 }
                 predecessor_id = Some(current.id.clone());
@@ -516,7 +516,7 @@ pub fn invalid_successor_supersession_event(
         can_upgrade_work_owner, canonical_work_id, successor_work_id, WorkEvent, WorkEventKind,
     };
     let recovery = format!(
-        "the registered PM can use workspace.close with work_id {}, close_kind superseded, then issue.monitor.requeue",
+        "the registered PM can use workspace.close with work_id {}, close_kind superseded, then issue.monitor.requeue (issue.monitor.launch_now when requeue answers not_held)",
         occupied.id
     );
     let refuse = |reason: &str| {
@@ -654,7 +654,7 @@ pub fn validate_superseded_member_runtimes(
     for session_id in members {
         let refuse = || {
             gwt_core::GwtError::Other(format!(
-            "invalid successor member {session_id} has live or unprovable runtime; the registered PM can use pane.close, then workspace.close with close_kind superseded and issue.monitor.requeue"
+            "invalid successor member {session_id} has live or unprovable runtime; the registered PM can use pane.close, then workspace.close with close_kind superseded and issue.monitor.requeue (issue.monitor.launch_now when requeue answers not_held)"
         ))
         };
         if gwt_agent::validate_session_id_path_component(session_id).is_err() {
