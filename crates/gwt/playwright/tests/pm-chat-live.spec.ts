@@ -241,6 +241,70 @@ test.describe('PM reports', () => {
     });
   });
 
+  test('AC-3431-CHAT-2 Chat shows only conversation text from native Claude and Codex records', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      // The checkout host inherits these; a set value would move its native store off the isolated HOME.
+      expect(process.env.CLAUDE_CONFIG_DIR ?? '', 'Claude store follows the isolated HOME').toBe('');
+      expect(process.env.CODEX_HOME ?? '', 'Codex store follows the isolated HOME').toBe('');
+      expect(ROOT, 'native records are bound to the fixture PM checkout').not.toBe('');
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      const sessionPath = join(HOME, '.gwt', 'sessions', `${SESSION}.toml`);
+      const originalSession = readFileSync(sessionPath, 'utf8');
+      const fixtures = resolve(ROOT, 'crates/gwt/src/pm_conversation/fixtures');
+      // Anonymized native records (see fixtures/README.md) bound to this fixture PM's checkout and identity.
+      const seed = (agent: 'ClaudeCode' | 'Codex', fixture: string, path: string) => {
+        const id = `chat-noise-${agent.toLowerCase()}-${theme}`;
+        const records = readFileSync(join(fixtures, fixture), 'utf8')
+          .replaceAll('"/work/project"', JSON.stringify(ROOT))
+          .replaceAll('"conversation"', JSON.stringify(id));
+        const file = join(HOME, path.replace('<id>', id));
+        mkdirSync(join(file, '..'), { recursive: true });
+        writeFileSync(file, records);
+        // The seeded stopped-PM Session is intentionally minimal; the reader needs a loadable one.
+        const session = originalSession.replace(/^agent_id = .*$/m, `agent_id = { type = "${agent}" }`);
+        writeFileSync(sessionPath, `${session}\ndisplay_name = "PM"\nagent_session_id = "${id}"\n`);
+        return file;
+      };
+      const seeded: string[] = [];
+      try {
+        seeded.push(seed('ClaudeCode', 'claude-chat.jsonl', '.claude/projects/chat-noise/<id>.jsonl'));
+        await gotoPmReports(page, undefined, BASE, true);
+        const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const chat = pane.getByRole('region', { name: 'PM conversation' });
+        const conversation = chat.locator('.pm-chat__conversation');
+        const expectOnlyVisibleConversation = async (userText: string) => {
+          await expect(chat.locator('.pm-chat__bubble--user')).toHaveText([userText], { timeout: 30_000 });
+          await expect(chat.locator('.pm-chat__bubble--assistant')).toHaveText(['Assistant reply']);
+          await expect(chat.locator('details.pm-chat__collapsed')).toHaveCount(0);
+          const shown = (await conversation.textContent()) ?? '';
+          for (const hidden of ['\u001b', '⏺', '⎿', 'Bash(', 'internal tool output', 'fixture command', 'Internal',
+            'Stop hook feedback', 'Scheduled supervision tick', 'Private reasoning', 'Duplicate human event']) {
+            expect(shown, `chat must not show ${JSON.stringify(hidden)}`).not.toContain(hidden);
+          }
+        };
+        // Claude: thinking, tool use/result (ANSI + terminal decoration), meta, Stop feedback, stop hook summary,
+        // the scheduled tick and a task notification are in the record but never in the chat.
+        await expectOnlyVisibleConversation('Human question');
+        // Codex: developer message, tool call/output, reasoning and the duplicate event record are excluded.
+        seeded.push(seed('Codex', 'codex-chat.jsonl', '.codex/sessions/2026/11/12/rollout-2026-11-12T00-00-00-<id>.jsonl'));
+        await expectOnlyVisibleConversation('Human question\nAdditional context');
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        const screenshot = info.outputPath(`chat-native-records-${theme}.png`);
+        await pane.screenshot({ path: screenshot });
+        await info.attach('PM chat from native records', { path: screenshot, contentType: 'image/png' });
+        expect(errors).toEqual([]);
+      } finally {
+        writeFileSync(sessionPath, originalSession);
+        for (const file of seeded) rmSync(file, { force: true });
+      }
+    });
+  });
+
   test('Issue #6235 Execution log preserves scrollback across replacement snapshots and reveal', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
