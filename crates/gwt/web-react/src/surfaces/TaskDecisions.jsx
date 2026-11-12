@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useStoreSelector } from "../store/useStoreSelector.js";
+import { focusElement, focusFirstEnabledButton } from "../hosts/focus.js";
 
 // Task-centered Decide surface (SPEC #7007 T-010). The store carries only
 // state derived by the host from the PM reports snapshot: typed decision
@@ -38,11 +39,6 @@ function relativeTimeLabel(iso) {
   return iso.slice(0, 10);
 }
 
-function firstEnabledButton(element) {
-  if (!element) return null;
-  return [...element.querySelectorAll("button")].find(button => !button.disabled) ?? null;
-}
-
 export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
   const model = useStoreSelector(store, selectTaskDecisionsModel);
   const headingRef = useRef(null);
@@ -53,11 +49,15 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
   const actionable = decisions.filter(item => !answered[item.id]);
   const actionableKey = actionable.map(item => item.id).join("\n");
 
+  // Focus placement itself is imperative DOM and belongs to the host
+  // (src/hosts/focus.js); this surface only chooses the target: the next
+  // waiting decision's first enabled button, or the heading when no
+  // waiting decision is left.
   const focusAfter = id => {
     const index = decisions.findIndex(item => item.id === id);
     const next = decisions.slice(index + 1).find(item => !answered[item.id]);
-    const target = next ? firstEnabledButton(cardRefs.current.get(next.id)) : headingRef.current;
-    target?.focus();
+    if (next) focusFirstEnabledButton(cardRefs.current.get(next.id));
+    else focusElement(headingRef.current);
   };
 
   // When the decision the user just acted on is answered (or leaves the

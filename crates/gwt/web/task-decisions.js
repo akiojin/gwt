@@ -1,5 +1,5 @@
 import { createUiStateStore } from "./ui-state-store.js";
-import { mountIsland } from "./react/islands.js";
+import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 
 // Task-centered Decide host (SPEC #7007). Rendered by the React surface
 // `TaskDecisions` (crates/gwt/web-react). The caller derives the decision
@@ -7,8 +7,7 @@ import { mountIsland } from "./react/islands.js";
 // and reply callbacks stay with the caller, which owns the PM chat send path.
 export function createTaskDecisions({ document, onAnswerDecision, onReplyInChat, scheduleFrame }) {
   const model = createUiStateStore(null, { scheduleFrame });
-  const container = document.createElement("div");
-  container.className = "react-island";
+  const container = createDetachedIslandContainer(document);
   const island = mountIsland("task-decisions", container, { store: model, onAnswerDecision, onReplyInChat });
   function receive(state) {
     model.update(() => state);
