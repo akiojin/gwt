@@ -498,6 +498,11 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await showShell();
       const originalShell = await shell.elementHandle();
       await expect.poll(() => page.evaluate(id => (window as any).__gwtTerminalTestApi.metrics(id).isReady, id)).toBe(true);
+      await expect.poll(async () => {
+        const current = (await windows()).find((entry: any) => entry.id === id);
+        return current?.status === "running" && Number.isFinite(current.runtime_started_at_ms)
+          && current.runtime_started_at_ms > 0;
+      }).toBe(true);
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: `node "${probe.replace(/\\/g, "/")}"\r` });
       await expect.poll(() => outputs.get(id!) || "", { timeout: 30_000 }).toContain("PTY_PROBE_READY");
       const grid = async (phase: string) => {
