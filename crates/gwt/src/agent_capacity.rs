@@ -277,6 +277,18 @@ struct ProjectConsumption {
 struct TargetMeasurement {
     bytes: u64,
     observed_at: u64,
+    /// Short lease renewed while a refresh walk of the same path advances.
+    #[serde(default)]
+    refreshed_until: u64,
+}
+
+impl TargetMeasurement {
+    /// TTL from completion, extended only by a live refresh lease.
+    fn valid_until(&self) -> u64 {
+        self.observed_at
+            .saturating_add(TARGET_TTL_SECS)
+            .max(self.refreshed_until)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -565,11 +577,7 @@ fn project_capacity_at(
         .iter()
         .filter(|(path, measurement)| {
             own_targets.contains(*path)
-                && fresh(
-                    measurement.observed_at,
-                    measurement.observed_at.saturating_add(TARGET_TTL_SECS),
-                    now,
-                )
+                && fresh(measurement.observed_at, measurement.valid_until(), now)
         })
         .map(|(_, measurement)| measurement.bytes)
         .max();
@@ -579,13 +587,7 @@ fn project_capacity_at(
         snapshot
             .targets
             .values()
-            .filter(|measurement| {
-                fresh(
-                    measurement.observed_at,
-                    measurement.observed_at.saturating_add(TARGET_TTL_SECS),
-                    now,
-                )
-            })
+            .filter(|measurement| fresh(measurement.observed_at, measurement.valid_until(), now))
             .map(|measurement| measurement.bytes)
             .max()
             .unwrap_or(own)
@@ -802,13 +804,7 @@ impl RuntimeProbe {
         let mut diagnostics = machine.diagnostics;
         diagnostics.extend(disk_errors);
         let mut targets = previous.targets;
-        targets.retain(|_, value| {
-            fresh(
-                value.observed_at,
-                value.observed_at.saturating_add(TARGET_TTL_SECS),
-                now,
-            )
-        });
+        targets.retain(|_, value| fresh(value.observed_at, value.valid_until(), now));
         let paths = roots
             .into_iter()
             .map(|root| root.join("target"))
@@ -828,8 +824,13 @@ impl RuntimeProbe {
             let walk = self
                 .walks
                 .entry(path.clone())
-                .or_insert_with(|| TargetWalk::new(path.clone()));
+                .or_insert_with(|| TargetWalk {
+                    started_at: now,
+                    ..TargetWalk::new(path.clone())
+                });
             walk.last_requested_at = now;
+            let started_at = walk.started_at;
+            let budget_before = remaining;
             let measurement = match advance(walk, &mut remaining, deadline) {
                 // Missing build output is known zero consumption, not a failed sensor.
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(0)),
@@ -843,13 +844,27 @@ impl RuntimeProbe {
                         TargetMeasurement {
                             bytes,
                             observed_at: now,
+                            refreshed_until: 0,
                         },
                     );
                 }
-                Ok(None) => diagnostics.push(format!(
-                    "target_measurement_in_progress: {}; wait for the scan or use Manual",
-                    path.display()
-                )),
+                Ok(None) => {
+                    // A refresh walk can outlast TARGET_TTL_SECS under the
+                    // per-tick budget. While one that began inside the
+                    // completed sample's TTL keeps advancing, keep that sample
+                    // published on a short lease; a stalled, failed or
+                    // post-expiry walk lets it lapse.
+                    if let Some(sample) = targets.get_mut(&path).filter(|sample| {
+                        remaining < budget_before
+                            && started_at < sample.observed_at.saturating_add(TARGET_TTL_SECS)
+                    }) {
+                        sample.refreshed_until = now.saturating_add(SNAPSHOT_TTL_SECS);
+                    }
+                    diagnostics.push(format!(
+                        "target_measurement_in_progress: {}; wait for the scan or use Manual",
+                        path.display()
+                    ))
+                }
                 Err(error) => {
                     self.walks.remove(&path);
                     targets.remove(&path);
@@ -1094,6 +1109,7 @@ struct TargetWalk {
     current: Option<std::fs::ReadDir>,
     bytes: u64,
     last_requested_at: u64,
+    started_at: u64,
 }
 
 impl TargetWalk {
@@ -1104,6 +1120,7 @@ impl TargetWalk {
             current: None,
             bytes: 0,
             last_requested_at: 0,
+            started_at: 0,
         }
     }
 
@@ -1412,6 +1429,7 @@ mod tests {
                 TargetMeasurement {
                     bytes: 5,
                     observed_at: 100,
+                    refreshed_until: 0,
                 },
             )]),
             ..MachineCapacitySnapshot::default()
@@ -2168,5 +2186,133 @@ mod tests {
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
         let recovered = refresh();
         assert_eq!(recovered.targets[&target].bytes, 7);
+    }
+
+    /// SPEC #3200 (PM 2026-11-12): a target whose refresh walk outlasts
+    /// TARGET_TTL_SECS must stay published while that walk keeps advancing,
+    /// without changing the scan budget or TTL, and must lapse when it stalls.
+    fn refresh_with(
+        probe: &mut RuntimeProbe,
+        root: &Path,
+        mut advance: impl FnMut(&mut usize) -> Option<u64>,
+    ) -> MachineCapacitySnapshot {
+        probe
+            .refresh_projects_with_scan(
+                std::slice::from_ref(&root.to_path_buf()),
+                |_, remaining, _| Ok(advance(remaining)),
+            )
+            .unwrap();
+        read_snapshot(&snapshot_path()).unwrap()
+    }
+
+    /// Simulate `seconds` passing for the published sample and the probe walk.
+    /// `renewed` models the intervening ticks having renewed the lease.
+    fn age_target(probe: &mut RuntimeProbe, target: &Path, seconds: u64, renewed: bool) {
+        let mut snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let sample = snapshot.targets.get_mut(target).unwrap();
+        sample.observed_at -= seconds;
+        if !renewed {
+            sample.refreshed_until = sample.refreshed_until.saturating_sub(seconds);
+        }
+        if let Some(walk) = probe.walks.get_mut(target) {
+            walk.started_at = walk.started_at.saturating_sub(seconds);
+        }
+        gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
+            .unwrap();
+    }
+
+    fn progressing(remaining: &mut usize) -> Option<u64> {
+        *remaining -= 1;
+        None
+    }
+
+    /// SPEC #3200 (PM 2026-11-12): a target whose refresh walk outlasts
+    /// TARGET_TTL_SECS must stay published while that walk keeps advancing,
+    /// without changing the scan budget or TTL, and must lapse when it stalls.
+    #[test]
+    fn progressing_target_refresh_keeps_the_completed_measurement_published_past_its_ttl() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        let root = normalized(&root);
+        let target = root.join("target");
+        let mut probe = RuntimeProbe::default();
+        assert_eq!(
+            refresh_with(&mut probe, &root, |_| Some(8)).targets[&target].bytes,
+            8
+        );
+        // The refresh walk starts while the measurement is still valid.
+        age_target(&mut probe, &target, TARGET_TTL_SECS / 2 + 1, false);
+        let started = refresh_with(&mut probe, &root, progressing);
+        assert_eq!(started.targets[&target].bytes, 8);
+        // The walk outlasts the TTL but keeps advancing every tick.
+        age_target(&mut probe, &target, TARGET_TTL_SECS / 2, true);
+        let renewed = refresh_with(&mut probe, &root, progressing);
+        assert_eq!(
+            renewed.targets.get(&target).map(|sample| sample.bytes),
+            Some(8),
+            "an advancing refresh walk keeps the completed measurement published"
+        );
+        let disk = project_capacity(&root, &BTreeSet::new(), 0)
+            .constraints
+            .into_iter()
+            .find(|row| row.resource == "disk")
+            .unwrap();
+        assert!(
+            !disk.reason.contains("measured target unavailable"),
+            "readers honour the refresh lease: {}",
+            disk.reason
+        );
+        // A walk that receives no budget does not renew the lease.
+        age_target(&mut probe, &target, SNAPSHOT_TTL_SECS, false);
+        let lapsed = refresh_with(&mut probe, &root, |_| None);
+        assert!(
+            !lapsed.targets.contains_key(&target),
+            "a stalled refresh walk lets the expired measurement lapse"
+        );
+    }
+
+    #[test]
+    fn refresh_walk_started_after_expiry_does_not_revive_the_measurement() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        let root = normalized(&root);
+        let target = root.join("target");
+        let now = epoch_seconds();
+        let mut snapshot = MachineCapacitySnapshot::default();
+        snapshot.targets.insert(
+            target.clone(),
+            TargetMeasurement {
+                bytes: 8,
+                observed_at: now - TARGET_TTL_SECS - 1,
+                refreshed_until: now + 1,
+            },
+        );
+        std::fs::create_dir_all(capacity_directory()).unwrap();
+        gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
+            .unwrap();
+        // A restarted probe has no walk that began inside the validity window.
+        let mut probe = RuntimeProbe::default();
+        probe
+            .refresh_projects_with_scan(std::slice::from_ref(&root), |_, remaining, _| {
+                *remaining -= 1;
+                Ok(None)
+            })
+            .unwrap();
+        let next = read_snapshot(&snapshot_path()).unwrap();
+        assert_eq!(
+            next.targets[&target].refreshed_until,
+            now + 1,
+            "a walk started after expiry must not extend the lease"
+        );
     }
 }

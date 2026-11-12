@@ -89,6 +89,33 @@ test("Work projection snapshots and patches update Other while retaining session
   const other = page.locator("details.issue-other-group");
   await other.locator("summary").click();
   await row(page, "other-paused").click();
+  await page.evaluate(() => {
+    const fixture = window as any;
+    for (const id of ["other-paused", "linked-visible"]) {
+      const work = fixture.__otherProjection.active_works.find((work: any) => work.id === id);
+      work.blocked_agents = 1;
+      work.next_action = "Await token";
+    }
+    fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+  });
+  await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "needs_attention");
+  await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveText("Await token");
+  const linkedReason = page.locator('[data-issue-number="4556"] .knowledge-row-secondary-item[data-kind="reason"]');
+  await expect(linkedReason).toHaveText("Await token");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    for (const id of ["other-paused", "linked-visible"]) {
+      const work = projection.active_works.find((work: any) => work.id === id);
+      work.blocked_agents = 0;
+      work.next_action = "";
+    }
+    fixture.__otherProjection = projection;
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection });
+  });
+  await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "paused");
+  await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveCount(0);
+  await expect(linkedReason).toHaveCount(0);
   await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
   await page.evaluate(() => {
     const fixture = window as any;
@@ -146,6 +173,39 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
     await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });
   }
+});
+
+test("needs_human snapshot shares counts and reasons across Issue views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const emit = (state: string, reason?: string) => page.evaluate(({ state, reason }) => {
+    const item = (number: number, state: string, error_message?: string, issueState = "open") => ({
+      issue: { number, title: `Issue ${number}`, state: issueState }, state, error_message,
+    });
+    (window as any).__otherEmit({ kind: "issue_monitor_inbox", items: [
+      item(4556, "needs_human", "Stale reason"), item(4556, state, reason),
+      item(4557, "needs_human", "stopped: PM paused"),
+      item(4558, "needs_human", "Completed", "closed"),
+    ] });
+  }, { state, reason });
+  const pill = page.locator(".knowledge-monitor-pill");
+  const strip = page.locator("#op-strip-issue-monitor");
+  const rowReason = page.locator('.knowledge-row[data-issue-number="4556"] [data-key="reason"]');
+  const detailReason = page.locator('.issue-detail-status [data-key="reason"]');
+  await emit("needs_human", "Choose credentials");
+  await expect(pill).toHaveAttribute("title", /Needs human 1/);
+  await expect(strip).toHaveAttribute("title", /Needs human 1/);
+  await expect(rowReason).toHaveText("Choose credentials");
+  await expect(detailReason).toHaveText("Choose credentials");
+  await emit("needs_human");
+  await expect(rowReason).toHaveText("Human decision required");
+  await expect(detailReason).toHaveText("Human decision required");
+  await page.screenshot({ path: info.outputPath("needs-human-shared-state.png"), fullPage: true });
+  await emit("queued");
+  await expect(pill).toHaveAttribute("title", /Needs human 0/);
+  await expect(strip).toHaveAttribute("title", /Needs human 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
 });
 
 test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {

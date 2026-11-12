@@ -360,6 +360,55 @@ function monitorBand(body) {
   };
 }
 
+test("needs_human derives one immutable count and reason for shared Issue views", async (t) => {
+  const { body, surface, sent, mod } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  assert.equal(surface.issueMonitorModel.read().humanAttention?.count, null,
+    "no inbox snapshot is unknown, not zero");
+  const item = (number, state, error_message, issueState = "open") => ({
+    issue: { number, title: `Issue ${number}`, state: issueState }, state, error_message,
+  });
+  surface.applyIssueMonitorInbox([
+    item(41, "needs_human", "Old reason"), item(41, "needs_human", "Choose credentials"),
+    item(42, "needs_human", "stopped: PM paused"),
+    item(43, "needs_human", "SessionStart readiness pending: stale", "closed"),
+    item(44, "launched", "Running"),
+  ]);
+  const snapshot = surface.issueMonitorModel.read().humanAttention;
+  assert.deepEqual(snapshot, { count: 1, summary: "Needs human 1",
+    byIssue: { 41: { reason: "Choose credentials" } } });
+  assert.ok(Object.isFrozen(snapshot.byIssue[41]));
+  assert.equal(Boolean(body.querySelector('[data-issue-number="43"] [data-key="reason"]')), false,
+    "a closed issue must not bypass the shared attention snapshot with a raw reason");
+  assert.equal(mod.issueRowStateModel({ entry: {
+    ...knowledgeEntry(41, "needs_human"), human_attention: snapshot.byIssue[41],
+    error_message: "Stale view-local reason",
+  } }).secondary[0].label, snapshot.byIssue[41].reason);
+  assert.match(monitorBand(body).pill.title, /Needs human 1/);
+  body.querySelector('[data-issue-number="41"] .knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 41, title: "Issue 41", state: "open",
+      labels: [], sections: [], related_works: [] } });
+  const reason = () => body.querySelector('[data-issue-number="41"] [data-key="reason"]')?.textContent;
+  const detailReason = () => body.querySelector('.issue-detail-status [data-key="reason"]')?.textContent;
+  assert.equal(reason(), snapshot.byIssue[41].reason);
+  assert.equal(detailReason(), reason());
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 99 });
+  assert.equal(surface.issueMonitorModel.read().humanAttention, snapshot);
+  surface.applyIssueMonitorInbox([item(41, "needs_human", undefined)]);
+  assert.equal(reason(), "Human decision required");
+  assert.equal(detailReason(), reason());
+  surface.applyIssueMonitorInbox([item(41, "queued", undefined)]);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 0);
+  assert.equal(reason(), undefined);
+  assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorInbox([]);
+  assert.deepEqual(surface.issueMonitorModel.read().humanAttention,
+    { count: 0, summary: "Needs human 0", byIssue: {} });
+  assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
+});
+
 test("Issues band presents and clears the quota-hold provider and reset", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -649,7 +698,7 @@ test("Issues band preserves higher-priority states around quota-hold metadata", 
     });
 
     assert.equal(band.text(), "Waiting · Hold | Queue 3 | Active 0 · 0 issues · PM 0");
-    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z");
+    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z | Needs human 0");
   }
 
   surface.applyIssueMonitorStatus({

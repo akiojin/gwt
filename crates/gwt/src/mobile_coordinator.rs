@@ -1,6 +1,7 @@
 //! Coordinator Host credential registry and offline administration (Issue #6476).
 //!
-//! No listener, device approval or PTY authority lives here. The storage module
+//! Explicit server startup serves a default-deny TLS listener; device approval
+//! and PTY authority remain separate. The storage module
 //! holds a separate registry lock, saves candidate secrets to
 //! private files first, atomically persists the registry second, and reloads
 //! before reporting success. Preparing a candidate is not successful issuance.
@@ -12,7 +13,9 @@ pub mod storage;
 pub mod admin;
 
 mod config;
-pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits};
+pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits, TlsError};
+pub mod listener;
+pub mod server;
 
 use gwt_core::repo_hash::ProjectKey;
 use ring::rand::{SecureRandom, SystemRandom};
