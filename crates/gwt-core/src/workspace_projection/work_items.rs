@@ -1694,11 +1694,13 @@ mod tests {
         let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 10, 0, 0).unwrap();
         let t1 = Utc.with_ymd_and_hms(2026, 8, 19, 11, 0, 0).unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("work/issue-3697");
 
         let mut start = WorkEvent::new(WorkEventKind::Start, "work-pr-metadata", t0);
         start.execution_container = Some(container_for_test(
             "work/issue-3697",
-            "/repo/work/issue-3697",
+            worktree.to_str().unwrap(),
         ));
         start.execution_container.as_mut().unwrap().worktree_path = None;
         projection.apply_event(start);
@@ -1706,7 +1708,7 @@ mod tests {
         let mut pr = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
         pr.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("work/issue-3697".to_string()),
-            worktree_path: Some(PathBuf::from("/repo/work/issue-3697")),
+            worktree_path: Some(worktree.clone()),
             pr_number: Some(3672),
             pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
             pr_state: Some("OPEN".to_string()),
@@ -1724,10 +1726,7 @@ mod tests {
             "same worktree must not duplicate the container"
         );
         let container = &item.execution_containers[0];
-        assert_eq!(
-            container.worktree_path.as_deref(),
-            Some(std::path::Path::new("/repo/work/issue-3697"))
-        );
+        assert_eq!(container.worktree_path.as_deref(), Some(worktree.as_path()));
         assert_eq!(container.pr_number, Some(3672));
         assert_eq!(
             container.pr_url.as_deref(),
@@ -1752,15 +1751,12 @@ mod tests {
         let mut update = WorkEvent::new(WorkEventKind::Update, "work-pr-metadata", t1);
         update.execution_container = Some(container_for_test(
             "work/issue-3697",
-            "/repo/work/issue-3697",
+            worktree.to_str().unwrap(),
         ));
         update.execution_container.as_mut().unwrap().worktree_path = None;
         projection.apply_event(update);
         let container = &projection.work_items[0].execution_containers[0];
-        assert_eq!(
-            container.worktree_path.as_deref(),
-            Some(std::path::Path::new("/repo/work/issue-3697"))
-        );
+        assert_eq!(container.worktree_path.as_deref(), Some(worktree.as_path()));
         assert_eq!(container.pr_number, Some(3672));
         assert_eq!(container.pr_state.as_deref(), Some("CLOSED"));
     }
