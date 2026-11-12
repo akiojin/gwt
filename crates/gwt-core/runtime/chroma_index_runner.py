@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
@@ -106,11 +107,29 @@ def _lower_process_priority() -> None:
             kernel.GetCurrentProcess.restype = wintypes.HANDLE
             kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
             kernel.SetPriorityClass.restype = wintypes.BOOL
+            kernel.GetProcessWorkingSetSizeEx.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel.GetProcessWorkingSetSizeEx.restype = wintypes.BOOL
+            kernel.SetProcessWorkingSetSizeEx.argtypes = [
+                wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t, wintypes.DWORD,
+            ]
+            kernel.SetProcessWorkingSetSizeEx.restype = wintypes.BOOL
             handle = kernel.GetCurrentProcess()
+            minimum, maximum, limits = ctypes.c_size_t(), ctypes.c_size_t(), wintypes.DWORD()
+            have_limits = kernel.GetProcessWorkingSetSizeEx(
+                handle, ctypes.byref(minimum), ctypes.byref(maximum), ctypes.byref(limits)
+            )
             # CPU priority alone leaves Chroma's disk I/O at normal priority.
             # Enter resource background mode before loading model/Chroma so
             # their worker threads also inherit the lower I/O priority.
-            kernel.SetPriorityClass(handle, 0x00100000)  # BACKGROUND_BEGIN
+            started = kernel.SetPriorityClass(handle, 0x00100000)  # BACKGROUND_BEGIN
+            if started and have_limits:
+                # Background mode also imposes a 32MiB hard working-set cap,
+                # causing E5 to thrash. Preserve the caller's memory limits
+                # while keeping the lower I/O and memory priorities.
+                kernel.SetProcessWorkingSetSizeEx(handle, minimum.value, maximum.value, limits.value)
             # Background mode resets the CPU class to Normal. Restore the
             # FR-385 class while retaining background I/O; also covers failure.
             kernel.SetPriorityClass(handle, 0x00004000)  # Below Normal
@@ -118,7 +137,10 @@ def _lower_process_priority() -> None:
             pass
     else:
         try:
-            os.nice(10)
+            # A resident worker inherits the forwarding process's nice level.
+            current = os.nice(0)
+            if current < 10:
+                os.nice(10 - current)
         except OSError:
             pass
 
@@ -472,12 +494,19 @@ def _pattern_to_regex(pattern: str, base_rel: str = "") -> Optional[re.Pattern]:
         return None
 
 
-def should_ignore(rel_path: str, compiled_patterns: List[re.Pattern]) -> bool:
-    """Check if a relative path should be ignored."""
+@lru_cache(maxsize=16384)
+def _should_ignore_cached(
+    rel_path: str, compiled_patterns: tuple[re.Pattern, ...],
+) -> bool:
     for pat in compiled_patterns:
         if pat.search(rel_path):
             return True
     return False
+
+
+def should_ignore(rel_path: str, compiled_patterns: Sequence[re.Pattern]) -> bool:
+    """Check the pure predicate; callers still load current ignore patterns."""
+    return _should_ignore_cached(rel_path, tuple(compiled_patterns))
 
 
 def is_binary_file(path: Path) -> bool:
@@ -513,14 +542,14 @@ def collect_files(project_root: Path) -> List[Path]:
     """Recursively collect project files, respecting the shared path policy."""
     policy = load_index_path_policy()
     patterns = load_project_ignore_patterns(project_root)
-    compiled = [
+    compiled = tuple(
         p for p in (_pattern_to_regex(pat, base) for base, pat in patterns) if p is not None
-    ]
+    )
     result = []
     for root, dirs, files in os.walk(project_root):
         root_path = Path(root)
         rel_root = root_path.relative_to(project_root)
-        rel_root_str = str(rel_root) if str(rel_root) != "." else ""
+        rel_root_str = rel_root.as_posix() if str(rel_root) != "." else ""
 
         dirs[:] = [
             d for d in dirs
@@ -1398,13 +1427,11 @@ V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
 ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
-# Issue #6979: an Issue refresh publishes a small delta generation over an
-# immutable base instead of copying every unchanged record into a new store.
-# The delta is compacted into a new base once it outgrows this bound.
+ISSUE_RECORD_PROTOCOL = "issues-records-v1"
+ISSUE_MEMBERSHIP_FILENAME = "membership.json"
+# Historical base/delta generations remain readable during lazy migration.
 ISSUE_DELTA_FILENAME = "delta.json"
 ISSUE_BASE_MANIFEST_FILENAME = "base-manifest.json"
-ISSUE_DELTA_MIN_RECORDS = 128
-ISSUE_DELTA_MAX_FRACTION = 0.05
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
@@ -1445,6 +1472,9 @@ FILE_INDEX_V2_REQUIRED_FIELDS = FILE_INDEX_V2_COMPATIBILITY_FIELDS + (
 )
 CANONICAL_BLOB_BATCH_BYTES = 8 * 1024 * 1024
 FILE_INDEX_V2_VECTOR_BATCH = 16
+# Membership/document reads do not fetch vectors or run the model.
+INDEX_RECORD_READ_BATCH = 128
+_FILE_INDEX_V2_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def gwt_index_root() -> Path:
@@ -1880,6 +1910,7 @@ class _FakeEmbeddingModel:
 
 
 _MODEL_CACHE: Optional[dict[Optional[str], Any]] = None
+_SEARCH_WORKER_QOS: Optional[str] = None
 # Issue #4698: milliseconds this process spent importing and constructing the
 # embedding model. The one-shot runner pays it on every search, so the caller
 # subtracts it to hold the warm remainder to its own budget.
@@ -1902,6 +1933,30 @@ def _publish_search_model_state(state: str) -> None:
         pass  # Diagnostics must never fail a query.
 
 
+def _background_default_model_revision() -> Optional[str]:
+    """Pin only a default artifact selected by the constructor's own Hub path."""
+    try:
+        if Path(FILE_INDEX_V2_MODEL_ID).exists():
+            return None  # SentenceTransformer gives local models precedence.
+        from huggingface_hub import hf_hub_download
+
+        modules = Path(hf_hub_download(
+            FILE_INDEX_V2_MODEL_ID, filename="modules.json", subfolder=".",
+            revision=None, library_name="sentence-transformers", token=None,
+            cache_dir=os.getenv("SENTENCE_TRANSFORMERS_HOME"), local_files_only=False,
+        ))
+        snapshot = modules.parent.name
+        if (modules.is_absolute() and modules.name == "modules.json"
+                and modules.parent.parent.name == "snapshots"
+                and modules.parent.parent.parent.name == "models--" + FILE_INDEX_V2_MODEL_ID.replace("/", "--")
+                and re.fullmatch(r"[0-9a-f]{40}", snapshot)
+                and snapshot == FILE_INDEX_V2_MODEL_REVISION):
+            return snapshot
+    except Exception:
+        pass  # Preserve the normal constructor's SDK/local/cache fallback.
+    return None
+
+
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
     """Lazily load and retain each model revision for this process.
 
@@ -1917,18 +1972,36 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
 
     _publish_search_model_state("warming")
     try:
+        model_revision = revision
+        if (_SEARCH_WORKER_QOS == "background" and revision is None
+                and os.environ.get("GWT_INDEX_FAKE_EMBEDDING") != "1"):
+            model_revision = _background_default_model_revision()
+            if model_revision is not None and model_revision in _MODEL_CACHE:
+                model = _MODEL_CACHE[model_revision]
+                _MODEL_CACHE[None] = model
+                _publish_search_model_state("warm")
+                return model
+        if _SEARCH_WORKER_QOS == "background" and _MODEL_CACHE:
+            # Two E5 revisions exceed the background runner's RSS budget.
+            # Drop the old graph before allocating its replacement.
+            import gc
+
+            _MODEL_CACHE.clear()
+            gc.collect()
         if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
             model = _FakeEmbeddingModel()
         else:
             started = _model_load_clock()
             from sentence_transformers import SentenceTransformer  # type: ignore
 
-            if revision is None:
+            if model_revision is None:
                 model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
             else:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=model_revision)
             _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
         _MODEL_CACHE[revision] = model
+        if revision is None and model_revision is not None:
+            _MODEL_CACHE[model_revision] = model
     except Exception:
         _publish_search_model_state("cold")
         raise
@@ -2074,11 +2147,16 @@ def _make_chroma_collection(db_path: Path, collection_name: str):
     db_path.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
-    return client, client.get_or_create_collection(
-        name=collection_name,
-        embedding_function=ef,
-        metadata={"hnsw:space": "cosine"},
-    )
+    try:
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
 
 
 def _make_chroma_collection_repairing(db_path: Path, collection_name: str):
@@ -2468,18 +2546,18 @@ class _FileIndexSourceSnapshotChanged(RuntimeError):
     """A filesystem source disappeared or was renamed during fixed capture."""
 
 
-def _collect_file_index_v2_files_strict(project_root: Path) -> List[Path]:
+def _collect_file_index_v2_files_strict(project_root: Path) -> List[tuple[str, Path]]:
     """Collect v2 sources without turning I/O failures into deletions."""
     policy = load_index_path_policy()
     patterns = load_project_ignore_patterns(project_root)
-    compiled = [
+    compiled = tuple(
         pattern
         for pattern in (
             _pattern_to_regex(raw_pattern, base)
             for base, raw_pattern in patterns
         )
         if pattern is not None
-    ]
+    )
 
     def fail_walk(error: OSError) -> None:
         if isinstance(error, FileNotFoundError):
@@ -2490,13 +2568,14 @@ def _collect_file_index_v2_files_strict(project_root: Path) -> List[Path]:
             f"file-index-v2 source traversal failed: {error}"
         ) from error
 
-    result: List[Path] = []
+    result: List[tuple[str, Path]] = []
     for current_root, directories, files in os.walk(
         project_root, onerror=fail_walk
     ):
         root_path = Path(current_root)
         relative_root = root_path.relative_to(project_root)
-        relative_root_text = "" if str(relative_root) == "." else str(relative_root)
+        relative_root_text = "" if str(relative_root) == "." else relative_root.as_posix()
+        normalized_root = normalize_rel_path(relative_root) if relative_root_text else ""
         directories[:] = [
             directory
             for directory in directories
@@ -2537,7 +2616,8 @@ def _collect_file_index_v2_files_strict(project_root: Path) -> List[Path]:
                     f"file-index-v2 source stat failed: {relative_path}: {error}"
                 ) from error
             if size <= MAX_FILE_SIZE:
-                result.append(path)
+                normalized_path = f"{normalized_root}/{filename}" if normalized_root else filename
+                result.append((normalized_path, path))
     return result
 
 
@@ -2554,11 +2634,7 @@ def _visible_file_records(
     untracked bytes are read exactly once and retained in the returned records.
     """
     visible_paths: Dict[str, Path] = {}
-    for path in _collect_file_index_v2_files_strict(root):
-        try:
-            rel_path = normalize_rel_path(path.relative_to(root))
-        except ValueError as error:
-            raise RuntimeError("file-index-v2 source escaped project root") from error
+    for rel_path, path in _collect_file_index_v2_files_strict(root):
         if rel_path in visible_paths:
             raise RuntimeError("file-index-v2 source contains duplicate normalized paths")
         visible_paths[rel_path] = path
@@ -2656,18 +2732,33 @@ def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] =
 
 def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     """Pin the first available canonical local ref without fetching."""
-    repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
-    if repository_probe.returncode != 0:
-        if (root / ".git").exists():
-            raise RuntimeError("git repository metadata is present but unreadable")
-        return None
-    top_level = _git_command(root, ["rev-parse", "--show-toplevel"])
-    prefix_output = _git_command(root, ["rev-parse", "--show-prefix"])
-    if top_level.returncode != 0 or prefix_output.returncode != 0:
-        raise RuntimeError("git repository root boundary could not be resolved")
+    boundary_fields = []
     try:
-        top_level_path = Path(top_level.stdout.decode("utf-8", errors="strict").strip())
-        tree_prefix = prefix_output.stdout.decode("utf-8", errors="strict").strip()
+        boundary_probe = _git_command(
+            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix"]
+        )
+        if boundary_probe.returncode == 0 and isinstance(boundary_probe.stdout, bytes):
+            boundary_fields = boundary_probe.stdout.split(b"\n")
+    except RuntimeError:
+        # Keep the original boundary/error classification on probe failure.
+        pass
+    if (len(boundary_fields) == 4 and boundary_fields[-1] == b""
+            and boundary_fields[0] in (b"true", b"false")):
+        root_output, prefix_bytes = boundary_fields[1:3]
+    else:
+        repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
+        if repository_probe.returncode != 0:
+            if (root / ".git").exists():
+                raise RuntimeError("git repository metadata is present but unreadable")
+            return None
+        top_level = _git_command(root, ["rev-parse", "--show-toplevel"])
+        prefix_output = _git_command(root, ["rev-parse", "--show-prefix"])
+        if top_level.returncode != 0 or prefix_output.returncode != 0:
+            raise RuntimeError("git repository root boundary could not be resolved")
+        root_output, prefix_bytes = top_level.stdout, prefix_output.stdout
+    try:
+        top_level_path = Path(root_output.decode("utf-8", errors="strict").strip())
+        tree_prefix = prefix_bytes.decode("utf-8", errors="strict").strip()
     except UnicodeDecodeError as error:
         raise RuntimeError("git repository root boundary is not valid UTF-8") from error
     if tree_prefix and not tree_prefix.endswith("/"):
@@ -2700,29 +2791,10 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
         }
     except UnicodeDecodeError as error:
         raise RuntimeError("git canonical ref listing is not valid UTF-8") from error
-    head_probe = _git_command(
-        root, ["rev-parse", "--symbolic-full-name", "--verify", "--quiet", "HEAD"]
-    )
-    if head_probe.returncode == 0:
-        head_exists = True
-    else:
-        symbolic_head = _git_command(root, ["symbolic-ref", "--quiet", "HEAD"])
-        if symbolic_head.returncode == 0:
-            try:
-                head_target = symbolic_head.stdout.decode(
-                    "utf-8", errors="strict"
-                ).strip()
-            except UnicodeDecodeError as error:
-                raise RuntimeError("git symbolic HEAD is not valid UTF-8") from error
-            head_exists = head_target in existing_refs
-        else:
-            # A valid repository always has HEAD. A non-symbolic HEAD that
-            # cannot resolve is detached on a missing/corrupt object.
-            head_exists = True
     candidate_presence = [
         (reference, refname in existing_refs) for reference, refname in candidates
     ]
-    candidate_presence.append(("HEAD", head_exists))
+    candidate_presence.append(("HEAD", True))
 
     for reference, exists in candidate_presence:
         if not exists:
@@ -2730,6 +2802,28 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
         expression = f"{reference}^{{tree}}"
         completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
         if completed.returncode != 0:
+            if reference == "HEAD":
+                head_probe = _git_command(
+                    root, ["rev-parse", "--symbolic-full-name", "--verify", "--quiet", "HEAD"]
+                )
+                if head_probe.returncode == 0:
+                    head_exists = True
+                else:
+                    symbolic_head = _git_command(root, ["symbolic-ref", "--quiet", "HEAD"])
+                    if symbolic_head.returncode == 0:
+                        try:
+                            head_target = symbolic_head.stdout.decode(
+                                "utf-8", errors="strict"
+                            ).strip()
+                        except UnicodeDecodeError as error:
+                            raise RuntimeError("git symbolic HEAD is not valid UTF-8") from error
+                        head_exists = head_target in existing_refs
+                    else:
+                        # A valid repository always has HEAD. A non-symbolic HEAD that
+                        # cannot resolve is detached on a missing/corrupt object.
+                        head_exists = True
+                if not head_exists:
+                    continue
             stderr = completed.stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(
                 f"git canonical ref {expression} exists but could not be peeled: {stderr}"
@@ -2947,14 +3041,127 @@ def _bounded_blob_entry_batches(
         yield batch
 
 
+def _file_payload_matches_manifest(document: Any, metadata: Any, entry: Dict[str, Any]) -> bool:
+    try:
+        return (isinstance(document, str) and isinstance(metadata, dict)
+                and hashlib.sha256(document.encode("utf-8")).hexdigest() == entry["payload_digest"]
+                and _sha256_json(metadata) == entry["metadata_digest"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _file_index_v2_reuse_inputs(
+    repo_hash: str, worktree_hash: str, descriptor: Dict[str, Any], db_root: Optional[Path],
+) -> Dict[str, Dict[str, Any]]:
+    """Read prior immutable metadata, not a proof of current native membership."""
+    root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
+    worktree = root / "worktrees" / _safe_artifact_id(worktree_hash)
+    try:
+        head = _read_file_index_v2_head(worktree / "head.json")
+        if head is None:
+            return {}
+        view_dir = worktree / "views" / head["active_view_id"]
+        view = _read_artifact_descriptor(view_dir)
+        if (view is None or view.get("repo_hash") != repo_hash
+                or view.get("worktree_hash") != worktree_hash
+                or not file_index_compatibility(view.get("compatibility", {}), descriptor)
+                or not _verify_file_index_v2_view(view_dir, metadata_only=True)):
+            return {}
+        result = {}
+        for kind, directory in (
+            ("base", root / "bases" / view["base_generation_id"]),
+            ("overlay", worktree / "overlays" / view["overlay_generation_id"]),
+        ):
+            loaded = _load_file_index_v2_artifact_metadata(directory, kind)
+            if loaded is None or not _uses_file_record_pool(loaded[0]):
+                return {}
+            previous, entries, _ = loaded
+            if not file_index_compatibility(previous["compatibility"], descriptor):
+                return {}
+            result[kind] = {"descriptor": previous,
+                            "entries": {entry["path"]: entry for entry in entries},
+                            "store": _file_artifact_store(directory, previous),
+                            "invalid_paths": set()}
+        return result
+    except (OSError, ValueError, TypeError, KeyError):
+        # Unknown or broken prior metadata supplies no reusable proof.
+        return {}
+
+
+def _file_reusable_payload_records(
+    reuse_inputs: Dict[str, Any], entries: Sequence[tuple[str, str, int]],
+) -> Dict[str, Dict[str, Any]]:
+    """Load actual persisted payloads only for matching canonical Git blobs."""
+    previous = reuse_inputs["descriptor"]
+    dimension = _expected_file_index_vector_dimension(previous["compatibility"])
+    candidates = {}
+    for path, oid, size in entries:
+        entry = reuse_inputs["entries"].get(path)
+        bucket = classify_file_bucket(path)
+        if (entry is not None and entry["source_object"] == f"git:{oid}"
+                and entry["dimension"] == dimension
+                and entry["scope"] == ("files" if bucket == "code" else "files-docs")):
+            candidates[_file_record_id(entry)] = (entry, oid, size, bucket)
+    result = {}
+    store = reuse_inputs["store"]
+    opened = []
+    try:
+        if not (store / "chroma.sqlite3").is_file():
+            return result
+        with acquire_lock(store.parent, exclusive=False):
+            for scope, collection_name in (("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)):
+                selected = [record_id for record_id, (entry, _, _, _) in candidates.items() if entry["scope"] == scope]
+                if not selected:
+                    continue
+                client, collection = _open_file_index_v2_collection(store, collection_name)
+                opened.append(client)
+                for start in range(0, len(selected), INDEX_RECORD_READ_BATCH):
+                    requested = selected[start:start + INDEX_RECORD_READ_BATCH]
+                    got = collection.get(ids=requested, include=["documents", "metadatas"])
+                    ids, documents, metadatas = got["ids"], got.get("documents") or [], got.get("metadatas") or []
+                    if not (len(ids) == len(documents) == len(metadatas)):
+                        continue
+                    for record_id, document, metadata in zip(ids, documents, metadatas):
+                        if record_id not in requested:
+                            continue
+                        entry, oid, size, bucket = candidates[record_id]
+                        if (not _file_payload_matches_manifest(document, metadata, entry)
+                                or type(metadata.get("size")) is not int or metadata["size"] != size
+                                or metadata.get("path") != entry["path"] or metadata.get("bucket") != bucket):
+                            continue
+                        identity = file_embedding_cas_key(
+                            _embedding_contract(previous["compatibility"]),
+                            _final_passage_input(previous["compatibility"], document),
+                        )
+                        if any(identity[key] != entry[key] for key in ("cas_key", "input_digest")):
+                            continue
+                        result[entry["path"]] = {"path": entry["path"], "bucket": bucket,
+                            "document": document, "metadata": metadata,
+                            "source_digest": entry["source_digest"], "source_object": f"git:{oid}"}
+        return result
+    except Exception:
+        # Any uncertain candidates take the original source/parser path.
+        result.clear()
+        return result
+    finally:
+        for client in opened:
+            _close_chroma_client(client)
+        reuse_inputs["invalid_paths"].update(
+            entry["path"] for entry, _, _, _ in candidates.values() if entry["path"] not in result
+        )
+
+
 def _canonical_base_records(
-    root: Path, snapshot: Dict[str, Optional[str]]
+    root: Path, snapshot: Dict[str, Optional[str]],
+    *, reuse_inputs: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     tree_oid = snapshot.get("root_tree_oid")
     if tree_oid is None:
         return []
     entries = _git_tree_blob_entries(root, tree_oid, snapshot.get("tree_prefix") or "")
-    records: List[Dict[str, Any]] = []
+    reused = _file_reusable_payload_records(reuse_inputs, entries) if reuse_inputs is not None else {}
+    records: List[Dict[str, Any]] = list(reused.values())
+    entries = [entry for entry in entries if entry[0] not in reused]
     for entry_batch in _bounded_blob_entry_batches(entries):
         blobs = _git_cat_file_batch(root, entry_batch)
         if set(blobs) != {rel_path for rel_path, _, _ in entry_batch}:
@@ -2992,6 +3199,23 @@ def _chroma_vector_matches_cas(
     if len(stored) != len(expected):
         return False
     try:
+        numpy = sys.modules.get("numpy")
+        if (numpy is not None and type(stored) is numpy.ndarray
+                and stored.ndim == 1 and stored.dtype.kind == "f"
+                and stored.dtype.itemsize in (4, 8)):
+            native_expected = (
+                type(expected) in (list, tuple)
+                and all(type(value) is float for value in expected)
+            ) or (
+                type(expected) is numpy.ndarray and expected.ndim == 1
+                and expected.dtype.kind == "f" and expected.dtype.itemsize in (4, 8)
+            )
+            if native_expected:
+                left = stored.astype(numpy.float64, copy=False)
+                right = numpy.asarray(expected, dtype=numpy.float64)
+                with numpy.errstate(over="ignore", invalid="ignore"):
+                    return bool(numpy.all(numpy.isfinite(left))
+                                and numpy.all(numpy.abs(left - right) <= 1e-6))
         return all(
             math.isfinite(float(left))
             and math.isclose(
@@ -3035,6 +3259,8 @@ def _read_cas_vector(
     identity: Dict[str, str],
     embedding_contract: Dict[str, Any],
     expected_dimension: int,
+    *,
+    expected_manifest_checksum: Optional[str] = None,
 ) -> Optional[List[float]]:
     path = _cas_entry_path(cas_root, identity["cas_key"])
     try:
@@ -3051,10 +3277,14 @@ def _read_cas_vector(
         or payload.get("embedding_contract") != embedding_contract
         or payload.get("dimension") != expected_dimension
         or len(vector) != expected_dimension
-        or payload.get("vector_checksum") != _vector_checksum(vector)
         or not _is_file_index_timestamp(payload.get("created_at"))
         or not _is_file_index_timestamp(payload.get("last_verified_at"))
     ):
+        return None
+    checksum = _vector_checksum(vector)
+    if (payload.get("vector_checksum") != checksum
+            or (expected_manifest_checksum is not None
+                and expected_manifest_checksum != checksum)):
         return None
     return vector
 
@@ -3360,11 +3590,26 @@ def _file_member_ids(entries: Sequence[Dict[str, Any]], scope: str) -> List[str]
 
 
 def _file_members_exist(collection, ids: Sequence[str]) -> bool:
-    for start in range(0, len(ids), FILE_INDEX_V2_VECTOR_BATCH):
-        batch = list(ids[start:start + FILE_INDEX_V2_VECTOR_BATCH])
+    for start in range(0, len(ids), INDEX_RECORD_READ_BATCH):
+        batch = list(ids[start:start + INDEX_RECORD_READ_BATCH])
         if set(collection.get(ids=batch, include=[])["ids"]) != set(batch):
             return False
     return True
+
+
+def _prune_unreferenced_record_block(collection, retained: set[str]) -> int:
+    """Page ID reads while retaining the 16-ID delete boundary."""
+    for offset in range(0, collection.count(), INDEX_RECORD_READ_BATCH):
+        ids = collection.get(limit=INDEX_RECORD_READ_BATCH, offset=offset, include=[])["ids"]
+        for start in range(0, len(ids), FILE_INDEX_V2_VECTOR_BATCH):
+            unused = [
+                record_id for record_id in ids[start:start + FILE_INDEX_V2_VECTOR_BATCH]
+                if record_id not in retained
+            ]
+            if unused:
+                collection.delete(ids=unused)
+                return len(unused)
+    return 0
 
 
 def _prune_file_record_pool(v2_root: Path) -> int:
@@ -3428,12 +3673,9 @@ def _prune_file_record_pool(v2_root: Path) -> int:
                     client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
                     try:
                         retained = marks.get(pool.name, {}).get(scope, set())
-                        for offset in range(0, collection.count(), FILE_INDEX_V2_VECTOR_BATCH):
-                            ids = collection.get(limit=FILE_INDEX_V2_VECTOR_BATCH, offset=offset, include=[])["ids"]
-                            unused = [record_id for record_id in ids if record_id not in retained]
-                            if unused:
-                                collection.delete(ids=unused)
-                                return len(unused)
+                        removed = _prune_unreferenced_record_block(collection, retained)
+                        if removed:
+                            return removed
                     finally:
                         _close_chroma_client(client)
     except Exception:
@@ -3518,30 +3760,32 @@ def _artifact_pair_metadata_is_verified(
             return False
         if _validated_file_index_v2_manifest_scope_paths(entries) is None:
             return False
-    for bucket, collection_name in (
-        ("code", V2_FILES_CODE_COLLECTION),
-        ("docs", V2_FILES_DOCS_COLLECTION),
-    ):
-        try:
+    opened = []
+    try:
+        for bucket, collection_name in (
+            ("code", V2_FILES_CODE_COLLECTION),
+            ("docs", V2_FILES_DOCS_COLLECTION),
+        ):
             client, collection = _open_file_index_v2_collection(
                 store, collection_name
             )
-            try:
-                expected_count = sum(
-                    record["bucket"] == bucket for record in records
-                )
-                if pooled:
-                    scope = "files" if bucket == "code" else "files-docs"
-                    ids = _file_member_ids(entries, scope)
-                    if len(ids) != expected_count or not _file_members_exist(collection, ids):
-                        return False
-                elif _safe_collection_count(collection) != expected_count:
+            opened.append(client)
+            expected_count = sum(
+                record["bucket"] == bucket for record in records
+            )
+            if pooled:
+                scope = "files" if bucket == "code" else "files-docs"
+                ids = _file_member_ids(entries, scope)
+                if len(ids) != expected_count or not _file_members_exist(collection, ids):
                     return False
-            finally:
-                _close_chroma_client(client)
-        except Exception:
-            return False
-    return True
+            elif _safe_collection_count(collection) != expected_count:
+                return False
+        return True
+    except Exception:
+        return False
+    finally:
+        for client in opened:
+            _close_chroma_client(client)
 
 
 def _staged_artifact_vectors_are_verified(
@@ -3551,6 +3795,7 @@ def _staged_artifact_vectors_are_verified(
     manifest_entries: Sequence[Dict[str, Any]],
     descriptor_identity: Dict[str, Any],
     cas_root: Path,
+    *, inherited_members: Optional[set[str]] = None,
 ) -> bool:
     if not (
         len(records) == len(identities) == len(manifest_entries)
@@ -3578,6 +3823,7 @@ def _staged_artifact_vectors_are_verified(
             for bucket in ("code", "docs"):
                 selected = [
                     index for index in indexes if records[index]["bucket"] == bucket
+                    and not (pooled and inherited_members and _file_record_id(manifest_entries[index]) in inherited_members)
                 ]
                 if not selected:
                     continue
@@ -3588,6 +3834,7 @@ def _staged_artifact_vectors_are_verified(
                         identities[index],
                         embedding_contract,
                         expected_dimension,
+                        expected_manifest_checksum=manifest_entries[index]["vector_checksum"],
                     )
                     if vector is None:
                         return False
@@ -3632,8 +3879,6 @@ def _staged_artifact_vectors_are_verified(
                         or _sha256_json(metadata)
                         != manifest_entry.get("metadata_digest")
                         or len(expected_vector) != manifest_entry.get("dimension")
-                        or _vector_checksum(expected_vector)
-                        != manifest_entry.get("vector_checksum")
                         or not _chroma_vector_matches_cas(
                             embedding, expected_vector
                         )
@@ -3660,6 +3905,7 @@ def _materialize_file_artifact_pair(
     progress_offset: int = 0,
     progress_total: Optional[int] = None,
     on_checkpoint: Optional[Callable[[int], None]] = None,
+    reuse_entries: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
@@ -3719,6 +3965,27 @@ def _materialize_file_artifact_pair(
                 opened[bucket] = _make_file_index_v2_collection(
                     store, collection_name
                 )
+            inherited: Dict[int, Dict[str, Any]] = {}
+            if pooled and reuse_entries:
+                dimension = _expected_file_index_vector_dimension(descriptor)
+                for index, plan in enumerate(manifest_plans):
+                    entry = reuse_entries.get(plan["path"])
+                    if (entry is not None and entry["dimension"] == dimension
+                            and all(entry.get(key) == value for key, value in plan.items())):
+                        inherited[index] = {**plan, "vector_checksum": entry["vector_checksum"], "dimension": dimension}
+                # This writer lock fences protocol writers; the migration pin
+                # fences GC. Recheck IDs and actual payloads, without vectors.
+                for bucket in ("code", "docs"):
+                    indexes = [index for index in inherited if records[index]["bucket"] == bucket]
+                    for start in range(0, len(indexes), INDEX_RECORD_READ_BATCH):
+                        selected = indexes[start:start + INDEX_RECORD_READ_BATCH]
+                        ids = [_file_record_id(inherited[index]) for index in selected]
+                        got = opened[bucket][1].get(ids=ids, include=["documents", "metadatas"])
+                        stored = dict(zip(got["ids"], zip(got.get("documents") or [], got.get("metadatas") or [])))
+                        for index, record_id in zip(selected, ids):
+                            previous = stored.get(record_id)
+                            if previous is None or not _file_payload_matches_manifest(previous[0], previous[1], inherited[index]):
+                                del inherited[index]
             # Issue #5431: a 16-document encode took 17.6 seconds on CPU,
             # longer than a search can wait. Check priority after each
             # non-interruptible encode; keep batching for foreground work.
@@ -3732,16 +3999,19 @@ def _materialize_file_artifact_pair(
             for start in range(0, len(records), checkpoint_batch):
                 stop = min(start + checkpoint_batch, len(records))
                 batch_records = records[start:stop]
-                batch_identities = identities[start:stop]
                 batch_started = time.monotonic()
-                vectors, batch_computed, batch_hits = _resolve_record_vector_batch(
-                    batch_records, batch_identities, descriptor, cas_root
-                )
+                unresolved = [index for index in range(start, stop) if index not in inherited]
+                resolved, batch_computed, batch_hits = _resolve_record_vector_batch(
+                    [records[index] for index in unresolved], [identities[index] for index in unresolved], descriptor, cas_root
+                ) if unresolved else ([], 0, 0)
+                vectors = {index: vector for index, vector in zip(unresolved, resolved)}
+                batch_hits += len(batch_records) - len(unresolved)
                 computed += batch_computed
                 hits += batch_hits
-                if on_checkpoint is not None:
+                checkpoint_needed = batch_computed > 0 or stop == len(records)
+                if on_checkpoint is not None and checkpoint_needed:
                     on_checkpoint(stop)
-                if heavy_target is not None:
+                if heavy_target is not None and checkpoint_needed:
                     _write_heavy_progress(
                         heavy_target,
                         progress_offset + stop,
@@ -3751,14 +4021,13 @@ def _materialize_file_artifact_pair(
                         model_revision=FILE_INDEX_V2_MODEL_REVISION,
                     )
                 manifest_entries.extend(
-                    _manifest_entry_with_vector(plan, vector)
-                    for plan, vector in zip(manifest_plans[start:stop], vectors)
+                    inherited[index] if index in inherited else _manifest_entry_with_vector(manifest_plans[index], vectors[index])
+                    for index in range(start, stop)
                 )
                 for bucket in ("code", "docs"):
                     selected = [
-                        (record, vector, entry)
-                        for record, vector, entry in zip(batch_records, vectors, manifest_entries[start:stop])
-                        if record["bucket"] == bucket
+                        (records[index], vectors[index], manifest_entries[index])
+                        for index in unresolved if records[index]["bucket"] == bucket
                     ]
                     if not selected:
                         continue
@@ -3850,6 +4119,7 @@ def _materialize_file_artifact_pair(
                 manifest_entries,
                 descriptor_identity,
                 cas_root,
+                **({"inherited_members": {_file_record_id(entry) for entry in inherited.values()}} if inherited else {}),
             ):
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
             if pooled:
@@ -3992,7 +4262,7 @@ def _is_safe_file_index_v2_logical_path(value: Any) -> bool:
     parts = value.split("/")
     return (
         all(part not in {"", ".", ".."} for part in parts)
-        and all(ord(char) >= 32 and ord(char) != 127 for char in value)
+        and _FILE_INDEX_V2_CONTROL_CHAR_RE.search(value) is None
         and normalize_rel_path(Path(value)) == value
     )
 
@@ -4062,7 +4332,7 @@ def _file_index_v2_manifest_record_identity(
     )
 
 
-def _load_verified_file_index_v2_artifact(
+def _load_file_index_v2_artifact_metadata(
     artifact_dir: Path, kind: str
 ) -> Optional[tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, set[str]]]]:
     descriptor = _read_artifact_descriptor(artifact_dir)
@@ -4159,27 +4429,40 @@ def _load_verified_file_index_v2_artifact(
         for scope in ("files", "files-docs")
     ):
         return None
-    for scope, collection_name in (
-        ("files", V2_FILES_CODE_COLLECTION),
-        ("files-docs", V2_FILES_DOCS_COLLECTION),
-    ):
-        try:
+    return descriptor, entries, scope_paths
+
+
+def _load_verified_file_index_v2_artifact(
+    artifact_dir: Path, kind: str
+) -> Optional[tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, set[str]]]]:
+    loaded = _load_file_index_v2_artifact_metadata(artifact_dir, kind)
+    if loaded is None:
+        return None
+    descriptor, entries, scope_paths = loaded
+    manifest_counts = {scope: len(paths) for scope, paths in scope_paths.items()}
+    opened = []
+    try:
+        for scope, collection_name in (
+            ("files", V2_FILES_CODE_COLLECTION),
+            ("files-docs", V2_FILES_DOCS_COLLECTION),
+        ):
             client, collection = _open_file_index_v2_collection(
                 _file_artifact_store(artifact_dir, descriptor), collection_name
             )
-            try:
-                valid = (
-                    _file_members_exist(collection, _file_member_ids(entries, scope))
-                    if _uses_file_record_pool(descriptor)
-                    else _safe_collection_count(collection) == manifest_counts[scope]
-                )
-                if not valid:
-                    return None
-            finally:
-                _close_chroma_client(client)
-        except Exception:
-            return None
-    return descriptor, entries, scope_paths
+            opened.append(client)
+            valid = (
+                _file_members_exist(collection, _file_member_ids(entries, scope))
+                if _uses_file_record_pool(descriptor)
+                else _safe_collection_count(collection) == manifest_counts[scope]
+            )
+            if not valid:
+                return None
+        return descriptor, entries, scope_paths
+    except Exception:
+        return None
+    finally:
+        for client in opened:
+            _close_chroma_client(client)
 
 
 def _file_index_v2_view_identity(
@@ -4203,7 +4486,7 @@ def _file_index_v2_view_identity(
     }
 
 
-def _verify_file_index_v2_view(view_dir: Path) -> bool:
+def _verify_file_index_v2_view(view_dir: Path, *, metadata_only: bool = False) -> bool:
     """Verify the complete Base/Overlay/View closure before publication."""
     view_dir = Path(view_dir)
     descriptor = _read_artifact_descriptor(view_dir)
@@ -4273,8 +4556,9 @@ def _verify_file_index_v2_view(view_dir: Path) -> bool:
         return False
     base_dir = v2_root / "bases" / descriptor["base_generation_id"]
     overlay_dir = worktree_root / "overlays" / descriptor["overlay_generation_id"]
-    base_verified = _load_verified_file_index_v2_artifact(base_dir, "base")
-    overlay_verified = _load_verified_file_index_v2_artifact(overlay_dir, "overlay")
+    loader = _load_file_index_v2_artifact_metadata if metadata_only else _load_verified_file_index_v2_artifact
+    base_verified = loader(base_dir, "base")
+    overlay_verified = loader(overlay_dir, "overlay")
     if base_verified is None or overlay_verified is None:
         return False
     base_descriptor, base_entries, base_paths = base_verified
@@ -4664,13 +4948,32 @@ def active_pointer_path(db_path: Path) -> Path:
     return generations_root(db_path) / ACTIVE_POINTER_FILENAME
 
 
+def _unknown_issue_pointer_contract(db_path: Path) -> bool:
+    try:
+        payload = json.loads(active_pointer_path(db_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and (
+        (type(payload.get("schema_version")) is int and payload["schema_version"] not in (1, 2))
+        or ("writer_protocol" in payload and (
+            payload.get("schema_version") != 2 or payload["writer_protocol"] != ISSUE_RECORD_PROTOCOL))
+    )
+
+
 def _read_active_pointer(db_path: Path) -> Optional[Dict[str, Any]]:
     pointer_path = active_pointer_path(db_path)
     try:
         payload = json.loads(pointer_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("generation"), str):
+    if (not isinstance(payload, dict)
+            or not isinstance(payload.get("generation"), str)
+            or re.fullmatch(r"gen-[A-Za-z0-9_-]+", payload["generation"]) is None
+            or type(payload.get("schema_version")) is not int
+            or payload["schema_version"] not in (1, 2)
+            or (payload["schema_version"] == 1 and "writer_protocol" in payload)
+            or (payload["schema_version"] == 2
+                and payload.get("writer_protocol") != ISSUE_RECORD_PROTOCOL)):
         return None
     return payload
 
@@ -4706,6 +5009,8 @@ def _issue_delta_state(db_path: Path) -> Optional[Dict[str, Any]]:
     pointer = _read_active_pointer(db_path)
     if pointer is None or not isinstance(pointer.get("delta"), str):
         return None
+    if re.fullmatch(r"gen-[A-Za-z0-9_-]+", pointer["delta"]) is None:
+        raise ValueError("invalid Issue delta generation")
     store = generations_root(db_path) / pointer["delta"]
     try:
         payload = json.loads((store / ISSUE_DELTA_FILENAME).read_text(encoding="utf-8"))
@@ -4727,6 +5032,8 @@ def _issue_delta_state(db_path: Path) -> Optional[Dict[str, Any]]:
 
 def _active_store_layers(db_path: Path) -> List[tuple]:
     """`(store, hidden_ids)` layers readers combine, base first."""
+    if _active_pointer_corrupt(db_path):
+        raise ValueError("invalid active generation pointer")
     base = resolve_active_store(db_path)
     delta = _issue_delta_state(db_path)
     if delta is None:
@@ -4734,42 +5041,126 @@ def _active_store_layers(db_path: Path) -> List[tuple]:
     return [(base, delta["shadowed"]), (delta["store"], frozenset())]
 
 
-def _issue_base_hashes(db_path: Path) -> Optional[Dict[str, str]]:
-    """Content hashes of the records stored in the active base generation."""
+def _issue_record_pool(db_path: Path) -> Path:
+    return generations_root(db_path) / "record-stores" / ISSUE_RECORD_PROTOCOL / "store"
+
+
+def _read_issue_membership(generation: Path) -> Dict[str, str]:
+    payload = json.loads((generation / ISSUE_MEMBERSHIP_FILENAME).read_text(encoding="utf-8"))
+    members = payload.get("members") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict)
+            or set(payload) != {"schema_version", "writer_protocol", "record_layout", "members", "members_digest"}
+            or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+            or payload["writer_protocol"] != ISSUE_RECORD_PROTOCOL
+            or payload["record_layout"] != ISSUE_RECORD_LAYOUT
+            or not isinstance(members, dict)
+            or not all(isinstance(key, str) and key and key.isascii() and _is_sha256(value)
+                       for key, value in members.items())
+            or len(set(members.values())) != len(members)
+            or payload["members_digest"] != _sha256_json(members)):
+        raise ValueError("invalid Issue generation membership")
+    return members
+
+
+def _active_issue_members(db_path: Path) -> Optional[Dict[str, str]]:
+    if _active_pointer_corrupt(db_path):
+        raise ValueError("invalid active Issue pointer")
     pointer = _read_active_pointer(db_path)
-    if pointer is None:
+    if pointer is None or pointer["schema_version"] == 1:
         return None
-    path = generations_root(db_path) / pointer["generation"] / ISSUE_BASE_MANIFEST_FILENAME
+    members = _read_issue_membership(generations_root(db_path) / pointer["generation"])
+    if (type(pointer.get("document_count")) is not int
+            or pointer["document_count"] != len(members)
+            or pointer.get("membership_digest") != _sha256_json(members)
+            or pointer.get("scope") != "issues"
+            or "delta" in pointer):
+        raise ValueError("Issue pointer and membership disagree")
+    return members
+
+
+def _verified_issue_members(collection, members: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+    """Only reuse records whose persisted payload still matches their address."""
+    logical_ids = {value: key for key, value in members.items()}
+    ids = list(logical_ids)
+    verified: Dict[str, Dict[str, Any]] = {}
+    for start in range(0, len(ids), INDEX_RECORD_READ_BATCH):
+        got = collection.get(ids=ids[start:start + INDEX_RECORD_READ_BATCH],
+                             include=["documents", "metadatas"])
+        for record_id, document, metadata in zip(got["ids"], got["documents"], got["metadatas"]):
+            record = {"id": logical_ids[record_id], "document": document, "metadata": metadata}
+            if _record_source_fingerprint([record]) == record_id:
+                verified[record_id] = record
+    return verified
+
+
+def _open_issue_pool_for_build(db_path: Path, repair: bool):
+    pool = _issue_record_pool(db_path)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
-    ):
-        return None
-    return payload
+        return _make_chroma_collection(pool, V2_ISSUES_COLLECTION)
+    except Exception as open_error:
+        if not repair:
+            raise
+        # Explicit repair may replace an unreadable *known* store. Exclude
+        # readers, preserve the original bytes, and never reset a future pool.
+        with acquire_lock(db_path, exclusive=True):
+            if _unknown_issue_pointer_contract(db_path):
+                raise ValueError("unsupported Issue writer contract")
+            # An unavailable healthy store (permissions, locks, disk full)
+            # must not be mistaken for corruption and lose its old versions.
+            import sqlite3
+            corrupt = False
+            try:
+                with contextlib.closing(sqlite3.connect(
+                    (pool / "chroma.sqlite3").resolve().as_uri() + "?mode=ro", uri=True
+                )) as database:
+                    corrupt = database.execute("PRAGMA quick_check").fetchone() != ("ok",)
+            except sqlite3.DatabaseError as error:
+                if getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                    corrupt = True
+            if not corrupt:
+                raise open_error
+            for generation in generations_root(db_path).glob("gen-*"):
+                if (generation / ISSUE_MEMBERSHIP_FILENAME).exists():
+                    _read_issue_membership(generation)
+                elif not (generation / "chroma.sqlite3").is_file():
+                    raise ValueError("unknown retained Issue generation")
+            from chromadb.api.shared_system_client import SharedSystemClient
+            # Chroma registers a System before native startup. A failed
+            # constructor leaves that exact path cached without bindings;
+            # release only this broken store, never the process-wide cache.
+            with contextlib.suppress(Exception):
+                SharedSystemClient._release_system(_chroma_store_path(pool))
+            quarantine = pool.with_name(f".store.quarantine-{time.time_ns()}")
+            _replace_staging_generation(pool, quarantine)
+            _fsync_directory(pool.parent)
+            return _make_chroma_collection(pool, V2_ISSUES_COLLECTION)
 
 
-def _plan_issue_delta(db_path: Path, new_hashes: Dict[str, str]) -> Optional[Dict[str, Any]]:
-    """Plan a delta over the active base, or None when a new base is due."""
-    pointer = _read_active_pointer(db_path)
-    base_hashes = _issue_base_hashes(db_path)
-    if pointer is None or base_hashes is None:
-        return None
-    changed = {
-        record_id for record_id, content_hash in new_hashes.items()
-        if base_hashes.get(record_id) != content_hash
-    }
-    deleted = set(base_hashes) - set(new_hashes)
-    limit = max(ISSUE_DELTA_MIN_RECORDS, int(len(base_hashes) * ISSUE_DELTA_MAX_FRACTION))
-    if len(changed) + len(deleted) > limit:
-        return None
-    return {
-        "base_generation": pointer["generation"],
-        "changed": changed,
-        "shadowed": sorted((changed & set(base_hashes)) | deleted),
-    }
+def _prune_issue_record_pool(db_path: Path) -> int:
+    """Caller holds build + exclusive scope locks, excluding writers/readers."""
+    try:
+        marks: set[str] = set()
+        for generation in generations_root(db_path).iterdir():
+            if not generation.is_dir() or not generation.name.startswith("gen-"):
+                continue
+            if (generation / ISSUE_MEMBERSHIP_FILENAME).exists():
+                marks.update(_read_issue_membership(generation).values())
+            elif not ((generation / ISSUE_BASE_MANIFEST_FILENAME).is_file()
+                      or (generation / ISSUE_DELTA_FILENAME).is_file()):
+                # Unknown retained contract: it might name this pool.
+                return 0
+        pool = _issue_record_pool(db_path)
+        if not (pool / "chroma.sqlite3").is_file():
+            return 0
+        client, collection = _open_chroma_collection(pool, V2_ISSUES_COLLECTION)
+        try:
+            return _prune_unreferenced_record_block(collection, marks)
+        finally:
+            _close_chroma_client(client)
+    except Exception:
+        # Cleanup never makes a published generation unavailable.
+        return 0
+    return 0
 
 
 def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
@@ -4780,7 +5171,7 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
     exclusive target lock, and `acquire_lock` is not reentrant.
     """
     store = resolve_active_store(db_path)
-    if not (store / "chroma.sqlite3").exists():
+    if scope != "issues" and not (store / "chroma.sqlite3").exists():
         return None
     try:
         return _layered_document_count(db_path, scope)
@@ -4815,6 +5206,7 @@ def _publish_generation(
     source_fingerprint: Optional[str] = None,
     after_publish=None,
     delta_of: Optional[str] = None,
+    issue_membership: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Atomically publish `staging` as the new active generation (FR-390).
 
@@ -4842,6 +5234,9 @@ def _publish_generation(
     try:
         gen_root.mkdir(parents=True, exist_ok=True)
         with acquire_lock(db_path, exclusive=True):
+            if scope == "issues" and _unknown_issue_pointer_contract(db_path):
+                return {"ok": False, "error_code": "INDEX_INCOMPATIBLE", "scope": scope,
+                        "error": "unsupported Issue writer contract; existing generation preserved"}
             previous = _read_active_pointer(db_path)
             if document_count == 0:
                 active_documents = _active_store_document_count(db_path, scope)
@@ -4858,7 +5253,11 @@ def _publish_generation(
                         "retryable": True,
                     }
             generation_dir = gen_root / generation_name
+            if issue_membership is not None:
+                _fsync_file_index_v2_directory(staging)
             _replace_staging_generation(staging, generation_dir)
+            if issue_membership is not None:
+                _fsync_directory(gen_root)
             for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
                 with contextlib.suppress(OSError):
                     (generation_dir / residue).unlink()
@@ -4872,11 +5271,12 @@ def _publish_generation(
             }
             if source_fingerprint is not None:
                 pointer_payload["source_fingerprint"] = source_fingerprint
-            pointer_tmp = gen_root / f".{ACTIVE_POINTER_FILENAME}.tmp-{os.getpid()}"
-            pointer_tmp.write_text(
-                json.dumps(pointer_payload, ensure_ascii=True), encoding="utf-8"
-            )
-            os.replace(pointer_tmp, active_pointer_path(db_path))
+            if issue_membership is not None:
+                pointer_payload.update(schema_version=2, writer_protocol=ISSUE_RECORD_PROTOCOL,
+                                       membership_digest=_sha256_json(issue_membership))
+                _write_durable_json_atomic(active_pointer_path(db_path), pointer_payload)
+            else:
+                _write_json_atomic(active_pointer_path(db_path), pointer_payload)
             if after_publish is not None:
                 # PR #3301 review: manifest / meta belong to the same
                 # publication as the pointer swap, so run them while the
@@ -4898,6 +5298,8 @@ def _publish_generation(
                     previous.get("delta") if previous else None,
                 },
             )
+            if issue_membership is not None:
+                _prune_issue_record_pool(db_path)
     except OSError as error:
         return {
             "ok": False,
@@ -5184,9 +5586,14 @@ def _action_index_files_protocol_v2_pinned(
         scope,
         compatibility_descriptor,
     )
+    reuse_inputs = _file_index_v2_reuse_inputs(repo_hash, worktree_hash, descriptor, db_root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
-        base_records = _canonical_base_records(root, canonical)
+        base_reuse = reuse_inputs.get("base")
+        if base_reuse is not None and base_reuse["descriptor"]["root_tree_oid"] != canonical["root_tree_oid"]:
+            base_records = _canonical_base_records(root, canonical, reuse_inputs=base_reuse)
+        else:
+            base_records = _canonical_base_records(root, canonical)
     else:
         base_records = []
     base_by_path = {record["path"]: record for record in base_records}
@@ -5321,6 +5728,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_offset=0,
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(done, "base"),
+        **({"reuse_entries": {path: entry for path, entry in reuse_inputs["base"]["entries"].items()
+                            if path not in reuse_inputs["base"]["invalid_paths"]}} if "base" in reuse_inputs else {}),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -5355,6 +5764,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_offset=len(base_records),
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
+        **({"reuse_entries": {path: entry for path, entry in reuse_inputs["overlay"]["entries"].items()
+                            if path not in reuse_inputs["overlay"]["invalid_paths"]}} if "overlay" in reuse_inputs else {}),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -6056,6 +6467,34 @@ def _issue_source_revision(repo_hash: str) -> Optional[str]:
     except (OSError, ValueError, UnicodeDecodeError):
         # Legacy/unversioned sources still use the complete read on every call.
         return None
+
+
+def _legacy_issue_source_snapshot(repo_hash: str) -> str:
+    """Match Rust's legacy source probe, including complete SPEC payloads."""
+    root = _issue_cache_root(repo_hash)
+    digest = hashlib.sha256(_issue_source_fingerprint(
+        _load_cached_issue_documents(repo_hash)).encode("utf-8"))
+    paths = []
+    for issue in root.iterdir() if root.is_dir() else []:
+        if (not issue.is_dir() or issue.is_symlink()
+                or re.fullmatch(r"\+?[0-9]+", issue.name) is None
+                or int(issue.name) > 2**64 - 1):
+            continue
+        body = issue / "body.md"
+        if body.is_file():
+            paths.append(body)
+        sections = issue / "sections"
+        if sections.is_dir():
+            paths.extend(path for path in sections.iterdir()
+                         if path.is_file() and not path.is_symlink() and path.suffix == ".md")
+    for path in sorted(paths, key=lambda path: path.parts):
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as source:
+            digest.update(os.fstat(source.fileno()).st_size.to_bytes(8, "little"))
+            while chunk := source.read(64 * 1024):
+                digest.update(chunk)
+    return "source:" + digest.hexdigest()
 
 
 def _cached_issue_source(repo_hash: str, kind: str, load: Callable[[], Any]) -> Any:
@@ -7931,20 +8370,41 @@ def _close_chroma_client(client) -> None:
         pass
 
 
-def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
-    store = resolve_active_store(db_path)
-    chroma_sqlite = store / "chroma.sqlite3"
-    if not chroma_sqlite.exists():
-        return False, 0
+def _scope_document_count(
+    db_path: Path, scope: str,
+    verified_issue_records: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> tuple[bool, int]:
     try:
+        # Acquiring the scope lock creates its directory; a status probe must not.
+        if not db_path.is_dir():
+            return False, 0
         with acquire_lock(db_path, exclusive=False):
-            return True, _layered_document_count(db_path, scope)
+            store = resolve_active_store(db_path)
+            if (scope not in ("issues", "specs") or _active_issue_members(db_path) is None):
+                if not (store / "chroma.sqlite3").exists():
+                    return False, 0
+            return True, _layered_document_count(db_path, scope, verified_issue_records)
     except Exception:
         return False, 0
 
 
-def _layered_document_count(db_path: Path, scope: str) -> int:
+def _layered_document_count(
+    db_path: Path, scope: str,
+    verified_issue_records: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> int:
     """Documents visible through the active layers. Caller holds a lock."""
+    members = _active_issue_members(db_path) if scope in ("issues", "specs") else None
+    if members is not None:
+        client, collection = _open_chroma_collection(_issue_record_pool(db_path), V2_ISSUES_COLLECTION)
+        try:
+            verified = _verified_issue_members(collection, members)
+            if verified_issue_records is not None:
+                verified_issue_records.update(verified)
+            if len(verified) != len(members):
+                raise ValueError("missing Issue generation member")
+            return len(members)
+        finally:
+            _close_chroma_client(client)
     total = 0
     for store, hidden in _active_store_layers(db_path):
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
@@ -7955,6 +8415,44 @@ def _layered_document_count(db_path: Path, scope: str) -> int:
         finally:
             _close_chroma_client(client)
     return total
+
+
+def _search_complete_issue_members(
+    collection,
+    records: Dict[str, Dict[str, Any]],
+    query: str,
+    query_embedding: Optional[List[float]],
+) -> List[Dict[str, Any]]:
+    """Return every eligible member without relying on ANN graph recall."""
+    if not records:
+        return []
+    query_vector = E5EmbeddingFunction._native_finite_query_vectors([
+        query_embedding if query_embedding is not None
+        else E5EmbeddingFunction().embed_query(query)[0]
+    ])[0]
+    query_norm = math.hypot(*query_vector)
+    if not query_norm or not math.isfinite(query_norm):
+        raise ValueError("Issue query vector has invalid norm")
+    items: List[Dict[str, Any]] = []
+    ids = list(records)
+    for start in range(0, len(ids), FILE_INDEX_V2_VECTOR_BATCH):
+        batch = ids[start:start + FILE_INDEX_V2_VECTOR_BATCH]
+        stored = collection.get(ids=batch, include=["embeddings"])
+        if set(stored["ids"]) != set(batch) or stored.get("embeddings") is None:
+            raise ValueError("missing Issue member vector")
+        vectors = E5EmbeddingFunction._native_finite_query_vectors(stored["embeddings"])
+        if len(vectors) != len(batch):
+            raise ValueError("missing Issue member vector")
+        for record_id, vector in zip(stored["ids"], vectors):
+            norm = math.hypot(*vector)
+            if len(vector) != len(query_vector) or not norm or not math.isfinite(norm):
+                raise ValueError("Issue member vector has invalid dimension or norm")
+            distance = 1.0 - math.fsum(
+                (left / query_norm) * (right / norm)
+                for left, right in zip(query_vector, vector)
+            )
+            items.append(dict(records[record_id], id=record_id, distance=distance))
+    return sorted(items, key=lambda item: item["distance"])
 
 
 def _query_active_layers(
@@ -7971,6 +8469,29 @@ def _query_active_layers(
     """
     items: List[Dict[str, Any]] = []
     count = 0
+    members = _active_issue_members(db_path) if scope in ("issues", "specs") else None
+    if members is not None:
+        client, collection = _open_chroma_collection(_issue_record_pool(db_path), V2_ISSUES_COLLECTION)
+        try:
+            verified = _verified_issue_members(collection, members)
+            if len(verified) != len(members):
+                raise ValueError("missing Issue generation member")
+            kind = "spec" if scope == "specs" else "issue"
+            eligible = {record_id: record for record_id, record in verified.items()
+                        if record["metadata"].get("record_kind") == kind}
+            if len(eligible) <= fetch_n:
+                items = _search_complete_issue_members(collection, eligible, query, query_embedding)
+            else:
+                items = _search_collection_v2(
+                    collection, query, fetch_n, query_embedding=query_embedding,
+                    ids=list(members.values()), **_scope_record_filter(scope),
+                )
+            logical_ids = {value: key for key, value in members.items()}
+            for item in items:
+                item["id"] = logical_ids[item["id"]]
+            return items, len(members)
+        finally:
+            _close_chroma_client(client)
     layers = _active_store_layers(db_path)
     for store, hidden in layers:
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
@@ -8155,6 +8676,7 @@ def _issue_status_v2(
     db_root: Optional[Path] = None,
     source: Optional[Dict[str, Any]] = None,
     check_repair: bool = True,
+    verified_issue_records: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
     meta = _read_issue_meta(db_path) or {}
@@ -8162,7 +8684,7 @@ def _issue_status_v2(
     exists = (resolve_active_store(db_path) / "chroma.sqlite3").exists() or (
         db_path / META_FILENAME
     ).is_file()
-    count_ok, document_count = _scope_document_count(db_path, "issues")
+    count_ok, document_count = _scope_document_count(db_path, "issues", verified_issue_records)
 
     reason = "ready"
     healthy = True
@@ -8307,6 +8829,9 @@ def _index_issues_v2_locked(
     """
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
 
+    if _unknown_issue_pointer_contract(db_path):
+        return {"ok": False, "scope": "issues", "error_code": "INDEX_INCOMPATIBLE",
+                "error": "unsupported Issue writer contract; existing generation preserved"}
     if repair:
         for name in ("cancel-requested", "repair.json"):
             (db_path / name).unlink(missing_ok=True)
@@ -8314,6 +8839,9 @@ def _index_issues_v2_locked(
         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
 
     source_revision = _issue_source_revision(repo_hash)
+    source_content_fingerprint = (
+        _legacy_issue_source_snapshot(repo_hash) if source_revision is None else None
+    )
     records = _load_issue_records(repo_hash)
     issue_cache_fingerprint = _issue_source_fingerprint(_load_cached_issue_documents(repo_hash))
     if source_revision != _issue_source_revision(repo_hash):
@@ -8328,13 +8856,23 @@ def _index_issues_v2_locked(
         return {"ok": False, "scope": "issues", "error_code": "REPAIR_STOPPED",
                 "error": "issues rebuild stopped after failure for the same source; use explicit repair",
                 "repair": previous_failure, "mode": previous_failure.get("mode", mode)}
-    health = _issue_status_v2(repo_hash, db_root=db_root, source=source)
+    # The build lock excludes other writers for this request. Reuse only the
+    # actual hash-verified payloads read by pre-health; status remains fresh
+    # outside this request, and publication gets its own full verification.
+    preverified: Dict[str, Dict[str, Any]] = {}
+    health = _issue_status_v2(repo_hash, db_root=db_root, source=source,
+                              verified_issue_records=preverified)
     if respect_ttl and not repair and health.get("healthy"):
         meta = _read_issue_meta(db_path) or {}
+        source_acknowledged = (
+            meta.get("source_cache_revision") == source_revision if source_revision is not None
+            else source_content_fingerprint is not None
+            and meta.get("source_content_fingerprint") == source_content_fingerprint
+        )
         last = _parse_iso(meta.get("last_full_refresh", ""))
         if last is not None:
             age = (_now_utc() - last).total_seconds()
-            if age < ttl_minutes * 60:
+            if age < ttl_minutes * 60 and source_acknowledged:
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
@@ -8353,17 +8891,10 @@ def _index_issues_v2_locked(
     new_entries = [{"path": record["id"],
                     "content_hash": _record_source_fingerprint([record])} for record in records]
     new_hashes = {entry["path"]: entry["content_hash"] for entry in new_entries}
-    delta_plan = _plan_issue_delta(db_path, new_hashes) if mode == "incremental" else None
-    # Stage only what the new generation holds: the delta's changed records,
-    # or every record for a new base.
-    staged_records = (
-        [record for record in records if record["id"] in delta_plan["changed"]]
-        if delta_plan is not None else records
-    )
-    staging_fingerprint = (
-        f"{fingerprint}:delta:{delta_plan['base_generation']}"
-        if delta_plan is not None else fingerprint
-    )
+    # Record identity includes the complete persisted input (logical ID,
+    # document and metadata). The versioned pool fixes the embedding contract.
+    members = new_hashes
+    staging_fingerprint = f"{ISSUE_RECORD_PROTOCOL}:{fingerprint}"
 
     # Persist before staging. The held build lock distinguishes a live build
     # from an orphan left by process death. Normal yield/success clear it.
@@ -8381,7 +8912,7 @@ def _index_issues_v2_locked(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(staged_records)
+    total = len(records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
@@ -8400,22 +8931,23 @@ def _index_issues_v2_locked(
     yielded = False
     staged_count = 0
     try:
+        pool = _issue_record_pool(db_path)
         with acquire_lock(staging, exclusive=True):
-            client, collection = _make_chroma_collection_repairing(staging, V2_ISSUES_COLLECTION)
+            # Never reset a shared pool when open fails: retained generations
+            # may still name it. Explicit repair fills missing members below.
+            client, collection = _open_issue_pool_for_build(db_path, repair)
             try:
-                staged_ids: set = set()
-                if continuation is None and mode == "incremental":
-                    _copy_unchanged_records(db_path, "issues", collection, V2_ISSUES_COLLECTION,
-                                            {record["id"]: new_hashes[record["id"]]
-                                             for record in staged_records})
-                    staged_ids = set(collection.get().get("ids") or [])
-                if continuation is not None:
-                    try:
-                        staged_ids = set(collection.get().get("ids") or [])
-                    except Exception:  # pragma: no cover - defensive chroma fallback
-                        staged_ids = set()
+                desired_ids = set(members.values())
+                # Explicit repair can replace a broken pool, invalidating all
+                # prior reads. Ordinary builds reuse only this request's proof.
+                staged_ids = ({record_id: record for record_id, record in preverified.items()
+                               if record_id in desired_ids} if not repair else {})
+                unknown_members = {logical_id: record_id for logical_id, record_id in members.items()
+                                   if record_id not in staged_ids}
+                if unknown_members:
+                    staged_ids.update(_verified_issue_members(collection, unknown_members))
                 pending: List[Dict[str, Any]] = [
-                    record for record in staged_records if record["id"] not in staged_ids
+                    record for record in records if members[record["id"]] not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
                 _write_heavy_progress(
@@ -8426,7 +8958,7 @@ def _index_issues_v2_locked(
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
                     batch_records = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
-                    ids = [record["id"] for record in batch_records]
+                    ids = [members[record["id"]] for record in batch_records]
                     documents = [record["document"] for record in batch_records]
                     metadatas = [record["metadata"] for record in batch_records]
                     collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
@@ -8460,11 +8992,19 @@ def _index_issues_v2_locked(
                     if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
                         yielded = True
                         break
-                staged_count = _safe_collection_count(collection)
+                if not yielded:
+                    inserted_members = {record["id"]: members[record["id"]] for record in pending}
+                    if inserted_members:
+                        staged_ids.update(_verified_issue_members(collection, inserted_members))
+                staged_count = len(staged_ids) + (newly_embedded if yielded else 0)
                 if not yielded and staged_count != total:
                     return _issue_build_failure(db_path, fingerprint, mode, "COUNT_MISMATCH", staged_count, total)
             finally:
                 _close_chroma_client(client)
+            if not yielded:
+                _fsync_file_index_v2_directory(pool)
+                for parent in (pool.parent, pool.parent.parent, generations_root(db_path), db_path.parent):
+                    _fsync_directory(parent)
     except Exception as error:
         result = _issue_build_failure(db_path, fingerprint, mode, "BUILD_FAILED", staged_count, total)
         result["error"] = str(error)
@@ -8520,6 +9060,8 @@ def _index_issues_v2_locked(
                     "source_cache_fingerprint": source["fingerprint"],
                     "issue_cache_fingerprint": issue_cache_fingerprint,
                     **({"source_cache_revision": source_revision} if source_revision is not None else {}),
+                    **({"source_content_fingerprint": source_content_fingerprint}
+                       if source_content_fingerprint is not None else {}),
                     "source_document_count": source["document_count"],
                     "source_cache_refresh_at": source.get("cache_refresh_at"),
                 },
@@ -8532,28 +9074,18 @@ def _index_issues_v2_locked(
             publication_error = error
 
     try:
-        # The layer descriptor travels inside the generation directory: a
-        # delta names its base and the base records it hides; a base records
-        # its content hashes so the next refresh can plan a delta over it.
-        if delta_plan is not None:
-            layer_name, layer_payload = ISSUE_DELTA_FILENAME, {
-                "schema_version": 1,
-                "base_generation": delta_plan["base_generation"],
-                "shadowed": delta_plan["shadowed"],
-                "document_count": staged_count,
-            }
-        else:
-            layer_name, layer_payload = ISSUE_BASE_MANIFEST_FILENAME, new_hashes
-        (staging / layer_name).write_text(
-            json.dumps(layer_payload, sort_keys=True, ensure_ascii=True), encoding="utf-8"
-        )
+        _write_durable_json_atomic(staging / ISSUE_MEMBERSHIP_FILENAME, {
+            "schema_version": 1, "writer_protocol": ISSUE_RECORD_PROTOCOL,
+            "record_layout": ISSUE_RECORD_LAYOUT, "members": members,
+            "members_digest": _sha256_json(members),
+        })
         publish = _publish_generation(
             db_path,
             staging,
             scope="issues",
             document_count=len(records),
             after_publish=_commit_issue_meta,
-            delta_of=delta_plan["base_generation"] if delta_plan is not None else None,
+            issue_membership=members,
         )
         if publication_error is not None:
             raise publication_error
@@ -10343,30 +10875,97 @@ def action_status_v2(
 # =====================================================================
 
 
-def _read_search_worker_message(connection: socket.socket) -> Dict[str, Any]:
+def _read_search_worker_message(
+    connection: socket.socket, pending: Optional[bytearray] = None,
+) -> Dict[str, Any]:
     """Read one bounded ASCII/UTF-8 JSON line from the local transport."""
-    frame = bytearray()
-    while len(frame) <= 16 * 1024 * 1024:
-        chunk = connection.recv(65536)
-        if not chunk:
-            raise ConnectionError("search worker connection closed")
-        frame.extend(chunk)
-        if len(frame) > 16 * 1024 * 1024:
-            break
-        if b"\n" in frame:
-            line, _, remainder = frame.partition(b"\n")
-            if remainder:
+    frame = pending if pending is not None else bytearray()
+    limit = 16 * 1024 * 1024
+    while True:
+        newline = frame.find(b"\n")
+        if 0 <= newline <= limit:
+            line = bytes(frame[:newline])
+            remainder = frame[newline + 1:]
+            if pending is None and remainder:
                 raise ValueError("unexpected data after search worker request")
+            frame[:] = remainder
             payload = json.loads(line)
             if not isinstance(payload, dict):
                 raise ValueError("search worker message must be an object")
             return payload
-    raise ValueError("search worker message is too large")
+        if len(frame) > limit:
+            raise ValueError("search worker message is too large")
+        chunk = connection.recv(65536)
+        if not chunk:
+            raise ConnectionError("search worker connection closed")
+        frame.extend(chunk)
+
+
+_WORKER_REFRESH_ENV = ("GWT_INDEX_REFRESH_YIELD_AT_MS", "GWT_INDEX_REFRESH_RUN_ID")
+
+
+@contextlib.contextmanager
+def _worker_refresh_environment(context: Dict[str, Any]) -> Iterator[None]:
+    if (not isinstance(context, dict) or set(context) - set(_WORKER_REFRESH_ENV)
+            or any(value is not None and not isinstance(value, str) for value in context.values())):
+        raise ValueError("invalid worker refresh context")
+    previous = {key: os.environ.get(key) for key in _WORKER_REFRESH_ENV}
+    try:
+        for key in _WORKER_REFRESH_ENV:
+            value = context.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _is_background_index_request(arguments: Dict[str, Any]) -> bool:
+    action = arguments.get("action", "")
+    return (
+        (arguments.get("qos") or default_qos_for_action(action)) == "background"
+        and (action == "index-issues" or (
+            action == "index-files" and arguments.get("file_index_protocol") == "v2"
+        ))
+    )
+
+
+def _index_action_payload(action: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    common = dict(
+        repo_hash=arguments["repo_hash"], project_root=arguments["project_root"],
+        db_root=Path(arguments["db_root"]) if arguments.get("db_root") else None,
+        qos=arguments.get("qos") or default_qos_for_action(action),
+        mode=arguments.get("mode", "full"),
+    )
+    if action == "index-issues":
+        return action_index_issues_v2(
+            **common, respect_ttl=arguments.get("respect_ttl", False),
+            repair=arguments.get("repair", False),
+        )
+    return action_index_files_v2(
+        **common, worktree_hash=arguments.get("worktree_hash") or "",
+        scope=arguments.get("scope") or ("files-docs" if action == "index-files-docs" else "files"),
+        file_index_protocol=arguments.get("file_index_protocol", "legacy"),
+    )
+
+
+def _clear_search_worker_read_clients() -> None:
+    if _SEARCH_WORKER_READ_CLIENTS is not None:
+        retained = list(_SEARCH_WORKER_READ_CLIENTS.values())
+        _SEARCH_WORKER_READ_CLIENTS.clear()
+        for _, client, _ in retained:
+            _close_chroma_client(client)
 
 
 def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
-    """Reuse one model process while Rust retains its normal search lease."""
-    qos = args.qos or "interactive"
+    """Reuse one model process while Rust retains the request's heavy lease."""
+    qos = args.qos or default_qos_for_action(args.action)
     identity = _sha256_json({
         "script": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "python": str(Path(sys.executable).resolve()),
@@ -10380,6 +10979,8 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
 
     def connect():
         endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
+        if endpoint.get("qos", "interactive") != qos:
+            raise RuntimeError("search worker QoS mismatch")
         port, token = endpoint["port"], endpoint["token"]
         if not isinstance(port, int) or not isinstance(token, str):
             raise ValueError("invalid search worker endpoint")
@@ -10421,14 +11022,31 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
                     time.sleep(0.1)
 
     with connection:
-        request = {"token": token, "args": vars(args)}
+        arguments = dict(vars(args))
+        if _is_background_index_request(arguments):
+            for key in ("project_root", "db_root"):
+                if arguments.get(key):
+                    arguments[key] = str(Path(arguments[key]).resolve())
+        request = {"token": token, "args": arguments, "refresh_context": {
+            key: os.environ.get(key) for key in _WORKER_REFRESH_ENV
+        }}
         connection.sendall(json.dumps(request, ensure_ascii=True).encode("ascii") + b"\n")
-        return _read_search_worker_message(connection)
+        pending = bytearray()
+        while True:
+            payload = _read_search_worker_message(connection, pending)
+            if set(payload) != {"worker_progress"}:
+                if pending:
+                    raise ValueError("unexpected data after search worker result")
+                return payload
+            if not isinstance(payload["worker_progress"], dict):
+                raise ValueError("invalid worker progress")
+            emit_progress(payload["worker_progress"])
 
 
-def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
-    """Serve search-multi only; release model memory after idle expiry."""
-    global _SEARCH_WORKER_ENDPOINT
+def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str = "interactive") -> int:
+    """Serve searches or background index requests; release models after idle expiry."""
+    global _SEARCH_WORKER_ENDPOINT, _SEARCH_WORKER_QOS, emit_progress, _FILE_INDEX_V2_YIELDED
+    _SEARCH_WORKER_QOS = qos
     worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     worker_dir.chmod(0o700)
     endpoint_path = worker_dir / "endpoint.json"
@@ -10440,7 +11058,7 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
         server.settimeout(idle_timeout)
         _write_json_atomic(endpoint_path, {
             "pid": pid, "port": server.getsockname()[1], "token": token,
-            "model_state": "cold", "model_load_ms": 0,
+            "model_state": "cold", "model_load_ms": 0, "qos": qos,
         })
         endpoint_path.chmod(0o600)
         _SEARCH_WORKER_ENDPOINT = endpoint_path
@@ -10452,6 +11070,9 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
                     return 0
                 with connection:
                     completed = threading.Event()
+                    previous_progress = emit_progress
+                    index_request = False
+                    disconnect_watcher = None
                     try:
                         connection.settimeout(10)
                         request = _read_search_worker_message(connection)
@@ -10461,10 +11082,16 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
                             not isinstance(supplied_token, str)
                             or not secrets.compare_digest(supplied_token, token)
                             or not isinstance(arguments, dict)
-                            or arguments.get("action") != "search-multi"
+                            or not isinstance(arguments.get("action"), str)
                             or not arguments.get("repo_hash")
-                            or not arguments.get("query")
                         ):
+                            raise ValueError("invalid search worker request")
+                        action = arguments.get("action")
+                        index_request = _is_background_index_request(arguments)
+                        if ((arguments.get("qos") or default_qos_for_action(action)) != qos
+                                or (index_request and not arguments.get("project_root"))
+                                or (not index_request and (
+                                    action != "search-multi" or not arguments.get("query")))):
                             raise ValueError("invalid search worker request")
                         connection.settimeout(None)
 
@@ -10478,29 +11105,62 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
                                 # heavy lease. No embedding may outlive it.
                                 os._exit(1)
 
-                        threading.Thread(target=cancel_on_disconnect, daemon=True).start()
-                        payload = action_search_multi_v2(
-                            repo_hash=arguments["repo_hash"],
-                            worktree_hash=arguments.get("worktree_hash") or None,
-                            project_root=arguments.get("project_root") or None,
-                            query=arguments["query"],
-                            n_results=arguments.get("n_results", 10),
-                            scopes=[scope.strip() for scope in arguments.get("scopes", "").split(",") if scope.strip()],
-                            match_mode=arguments.get("match_mode", "semantic"),
-                            db_root=Path(arguments["db_root"]) if arguments.get("db_root") else None,
-                            file_index_protocol=arguments.get("file_index_protocol", "legacy"),
-                        )
+                        disconnect_watcher = threading.Thread(target=cancel_on_disconnect, daemon=True)
+                        disconnect_watcher.start()
+                        with _worker_refresh_environment(request.get("refresh_context", {})):
+                            if index_request:
+                                _FILE_INDEX_V2_YIELDED = False
+                                _clear_search_worker_read_clients()
+
+                                def forward_progress(progress):
+                                    connection.sendall(json.dumps({"worker_progress": progress},
+                                                                 ensure_ascii=True).encode("ascii") + b"\n")
+
+                                emit_progress = forward_progress
+                                payload = _index_action_payload(action, arguments)
+                            else:
+                                payload = action_search_multi_v2(
+                                    repo_hash=arguments["repo_hash"],
+                                    worktree_hash=arguments.get("worktree_hash") or None,
+                                    project_root=arguments.get("project_root") or None,
+                                    query=arguments["query"],
+                                    n_results=arguments.get("n_results", 10),
+                                    scopes=[scope.strip() for scope in arguments.get("scopes", "").split(",") if scope.strip()],
+                                    match_mode=arguments.get("match_mode", "semantic"),
+                                    db_root=Path(arguments["db_root"]) if arguments.get("db_root") else None,
+                                    file_index_protocol=arguments.get("file_index_protocol", "legacy"),
+                                )
                     except ValueError as error:
                         payload = {"ok": False, "error_code": "BAD_ARGS", "error": str(error)}
                     except Exception as error:
                         payload = {"ok": False, "error_code": "RUNTIME_ERROR", "error": str(error)}
                     finally:
+                        emit_progress = previous_progress
+                        if index_request:
+                            _clear_search_worker_read_clients()
+                            _FILE_INDEX_V2_YIELDED = False
                         completed.set()
                     payload["worker_pid"] = pid
                     try:
                         connection.sendall(json.dumps(payload, ensure_ascii=True).encode("ascii") + b"\n")
                     except OSError:
                         pass
+                    finally:
+                        # Winsock forbids close concurrent with the watcher's
+                        # recv. Send FIN, then let the client close after its
+                        # terminal frame before releasing this socket.
+                        with contextlib.suppress(OSError):
+                            connection.shutdown(socket.SHUT_WR)
+                        if disconnect_watcher is not None and disconnect_watcher.is_alive():
+                            disconnect_watcher.join(timeout=1)
+                            if disconnect_watcher.is_alive():
+                                with contextlib.suppress(OSError):
+                                    connection.shutdown(socket.SHUT_RDWR)
+                                disconnect_watcher.join(timeout=1)
+                                if disconnect_watcher.is_alive():
+                                    # No active work remains; do not close a
+                                    # socket still used by a stuck watcher.
+                                    os._exit(1)
         finally:
             _SEARCH_WORKER_ENDPOINT = None
             # A stale worker must never erase a replacement worker's endpoint.
@@ -10603,40 +11263,13 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
-        if action == "index-issues":
+        if action in ("index-issues", "index-files", "index-files-docs"):
             if not args.project_root:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
                 return 2
-            result = action_index_issues_v2(
-                repo_hash=repo_hash,
-                project_root=args.project_root,
-                respect_ttl=args.respect_ttl,
-                db_root=db_root,
-                qos=args.qos or default_qos_for_action(action),
-                mode=args.mode,
-                repair=getattr(args, "repair", False),
-            )
+            result = _index_action_payload(action, vars(args))
             emit(result)
-            return 0 if result.get("ok") else 1
-
-        if action in ("index-files", "index-files-docs"):
-            if not args.project_root:
-                emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
-                return 2
-            scope = args.scope or ("files-docs" if action == "index-files-docs" else "files")
-            emit(
-                action_index_files_v2(
-                    project_root=args.project_root,
-                    repo_hash=repo_hash,
-                    worktree_hash=worktree_hash or "",
-                    mode=args.mode,
-                    scope=scope,
-                    qos=args.qos or default_qos_for_action(action),
-                    db_root=db_root,
-                    file_index_protocol=args.file_index_protocol,
-                )
-            )
-            return 0
+            return (0 if result.get("ok") else 1) if action == "index-issues" else 0
 
         if action == "index-specs":
             if not args.project_root:
@@ -10784,6 +11417,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    global _FILE_INDEX_V2_YIELDED
     args = parse_args()
 
     try:
@@ -10802,7 +11436,7 @@ def main() -> int:
         if action == "serve-search-worker":
             if not args.worker_dir:
                 raise ValueError("--worker-dir is required")
-            return _serve_search_worker(Path(args.worker_dir))
+            return _serve_search_worker(Path(args.worker_dir), qos=args.qos or "interactive")
 
         # Issue #2933: when the caller omitted --repo-hash (e.g. an agent pane
         # whose launch env did not export GWT_REPO_HASH / GWT_WORKTREE_HASH)
@@ -10817,21 +11451,27 @@ def main() -> int:
 
         # Phase 8: when --repo-hash is supplied, dispatch the v2 action layer.
         if args.repo_hash:
-            if action == "search-multi":
-                if not args.query:
+            index_request = _is_background_index_request(vars(args))
+            if action == "search-multi" or index_request:
+                if action == "search-multi" and not args.query:
                     emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
+                    return 2
+                if index_request and not args.project_root:
+                    emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
                     return 2
                 try:
                     payload = _search_worker_request(args)
                 except (OSError, ValueError, RuntimeError):
                     payload = {
                         "ok": False,
-                        "error_code": "SEARCH_UNAVAILABLE",
+                        "error_code": "RUNTIME_ERROR" if index_request else "SEARCH_UNAVAILABLE",
                         "retryable": True,
                         "reason": "search worker transport failed",
                         "retry_after_ms": 250,
                     }
                 emit(payload)
+                if index_request and payload.get("ok") is True and payload.get("yielded") is True:
+                    _FILE_INDEX_V2_YIELDED = True
                 return 0 if payload.get("ok") else 1
             return _dispatch_v2(action, args)
 

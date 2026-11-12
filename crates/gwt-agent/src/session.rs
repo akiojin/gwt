@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    launch::{normalize_launch_args, LaunchConfig, ManualLaunchRuntimeProof},
+    launch::{normalize_launch_args, CodexSpeed, LaunchConfig, ManualLaunchRuntimeProof},
     types::{
         AgentId, AgentStatus, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
         WindowsShellKind, WorkflowBypass,
@@ -1170,6 +1170,25 @@ impl Session {
 
     pub fn fast_mode_enabled(&self) -> bool {
         self.fast_mode || self.codex_fast_mode
+    }
+
+    /// Restore the explicitly selected Codex tier from the persisted command.
+    /// Older boolean-only sessions retain their effective Off behavior.
+    pub fn codex_speed(&self) -> CodexSpeed {
+        if self.agent_id != AgentId::Codex {
+            return CodexSpeed::Off;
+        }
+        self.launch_args
+            .windows(2)
+            .filter(|pair| matches!(pair[0].as_str(), "-c" | "--config"))
+            .filter_map(|pair| pair[1].strip_prefix("service_tier="))
+            .next_back()
+            .map(|tier| match tier.trim_matches(['\"', '\'']) {
+                "fast" | "priority" => CodexSpeed::Fast,
+                "ultrafast" => CodexSpeed::Ultrafast,
+                _ => CodexSpeed::Off,
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -3301,6 +3320,19 @@ mod tests {
         assert!(!session.id.is_empty());
         // Verify it's a valid UUID
         assert!(Uuid::parse_str(&session.id).is_ok());
+    }
+
+    #[test]
+    fn codex_speed_restores_explicit_launch_args_and_keeps_legacy_bool_off() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        session.codex_fast_mode = true;
+        assert_eq!(session.codex_speed(), crate::CodexSpeed::Off);
+        session.launch_args = vec!["-c".into(), "service_tier=ultrafast".into()];
+        assert_eq!(session.codex_speed(), crate::CodexSpeed::Ultrafast);
+        session.launch_args = vec!["--config".into(), "service_tier=fast".into()];
+        assert_eq!(session.codex_speed(), crate::CodexSpeed::Fast);
+        session.agent_id = AgentId::ClaudeCode;
+        assert_eq!(session.codex_speed(), crate::CodexSpeed::Off);
     }
 
     #[test]

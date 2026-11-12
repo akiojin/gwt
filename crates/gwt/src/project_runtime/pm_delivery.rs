@@ -917,6 +917,7 @@ pub(crate) fn deliver_pm_wake(
                 let body = prompt.trim_end_matches('\r');
                 let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
                 let prepared = pm_registry::PmDeliveryReceipt {
+                    grok_prompt: None,
                     operation_id: operation_id.to_string(),
                     recorded_at: chrono::Utc::now().to_rfc3339(),
                     status: pm_registry::PmDeliveryReceiptStatus::Prepared,
@@ -1280,6 +1281,8 @@ pub fn pm_status_from_launch_prefs(
         configured_agent_id: configured.agent_id,
         configured_model: configured.model,
         configured_reasoning: configured.reasoning,
+        configured_codex_speed: configured.codex_speed,
+        configured_fast_mode: configured.fast_mode,
         running_agent_id: running_profile
             .as_ref()
             .map(|profile| profile.agent_id.clone()),
@@ -1307,11 +1310,15 @@ fn pm_running_profile_at(sessions_dir: &Path, registration: &PmRegistration) -> 
     let session_path = sessions_dir.join(format!("{}.toml", registration.session_id));
     gwt_agent::Session::load(&session_path)
         .map(|session| {
+            let codex_speed = Some(session.codex_speed());
+            let fast_mode = Some(session.fast_mode_enabled());
             PmLaunchProfile {
                 agent_id: session.agent_id.command().to_string(),
                 model: session.model,
                 reasoning: session.reasoning_level,
                 version: session.tool_version,
+                codex_speed,
+                fast_mode,
             }
             .normalized()
         })
@@ -1667,6 +1674,7 @@ pub(crate) fn deliver_board_notification(
     let body_sha256 = pm_registry::pm_delivery_prompt_sha256(&body);
     let prompt = format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r");
     let prepared = pm_registry::PmDeliveryReceipt {
+        grok_prompt: None,
         operation_id: operation_id.clone(),
         recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         status: pm_registry::PmDeliveryReceiptStatus::Prepared,

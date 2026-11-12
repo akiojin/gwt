@@ -9,6 +9,31 @@ const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
 
+// Issue #7030 AC-5: Codex can downgrade an unadvertised tier without exiting.
+// Preserve its actual explanation through the same terminal protocol as PTY output.
+test("Issue #7030 Ultrafast downgrade warning remains visible", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await expectGridConverged(page);
+  const warning = "Configured service tier `ultrafast` is not advertised as supported for model `gpt-6-astra` and will be omitted from requests.";
+  await emit(page, "terminal_output", warning + "\r\n");
+  await expect.poll(async () => (await text(page)).replace(/\n/g, "")).toContain(warning);
+  await expect(pm.locator(".xterm-screen")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`ultrafast-warning-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 test("PM spinner redraw queued before resize keeps its original wrap grid", async ({ page }, info) => {
   const errors: string[] = [];
   const theme = info.project.name.includes("light") ? "light" : "dark";

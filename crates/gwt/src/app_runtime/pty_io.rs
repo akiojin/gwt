@@ -314,7 +314,8 @@ impl AppRuntime {
                     | OwnerCommand::Resize {
                         id, incarnation, ..
                     }
-                    | OwnerCommand::Close { id, incarnation } => Some((id, incarnation)),
+                    | OwnerCommand::Close { id, incarnation }
+                    | OwnerCommand::Stop { id, incarnation } => Some((id, incarnation)),
                     _ => None,
                 };
                 if let Some((pane, incarnation)) = target.filter(|(pane, incarnation)| {
@@ -397,11 +398,12 @@ impl AppRuntime {
         let in_flight_reply = runtime.input_in_flight_reply.take();
         let pending = std::mem::take(&mut runtime.pending_input_commands);
         let mut events = Vec::new();
-        if let Some(client_id) = in_flight_reply {
+        if let Some((client_id, request_id)) = in_flight_reply {
             events.extend(self.remote_command_refusal(
                 id,
                 &super::RemoteRuntimeCommandKind::Input {
                     reply_client: Some(client_id),
+                    request_id,
                 },
                 "Input delivery is uncertain. Check the pane before retrying.".into(),
             ));
@@ -410,7 +412,10 @@ impl AppRuntime {
         for (_, kind) in pending {
             if matches!(
                 kind,
-                super::RemoteRuntimeCommandKind::Input { reply_client: None }
+                super::RemoteRuntimeCommandKind::Input {
+                    reply_client: None,
+                    ..
+                }
             ) && std::mem::replace(&mut raw_reported, true)
             {
                 continue;
@@ -447,6 +452,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if let super::RemoteRuntimeCommandKind::Input {
             reply_client: Some(client_id),
+            request_id,
         } = kind
         {
             return vec![OutboundEvent::reply(
@@ -455,6 +461,7 @@ impl AppRuntime {
                     ok: false,
                     window_id: Some(id.into()),
                     error: Some(error),
+                    request_id: *request_id,
                 },
             )];
         }
@@ -489,6 +496,9 @@ impl AppRuntime {
                 "The project execution is unavailable.".into(),
             );
         };
+        if matches!(kind, super::RemoteRuntimeCommandKind::Resize) && runtime.exit_confirmed {
+            return Vec::new();
+        }
         let Some(context) = self
             .window_lookup
             .get(id)
@@ -584,8 +594,13 @@ impl AppRuntime {
             }
             let token = uuid::Uuid::new_v4();
             runtime.input_in_flight = Some((connection_id, token));
-            if let super::RemoteRuntimeCommandKind::Input { reply_client } = &kind {
-                runtime.input_in_flight_reply = reply_client.clone();
+            if let super::RemoteRuntimeCommandKind::Input {
+                reply_client,
+                request_id,
+            } = &kind
+            {
+                runtime.input_in_flight_reply =
+                    reply_client.clone().map(|client| (client, *request_id));
             }
             Some(token)
         } else {
@@ -699,6 +714,14 @@ impl AppRuntime {
             }
             return Vec::new();
         }
+        if matches!(kind, super::RemoteRuntimeCommandKind::Resize)
+            && self
+                .runtimes
+                .get(&id)
+                .is_some_and(|runtime| runtime.exit_confirmed)
+        {
+            return Vec::new();
+        }
         if let Some(token) = input_command_id {
             let runtime = self.runtimes.get_mut(&id).expect("fenced input ACK");
             if runtime.input_in_flight != Some((connection_id, token)) {
@@ -743,12 +766,14 @@ impl AppRuntime {
         let mut events = match kind {
             super::RemoteRuntimeCommandKind::Input {
                 reply_client: Some(client_id),
+                request_id,
             } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: true,
                     window_id: Some(id.clone()),
                     error: None,
+                    request_id,
                 },
             )],
             super::RemoteRuntimeCommandKind::Stop => {
@@ -793,6 +818,7 @@ impl AppRuntime {
         client_id: ClientId,
         session_id: &str,
         text: &str,
+        request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let target = self.tabs.iter().find_map(|tab| {
             tab.workspace
@@ -809,10 +835,11 @@ impl AppRuntime {
                     ok: false,
                     window_id: None,
                     error: Some(format!("no pane bound to session {session_id}")),
+                    request_id,
                 },
             )];
         };
-        self.pane_send_input_to_window_events(client_id, &window_id, text)
+        self.pane_send_input_to_window_events(client_id, &window_id, text, request_id)
     }
 
     pub(crate) fn pane_send_input_for_project_events(
@@ -821,6 +848,7 @@ impl AppRuntime {
         project_key: &gwt_core::repo_hash::ProjectKey,
         session_id: &str,
         text: &str,
+        request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let target = self
             .tabs
@@ -841,10 +869,11 @@ impl AppRuntime {
                     ok: false,
                     window_id: None,
                     error: Some("no pane bound to this project session".into()),
+                    request_id,
                 },
             )];
         };
-        self.pane_send_input_to_window_events(client_id, &window_id, text)
+        self.pane_send_input_to_window_events(client_id, &window_id, text, request_id)
     }
 
     pub(crate) fn pane_send_input_to_window_events(
@@ -852,9 +881,11 @@ impl AppRuntime {
         client_id: ClientId,
         window_id: &str,
         text: &str,
+        request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let kind = super::RemoteRuntimeCommandKind::Input {
             reply_client: Some(client_id),
+            request_id,
         };
         let Some(runtime) = self.runtimes.get(window_id) else {
             return self.remote_command_refusal(
@@ -875,7 +906,10 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let kind = super::RemoteRuntimeCommandKind::Input { reply_client: None };
+        let kind = super::RemoteRuntimeCommandKind::Input {
+            reply_client: None,
+            request_id: None,
+        };
         let Some(runtime) = self.runtimes.get_mut(id) else {
             return self.remote_command_refusal(id, &kind, "no remote pane is installed".into());
         };
@@ -1085,19 +1119,9 @@ impl AppRuntime {
 
     #[cfg(test)]
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
-        if let Some(runtime) = self.runtimes.get(window_id) {
-            let command = gwt::project_runtime::events::OwnerCommand::Close {
-                id: runtime.owner_pane_id.clone(),
-                incarnation: runtime.incarnation,
-            };
-            let events = self.queue_remote_runtime_command(
-                window_id,
-                command,
-                super::RemoteRuntimeCommandKind::Stop,
-            );
-            if !events.is_empty() {
-                self.proxy.send(UserEvent::Dispatch(events));
-            }
+        let events = self.stop_window_events(window_id);
+        if !events.is_empty() {
+            self.proxy.send(UserEvent::Dispatch(events));
         }
     }
 
@@ -1265,6 +1289,7 @@ mod submit_split_tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &pm_registry::PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.into(),
                 recorded_at: "2026-08-13T00:00:00Z".into(),
                 status: PmDeliveryReceiptStatus::Prepared,

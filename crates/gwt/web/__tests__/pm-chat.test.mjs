@@ -27,11 +27,12 @@ function fixture({ tasksDefault = false } = {}) {
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
   let revision = 0;
-  const update = (reports = [], error = null, current = null) => {
+  const update = (reports = [], error = null, current = null, current_error = undefined) => {
     const request = model.requestPmReports('pm');
     const event = { kind: 'pm_reports', id: 'pm', request_id: request.request_id,
       version: { epoch: 'fixture', revision: ++revision }, snapshot: request.version === null,
-      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current };
+      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
+      ...(current_error === undefined ? {} : { current_error }) };
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
@@ -43,6 +44,30 @@ const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revi
 const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task ${key}`,
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
+
+test('Home opens Chat in one action and rebinds without showing the previous conversation (AC-3431-CHAT-1)', () => {
+  const { root, model, view } = fixture({ tasksDefault: true });
+  assert.equal(view.isChatVisible(), false, 'Home remains the default PM view');
+  const home = root.querySelector('.task-home');
+  assert.ok(home && !home.hidden, 'Home is visible on entry');
+  const chatButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Chat');
+  chatButton.click();
+  assert.equal(view.isChatVisible(), true, 'one toolbar action opens Chat');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'old', role: 'assistant', text: 'Previous session' }]));
+  assert.match(root.querySelector('.pm-chat__chat').textContent, /Previous session/);
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(view.isChatVisible(), false, 'a new session returns to Home');
+  assert.equal(home.hidden, false, 'Home is visible after rebinding');
+  chatButton.click();
+  assert.equal(view.isChatVisible(), true, 'the rebound session keeps one-action Chat access');
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0, 'previous-session bubbles are cleared');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'stale', role: 'assistant', text: 'Stale reply' }]));
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0, 'a delayed old-session reply stays hidden');
+  model.applyPmWindowReceiveEvent({ ...conversation([{ id: 'new', role: 'assistant', text: 'New session' }]),
+    session_id: 'replacement' });
+  assert.deepEqual([...root.querySelectorAll('.pm-chat__bubble')].map(node => node.textContent), ['New session']);
+});
 
 test('Home is the default PM view; Tasks preserves the unfinished filter and stable rows', () => {
   const { root, update, view, model } = fixture({ tasksDefault: true });
@@ -84,6 +109,22 @@ test('Home is the default PM view; Tasks preserves the unfinished filter and sta
   view.showTasks();
   assert.equal(filter.getAttribute('aria-pressed'), 'true');
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('A current-card failure keeps the last explanation but never hides newly saved reports (#6950)', () => {
+  const { root, model, update } = fixture();
+  const confirmed = { status: { items: [{ kind: 'waiting', text: 'Watching CI', started_at: '2026-10-13T09:00:00Z' }], next_trigger: 'CI result' }, request_tasks: taskOverview() };
+  update([report('one')], null, confirmed);
+  const before = model.readPmWindowState().windows.pm.current;
+  update([report('one'), report('two')], null, { request_tasks: taskOverview() }, 'PM current status could not be loaded');
+  const state = model.readPmWindowState().windows.pm;
+  assert.deepEqual(state.reports.map(item => item.id), ['one', 'two'], 'saved reports are displayed');
+  assert.equal(state.current, before, 'the last confirmed explanation is kept');
+  assert.equal(root.querySelectorAll('.pm-chat__body [data-report-id]').length, 2);
+  assert.match(root.querySelector('.pm-chat__body').textContent, /PM current status could not be loaded/);
+  update([report('three')], 'Unreadable reports', { request_tasks: taskOverview() });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['one', 'two'],
+    'only a reports failure keeps the last confirmed list');
 });
 
 test('Task read errors preserve confirmed data in the shared immutable model and recover explicitly', () => {
@@ -739,6 +780,38 @@ test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-
   assert.equal(chat.hidden, true);
 });
 
+test('Chat collapses earlier PM messages of one turn behind an N messages disclosure (T-CHAT-COLLAPSE)', () => {
+  const { root, model, view } = fixture();
+  view.showChat();
+  const chat = root.querySelector('.pm-chat__chat');
+  const turn = [
+    { id: 'u1', role: 'user', text: 'Status?' },
+    { id: 'a1', role: 'assistant', text: 'Checking the queue.' },
+    { id: 'a2', role: 'assistant', text: 'Reading CI.' },
+    { id: 'a3', role: 'assistant', text: 'All green.' },
+    { id: 'u2', role: 'user', text: 'Thanks' },
+    { id: 'a4', role: 'assistant', text: 'You are welcome.' },
+  ];
+  model.applyPmWindowReceiveEvent(conversation(turn));
+  const log = chat.querySelector('.pm-chat__conversation');
+  const order = () => [...log.children].map(node => node.tagName === 'DETAILS'
+    ? `group:${[...node.querySelectorAll('.pm-chat__bubble')].map(bubble => bubble.dataset.messageId).join(',')}`
+    : node.dataset.messageId);
+  assert.deepEqual(order(), ['u1', 'group:a1,a2', 'a3', 'u2', 'a4'], 'only the latest PM message of a turn stays open');
+  const group = log.querySelector('details.pm-chat__collapsed');
+  assert.equal(group.open, false);
+  assert.equal(group.querySelector('summary').textContent, '2 earlier messages');
+  group.open = true;
+  model.applyPmWindowReceiveEvent(conversation([...turn.slice(0, 4), { id: 'a5', role: 'assistant', text: 'Merged.' }, ...turn.slice(4)]));
+  assert.deepEqual(order(), ['u1', 'group:a1,a2,a3', 'a5', 'u2', 'a4']);
+  const regrown = log.querySelector('details.pm-chat__collapsed');
+  assert.equal(regrown.open, true, 'an expanded group stays expanded across snapshots');
+  assert.equal(regrown.querySelector('summary').textContent, '3 earlier messages');
+  model.applyPmWindowReceiveEvent(conversation([turn[0], turn[1], turn[4], { id: 'a6', role: 'assistant', text: 'Done.' }, { id: 'a7', role: 'assistant', text: 'Bye.' }]));
+  assert.deepEqual(order(), ['u1', 'a1', 'u2', 'group:a6', 'a7']);
+  assert.equal(log.querySelector('details.pm-chat__collapsed summary').textContent, '1 earlier message');
+});
+
 test('Chat rejects stale sessions and explains unavailable conversations', () => {
   const { root, model, view } = fixture();
   view.showChat();
@@ -787,23 +860,23 @@ test('Chat composer sends text to the PM pane and keeps it until delivery is con
   assert.equal(key({ isComposing: true }).defaultPrevented, false, 'Enter during IME composition is not a send');
   assert.equal(sent.length, 0);
   assert.equal(key().defaultPrevented, true);
-  assert.deepEqual(sent, [{ kind: 'pane_send_input', session_id: 'session', text: 'Ship #3431?\nThen report.\r' }]);
+  assert.deepEqual(sent, [{ kind: 'pane_send_input', session_id: 'session', text: 'Ship #3431?\nThen report.\r', request_id: sent[0].request_id }]);
   assert.equal(draft.value, 'Ship #3431?\nThen report.', 'the draft is kept while delivery is pending');
   assert.equal(button.disabled, true);
   assert.equal(draft.readOnly, true, 'the pending draft cannot be edited and then lost on success');
   assert.match(status.textContent, /Sending/);
   key();
   assert.equal(sent.length, 1, 'a pending message is not sent twice');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'other', error: null });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'other', error: null, request_id: sent[0].request_id });
   assert.match(status.textContent, /Sending/, 'another window result is ignored');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'no live runtime for remote pane' });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'no live runtime for remote pane', request_id: sent[0].request_id });
   assert.equal(draft.value, 'Ship #3431?\nThen report.', 'a refused message stays in the draft');
   assert.equal(status.textContent, 'Not sent: no live runtime for remote pane. Your message is kept.');
   assert.equal(button.disabled, false);
   assert.equal(draft.readOnly, false);
   form.dispatchEvent(new root.ownerDocument.defaultView.Event('submit', { cancelable: true }));
   assert.equal(sent.length, 2);
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'pm', error: null });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'pm', error: null, request_id: sent[1].request_id });
   assert.equal(draft.value, '', 'a delivered message clears the draft');
   assert.equal(status.textContent, '');
   model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'late' });
@@ -820,10 +893,47 @@ test('Chat composer sends text to the PM pane and keeps it until delivery is con
   model.markPmChatSendUnavailable('pm');
   assert.match(status.textContent, /Not sent.*not connected/i);
   key();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: null, error: 'no pane bound to this project session' });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: null, error: 'no pane bound to this project session', request_id: sent.at(-1).request_id });
   assert.match(status.textContent, /Not sent.*no pane bound/, 'a session refusal reaches the only pending send');
   model.bindPmWindowState('pm', 'replacement');
   assert.equal(model.requestPmChatSend('pm', 'x').session_id, 'replacement');
+});
+
+test('Chat ignores unrelated and expired send results while preserving the current draft', () => {
+  const { root, model, view, sent } = fixture();
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  const submit = () => {
+    draft.value = 'Keep this message';
+    draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+    root.querySelector('.pm-chat__composer').dispatchEvent(new root.ownerDocument.defaultView.Event('submit', { cancelable: true }));
+    return sent.at(-1);
+  };
+  const first = submit();
+  const reply = (request_id, window_id = 'pm') => model.applyPmWindowReceiveEvent({
+    kind: 'pane_send_result', request_id, window_id, ok: true, error: null });
+  reply(undefined);
+  assert.equal(draft.value, 'Keep this message', 'a legacy Command Palette result cannot clear the Chat draft');
+  reply(first.request_id + 1);
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'pending');
+  model.expirePmChatSend('pm');
+  const retry = submit();
+  assert.notEqual(retry.request_id, first.request_id);
+  reply(first.request_id);
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'pending', 'an expired attempt cannot settle its retry');
+  reply(retry.request_id, 'other');
+  assert.equal(draft.value, 'Keep this message', 'the correlated reply still must match its window');
+  reply(retry.request_id);
+  assert.equal(draft.value, '', 'only the matching result clears the draft');
+  const oldSession = submit();
+  model.bindPmWindowState('pm', 'replacement');
+  const rebound = submit();
+  reply(oldSession.request_id);
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'pending', 'a former Session result cannot settle a new send');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', request_id: rebound.request_id,
+    window_id: null, ok: false, error: 'no pane bound to this project session' });
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'failed');
+  assert.equal(draft.value, 'Keep this message', 'a matching early refusal preserves the draft');
 });
 
 test('Chat composer is Operator-styled and stays below the scrolling conversation', async () => {
@@ -832,7 +942,7 @@ test('Chat composer is Operator-styled and stays below the scrolling conversatio
   assert.match(rule('pm-chat__chat'), /display:\s*flex/);
   assert.match(rule('pm-chat__conversation'), /overflow-y:\s*auto/);
   assert.match(rule('pm-chat__composer'), /border-top:\s*1px solid var\(--color-border\)/);
-  for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status']) {
+  for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status', 'pm-chat__collapsed', 'pm-chat__collapsed-summary']) {
     assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
   }
 });

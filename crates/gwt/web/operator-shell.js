@@ -342,6 +342,22 @@ function usageSummaryPercent(account) {
   return percentages.length ? Math.max(...percentages) : null;
 }
 
+function codexCreditStatus(account) {
+  if (account.provider !== "codex" || !account.credits ||
+      !["ok", "stale"].includes(account.state?.kind)) return null;
+  const full = (account.windows || []).some(window =>
+    ["five_hour", "weekly"].includes(window.kind) && usageWindowPercent(window) === 100);
+  return {
+    active: full && account.credits.has_credits === true,
+    exhausted: full && account.credits.has_credits === false,
+  };
+}
+
+function usageDisplayLimitReached(account) {
+  const credits = codexCreditStatus(account);
+  return !credits?.active && (account.limit_reached || credits?.exhausted);
+}
+
 // Stable, glanceable per-provider summary value for the status strip (the
 // window nearest its limit when available, else a short degraded token).
 function usageSummaryValue(account) {
@@ -349,13 +365,21 @@ function usageSummaryValue(account) {
   if (kind === "disabled") return "off";
   if (kind === "no_data") return "—";
   if (kind === "unavailable") return "n/a";
+  if (codexCreditStatus(account)?.active) {
+    const credits = account.credits;
+    const balance = credits.unlimited ? "unlimited"
+      : Number.isFinite(credits.balance) && credits.balance >= 0
+        ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
+    return `Using credits · ${balance}${kind === "stale" ? " · stale" : ""}`;
+  }
   const percent = usageSummaryPercent(account);
   if (percent != null) return `${Math.round(percent)}%`;
   return "—";
 }
 
 function usageSeverity(account) {
-  if (account.limit_reached) return "danger";
+  if (usageDisplayLimitReached(account)) return "danger";
+  if (codexCreditStatus(account)?.active) return "normal";
   const percent = usageSummaryPercent(account);
   if (percent == null) return "";
   if (percent >= 95) return "danger";
@@ -421,7 +445,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
       USAGE_PROVIDER_NAME[account.provider] || usageProviderLabel(account.provider),
     value: usageSummaryValue(account),
     severity: usageSeverity(account),
-    accessibleSeverity: account.limit_reached
+    accessibleSeverity: usageDisplayLimitReached(account)
       ? "limit reached"
       : usageSeverity(account),
     criticality: usageCriticality(account),
@@ -440,7 +464,8 @@ export function applyProviderUsage(doc, snapshot = {}) {
     const chip = doc.createElement("span");
     chip.className = "op-usage-sum";
     chip.dataset.provider = account.provider;
-    if (account.limit_reached) chip.dataset.limit = "true";
+    if (usageDisplayLimitReached(account)) chip.dataset.limit = "true";
+    if (codexCreditStatus(account)?.active) chip.classList.add("op-usage-sum--credits");
     if (summary.severity) chip.dataset.severity = summary.severity;
     if (summary.models) {
       chip.classList.add("op-usage-sum--models");
@@ -494,7 +519,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
   cell.setAttribute("aria-controls", "provider-usage-popover");
   if (!cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
   cell.title = accessibleSummary;
-  if (accounts.some((a) => a.limit_reached)) cell.dataset.limit = "true";
+  if (accounts.some(usageDisplayLimitReached)) cell.dataset.limit = "true";
   else delete cell.dataset.limit;
   cell.hidden = false;
 
@@ -1437,19 +1462,108 @@ function pad2(n) {
 }
 
 // The project execution owner is independent of the browser's GUI connection.
-export function subscribeProjectOwnerHealth(doc, model) {
-  return model.subscribeFrame(state => state, health => {
-    if (health) applyProjectOwnerHealth(doc, health);
+export function subscribeProjectOwnerHealth(doc, model, { send, createFocusTrap = () => () => {} } = {}) {
+  const cell = doc.querySelector("[data-project-owner-health]");
+  let health = null, confirmationId = null, pending = false, releaseTrap = null, returnFocus = null;
+  const node = (tag, className, text) => {
+    const element = doc.createElement(tag);
+    element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const restart = node("button", "text-button", "Restart daemon…");
+  restart.type = "button";
+  restart.dataset.ownerRestart = "";
+  restart.hidden = true;
+  cell?.append(restart);
+  const modal = node("div", "modal-backdrop");
+  modal.id = "owner-restart-modal";
+  modal.setAttribute("aria-hidden", "true");
+  const dialog = node("div", "modal-shell");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "owner-restart-title");
+  dialog.setAttribute("aria-describedby", "owner-restart-description");
+  dialog.tabIndex = -1;
+  const header = node("div", "modal-header");
+  const title = node("h2", "", "Restart unresponsive daemon?");
+  title.id = "owner-restart-title";
+  header.append(title);
+  const body = node("div", "modal-body");
+  body.id = "owner-restart-description";
+  body.textContent = "Restarting stops all agents hosted by this daemon, including agents in other open projects. Diagnostics are saved first. GWT then sends SIGTERM and, if the daemon does not exit during the grace period, SIGKILL. Unsaved terminal work may be lost.";
+  const footer = node("div", "modal-footer");
+  const cancel = node("button", "text-button", "Cancel");
+  cancel.type = "button";
+  cancel.dataset.ownerRestartCancel = "";
+  const confirm = node("button", "wizard-button primary destructive", "Save diagnostics and restart");
+  confirm.type = "button";
+  confirm.dataset.ownerRestartConfirm = "";
+  footer.append(cancel, confirm);
+  dialog.append(header, body, footer);
+  modal.append(dialog);
+  doc.body.append(modal);
+  function hide() {
+    confirmationId = null;
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+    releaseTrap?.(); releaseTrap = null;
+    returnFocus?.focus?.(); returnFocus = null;
+  }
+  restart.addEventListener("click", () => {
+    if (health?.state !== "wedged" || !health.recovery_id || pending || !send) return;
+    confirmationId = health.recovery_id;
+    returnFocus = doc.activeElement;
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+    releaseTrap = createFocusTrap(dialog, { document: doc });
+    cancel.focus();
   });
+  cancel.addEventListener("click", hide);
+  modal.addEventListener("click", event => { if (event.target === modal) hide(); });
+  const onKey = event => {
+    if (event.key === "Escape" && modal.classList.contains("open")) {
+      event.preventDefault(); event.stopPropagation(); hide();
+    }
+  };
+  doc.addEventListener("keydown", onKey);
+  confirm.addEventListener("click", () => {
+    const current = model.read();
+    if (!modal.classList.contains("open") || current?.state !== "wedged" || !confirmationId || current.recovery_id !== confirmationId || pending || !send) return;
+    const recoveryId = confirmationId;
+    pending = true;
+    restart.disabled = true;
+    hide();
+    if (send({ kind: "restart_wedged_owner", confirmed: true, recovery_id: recoveryId }) !== "sent") {
+      pending = false;
+      restart.disabled = false;
+    }
+  });
+  const unsubscribe = model.subscribeFrame(state => state, current => {
+    const identityChanged = health?.recovery_id !== current?.recovery_id;
+    health = current;
+    if (health) applyProjectOwnerHealth(doc, health);
+    restart.hidden = health?.state !== "wedged" || !health?.recovery_id || !send;
+    // A backend refusal keeps the owner wedged. A new observation reopens
+    // the explicit confirmation path; the backend consumes each token once.
+    pending = false;
+    restart.disabled = false;
+    if (health?.state !== "wedged" || identityChanged) hide();
+  });
+  return () => {
+    unsubscribe(); hide();
+    doc.removeEventListener("keydown", onKey);
+    restart.remove(); modal.remove();
+  };
 }
 
 function applyProjectOwnerHealth(doc, health = {}) {
   const cell = doc.querySelector("[data-project-owner-health]");
   if (!cell) return;
-  const state = ["healthy", "degraded"].includes(health.state) ? health.state : "connecting";
+  const state = ["healthy", "degraded", "wedged"].includes(health.state) ? health.state : "connecting";
   cell.dataset.state = state;
   cell.hidden = false;
   cell.title = health.detail || "";
   const value = cell.querySelector("[data-project-owner-health-value]");
-  if (value) value.textContent = state === "healthy" ? "Ready" : state === "degraded" ? "Unavailable" : "Connecting";
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "wedged" ? "Wedged" : state === "degraded" ? "Unavailable" : "Connecting";
 }

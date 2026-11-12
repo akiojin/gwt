@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import textwrap
 import unittest
@@ -15,6 +16,56 @@ THIRD = "<!-- gwt-feedback:87e44d8a-7903-4457-9e2d-51703a44c180 -->"
 
 
 class FeedbackIntakeTests(unittest.TestCase):
+    def job_allows(self, payload, repository="akiojin/gwt"):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        condition = workflow.split("  identify:\n", 1)[1].split("    runs-on:", 1)[0]
+        condition = condition.split("if:", 1)[1].strip().removeprefix(">-").strip()
+        issue = payload.get("issue", {})
+        values = {
+            "github.repository": repository,
+            "github.event.issue.pull_request": issue.get("pull_request"),
+            "github.event.issue.body": issue.get("body"),
+            "github.event.issue.labels.*.name": [item["name"] for item in issue.get("labels", [])],
+            "github.event.comment": payload.get("comment"),
+            "github.event.comment.body": payload.get("comment", {}).get("body"),
+            "github.event.changes.body.from": payload.get("changes", {}).get("body", {}).get("from"),
+        }
+        condition = re.sub(r"github\.[\w.*]+", lambda match: json.dumps(values[match[0]]), condition)
+        harness = """
+const contains = (value, search) => Array.isArray(value)
+  ? value.some(item => item.toLowerCase() === search.toLowerCase())
+  : String(value ?? '').toLowerCase().includes(search.toLowerCase());
+"""
+        result = subprocess.run(["node", "-e", harness + f"console.log(Boolean({condition}));"],
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip() == "true"
+
+    def test_job_skips_unrelated_events_before_runner_allocation(self):
+        owner = {"number": 34, "body": "PM curated repair requirements", "labels": []}
+        for payload in [{"issue": owner}, {"issue": owner, "comment": {"body": "agent heartbeat"}},
+                        {"issue": {**owner, "body": MARKER, "labels": [{"name": "gwt-feedback"}]},
+                         "comment": {"body": "agent heartbeat"}},
+                        {"issue": owner, "comment": {"body": "<!-- gwt-feedback-aggregation:34 -->"}}]:
+            with self.subTest(payload=payload):
+                self.assertFalse(self.job_allows(payload))
+
+    def test_job_retains_raw_and_evidence_events_including_edits_and_deletions(self):
+        owner = {"number": 34, "body": "PM curated repair requirements", "labels": []}
+        for payload in [{"issue": {**owner, "body": MARKER}},
+                        {"issue": {**owner, "labels": [{"name": "gwt-feedback"}]}},
+                        {"issue": owner, "changes": {"body": {"from": MARKER}}},
+                        {"issue": owner, "comment": {"body": MARKER}},
+                        {"issue": owner, "comment": {"body": "edited away"},
+                         "changes": {"body": {"from": MARKER}}},
+                        {"action": "deleted", "issue": owner, "comment": {"body": MARKER}}]:
+            with self.subTest(payload=payload):
+                self.assertTrue(self.job_allows(payload))
+                self.assertFalse(self.job_allows(payload, repository="another/project"))
+                self.assertFalse(self.job_allows({
+                    **payload, "issue": {**payload["issue"], "pull_request": {"url": "pr"}},
+                }))
+
     def run_event(self, payload, comments=None, repository="akiojin/gwt", missing_labels=False,
                   current_issue=None, pages=None, fail_page=None, expected_error=None):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -52,6 +103,8 @@ console.log(JSON.stringify({calls, error}));
         self.assertEqual(result.returncode, 0, result.stderr)
         response = json.loads(result.stdout)
         self.assertEqual(response["error"], expected_error)
+        if response["calls"]:
+            self.assertTrue(self.job_allows(payload, repository), "job filter must retain script work")
         return response["calls"]
 
     def summary_writes(self, calls):

@@ -1173,6 +1173,7 @@ pub(super) fn runtime_hook_state_for_event(
         source_event: Some(source_event.to_string()),
         gwt_session_id: Some(session_id.to_string()),
         continuation_readiness_nonce: None,
+        native_prompt_id: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -1189,6 +1190,7 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
         source_event: Some("PostToolUse".to_string()),
         gwt_session_id: Some(session_id.to_string()),
         continuation_readiness_nonce: None,
+        native_prompt_id: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -1569,11 +1571,13 @@ pub(super) fn owner_fixture_block_on<T: Send>(
 ) -> T {
     let home = gwt_core::test_support::gwt_home_override();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let clock = gwt_core::operation_deadline::ScopedOperationClock::current();
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let _home = home.as_ref().map(ScopedGwtHome::set);
+                let _clock = clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -2661,6 +2665,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: true,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -6171,7 +6176,8 @@ fn leave_fresh_execution_activated_before_projection_commit(
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .unwrap());
 }
 
 impl AppRuntime {
@@ -6586,7 +6592,7 @@ impl OwnerFreshLaunchFixture {
 fn assert_owner_fresh_launch_rolled_back(fixture: &OwnerFreshLaunchFixture) {
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let candidate = &fixture.pending.binding.session_id;
-    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate));
+    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate).unwrap());
     assert!(!sessions_dir.join(format!("{candidate}.toml")).exists());
     assert!(!gwt_agent::runtime_state_path(&sessions_dir, candidate).exists());
     assert!(LaunchWizardMemoryCache::load(&sessions_dir)
@@ -9265,6 +9271,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9283,6 +9290,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9745,6 +9753,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -10033,6 +10042,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         session_mode: Default::default(),
         skip_permissions: false,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
@@ -11100,6 +11110,7 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     for submits_before_expiry in [0, 1] {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let prepared = pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: "2026-11-06T00:00:00Z".into(),
             status: Status::Prepared,
@@ -12355,6 +12366,7 @@ fn codex_usage_account(
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             weekly_used_percent,
@@ -12628,6 +12640,7 @@ fn assert_pm_delivery_refused(
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
         let hash = gwt::pm_registry::pm_delivery_prompt_sha256("do not deliver to the PM");
         let receipt = gwt::pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: Utc::now().to_rfc3339(),
             status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
@@ -12890,3 +12903,6 @@ mod work_projection_tests;
 mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
+
+#[cfg(test)]
+mod codex_speed_tests;

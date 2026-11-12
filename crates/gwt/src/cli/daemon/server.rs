@@ -4482,6 +4482,9 @@ fn apply_routine_issue_monitor_control(
                     None => crate::IssueMonitorFailureClass::Unknown,
                     _ => unreachable!("other typed failures are handled above"),
                 };
+                if monitor.record_review_window_failed_at(&window_id, &message, now) {
+                    return true;
+                }
                 if let Some(issue_number) =
                     issue_number.or_else(|| monitor.launched_window_issue(&window_id))
                 {
@@ -9250,11 +9253,14 @@ fn publish_issue_monitor_payloads(
     monitor: &mut crate::IssueMonitorState,
     project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
 ) {
+    // Read the leases before the snapshot so a connected window does not
+    // publish one scan late as "Open the gwt window".
+    monitor.set_gui_connected(issue_monitor_gui_connected(hub));
+    monitor.set_gui_window_open(hub.gui_window_open());
     refresh_issue_monitor_agent_status(hub, monitor);
-    let gui_connected = issue_monitor_gui_connected(hub);
     publish_issue_monitor_daemon_payloads(
         hub,
-        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, gui_connected),
+        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, monitor.gui_connected),
         project_store,
     );
 }
@@ -9369,6 +9375,7 @@ async fn handle_connection(
 
     let mut line = String::new();
     let mut materializer_lease = None;
+    let mut gui_window_lease = None;
     // Binds any verification child to this connection. Dropped on every exit
     // from the loop below, which is what makes a dead or disconnected caller
     // reclaim its workload instead of orphaning it (Issue #4409 AC-2).
@@ -9409,9 +9416,12 @@ async fn handle_connection(
             }
             Ok(frame @ ClientFrame::Subscribe { .. })
             | Ok(frame @ ClientFrame::SubscribeMaterializer { .. }) => {
-                let (channels, materializer) = match frame {
-                    ClientFrame::Subscribe { channels } => (channels, false),
-                    ClientFrame::SubscribeMaterializer { channels } => (channels, true),
+                let (channels, materializer, gui_window) = match frame {
+                    ClientFrame::Subscribe {
+                        channels,
+                        gui_window,
+                    } => (channels, false, gui_window),
+                    ClientFrame::SubscribeMaterializer { channels } => (channels, true, true),
                     _ => unreachable!("subscribe variants matched above"),
                 };
                 if materializer
@@ -9500,6 +9510,9 @@ async fn handle_connection(
                 // Otherwise the worker could drain a lossy notice/review
                 // outbox into the gap between lease acquisition and channel
                 // subscription.
+                if (gui_window || materializer) && gui_window_lease.is_none() {
+                    gui_window_lease = Some(hub.acquire_gui_window());
+                }
                 if materializer && materializer_lease.is_none() {
                     materializer_lease = Some(hub.acquire_issue_monitor_materializer());
                 }
@@ -10294,6 +10307,93 @@ mod agent_failure_source_contract_tests {
             crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
             committed
         );
+    }
+
+    #[test]
+    fn issue_4923_review_failure_control_resolves_unbound_window_and_counts_once() {
+        for snapshot_first in [false, true] {
+            let mut monitor = monitor_with_launch("review-claim", "tab-1::implementation");
+            monitor.set_autonomous_mode(true);
+            monitor.record_candidate(
+                serde_json::from_value(serde_json::json!({
+                    "number": 42, "title": "Review launch", "labels": [], "state": "open"
+                }))
+                .unwrap(),
+            );
+            monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+            monitor.begin_review(42, 99, "abc123");
+            let snapshot = |status| crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab-1".into(),
+                observed_at: "2026-07-02T00:00:01Z".into(),
+                windows: vec![crate::IssueMonitorWindowObservation {
+                    monitor_owned: false,
+                    window_id: "tab-1::review".into(),
+                    issue_number: Some(42),
+                    review_dispatch: true,
+                    status,
+                    hold_reason: None,
+                    last_output_at: None,
+                    session_id: None,
+                }],
+            };
+            monitor.record_window_snapshot(snapshot(if snapshot_first {
+                crate::WindowState::Error
+            } else {
+                crate::WindowState::Running
+            }));
+            // Use the GUI's actual fenced notification, with no Issue hint or binding.
+            let control = decode_issue_monitor_control(
+                crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    crate::project_runtime::runtime_events::issue_monitor_agent_failed_from_launch_payload(
+                        "tab-1::review",
+                        "Process exited with status 1",
+                        &crate::runtime_daemon_events::IssueMonitorAgentFailureSource::Unbound,
+                        None,
+                    ),
+                    std::process::id() + 1,
+                ),
+            ).expect("production review failure decodes");
+            assert_eq!(
+                super::try_apply_issue_monitor_control(
+                    &mut monitor,
+                    control,
+                    "2026-07-02T00:00:02Z"
+                ),
+                Some(true)
+            );
+            assert!(
+                monitor
+                    .autonomous_record(42)
+                    .unwrap()
+                    .review_attempts
+                    .is_some(),
+                "the notification must record the failure before another snapshot"
+            );
+            monitor.record_window_snapshot(snapshot(crate::WindowState::Error));
+            let record = monitor.autonomous_record(42).unwrap();
+            assert_eq!(
+                record
+                    .review_attempts
+                    .as_ref()
+                    .expect("review failure recorded")
+                    .count,
+                1
+            );
+            assert_eq!(record.attempts, 0, "the implementation did not fail");
+            let error = monitor
+                .inbox_item(42)
+                .unwrap()
+                .error_message
+                .as_deref()
+                .unwrap();
+            assert!(error.contains("launch failure"), "{error}");
+            assert!(!error.contains("PTY handoff complete") && !error.contains("never appeared"));
+            assert_eq!(
+                monitor.launched_window_id(42).as_deref(),
+                Some("tab-1::implementation")
+            );
+        }
     }
 
     #[test]
@@ -12657,6 +12757,33 @@ exit 0
         assert_eq!(status.active_count, fresh_status.active_launches.len());
     }
 
+    /// Issue #7087 AC-2: a live GUI window lease with no materializer lease
+    /// publishes the reconnect diagnostic and still withholds launch requests.
+    #[test]
+    fn open_gui_window_without_materializer_publishes_reconnect_diagnostic() {
+        let hub = BroadcastHub::new();
+        let project = TempDir::new().expect("project tempdir");
+        let project_store =
+            crate::runtime_daemon_events::ProjectStoreIdentity::from_project_root(project.path());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        let window = hub.acquire_gui_window();
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+        let now = "2026-11-12T00:00:00Z";
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status.stall_reason,
+            Some(crate::IssueMonitorStallReason::GuiDisconnected)
+        );
+        assert_eq!(
+            status.gui_action.as_deref(),
+            Some(crate::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION)
+        );
+        drop(window);
+    }
+
     /// SPEC #3431 FR-144 / AS-PM-SUBSCRIBE-OBSERVER-001: channel receivers are
     /// observations, not materializer authority. Neither one observer asking
     /// for both channels nor split observer connections may drain deliveries.
@@ -12919,6 +13046,7 @@ exit 0
                     crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
                     crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
                 ],
+                gui_window: false,
             })
             .await
             .expect("observer subscribes to both channels");
@@ -12936,6 +13064,7 @@ exit 0
         split_issue_observer
             .send_frame(&ClientFrame::Subscribe {
                 channels: vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+                gui_window: false,
             })
             .await
             .expect("issue observer subscribes");
@@ -12954,6 +13083,7 @@ exit 0
                 channels: vec![
                     crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
                 ],
+                gui_window: false,
             })
             .await
             .expect("overlay observer subscribes");
@@ -13263,6 +13393,7 @@ exit 0
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -17741,6 +17872,7 @@ exit 0
                 session_mode: Default::default(),
                 skip_permissions: false,
                 fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -27618,6 +27750,7 @@ exit 1
                 session_mode: Default::default(),
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),

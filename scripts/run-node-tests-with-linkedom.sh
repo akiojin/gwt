@@ -10,8 +10,8 @@ cleanup() {
 trap cleanup EXIT
 
 printf '{"private":true,"type":"module"}\n' > "$TMPDIR/package.json"
-if ! bun install --cwd "$TMPDIR" linkedom@0.18.12 acorn@8.15.0 >/dev/null 2>"$TMPDIR/bun-install.err"; then
-  npm install --prefix "$TMPDIR" linkedom@0.18.12 acorn@8.15.0 >/dev/null
+if ! bun install --cwd "$TMPDIR" linkedom@0.18.12 acorn@8.15.0 acorn-jsx@5.3.2 >/dev/null 2>"$TMPDIR/bun-install.err"; then
+  npm install --prefix "$TMPDIR" linkedom@0.18.12 acorn@8.15.0 acorn-jsx@5.3.2 >/dev/null
 fi
 
 ln -s "$ROOT/crates" "$TMPDIR/crates"

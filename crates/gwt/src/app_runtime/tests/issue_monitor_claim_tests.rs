@@ -249,6 +249,61 @@ fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notificatio
     );
 }
 
+#[test]
+fn issue_6996_cached_finalizer_timeout_does_not_repeat_error_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let request = super::super::DeferredIssueMonitorLaunch {
+        project_root: repo,
+        issue_number: 6996,
+        linked_issue_kind: LinkedIssueKind::Issue,
+        delivery_id: Some("finalizer-timeout-delivery".into()),
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    };
+    let message = "workspace finalizer fresh-launch-6996 timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline";
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context.clone(),
+                request.clone(),
+                message.into(),
+                None,
+            )
+            .len(),
+        1
+    );
+    for replay in 0..5 {
+        assert!(
+            runtime
+                .schedule_issue_monitor_launch_failure(
+                    context.clone(),
+                    request.clone(),
+                    message.replace("120000ms", &format!("{}ms", 120000 + replay * 5000)),
+                    None,
+                )
+                .is_empty(),
+            "cached timeout keeps recovery state without another error toast"
+        );
+    }
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context,
+                request,
+                message.replace("fresh-launch-6996", "fresh-launch-next"),
+                None,
+            )
+            .len(),
+        1,
+        "a different finalizer still reports its own timeout"
+    );
+}
+
 fn commit_issue_monitor_preparations(
     runtime: &mut AppRuntime,
     queued: &BlockingTestTaskQueue,
@@ -4162,6 +4217,102 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
 }
 
 #[test]
+fn issue_7072_update_drain_reaps_stopped_holder_without_monitor_scan() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("stopped-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/stopped-owner",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 7072,
+    };
+    let session_id = "update-stopped-holder";
+    seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/stopped-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let mut active = sample_active_agent_session("tab-1", "tab-1::agent-1");
+    active.session_id = session_id.into();
+    active.worktree_path = worktree.clone();
+    runtime
+        .active_agent_sessions
+        .insert(active.window_id.clone(), active);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-11-11T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: since.to_rfc3339(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(false),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // An admitted restore has no live runtime yet and must remain protected.
+    runtime
+        .restore_launch_windows
+        .insert("tab-1::agent-1".into(), Some(session_id.into()));
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(15));
+    assert_eq!(
+        gwt::cli::execution_state::load(&worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Active
+    );
+    runtime.restore_launch_windows.clear();
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(30));
+    assert_eq!(
+        gwt::cli::execution_state::load(&worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Blocked,
+        "the drain worker must reclaim its stopped holder even with Monitor disabled"
+    );
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(45));
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(105));
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::ApplyUpdateDrained { .. }
+        )),
+        "stopped execution and error window must allow graceful update apply"
+    );
+}
+
+#[test]
 fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -6819,38 +6970,39 @@ fn assert_expired_launch_ack_cleanup(
         .unwrap();
         None
     } else {
-        // The real scan commit rebases and expires at real now. Age only this
-        // exact fixture delivery so expiry survives that canonical recheck.
-        let created_at = (Utc::now() - chrono::Duration::seconds(121)).to_rfc3339();
-        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            let delivery = prefs
-                .pending_launch_deliveries
-                .iter_mut()
-                .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
-                .expect("the exact paused materializer delivery");
-            assert_eq!(delivery.issue_number, 42);
-            assert_eq!(
-                delivery.materializer_window_id.as_deref(),
-                Some(id.as_str())
-            );
-            delivery.created_at = created_at.clone();
-            prefs
-                .launching_issues
-                .iter_mut()
-                .find(|launch| launch.issue_number == 42)
-                .unwrap()
-                .claimed_at = Some(created_at.clone());
-            Ok(())
-        })
-        .unwrap();
-        owner_fixture_block_on(
-            owner.expire_monitor_windowless_launches_at(Utc::now().to_rfc3339()),
+        // This verifies cleanup after a committed expiry, not the deadline
+        // predicate. A scan can observe the paused Session's provisional live
+        // execution and correctly refuse to expire it (Issue #7098). Commit
+        // the exact delivery's timeout before releasing its launch checkpoint.
+        let delivery = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .pending_launch_deliveries
+            .into_iter()
+            .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
+            .expect("the exact paused materializer delivery");
+        assert_eq!(delivery.issue_number, 42);
+        assert_eq!(
+            delivery.materializer_window_id.as_deref(),
+            Some(id.as_str())
+        );
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(
+            &root,
+            gwt::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"launch_failed": {
+                    "issue_number": 42,
+                    "message": "Launch timed out: no window was created within 120s",
+                    "delivery_id": delivery.delivery_id,
+                    "materializer_id": delivery.materializer_id,
+                }}),
+                std::process::id(),
+            ),
         )
         .unwrap();
         let expired = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert!(
             expired.pending_launch_deliveries.is_empty(),
-            "the real daemon expired its windowless delivery"
+            "the real daemon committed the exact delivery's timeout"
         );
         assert!(expired.launching_issues.is_empty());
         Some(expired)
@@ -9715,6 +9867,241 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         "Issues auto launch must pass the generated prompt to the agent exactly once: {prompt}"
     );
 }
+/// Issue #3706: the native initial argv survives CLI startup and produces a
+/// first response without racing an early PTY input write.
+#[test]
+fn grok_monitor_auto_launch_delivers_initial_task_before_first_response() {
+    use gwt::project_runtime::events::OwnerCommand;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let grok_home = temp.path().join("grok-home");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join("codex-home"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "grok-initial-task",
+        MonitorProviderConversationFixture::Missing,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    let capture_path = temp.path().join("grok-native.txt");
+    let runner_root = temp.path().join("grok-runner");
+    pin_monitor_fixture_agents(
+        &fixture,
+        &runner_root,
+        &[(
+            "GWT_TEST_MONITOR_NATIVE_CAPTURE",
+            capture_path.to_str().unwrap(),
+        )],
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let runner = runner_root
+        .join("fixture-runner-bin")
+        .join(if cfg!(windows) { "grok.cmd" } else { "grok" });
+    let script = fs::read_to_string(&runner).unwrap();
+    // Reuse the native argv capture fixture. Its response is emitted only
+    // after the complete initial task has been read and atomically captured.
+    #[cfg(windows)]
+    let responding = script
+        .replace("echo owner-monitor-fixture-ready", "echo Read Terms and Privacy Policy. owner-monitor-fixture-ready")
+        .replace(
+            "[IO.File]::Move($temporary, $env:GWT_TEST_MONITOR_NATIVE_CAPTURE)",
+            "[IO.File]::Move($temporary, $env:GWT_TEST_MONITOR_NATIVE_CAPTURE); [Console]::WriteLine('GWT_GROK_FIRST_RESPONSE')",
+        );
+    #[cfg(not(windows))]
+    let responding = script
+        .replace(
+            "if [ -n \"${GWT_TEST_MONITOR_NATIVE_CAPTURE-}\" ]; then",
+            "printf 'Read Terms and Privacy Policy.\\n'\nif [ -n \"${GWT_TEST_MONITOR_NATIVE_CAPTURE-}\" ]; then",
+        )
+        .replace(
+            "  mv \"$GWT_TEST_MONITOR_NATIVE_CAPTURE.pending\" \"$GWT_TEST_MONITOR_NATIVE_CAPTURE\"",
+            "  mv \"$GWT_TEST_MONITOR_NATIVE_CAPTURE.pending\" \"$GWT_TEST_MONITOR_NATIVE_CAPTURE\"\n  printf 'GWT_GROK_FIRST_RESPONSE\\n'",
+        );
+    assert!(responding.contains("GWT_GROK_FIRST_RESPONSE"));
+    fs::write(&runner, responding).unwrap();
+
+    let events = prepare_monitor_relaunch(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
+    let pane = pane.expect("actual Grok Monitor launch");
+    let registered = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", pane.session.as_ref().unwrap().id)),
+    );
+    let observed = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound a real fixture process hang; the response marker, not elapsed time, establishes ordering.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = owner
+                    .command(OwnerCommand::Snapshot {
+                        id: pane.id.clone(),
+                        incarnation: pane.incarnation,
+                    })
+                    .await?;
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_GROK_FIRST_RESPONSE"))
+                {
+                    return fs::read_to_string(&capture_path).map_err(|error| error.to_string());
+                }
+                if let Some(exit) = pane.pty.try_wait().map_err(|error| error.to_string())? {
+                    return Err(format!("Grok fixture exited before its response: {exit:?}"));
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+    });
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    fixture
+        .runtime
+        .test_project_owners
+        .remove(&fixture.project_root);
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("drained Grok owner")
+            .shutdown(),
+    );
+
+    let registered = registered.expect("Grok launch must register its durable Session");
+    assert_eq!(registered.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(registered.id, pane.session.as_ref().unwrap().id);
+    assert_eq!(registered.session_mode, gwt_agent::SessionMode::Normal);
+    let captured = observed
+        .expect("Grok fixture must emit a first response")
+        .expect("Grok fixture must capture its initial task");
+    let (session_id, arguments) = captured.split_once('\n').unwrap();
+    let (prompt_file, arguments) = arguments.split_once('\n').unwrap();
+    let (arguments, prompt) = arguments
+        .split_once("\n__GWT_MONITOR_PROMPT_CONTENT__\n")
+        .unwrap();
+    assert_eq!(session_id, registered.id);
+    if prompt_file.is_empty() {
+        assert_eq!(arguments.matches("$gwt-execute #3165").count(), 1);
+    } else {
+        assert_eq!(
+            arguments
+                .matches("Read the complete initial task from the UTF-8 file")
+                .count(),
+            1
+        );
+    }
+    assert_eq!(prompt.matches("$gwt-execute #3165").count(), 1);
+    assert!(pane.pty.try_wait().unwrap().is_some());
+}
+
+#[test]
+#[ignore = "requires explicit opt-in, installed Grok and XAI_API_KEY; makes one paid model request"]
+fn grok_live_native_initial_task_starts_first_response() {
+    use gwt_terminal::pty::{PtyHandle, SpawnConfig};
+    use std::io::Read;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(std::env::var("GWT_GROK_LIVE_SMOKE").as_deref(), Ok("1"));
+    assert!(std::env::var_os("XAI_API_KEY").is_some_and(|key| !key.is_empty()));
+    let binary = std::env::var_os("GWT_GROK_LIVE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| which::which("grok").expect("installed Grok executable"));
+    assert!(binary.is_absolute() && binary.is_file());
+    #[cfg(windows)]
+    assert!(binary
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")));
+    let temp = tempdir().expect("isolated live cwd");
+    let mut args = gwt_agent::canonical_launch_args(&gwt_agent::AgentId::GrokBuild);
+    args.push("Do not use tools or modify files. Reply only with the uppercase spelling of: gwt_grok_live_response".into());
+    let pty = PtyHandle::spawn(SpawnConfig {
+        command: binary.display().to_string(),
+        args,
+        cols: 160,
+        rows: 40,
+        env: HashMap::from([(
+            "GROK_HOME".into(),
+            temp.path().join("grok-home").display().to_string(),
+        )]),
+        remove_env: std::env::vars_os()
+            .filter_map(|(key, _)| {
+                key.to_str()
+                    .filter(|key| key.starts_with("GWT_"))
+                    .map(str::to_owned)
+            })
+            .collect(),
+        cwd: Some(temp.path().to_path_buf()),
+    })
+    .expect("spawn real Grok CLI");
+    let reader = pty.reader();
+    if reader.is_err() {
+        let _ = pty.terminate_and_wait_for_tree(Duration::from_secs(10));
+        let _ = pty.wait();
+    }
+    let mut reader = reader.expect("real Grok PTY reader");
+    let (sender, receiver) = mpsc::channel();
+    let reading = thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut terminal = vt100::Parser::new(40, 160, 0);
+    // test-hygiene: allow-wall-clock-deadline Bound the opt-in live model request; only the generated uppercase response establishes success.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let responded = loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break false;
+        };
+        // test-hygiene: allow-wall-clock-deadline Bound the real CLI reader wait so timeout still reaches process-tree cleanup; only response content proves success.
+        let Ok(chunk) = receiver.recv_timeout(remaining) else {
+            break false;
+        };
+        if chunk.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+            let _ = pty.write_input(b"\x1b[1;1R");
+        }
+        terminal.process(&chunk);
+        if terminal
+            .screen()
+            .contents()
+            .contains("GWT_GROK_LIVE_RESPONSE")
+        {
+            break true;
+        }
+    };
+    let tree_exited = pty.terminate_and_wait_for_tree(Duration::from_secs(10));
+    let reaped = pty.wait();
+    pty.release_descriptors();
+    drop(receiver);
+    let reader_stopped = reading.join();
+    assert!(tree_exited.expect("terminate real Grok process tree"));
+    reaped.expect("reap real Grok CLI");
+    reader_stopped.expect("drain real Grok PTY reader");
+    assert!(
+        responded,
+        "real Grok did not start the requested response; screen={}",
+        terminal.screen().contents()
+    );
+}
+
 #[test]
 fn terminal_convergence_tick_defers_durable_update_reads_and_coalesces_scans() {
     let temp = tempdir().expect("tempdir");

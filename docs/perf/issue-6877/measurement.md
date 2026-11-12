@@ -18,6 +18,63 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-12: independent review verdict 待ちの gate readback（サチ）
+
+fresh launch の HEAD / fetched `origin/develop` はともに
+`c65e99b9be8bc2c896623d45678f3185513d70a2`。PR #7088 の source と merge は
+base に含まれ、未配信 source は0だった。AC-1/3 の配信状態を保持し、
+残る AC-2/4/5 を現 base に対して再評価した。
+
+03:30〜03:40 JST（2026-11-11T18:30:00Z〜18:40:00Z）の完全な600秒区間を、
+既存 `gwt.log.2026-11-11` の JSON から `fields.kind=gh` / `phase=start` /
+`span.name=issue_monitor_scan` で集計した。gwt は210件（protection43、
+rollup38、head36、mergeability34、timeline14、issues17、open pulls3、
+closed pulls3、full PR view22）、unity-cli は112件、vr-cabin-exposure は5件。
+timeline の延べ完了は29 Issue、全回 `pending=true`。対象番号や cursor が
+未記録なので、これを重複読みと断定しない。
+
+これは installed v9.160.0 / GUI PID52136（2026-11-11T11:40:47Z 起動）の
+旧 runtime 観測である。分割 gate と毎回の protection 読みは配信済み
+PR #7058 の集約・cache を反映しておらず、PR #7088 も未ロード。
+この件数や、その一部を差し引いた推計を現 develop の性能証拠にはしない。
+
+現 source に残る根因は別に確認した。`Reviewing` の worker は
+branch protection と gate を取得した後、`autonomous_gate_inputs` が
+reviewed SHA / verdict 未着で `None` を返すと読み取りを破棄していた。
+CI hold は verdict 後にしか作られず、結果待ちの各 scan で再取得する。
+
+最小 Plan は、この既存のローカル readiness 条件を readback 前へ移すこと。
+新 cache / TTL 延長との比較では、新状態を加えず既存契約を保つ案を採用した。
+対象は `issue_monitor_worker.rs` と既存 worker fixture、本記録、Work shards。
+`Some(false)` は完成した拒否 verdict として従来の live gate へ通す。
+空文字 SHA の意味、CI hold、acceptance/head 比較、permission / effect /
+review authority、slot、deadline、UI、稼働 fleet は変更しない。
+
+受け入れは、既存 review-backoff fixture の待機区間を使う決定的な
+RED/GREEN、既存 gate/cache/worker 回帰、hygiene、fresh canonical pre-pr、
+必須 CI / coverage と通常の Ready Refs PR / auto-merge / develop 包含。
+readback budget を既に消費した時計を注入し、未着待機は readback を試みず、
+成功・拒否 verdict 後は従来の BranchProtection stage に戻ることを検証する。
+配備後の AC-2/4/5 は対応する実 fleet 計測まで未証明・unchecked を維持する。
+
+既存 review-backoff 1件と CI-wait 1件は変更前に成功。拡張 fixture は
+`BranchProtection: scan budget reserved for the launch stage` で RED となり、
+未着待ちでも readback に進むことを確認した。production の修正は5行。
+独立実差分レビューは阻害0で、verdict の受信・復旧はこの readback と独立し、
+空文字 SHA や完成した拒否 verdict の意味は変わらないことも確認した。
+
+GREEN は `cargo test -p gwt --lib issue_monitor_worker:: -- --test-threads=1`
+で98成功（既存の実環境用1 ignored）、`issue_monitor_gate::` で40成功。
+追加待機区間、CI hold/cache、review backoff、acceptance/head drift と
+拒否 verdict の routing が成功した。test hygiene は37成功（既存の
+baseline 再生成 helper 1 ignored）、fmt / diff check も成功。
+
+Acceptance Surface: non-user-facing (ordering of remote gate discovery only).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## GUI の stale refresh 迂回（2026-11-10、次スライス）
 
 アヤ・ミウラ / Codex。開始時の fetch 後 HEAD と origin/develop はともに
@@ -272,6 +329,218 @@ rollback はこの2箇所の policy 修正を戻せばよく、データ migrati
 AC-2 の20回/10分、AC-4 の6 agent CPU、AC-5 の5分 / 60分比較は
 更新後の同一実行ファイルで別途測定する。単体テスト成功を達成証拠に
 置き換えず、owner の未チェックを維持する。
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
+## 2026-11-11: branch merge verdict の lineage スラッシング（サクラ）
+
+### 観測（installed GUI PID 34596、v9.159 系、再起動後約 30 分）
+
+- `~/.gwt/logs/gwt.log.2026-11-11` の `gwt.process.summary` を 12:45〜12:55
+  の 10 分で集計すると、GUI が起動した git/gh は 1,429 本。上位は
+  `rev-parse --verify --quiet origin/develop` 398、`merge-base --is-ancestor`
+  252、`rev-parse --verify --quiet work/issue-N` 214、
+  `rev-parse work/issue-N^{commit} origin/develop^{commit}` 196、
+  `git cherry` 17（AC-3 の 10 回/10 分を超過）。
+- この並びは branch list hydrate（`build_cleanup_targets` →
+  `detect_cleanable_target_with_remote_names` → `is_branch_merged_into`）の
+  ブランチ 1 本ごとの手順と一致する。1 回の hydrate が約 130 本の
+  ローカルブランチを 1〜3 秒/本で処理し、10 分間途切れず続いていた。
+- 古いブランチの `merge-base --is-ancestor` は 1 回 0.4〜1.5 秒、
+  `git cherry` は約 2 秒。
+- `branch-merge-verdicts.json` の 51da5cd（未マージ）の lineage は
+  `origin/develop` 現 tip と `origin/main` の tip 2 つ（8b46369 / 46b11ca）。
+  ログでは develop 判定のたびに main tip の lineage を `merge-base` で
+  順に試し、全て不一致のあと `git cherry` を全量で再実行していた。
+
+### 根因
+
+`is_merged_cached` は base が進んだとき、祖先にあたる lineage を
+**取り外して**新しい base へ付け替えていた。release 後の `origin/main` は
+古い `origin/develop` tip を含むため、main 判定が develop の lineage を
+消費する。次の develop 判定は使える lineage が無く `git cherry` を
+全量実行し、main 判定がまたそれを消費する。キャッシュがあっても、
+未マージのブランチは毎回 base ごとに cherry を払っていた。さらに
+`is_branch_merged_into_existing_refs` は cache を見る前に毎回
+`merge-base --is-ancestor <branch> <base>` を起動していた。
+
+### 修正（`crates/gwt-git/src/merge_verdict_cache.rs` / `branch.rs`）
+
+1. 進めた元の lineage は残し、新しい base の lineage を先頭に足す
+   （1 tip あたり最大 4 本は既存どおり）。
+2. lineage の祖先判定（base tip 同士）はプロセス内でメモ化する。commit の
+   祖先関係は不変で、1 回の hydrate の全ブランチが同じ base の組を問う。
+   エラーはメモ化しない。
+3. ブランチ自身の `--is-ancestor` は lineage が無い tip だけで実行する。
+   base が進んだ範囲の `rev-list --no-merges` にはマージコミットで入った
+   ブランチ自身のコミットも含まれるので、patch id の照合で検出できる。
+
+RED: 新規テスト
+`is_branch_merged_into_keeps_one_lineage_per_base_across_releases` が
+修正前に失敗した（release 後、tip の lineage が main 2 つだけ）。GREEN 後は
+develop / main の lineage が両方残り、変化が無い組の再判定は ref 確認 2 本と
+`rev-parse` 1 本の計 3 spawn だけになる（修正前は `merge-base` を含め 4 本）。
+gwt-git lib 425 件と `merged_branch_prune_test` 14 件が成功。
+
+### 範囲外 / 未測定
+
+- 実 fleet の AC-2（gh ≤20/10 分）、AC-4（6 agent で 5 秒 CPU ≤100%）、
+  AC-5（5 分 / 60 分の差 ≤20pt）は、この修正を含む実行ファイルで
+  PM が測定する。単体テストの結果を fleet の達成証拠にはしない。
+- 同じ 20 秒採取で、GUI 直下に `git status --porcelain=v1
+  --untracked-files=all --ignored=traditional -- .gwt/work/events.jsonl
+  .gwt/work/events` が 9 本あった（`work_event_dirty_paths`、Work event
+  settlement の判定）。これは `hidden_command` 経由で
+  `gwt.process.summary` に出ない。コマンドラインが空の git 16 本も
+  記録経路が同じと見られ、caller は特定できていない。この slice では
+  変更しない。
+
+## 2026-11-11: Reviewing gate の毎 scan readback（サクラ、次スライス）
+
+### 観測（installed GUI PID 34596、14:32〜14:42 JST の 10 分）
+
+`gwt.process.summary` の gh 起動は E:\gwt 139 本、E:\unity-cli 116 本で、
+AC-2（1 プロジェクト 10 分で 20 本以下）を満たしていない。すべて
+`issue_monitor_scan` span 内。上位は Reviewing 中の PR 1 本あたり scan ごとに
+4 本ずつ出る gate readback で、unity-cli PR #556 は
+`branches/main/protection` / `pr view --json statusCheckRollup` /
+`--json headRefOid` / `--json state,mergeable,mergeStateStatus` が各 26 本、
+gwt PR #7047 も同じ 4 本が各 19〜21 本だった。
+
+### 修正（`crates/gwt/src/issue_monitor_worker.rs` / `crates/gwt-git/src/pr_status.rs`）
+
+1. rollup・head・mergeability を `gh pr view --json
+   statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus` の 1 本で読む。
+2. branch protection を既存の in-process read cache（timer scan の read max
+   age 内だけ有効、失敗はキャッシュしない）で再利用する。
+3. gate が「必須 CI 実行中」（WaitForCi）と判定した PR は、timer scan では
+   60 秒間 gate readback を読み直さない。手動 scan は従来どおり毎回読む。
+   Deliver / Remediate は常に新しい readback で判定する。
+
+PR 1 本が 10 分 Reviewing に留まる場合、gh は約 104 本から約 11 本になる見込み。
+
+### 範囲外 / 未測定
+
+- E:\gwt の `gh api graphql issue timelines`（24 本）と `gh api issues`
+  （20 本）は Reviewing gate とは別経路で、この slice では変えていない。
+  そのため gwt プロジェクトでは修正後も AC-2 の 20 本に届かない見込み。
+- AC-4 / AC-5 は実 fleet で測定する。
+
+## 2026-11-12: corrected-head 待ちの個別再読（サチ）
+
+分類は gwt runtime の性能修正。fetched base と開始時 HEAD はともに
+`9221b0c75953e23eae442dc0ff0b73ad822b53a9`。branch-only commit は0、
+既存 PR #7058 は MERGED。owner は Issue #6877、関連 SPEC は Issue #4093。
+既配送 source は再実装せず、FR-6877-5 / T-6877-R16〜R18 を追加した。
+
+### 観測と根因
+
+[review-head-baseline.json](review-head-baseline.json) は installed GUI
+PID52136（PM記録の v9.160.0、2026-11-11T11:40:47Z 起動）の既存ログを
+01:00〜01:10 JST の600秒に限定して集計したもの。gwt project の
+`issue_monitor_scan` 内 gh start は67本で、PR #7083 / PR #7080 /
+PR #7074 の `headRefOid` が各12本、計36本を占めた。
+同時刻の hold reason は全て「corrected head 待ち」であった。
+親PIDはログにないため、GUI直接子の厳密な実測とは区別する。
+
+`Implementing` の review ladder / remediation が存在すると、worker は
+保留判定より前に毎scan個別HEADを取得する。open-pulls REST page は
+同じ scan が既に取得しており `head.sha` も含むが、数値PR一覧に変換した
+後の保留判定では使われていなかった。
+
+### 最小 Plan と境界
+
+Goal は保留中の重複HEAD取得の除去。TTL延長、新規cache、既存REST pageの
+再利用を比較し、既存page再利用を選ぶ。読取アダプタは同じ endpoint /
+`--include` / pager / cache key を共有する。periodic scan の発見情報は
+最大600秒遅れるが、実review dispatchは live HEAD / diff と既存の
+`dispatch_review` による最終hold再検査を維持する。manual scanもlive。
+
+対象は `pr_status.rs` / `issue_monitor_worker.rs` の読取経路と既存回帰。
+Non-goals / untouched は UI、TTL・deadline値、review ladder、slotと
+mutationのauthority、稼働fleetの停止・差替え、他の SPEC backlog。
+rollback はこの読取変更のrevertで、永続形式やmigrationの変更はない。
+
+受け入れは既存inventory / backoffテスト、実worker fixtureのRED/GREEN、
+cacheとliveで異なるSHAのdispatch、manual live、hygiene、fresh canonical
+pre-pr、Ready Refs PR、必須CI / auto-merge / develop包含で判定する。
+same-headのbackoff経過は既存domain回帰も併用して確認する。
+
+この36本を除くだけでも、元の観測には他経路31本が残る。fixtureでの
+呼出回数低減をfleetのAC-2（20本以下）へ置き換えない。AC-1/3の既配送
+状態を維持し、AC-2/4/5は更新後の適合する実測まで未チェックとする。
+PMのCPU観測は12点中11点が100%以下、3分/58分の差15ptであり、厳密な
+6 agent・5分/60分条件の全証明とは区別する。
+
+残るtimeline14本は成功13・timeout1。成功直後の13ログは全て
+`pending=true`、延べ完了数32で、既存cursor継続とbacklog処理に整合する。
+ただし対象Issue番号・cursor・query識別子・read max ageがログにないため、
+unique完了数や同一対象再読の内訳は確定できない。31本は修正後の予測値
+でもない。scan頻度が変わり得るため、別途実測が必要である。
+
+### 回帰とレビュー
+
+変更前のinventory4件と既存worker backoff1件はPASS。拡張fixtureは
+初回+保留2scanでHEAD取得3回、期待1回となってREDを確認した。
+先行したWindowsログ引用符によるcount0はテスト側の集計ミスとして修正し、
+production変更前に期待した原因でREDを再確認している。
+
+GREENの`issue_4815_` 5件はPASS。保留2scanのHEAD個別取得は0回、
+共有pulls pageは1回だけ取得。cacheのabc123とliveのdef456を分け、
+実dispatchがdef456へ結びつくこと、次のmanual scanがlive読取することを
+確認した。既存domainテストでsame-head backoff経過後の再試行と
+3失敗時の停止・新HEADによる解除も維持した。実差分の独立レビューは阻害0。
+
+Acceptance Surface: non-user-facing (remote discovery/cache routing only)。
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
+## 2026-11-12 タイムライン続きページの集約（FR-6877-7）
+
+### 計測（変更前、installed v9.161.1）
+
+macOS の GUI PID 8114（06:56 JST 起動）の `~/.gwt/logs/gwt.log.2026-11-12`
+を 10 分窓で集計した。gwt project の `issue_monitor_scan` 内 gh start は
+定常 30〜37 本で、20 本を上回る。12:40〜12:50 JST の内訳は
+`gh api graphql issue timelines` 20 本（約 30 秒の scan ごとに 1 本）、
+`gh api issues` 5 本、`gh pr view` 9 本、pulls 一覧 1 本だった。
+
+同日の incremental timeline readback 544 回はすべて `pending=true` で、
+完了 Issue 数 0 が 147 回あった。10 分あたりの完了は約 43 件で、
+Issue ごとの 600 秒 TTL が順に切れるため、backlog は空にならない。
+深い timeline（release PR が全 Issue を参照するため、#5390 は 208 件）
+の続きページは 1 alias の chunk として queue に戻り、1 回の呼出を占有していた。
+
+Issue の `updatedAt` を timeline cache の検証子に使う案は棄却した。
+Issue #5390 の `updatedAt` は 2026-11-11T03:39Z だったが、PR #7088 による
+cross-reference は同日 17:43Z に追加されていた。cross-reference は
+`updatedAt` を更新しない。
+
+### 変更と境界
+
+`LinkedPrBulkRead::read_next` は、部分的なページを後続の同種 chunk で
+alias 上限まで埋める。同種とは、続きページ同士、または初回ページ同士を指す。
+cursor、既読 cursor、途中の要約も一緒に移す。
+ページあたり 5 alias の上限、完全な履歴だけを公開する規則、不正 cursor の
+再始動、transport retry は維持する。#6954 の「失敗する続きページは
+初回ページを待たせない」も維持する。
+TTL、deadline、UI、launch/claim の権限は変更しない。
+
+### 検証
+
+RED: `issue_6877_linked_pr_bulk_read_packs_continuations_into_one_page` は
+変更前に呼出 4 回（期待 3 回）で失敗した。後続 scan の初回ページを挟む形に
+拡張後の期待値は 4 回で、変更前は 5 回になる。GREEN: `linked_pr` 20 件、
+`issue_monitor_worker::` を含む 117 件が PASS した。
+`cargo clippy -p gwt --all-targets --all-features -- -D warnings` も PASS した。
+
+期待効果は timeline 呼出の約 20 本 → 約 11 本 / 600 秒で、配備後の
+実測ではない。AC-2（合計 20 本以下）は本スライスだけでは満たさない見込みで、
+未チェックのまま残す。AC-4/5（CPU）も未計測である。
 
 User Verification Result: n/a (autonomous)
 

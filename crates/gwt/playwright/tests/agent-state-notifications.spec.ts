@@ -114,6 +114,25 @@ test("windowless NeedsHuman uses one notification history entry, never the inbox
   await page.screenshot({ path: testInfo.outputPath("needs-human-history.png"), fullPage: true });
 });
 
+test("Issue #4923: review launch failure appears once in notification history", async ({ page }, testInfo) => {
+  const message = "independent review for PR #99 at abc123 failed (attempt 1/3): review window launch failure: Process exited with status 1";
+  const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+  }, detail);
+  await inject({ kind: "issue_monitor_toast", level: "warn", issue_number: 4923, message });
+  await inject({ kind: "issue_monitor_inbox", items: [{
+    issue: { number: 4923, title: "Review launch failure", labels: [], state: "open" },
+    state: "launched", launched_window_id: "tab-1::implementation", error_message: message,
+  }] });
+  await page.locator("#op-notifications-button").click();
+  const rows = page.locator("#notification-center .notification-center__item");
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("launch failure");
+  await expect(rows.first()).toContainText("PR #99");
+  await expect(rows.first()).not.toContainText(/PTY handoff complete|never appeared|completed|finished/i);
+  await page.screenshot({ path: testInfo.outputPath("review-launch-failure.png"), fullPage: true });
+});
+
 test("Issue #5016 AC-HS3: identical Issues notices aggregate into one counted row", async ({ page }, testInfo) => {
   const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));

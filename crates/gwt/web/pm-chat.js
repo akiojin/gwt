@@ -96,10 +96,12 @@ export function createPmWindowModel() {
         const taskOverview = event.current?.request_tasks;
         const taskError = taskOverview?.state === 'error' ? taskOverview.message
           : (!taskOverview ? event.error || 'Request tasks are unavailable. Reload this page to try again.' : null);
-        next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
+        // A Current-card failure fences only that card; saved reports still apply (#6950).
+        const currentFailed = Boolean(event.error || event.current_error);
+        next = { ...next, reportsVersion: event.version, error: event.error || event.current_error || null, loaded: true,
           requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
           requestTasksError: taskError,
-          current: event.error ? previous.current : (event.current || null),
+          current: currentFailed ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
             content: report.structured ? { type: 'text', body: reportDisplayText(report) }
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
@@ -118,10 +120,12 @@ export function createPmWindowModel() {
         if (JSON.stringify(conversation) === JSON.stringify(previous.conversation)) return state;
         next = { ...next, conversation };
       } else if (event.kind === 'pane_send_result') {
-        // Results carry no correlation id; only a pending Chat send consumes one. Session
-        // refusals omit the window, which is unambiguous only with one send in flight.
-        const pendingIds = Object.keys(state.windows).filter(id => state.windows[id].chatSend?.status === 'pending');
-        const windowId = event.window_id ?? (pendingIds.length === 1 ? pendingIds[0] : null);
+        // Palette/CLI replies and expired attempts cannot settle a Chat send.
+        // Session refusals omit the window, but still carry the exact request ID.
+        if (!Number.isSafeInteger(event.request_id)) return state;
+        const windowId = Object.keys(state.windows).find(id => state.windows[id].chatSend?.status === 'pending'
+          && state.windows[id].chatSend.sequence === event.request_id
+          && (event.window_id == null || event.window_id === id));
         const pending = state.windows[windowId];
         if (pending?.chatSend?.status !== 'pending') return state;
         const chatSend = { sequence: pending.chatSend.sequence, status: event.ok ? 'sent' : 'failed',
@@ -153,7 +157,7 @@ export function createPmWindowModel() {
     if (!sessionId || !String(text ?? '').trim()) return null;
     const sequence = ++chatSendSequence;
     if (!setChatSend(windowId, current => current?.status !== 'pending', { sequence, status: 'pending', error: null })) return null;
-    return { kind: 'pane_send_input', session_id: sessionId, text: `${text}\r` };
+    return { kind: 'pane_send_input', session_id: sessionId, text: `${text}\r`, request_id: sequence };
   }
   function failPendingChatSend(windowId, error, sequence = null) {
     const current = model.read().windows[windowId]?.chatSend;
@@ -197,6 +201,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let scrollTop = 0;
   let followTail = true;
   const expandedReports = new Set();
+  const expandedChatGroups = new Set();
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -478,7 +483,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     chatDigest = nextDigest;
     const following = chatLog.scrollHeight - chatLog.clientHeight - chatLog.scrollTop <= 32;
     const messages = conversation?.availability === 'ready' ? conversation.messages : [];
-    chatLog.replaceChildren(...messages.map(message => {
+    const bubbleFor = message => {
       const user = message.role === 'user';
       const bubble = element('article', `pm-chat__bubble pm-chat__bubble--${user ? 'user' : 'assistant'}`);
       bubble.dataset.messageId = message.id;
@@ -486,7 +491,31 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       bubble.setAttribute('aria-label', user ? 'You' : 'PM');
       bubble.append(renderUiContent(document, message.content, 'pm-chat__text'));
       return bubble;
-    }));
+    };
+    // Within one PM turn only the latest PM message stays open; the earlier ones fold
+    // behind a disclosure keyed by the turn's first message. The open state is read from
+    // the DOM at render time because the toggle event fires asynchronously.
+    for (const group of chatLog.querySelectorAll('details.pm-chat__collapsed')) {
+      if (group.open) expandedChatGroups.add(group.dataset.groupKey); else expandedChatGroups.delete(group.dataset.groupKey);
+    }
+    const nodes = [];
+    for (let start = 0; start < messages.length;) {
+      let end = start + 1;
+      if (messages[start].role !== 'user') while (end < messages.length && messages[end].role !== 'user') end += 1;
+      const earlier = messages.slice(start, end - 1);
+      if (earlier.length) {
+        const key = earlier[0].id;
+        const group = element('details', 'pm-chat__collapsed');
+        group.dataset.groupKey = key;
+        group.open = expandedChatGroups.has(key);
+        group.append(element('summary', 'pm-chat__collapsed-summary',
+          `${earlier.length} earlier message${earlier.length === 1 ? '' : 's'}`), ...earlier.map(bubbleFor));
+        nodes.push(group);
+      }
+      nodes.push(bubbleFor(messages[end - 1]));
+      start = end;
+    }
+    chatLog.replaceChildren(...nodes);
     chatNotice.textContent = !conversation ? 'Loading PM conversation…'
       : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
@@ -678,6 +707,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     taskList.replaceChildren();
     tasksDigest = '';
     chatDigest = undefined;
+    expandedChatGroups.clear();
     chatLog.replaceChildren();
     draft.value = '';
     renderComposer(null);

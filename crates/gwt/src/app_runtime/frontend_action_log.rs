@@ -135,6 +135,9 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
+        FrontendEvent::RestartWedgedOwner { .. } => {
+            FrontendUserActionLog::new("restart_wedged_owner", "project")
+        }
         FrontendEvent::RefreshOrphanDaemons => {
             FrontendUserActionLog::new("refresh_orphan_daemons", "project")
         }

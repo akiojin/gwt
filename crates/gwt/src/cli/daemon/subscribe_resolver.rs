@@ -1369,6 +1369,7 @@ mod tests {
             client
                 .send_frame(&ClientFrame::Subscribe {
                     channels: vec!["issue-monitor".to_string()],
+                    gui_window: false,
                 })
                 .await
                 .expect("subscribe frame");

@@ -13,6 +13,7 @@ coordinator directory (`GWT_INDEX_COORDINATOR_ROOT`).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -397,7 +398,7 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
     def test_known_budget_interruption_before_first_batch_can_restart(self):
         db = self.db_root / ISSUE_REPO_HASH / "issues"
         with mock.patch.dict(os.environ, {"GWT_INDEX_REFRESH_RUN_ID": "run-a"}), \
-                mock.patch.object(runner, "_make_chroma_collection_repairing", side_effect=KeyboardInterrupt):
+                mock.patch.object(runner, "_open_issue_pool_for_build", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self._run()
         self.assertFalse((runner._staging_dir_for(db) / runner.CONTINUATION_FILENAME).exists())
@@ -414,6 +415,50 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
 
 V2_REPO_HASH = "19391939abcd1939"
 V2_WORKTREE_HASH = "aaaabbbbccccdddd"
+
+
+class FileIndexV2CheckpointTests(unittest.TestCase):
+    def test_cached_batches_only_checkpoint_new_embeddings_and_artifact_completion(self):
+        records = [{"path": f"src/{index}.rs", "bucket": "code",
+                    "document": str(index), "metadata": {}} for index in range(4)]
+        plans = [{"path": record["path"], "scope": "files"} for record in records]
+        checkpoint = mock.Mock()
+        progress = mock.Mock()
+        collection = mock.Mock()
+        collection.get.return_value = {"ids": [], "documents": [], "metadatas": [],
+                                       "embeddings": []}
+        # CAS hits must still be resolved and checked, but only newly computed
+        # vectors and artifact completion need persisted progress callbacks.
+        resolved = [([[1.0]], 0, 1), ([[1.0]], 1, 0),
+                    ([[1.0]], 0, 1), ([[1.0]], 0, 1)]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.multiple(
+                runner,
+                acquire_lock=lambda *args, **kwargs: contextlib.nullcontext(),
+                _uses_file_record_pool=lambda descriptor: True,
+                _file_artifact_store=lambda *args: root / "pool" / "store",
+                _artifact_pair_metadata_is_verified=lambda *args: False,
+                _make_file_index_v2_collection=lambda *args: (mock.Mock(), collection),
+                _resolve_record_vector_batch=mock.Mock(side_effect=resolved),
+                _write_heavy_progress=progress,
+                _pending_higher_priority=lambda priority: False,
+                _file_members_exist=lambda *args: True,
+                _close_chroma_client=mock.Mock(),
+                _write_json_atomic=mock.Mock(),
+                _staged_artifact_vectors_are_verified=lambda *args: True,
+                _fsync_file_index_v2_directory=mock.Mock(),
+                _fsync_directory=mock.Mock(),
+                _durably_replace_file_index_v2_directory=mock.Mock(),
+            ):
+                result = runner._materialize_file_artifact_pair(
+                    root / "artifact", records, [{}] * len(records), plans,
+                    {}, {}, root / "cas", qos="background", heavy_target="test",
+                    on_checkpoint=checkpoint,
+                )
+        self.assertEqual(result, (1, 3, False))
+        self.assertEqual(checkpoint.call_args_list, [mock.call(2), mock.call(4)])
+        self.assertEqual([call.args[1] for call in progress.call_args_list], [0, 2, 4])
 
 
 class FileIndexV2CooperativeYieldTests(unittest.TestCase):
