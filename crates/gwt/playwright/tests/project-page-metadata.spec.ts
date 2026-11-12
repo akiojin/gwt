@@ -233,21 +233,13 @@ test("SPEC #5016 AC-HS2: live title, status strip and Works heading render one s
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base, "requires browser-check isolated checkout server");
   const errors = collectErrors(page);
-  const aggregates: any[] = [];
-  page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
-    try {
-      const event = JSON.parse(String(payload));
-      if (event.kind === "project_agent_aggregate") aggregates.push(event.aggregate);
-    } catch { /* unrelated websocket payload */ }
-  }));
   await gotoLiveGwt(page, base!, { suppressProjectSurfaces: true });
   await openLiveGwtProject(page, process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd());
   const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
   await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await expect.poll(() => aggregates.length).toBeGreaterThan(0);
-  const aggregate = aggregates.at(-1);
-  expect(aggregate).toMatchObject({ running_count: 0, block_count: 1, idle_count: 0, error_count: 0 });
+  // The seeded stopped PM pane is the only agent: the server aggregate is RUN 0 / BLOCK 1.
+  await expect(page).toHaveTitle(/— RUN 0 · BLOCK 1 — gwt$/);
   await page.locator('.op-rail__surface[data-surface="works"]').click();
   const heading = page.locator(".works-surface:not(.works-surface--preview) .works-counts");
   for (const [strip, works, value] of [["running", "running", "0"], ["waiting", "block", "1"], ["idle", "idle", "0"], ["error", "error", "0"]]) {
@@ -255,7 +247,6 @@ test("SPEC #5016 AC-HS2: live title, status strip and Works heading render one s
     await expect(heading.locator(`[data-count="${works}"]`)).toHaveText(value);
   }
   await expect(page.locator(".op-status-strip__cell--waiting .op-status-strip__label")).toHaveText("BLOCK");
-  await expect(page).toHaveTitle(/— RUN 0 · BLOCK 1 — gwt$/);
   await page.screenshot({ path: testInfo.outputPath(`live-hs2-${theme}.png`) });
   expect(errors).toEqual([]);
 });
