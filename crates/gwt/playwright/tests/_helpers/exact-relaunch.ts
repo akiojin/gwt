@@ -91,6 +91,7 @@ export async function startExactRelaunchFixture(testInfo: TestInfo, setup: Exact
   }
   Object.assign(env, {
     HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"),
+    CLAUDE_CONFIG_DIR: join(home, ".claude"),
     PATH: [bin, process.env.PATH ?? process.env.Path ?? ""].join(delimiter),
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: join(home, "project"),
