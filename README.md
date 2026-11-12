@@ -353,8 +353,11 @@ supported request fields and storage requirements.
 #### Coordinator HTTPS startup (Unix, from source)
 
 The same binary provides an explicit `serve` command for deployment checks.
-It currently returns **404 for every HTTP request**: registration, signaling,
-client assets, and phone connections are not available.
+Every route currently returns **404**. A supplied `Origin` must be a single header
+matching the configured HTTPS origin exactly; otherwise the server returns **403**.
+Both responses carry a Content Security Policy restricting scripts and connections
+to the same origin and blocking frames, plus `nosniff`, `no-referrer`, and `no-store`.
+Registration, signaling, client assets, and phone connections are not available.
 
 Prepare the private directories above, initialize the registry, and place a
 matching PEM certificate chain and private key in private storage outside any
