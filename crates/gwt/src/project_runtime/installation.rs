@@ -2942,7 +2942,10 @@ pub(crate) fn prepare_owner_agent_admission(
                         let mut builder =
                             gwt_agent::AgentLaunchBuilder::new(config.agent_id.clone())
                                 .runtime_target(profile.runtime_target)
-                                .fast_mode(profile.fast_mode)
+                                .fast_mode(
+                                    profile.fast_mode
+                                        && config.agent_id != gwt_agent::AgentId::Codex,
+                                )
                                 .codex_speed(profile.codex_speed);
                         if let Some(model) = profile.model.or(default_model) {
                             builder = builder.model(model);
@@ -3067,7 +3070,8 @@ pub(crate) fn prepare_owner_agent_admission(
                             && profile.model == config.model
                             && profile.reasoning == config.reasoning_level
                             && profile.runtime_target == config.runtime_target
-                            && profile.fast_mode == config.fast_mode
+                            && (profile.fast_mode && config.agent_id != gwt_agent::AgentId::Codex)
+                                == config.fast_mode
                             && profile.codex_speed == config.codex_speed
                     })
                 });
@@ -4489,10 +4493,14 @@ mod owner_admission_tests {
             )
             .unwrap();
             let member_id = roster.members.last().unwrap().agent_member_id.clone();
-            let profile: crate::IssueMonitorLaunchProfile = serde_json::from_value(
+            let mut profile: crate::IssueMonitorLaunchProfile = serde_json::from_value(
                 serde_json::json!({"agent_id":agent_id.command(), "agent_member_id":member_id}),
             )
             .unwrap();
+            if agent_id == gwt_agent::AgentId::Codex {
+                profile.fast_mode = true;
+                profile.codex_speed = gwt_agent::CodexSpeed::Fast;
+            }
             crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
                 prefs.set_launch_profile_pool(vec![profile.clone()]);
                 Ok(())
@@ -4538,6 +4546,11 @@ mod owner_admission_tests {
             wizard.use_profile_launch_preferences();
             let mut defaults = wizard.build_launch_config().unwrap();
             assert!(defaults.reasoning_level.is_some());
+            if agent_id == gwt_agent::AgentId::Codex {
+                assert!(!defaults.fast_mode);
+                assert!(!defaults.codex_fast_mode);
+                assert_eq!(defaults.codex_speed, gwt_agent::CodexSpeed::Fast);
+            }
             let mut input = make_input();
             input.metadata.selected_agent_member_id = Some(member_id.clone());
             let result = prepare_owner_agent_admission(input, &mut defaults);
@@ -4783,7 +4796,7 @@ mod owner_admission_tests {
                 launch_auto: requested_tier.is_some(),
                 launch_tiers: requested_tier.map_or_else(Vec::new, |_| {
                     vec![vec![serde_json::from_value(serde_json::json!({
-                        "agent_id":"codex", "codex_speed":"fast"
+                        "agent_id":"codex", "fast_mode":true, "codex_speed":"fast"
                     }))
                     .unwrap()]]
                 }),

@@ -715,7 +715,7 @@ test.describe("Issue queue real backend launch", () => {
       const primaryScope = fixture.fixtureOperation("issue.monitor.status");
       expect(primaryScope.ok, JSON.stringify(primaryScope)).toBe(true);
       const sourceProfile = { agent_id: "codex", agent_member_id: target.agent_member_id,
-        model: "gpt-6-sol", reasoning: "high", fast_mode: true, runtime_target: "Host",
+        model: "gpt-6-sol", reasoning: "high", fast_mode: true, codex_speed: "fast", runtime_target: "Host",
         skip_permissions: false, prefer_for: ["label:source-only"] };
       const sourceSave = fixture.fixtureOperation("issue.monitor.profiles.set", { profiles: [sourceProfile] }, profileSourceRoot);
       expect(sourceSave.ok, JSON.stringify(sourceSave)).toBe(true);
@@ -835,11 +835,17 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(record, "session_mode")).toBe("Normal");
       expect(field(record, "model")).toBe(sourceProfile.model);
       expect(field(record, "reasoning_level")).toBe(sourceProfile.reasoning);
-      expect(record).toMatch(/^fast_mode\s*=\s*true$/m);
-      expect(record).toMatch(/^codex_fast_mode\s*=\s*true$/m);
+      // Legacy flags stay Off; explicit speed is persisted in launch arguments.
+      expect(record).toMatch(/^fast_mode\s*=\s*false$/m);
+      expect(record).toMatch(/^codex_fast_mode\s*=\s*false$/m);
+      const persistedLaunchArgs = /^launch_args\s*=\s*\[([\s\S]*?)\]/m.exec(record)?.[1];
+      expect(persistedLaunchArgs).toContain('"service_tier=fast"');
+      expect(persistedLaunchArgs).toContain('"features.fast_mode=true"');
       expect(record).toMatch(/^skip_permissions\s*=\s*true$/m);
       expect(launch.argv).toContain(`--model=${sourceProfile.model}`);
       expect(launch.argv).toContain(`model_reasoning_effort=${sourceProfile.reasoning}`);
+      expect(launch.argv).toContain("service_tier=fast");
+      expect(launch.argv).toContain("features.fast_mode=true");
       expect(launch.argv).toContain("--yolo");
       expect(launch.argv).not.toContain("resume");
       const primaryTarget = JSON.parse((await fixture.monitorPreferencesBytes()).toString()).launch_profiles
