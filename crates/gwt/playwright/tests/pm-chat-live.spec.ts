@@ -29,6 +29,13 @@ async function gotoPmReports(page: Page, projectKey?: string, base = BASE, keepT
   if (!keepTasks) await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
 }
 
+// A reload reopens the PM window in its default Chat view (T-CHAT-DEFAULT),
+// so reselect Reports before asserting the persisted history.
+async function reloadPmReports(page: Page) {
+  await page.reload();
+  await page.locator('.pm-chat').getByRole('button', { name: 'Reports', exact: true }).click();
+}
+
 async function refreshPmReports(page: Page) {
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
 }
@@ -885,7 +892,7 @@ test.describe('PM reports', () => {
         await info.attach(`Inactive Reports after ${phase}`, { path: screenshot, contentType: 'image/png' });
         lastMarker = marker;
       }
-      await page.reload();
+      await reloadPmReports(page);
       await expect(reports.getByRole('heading', { name: lastMarker, exact: true })).toBeVisible();
       expect(errors).toEqual([]);
     });
@@ -957,7 +964,7 @@ test.describe('PM reports', () => {
       await refreshPmReports(page);
       await expect(outgoingReport).toHaveCount(1);
       await expect(incomingReport).toHaveCount(1);
-      await page.reload();
+      await reloadPmReports(page);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(outgoingReport).toHaveCount(1);
       await expect(incomingReport).toHaveCount(1);
@@ -1039,7 +1046,7 @@ test.describe('PM reports', () => {
       await expect(reports.locator('article').filter({ hasText: action })).toHaveCount(1);
       await expect(reports.locator('article').filter({ hasText: answer })).toHaveCount(1);
       await expect(reports.getByText(question, { exact: true })).toBeVisible();
-      await page.reload();
+      await reloadPmReports(page);
       await expect(reports.locator('article')).toHaveCount(originalRows + 2);
       await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
       const screenshot = info.outputPath(`automatic-prompt-reports-${info.project.name}.png`);
@@ -1131,7 +1138,9 @@ test.describe('PM reports', () => {
       await expect(report.locator('li')).toHaveCount(2);
       await expect(report.locator('pre code')).toHaveText('cargo test -p gwt-core\n');
       await expect(report.locator('time')).toHaveAttribute('datetime', /T/);
-      await expect(pane.locator('.pm-chat').locator('input, textarea, form, [contenteditable], button[type="submit"]')).toHaveCount(0);
+      // Reports stay read-only; the Chat composer exists but is hidden here.
+      await expect(reports.locator('input, textarea, form, [contenteditable], button[type="submit"]')).toHaveCount(0);
+      await expect(pane.getByRole('form', { name: 'Message PM', exact: true })).toBeHidden();
       const attachments = await page.evaluate(() => {
         const calls: string[] = [];
         (window as any).__gwtAttachmentUploader = async () => { calls.push('upload'); return { upload_id: 'blocked' }; };
@@ -1207,7 +1216,7 @@ test.describe('PM reports', () => {
       await pane.getByRole('button', { name: 'Reports', exact: true }).click();
       await expect(report).toBeVisible();
       expect(await page.evaluate(() => (window as any).__pmReportAttachmentCalls)).toEqual([]);
-      await page.reload();
+      await reloadPmReports(page);
       await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
       await expect(report).toBeVisible();
       await expect(qaReport.locator('.pm-chat__question')).toHaveText(question);

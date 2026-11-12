@@ -290,6 +290,32 @@ if [ ! -s "$CHECK_KEEPALIVE_READY" ] || ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/
   exit 1
 fi
 
+# Issue #5219: a --no-tray instance exits once no GUI client is connected, which
+# happens between tests that close their page. Retain one read-only Hub
+# connection until the suite ends. This client and the server belong to this shell.
+CHECK_KEEPALIVE_READY="$CHECK_HOME/keepalive-ready"
+node --input-type=module - "$CHECK_URL" "$CHECK_KEEPALIVE_READY" \
+  > "$CHECK_HOME/keepalive.log" 2>&1 <<'JS' &
+import { writeFileSync } from "node:fs";
+const url = new URL("/ws", process.argv[2]);
+url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+const socket = new WebSocket(url);
+socket.addEventListener("open", () => writeFileSync(process.argv[3], "ready"));
+socket.addEventListener("error", (event) => { console.error(event.error); process.exit(1); });
+socket.addEventListener("close", () => process.exit(1));
+JS
+CHECK_KEEPALIVE_PID=$!
+for ((CHECK_WAIT=0; CHECK_WAIT<100; CHECK_WAIT++)); do
+  if [ -s "$CHECK_KEEPALIVE_READY" ]; then break; fi
+  if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+if [ ! -s "$CHECK_KEEPALIVE_READY" ] || ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
+  cat "$CHECK_HOME/keepalive.log" >&2
+  echo 'browser-check Hub connection failed' >&2
+  exit 1
+fi
+
 # Keep the runner on the real HOME so its pinned browser cache is available.
 # Only the owned checkout process receives CHECK_HOME. Extra arguments include
 # canonical verify.run's --headed and embedded reporter.
