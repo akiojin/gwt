@@ -21,6 +21,7 @@ type RosterMember = { agent_member_id: string; agent_id: string; name: string; e
   saved_manual_revision?: string | null;
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
+const WINDOWS_WORKS_CASE = "Works shows the real PM and four implementation children after reload";
 
 async function rosterAfter(page: Page, after: number, previousRevision = -1): Promise<AgentRoster> {
   return page.waitForFunction(({ after, previousRevision }) => {
@@ -291,7 +292,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // CI Playwright job does not build.
   test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1",
     "GWT_PLAYWRIGHT_EXACT_RELAUNCH=1 is not set; checkout relaunch E2E skipped");
-  test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
+  test.beforeEach(({}, info) => {
+    test.skip(process.platform === "win32" && info.title !== WINDOWS_WORKS_CASE,
+      "only the Works cold-restart case has Windows acceptance coverage");
+  });
   test.setTimeout(420_000);
 
   test("Issue #6946: explicit Quit drains the GUI, managed daemon and live provider", async ({ page }, info) => {
@@ -395,7 +399,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
 
   test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
     let starts = 0;
-    const cleanups: { pid: number; ps_status: number }[] = [];
+    const cleanups: { pid: number; exited: boolean }[] = [];
     const fixture = await startExactRelaunchFixture({
       async attach(name, attachment) {
         if (name === "exact-relaunch-fixture" && ++starts === 2) throw new Error("fixture evidence failure");
@@ -406,7 +410,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     try {
       await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
       expect(cleanups).toHaveLength(2);
-      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
+      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.exited)).toBe(true);
     } finally {
       await fixture.stop();
     }
@@ -780,12 +784,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
-  test("Works shows the real PM and four implementation children after reload", async ({ page }, info) => {
+  test(WINDOWS_WORKS_CASE, async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
     const fixture = await startExactRelaunchFixture(info, {
       monitorPreferences: { max_active_agents: 4 },
       async prepare({ home, bin, project, env }) {
+        env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info"].join(",");
         const git = (...args: string[]) => execFileSync("git", args, { cwd: project, env, encoding: "utf8" });
         git("clone", "--bare", "--quiet", project, join(home, "origin.git"));
         git("remote", "add", "origin", join(home, "origin.git")); git("fetch", "--quiet", "origin");
@@ -817,6 +822,7 @@ const at = new Date().toISOString();`);
   }
   if (line.trim() === 'GWT_FIXTURE_EXIT')`);
         let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
+          .replace("const hookProvider = 'codex';", "const hookProvider = 'claude';")
           .replace("'.codex', 'hooks.json'", "'.claude', 'settings.local.json'")
           .replace("const resumed = resumeAt < 0 ? null :", "const resumed = option('--resume') || (resumeAt < 0 ? null :")
           .replace(" ?? null);\nconst requested", " ?? null));\nconst requested");
@@ -942,7 +948,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await assertAggregates();
       await expect.poll(async () => Number(await first.locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
       await expect.poll(() => first.locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
-      const pmWorktree = tomlString(await sessionRecord(fixture.home, pm.session_id), "worktree_path");
+      const registration = JSON.parse(await readFile(join(fixture.preferences, "pm.json"), "utf8")).registration;
+      expect(registration.session_id).toBe(pm.session_id);
+      const pmWorktree = registration.worktree_path;
       expect(pmWorktree).toBeTruthy();
       const pmBranch = execFileSync("git", ["-C", pmWorktree!, "branch", "--show-current"], { encoding: "utf8" }).trim();
       await expect(first.locator('[data-stat="branch"]')).toHaveText(pmBranch);
@@ -966,9 +974,14 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
-      // Prevent the old document from reconnecting before the fresh navigation.
-      await page.goto("about:blank");
-      const restarted = await fixture.restart({ coldOwnerDrain: true }); workspace = null; usage = null; activity = null;
+      // Capture the owner before ending the last browser document's lifetime.
+      const restarted = await fixture.restart({ coldOwnerDrain: true,
+        disconnectBrowser: () => page.goto("about:blank") }); workspace = null; usage = null; activity = null;
+      const shutdown = info.attachments.find(attachment => attachment.name === "fixture-cold-gui-shutdown");
+      expect(shutdown, "cold restart must prove signal-free normal GUI shutdown").toBeDefined();
+      expect(JSON.parse(shutdown!.body!.toString())).toMatchObject({
+        exit_code: 0, signal: null, shutdown_requested: true, cleanup_completed: true, backstop: false,
+      });
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
@@ -1039,7 +1052,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         for (const session of new Set((await fixture.launches()).map(launch => launch.gwt_session_id))) {
           expect(profiles, `retain hook timings for launched Session ${session}`).toContain(`hook-${session}.jsonl`);
         }
-      } finally { await fixture.stop(); }
+      } finally {
+        await fixture.stop(true, () => page.goto("about:blank"));
+      }
     }
   });
 
