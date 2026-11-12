@@ -214,10 +214,17 @@ export function applyTelemetryCounts(doc, counts = {}) {
 }
 
 export function subscribeIssueMonitorStatus(doc, model) {
-  return model.subscribeFrame(state => state.status, status => renderIssueMonitorStatus(doc, status));
+  let selected;
+  return model.subscribeFrame(state => {
+    const summary = state.humanAttention?.summary;
+    if (!selected || selected.status !== state.status || selected.summary !== summary) {
+      selected = { status: state.status, summary };
+    }
+    return selected;
+  }, state => renderIssueMonitorStatus(doc, state.status, state.summary));
 }
 
-export function renderIssueMonitorStatus(doc, status = {}) {
+export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
@@ -226,8 +233,8 @@ export function renderIssueMonitorStatus(doc, status = {}) {
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Open Issues: ${view.value}`);
-  cell.setAttribute("title", `Open Issues | ${view.title}`);
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, humanSummary].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
