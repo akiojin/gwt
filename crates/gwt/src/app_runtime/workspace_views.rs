@@ -4126,10 +4126,12 @@ fn agent_roster_view_from_snapshot(
     strict: bool,
 ) -> std::io::Result<gwt::AgentRosterView> {
     use std::collections::{BTreeMap, BTreeSet};
-    let roster = prefs
-        .agent_roster
-        .as_ref()
-        .expect("initialized roster snapshot");
+    let roster = prefs.agent_roster.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Agent roster is not initialized; reload the current roster and retry",
+        )
+    })?;
     let normalized_root =
         dunce::canonicalize(&context.project_root).unwrap_or_else(|_| context.project_root.clone());
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(&context.project_root);
@@ -6734,6 +6736,23 @@ mod bounded_cache_merge_tests {
             result.is_err(),
             "Prepared registry must refuse even with no Sessions"
         );
+        std::fs::write(gwt::agent_registry::path(), br#"{"schema_version":2,"phase":"active","revision":1,"roster":null,"profiles":{},"sources":{},"pm_projects":{}}"#).unwrap();
+        let snapshot = gwt::agent_registry::SessionMemberSnapshot::load().unwrap();
+        let uninitialized = snapshot.project_snapshot(&context.project_key).unwrap();
+        assert!(uninitialized.agent_roster.is_none());
+        let error = agent_roster_view_from_snapshot(
+            &context,
+            &uninitialized,
+            &[],
+            &[],
+            true,
+            &gwt_core::paths::gwt_sessions_dir(),
+            Some(&snapshot),
+            true,
+        )
+        .expect_err("a valid but uninitialized snapshot must return an error without panicking");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("not initialized"));
     }
 
     #[test]
