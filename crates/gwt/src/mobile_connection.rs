@@ -62,10 +62,19 @@ impl HostBinding {
     pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
         let host_id = Uuid::parse_str(host_id)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;
-        let origin = reqwest::Url::parse(coordinator_origin)
-            .ok()
-            .filter(|url| {
-                url.scheme() == "https"
+        let coordinator_origin = normalize_coordinator_origin(coordinator_origin)?;
+        Ok(Self {
+            host_id: host_id.to_string(),
+            coordinator_origin,
+        })
+    }
+}
+
+pub(crate) fn normalize_coordinator_origin(coordinator_origin: &str) -> io::Result<String> {
+    let origin = reqwest::Url::parse(coordinator_origin)
+        .ok()
+        .filter(|url| {
+            url.scheme() == "https"
                     && url.host_str().is_some()
                     && url.username().is_empty()
                     && url.password().is_none()
@@ -79,18 +88,14 @@ impl HostBinding {
                     })
                     && coordinator_origin.trim() == coordinator_origin
                     && !coordinator_origin.chars().any(char::is_control)
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid mobile coordinator origin",
-                )
-            })?;
-        Ok(Self {
-            host_id: host_id.to_string(),
-            coordinator_origin: origin.origin().ascii_serialization(),
         })
-    }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid mobile coordinator origin",
+            )
+        })?;
+    Ok(origin.origin().ascii_serialization())
 }
 
 impl TryFrom<StoredHostBinding> for HostBinding {

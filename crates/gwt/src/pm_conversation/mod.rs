@@ -29,6 +29,8 @@ pub struct PmConversationMessage {
     pub id: String,
     pub role: PmConversationRole,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +395,16 @@ pub fn read_for_session(session: &Session) -> PmConversationSnapshot {
     PmConversationReader::default().read_for_session(session)
 }
 
+pub(crate) fn native_request_source_id(
+    provider: &str,
+    conversation: &str,
+    message: &str,
+) -> String {
+    let identity = serde_json::to_vec(&(provider, conversation, message))
+        .expect("native identity is a serializable string tuple");
+    format!("native:{}", gwt_core::pm_authorization::digest(&identity))
+}
+
 #[cfg(test)]
 fn read_path(agent: &AgentId, path: &Path, id: &str, cwd: &Path) -> PmConversationSnapshot {
     match std::fs::File::open(path) {
@@ -514,11 +526,15 @@ fn scan_records(
             }
             _ => return Err("This conversation format is unsupported."),
         };
-        let Some(message) = message else {
+        let Some(mut message) = message else {
             continue;
         };
         if message.role == PmConversationRole::User && internal_prompt(&message.text) {
             continue;
+        }
+        if message.role == PmConversationRole::User {
+            let source_id = native_request_source_id(key.agent.command(), &key.id, &message.id);
+            message.source_key = Some(gwt_core::pm_authorization::digest(source_id.as_bytes()));
         }
         if let Some(existing) = snapshot
             .messages

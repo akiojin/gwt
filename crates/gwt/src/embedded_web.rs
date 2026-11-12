@@ -188,6 +188,10 @@ root_js_modules! {
     // pm-chat.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.
     "task-home.js" => "createTaskHome",
+    // SPEC #7007 — task-centered Decide island host for the PM chat surface.
+    // pm-chat.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load 404s and the splash hangs.
+    "task-decisions.js" => "createTaskDecisions",
     // SPEC #3206 — shared floating-toast primitive behind the bottom-right
     // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",

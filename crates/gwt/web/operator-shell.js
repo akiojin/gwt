@@ -206,7 +206,8 @@ export function applyTelemetryCounts(doc, counts = {}) {
         : "";
   }
   setText("op-strip-idle", counts.idle ?? 0);
-  // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
+  // SPEC #5016 AC-HS1: the cell keeps its FR-039 `waiting` styling contract
+  // and shows the server BLOCK count (agents that need the operator).
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");

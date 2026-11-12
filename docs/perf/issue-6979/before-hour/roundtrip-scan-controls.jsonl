@@ -1,0 +1,2 @@
+{"roundtrip": 1, "sent_at_ms": 1794430355870, "owner": {"pid": 54852, "executable": "E:\\gwt\\work\\issue-6979\\target\\debug\\gwtd.exe", "creation_100ns": 134389039504158593, "created_epoch_ms": 1794430350415}, "acknowledgment_ms": 31, "boundary": "premeasurement native ScanNow"}
+{"roundtrip": 2, "sent_at_ms": 1794430368832, "owner": {"pid": 54852, "executable": "E:\\gwt\\work\\issue-6979\\target\\debug\\gwtd.exe", "creation_100ns": 134389039504158593, "created_epoch_ms": 1794430350415}, "acknowledgment_ms": 73, "boundary": "premeasurement native ScanNow"}

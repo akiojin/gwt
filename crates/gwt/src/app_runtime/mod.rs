@@ -693,7 +693,7 @@ pub struct WindowRuntime {
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
     pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
-    input_in_flight_reply: Option<ClientId>,
+    input_in_flight_reply: Option<(ClientId, Option<u64>)>,
     pub(crate) pending_input_commands: std::collections::VecDeque<(
         gwt::project_runtime::events::OwnerCommand,
         RemoteRuntimeCommandKind,
@@ -815,7 +815,10 @@ struct PendingRemoteRuntimeCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) enum RemoteRuntimeCommandKind {
-    Input { reply_client: Option<ClientId> },
+    Input {
+        reply_client: Option<ClientId>,
+        request_id: Option<u64>,
+    },
     Resize,
     Stop,
 }
@@ -12380,9 +12383,11 @@ impl AppRuntime {
                 pm_chat::PmRequestTaskOperation::Complete(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
-            FrontendEvent::PaneSendInput { session_id, text } => {
-                self.pane_send_input_events(client_id, &session_id, &text)
-            }
+            FrontendEvent::PaneSendInput {
+                session_id,
+                text,
+                request_id,
+            } => self.pane_send_input_events(client_id, &session_id, &text, request_id),
             FrontendEvent::PmPaneSendInput {
                 operation_id,
                 window_id,
@@ -13449,13 +13454,19 @@ impl AppRuntime {
             .collect()
     }
 
+    /// SPEC #5016 AC-HS1 derived-state definition, kept in this one place:
+    /// RUN is a working or launching agent; BLOCK is every agent that needs the
+    /// operator, including stopped, interrupted and errored panes; IDLE waits for
+    /// new work; ERROR is the subset of BLOCK whose runtime failed.
     fn aggregate_counts(
         statuses: &HashMap<String, WindowProcessStatus>,
     ) -> gwt::protocol::ProjectAgentAggregate {
         let mut aggregate = gwt::protocol::ProjectAgentAggregate::default();
         for status in statuses.values() {
             match status {
-                WindowProcessStatus::Running => aggregate.running_count += 1,
+                WindowProcessStatus::Running | WindowProcessStatus::Starting => {
+                    aggregate.running_count += 1
+                }
                 WindowProcessStatus::Waiting
                 | WindowProcessStatus::Stopped
                 | WindowProcessStatus::Interrupted => aggregate.block_count += 1,
@@ -13463,7 +13474,7 @@ impl AppRuntime {
                     aggregate.block_count += 1;
                     aggregate.error_count += 1;
                 }
-                WindowProcessStatus::Idle | WindowProcessStatus::Starting => {}
+                WindowProcessStatus::Idle => aggregate.idle_count += 1,
             }
         }
         aggregate

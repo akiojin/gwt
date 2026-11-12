@@ -1,0 +1,8 @@
+{
+  "all_claim_elapsed_ms": [],
+  "p95_ms": null,
+  "gate_ms": 5000,
+  "includes_completed_checkpointed_failed": true,
+  "failed_claims": [],
+  "raw_all_claims_including_startup": []
+}

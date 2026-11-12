@@ -1,0 +1,260 @@
+{
+  "kind": "read-only legacy path discriminator correction; original summary and counters unchanged",
+  "reason": "Original scope matcher recognized issues and issues.gen but omitted historical issues.staging.",
+  "original_summary_failure": "RuntimeError: native frontend dispatch reached the hundred-millisecond watchdog boundary",
+  "original_instrumentation_proven": false,
+  "corrected_instrumentation_proven": true,
+  "all_26_actions_have_exact_native_vector_coverage": true,
+  "native_scope_calls": {
+    "issues.staging": 1209,
+    "file-index-v2": 26221
+  },
+  "window": {
+    "started_at_ms": 1794430431531,
+    "completed_at_ms": 1794434038325
+  },
+  "per_action_proof": [
+    {
+      "event": 0,
+      "action": "index-issues",
+      "writer_pid": 39448,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 0,
+      "action": "index-files",
+      "writer_pid": 39640,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 1,
+      "action": "index-issues",
+      "writer_pid": 28952,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 1,
+      "action": "index-files",
+      "writer_pid": 50616,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 2,
+      "action": "index-issues",
+      "writer_pid": 24492,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 2,
+      "action": "index-files",
+      "writer_pid": 32580,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 3,
+      "action": "index-issues",
+      "writer_pid": 54124,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 3,
+      "action": "index-files",
+      "writer_pid": 56172,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 4,
+      "action": "index-issues",
+      "writer_pid": 55552,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 4,
+      "action": "index-files",
+      "writer_pid": 50908,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 5,
+      "action": "index-issues",
+      "writer_pid": 55932,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 5,
+      "action": "index-files",
+      "writer_pid": 39808,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 6,
+      "action": "index-issues",
+      "writer_pid": 47452,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 6,
+      "action": "index-files",
+      "writer_pid": 33864,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 7,
+      "action": "index-issues",
+      "writer_pid": 4152,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 7,
+      "action": "index-files",
+      "writer_pid": 26920,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 8,
+      "action": "index-issues",
+      "writer_pid": 54060,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 8,
+      "action": "index-files",
+      "writer_pid": 52492,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 9,
+      "action": "index-issues",
+      "writer_pid": 54192,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 9,
+      "action": "index-files",
+      "writer_pid": 19148,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 10,
+      "action": "index-issues",
+      "writer_pid": 27096,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 10,
+      "action": "index-files",
+      "writer_pid": 31896,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 11,
+      "action": "index-issues",
+      "writer_pid": 8404,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 11,
+      "action": "index-files",
+      "writer_pid": 36088,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    },
+    {
+      "event": 12,
+      "action": "index-issues",
+      "writer_pid": 51416,
+      "native_upsert_calls": 93,
+      "float32_vectors": 5889,
+      "expected_vectors": 5889,
+      "logical_payload_bytes": 31285921
+    },
+    {
+      "event": 12,
+      "action": "index-files",
+      "writer_pid": 33116,
+      "native_upsert_calls": 2017,
+      "float32_vectors": 2017,
+      "expected_vectors": 2017,
+      "logical_payload_bytes": 10578549
+    }
+  ],
+  "raw_sha256": {
+    "summary.json": "1cc0d4784cce2623c3d79376fe1bee0de7913e6d83db90e51c02e04fed1ba668",
+    "write-instrumentation.json": "78c2d0f2eab0ab850e613ca46556338a93edf2017a15f804133b2ff00207eea5",
+    "writes.jsonl": "2d761bd03efa968a8d50fa61d15565ab4864821d5a01e93d361a577ee2fff807",
+    "baseline-actions.jsonl": "19661e5ee3128e6f473e8b4be745509a3274a045af4bee07605c6573c097064f"
+  },
+  "physical_os_writes": "unmeasured",
+  "baseline_classification": "complete matched measurement, with native GUI watchdog violations; not an overall PASS"
+}
