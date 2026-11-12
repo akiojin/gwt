@@ -2,11 +2,12 @@
 //!
 //! `from_json` performs no I/O; `load` validates only private config storage.
 //! `load_from_home` also checks the fixed private coordinator directory chain.
-//! Neither grants registration or device authority.
-//! Before serving, the caller must independently validate private storage,
-//! certificate/key contents, permissions, ownership, ACLs and symlinks, and
-//! retain the existing CoordinatorStore's separate registry lock. Registry
-//! paths remain fixed by that store. TURN configuration is not supported yet.
+//! `tls_server_config` reads the configured certificate/key from private
+//! storage and checks that they match. None grants registration or device
+//! authority. Before serving, the caller must retain the existing
+//! CoordinatorStore's separate registry lock; certificate names and validity
+//! periods are left to the clients' standard verification. Registry paths
+//! remain fixed by that store. TURN configuration is not supported yet.
 
 use crate::mobile_connection::normalize_coordinator_origin;
 use serde::Deserialize;
@@ -16,6 +17,9 @@ use std::{
 };
 
 const MAX_CONFIG_BYTES: usize = 16 * 1024;
+#[cfg(unix)]
+const MAX_TLS_FILE_BYTES: usize = 64 * 1024;
+const MAX_CERTIFICATES: usize = 8;
 
 #[cfg(unix)]
 fn storage_error(error: super::storage::StoreError) -> ConfigError {
@@ -58,6 +62,38 @@ pub enum ConfigError {
     InvalidTlsPath,
     #[error("invalid coordinator limits; use positive values no greater than registrations=64, peers_per_host=8, device rate/burst=32/64, Host rate/burst=256/512, with burst at least rate; correct limits and parse again")]
     InvalidLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TlsError {
+    #[error("unsafe coordinator TLS storage; place the certificate and private key as owned single-link regular 0600 files in a canonical owned 0700 directory outside repositories, without symlinks or macOS extended ACLs; explicitly repair storage and load again")]
+    UnsafeStorage,
+    #[error("coordinator TLS storage is inside a repository; move the certificate and private key to a trusted private directory outside repositories and load again")]
+    RepositoryStorage,
+    #[error("coordinator TLS storage is unavailable; inspect the configured certificate and private key files, explicitly repair missing or unreadable storage, and load again")]
+    StorageUnavailable,
+    #[error("private coordinator TLS storage is unsupported on this platform; use a supported Unix host until a Windows ACL adapter is available")]
+    UnsupportedPrivateStorage,
+    #[error("a coordinator TLS file exceeds 64 KiB; reduce it and load again")]
+    TooLarge,
+    #[error("invalid coordinator TLS certificate; provide 1 to 8 PEM CERTIFICATE blocks and nothing else, end-entity first, and load again")]
+    InvalidCertificate,
+    #[error("invalid coordinator TLS private key; provide exactly one supported PEM private key and nothing else, and load again")]
+    InvalidPrivateKey,
+    #[error("the coordinator TLS private key does not match the certificate; provide the matching pair and load again")]
+    KeyMismatch,
+}
+
+impl From<ConfigError> for TlsError {
+    fn from(error: ConfigError) -> Self {
+        match error {
+            ConfigError::RepositoryStorage => Self::RepositoryStorage,
+            ConfigError::StorageUnavailable => Self::StorageUnavailable,
+            ConfigError::UnsupportedPrivateStorage => Self::UnsupportedPrivateStorage,
+            ConfigError::TooLarge => Self::TooLarge,
+            _ => Self::UnsafeStorage,
+        }
+    }
 }
 
 /// Admission ceilings, not proof that any listener or rate limiter is active.
@@ -165,48 +201,11 @@ impl CoordinatorConfig {
     /// Missing/unsafe files are errors; no files or permissions are changed.
     #[cfg(unix)]
     pub fn load(directory: &Path) -> Result<Self, ConfigError> {
-        use super::storage::{has_repository_marker, open_directory, open_private_file, same_file};
-        use std::io::Read;
-
-        if !directory.is_absolute()
-            || directory
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
-        {
-            return Err(ConfigError::UnsafeStorage);
-        }
-        if directory
-            .canonicalize()
-            .map_err(|_| ConfigError::StorageUnavailable)?
-            != directory
-        {
-            return Err(ConfigError::UnsafeStorage);
-        }
-        let parent = open_directory(directory).map_err(storage_error)?;
-        if has_repository_marker(directory).map_err(storage_error)? {
-            return Err(ConfigError::RepositoryStorage);
-        }
-        let path = directory.join("config.json");
-        let file = open_private_file(&path, false).map_err(storage_error)?;
-        let mut bytes = Vec::new();
-        (&file)
-            .take(MAX_CONFIG_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ConfigError::StorageUnavailable)?;
-        if bytes.len() > MAX_CONFIG_BYTES {
-            return Err(ConfigError::TooLarge);
-        }
-        if !same_file(&parent, &open_directory(directory).map_err(storage_error)?)
-            .map_err(storage_error)?
-            || !same_file(
-                &file,
-                &open_private_file(&path, false).map_err(storage_error)?,
-            )
-            .map_err(storage_error)?
-        {
-            return Err(ConfigError::UnsafeStorage);
-        }
-        Self::from_json(&bytes)
+        Self::from_json(&read_private(
+            directory,
+            "config.json".as_ref(),
+            MAX_CONFIG_BYTES,
+        )?)
     }
 
     /// Private storage requires a platform-specific ownership/ACL adapter.
@@ -299,6 +298,116 @@ impl CoordinatorConfig {
     pub fn limits(&self) -> &CoordinatorLimits {
         &self.limits
     }
+
+    /// Read the configured certificate chain and private key from private
+    /// storage and build a ring-backed server config without client auth.
+    ///
+    /// Each file must be an owned single-link regular 0600 file in a canonical
+    /// owned 0700 directory outside repositories. The key must match the
+    /// end-entity certificate; only that first certificate is parsed here.
+    /// Names, validity periods and the rest of the chain are left to clients.
+    /// No files or permissions are created or changed.
+    pub fn tls_server_config(&self) -> Result<rustls::ServerConfig, TlsError> {
+        use rustls::pki_types::{
+            pem::{PemObject, SectionKind},
+            CertificateDer, PrivateKeyDer,
+        };
+        let certificate = read_tls_file(&self.tls_certificate)?;
+        // Best effort: the raw PEM is wiped; rustls owns the decoded key.
+        let key = zeroize::Zeroizing::new(read_tls_file(&self.tls_private_key)?);
+        let certificates = <(SectionKind, Vec<u8>)>::pem_slice_iter(&certificate)
+            .map(|section| match section {
+                Ok((SectionKind::Certificate, der)) => Ok(CertificateDer::from(der)),
+                _ => Err(TlsError::InvalidCertificate),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if certificates.is_empty() || certificates.len() > MAX_CERTIFICATES {
+            return Err(TlsError::InvalidCertificate);
+        }
+        let mut sections = <(SectionKind, Vec<u8>)>::pem_slice_iter(&key);
+        let key = match (sections.next(), sections.next()) {
+            (Some(Ok((kind, der))), None) => PrivateKeyDer::from_pem(kind, der),
+            _ => None,
+        }
+        .ok_or(TlsError::InvalidPrivateKey)?;
+        rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| TlsError::InvalidPrivateKey)?
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .map_err(|error| match error {
+            rustls::Error::InconsistentKeys(_) => TlsError::KeyMismatch,
+            rustls::Error::InvalidCertificate(_) => TlsError::InvalidCertificate,
+            _ => TlsError::InvalidPrivateKey,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn read_tls_file(path: &Path) -> Result<Vec<u8>, TlsError> {
+    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(TlsError::UnsafeStorage);
+    };
+    Ok(read_private(directory, name, MAX_TLS_FILE_BYTES)?)
+}
+
+#[cfg(not(unix))]
+fn read_tls_file(_: &Path) -> Result<Vec<u8>, TlsError> {
+    Err(TlsError::UnsupportedPrivateStorage)
+}
+
+/// Read at most `limit` bytes of `directory/name` into a preallocated buffer,
+/// then recheck directory and file identity.
+#[cfg(unix)]
+fn read_private(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+    limit: usize,
+) -> Result<Vec<u8>, ConfigError> {
+    use super::storage::{has_repository_marker, open_directory, open_private_file, same_file};
+    use std::io::Read;
+
+    if !directory.is_absolute()
+        || directory
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(ConfigError::UnsafeStorage);
+    }
+    if directory
+        .canonicalize()
+        .map_err(|_| ConfigError::StorageUnavailable)?
+        != directory
+    {
+        return Err(ConfigError::UnsafeStorage);
+    }
+    let parent = open_directory(directory).map_err(storage_error)?;
+    if has_repository_marker(directory).map_err(storage_error)? {
+        return Err(ConfigError::RepositoryStorage);
+    }
+    let path = directory.join(name);
+    let file = open_private_file(&path, false).map_err(storage_error)?;
+    let mut bytes = Vec::with_capacity(limit + 1);
+    (&file)
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConfigError::StorageUnavailable)?;
+    if bytes.len() > limit {
+        return Err(ConfigError::TooLarge);
+    }
+    if !same_file(&parent, &open_directory(directory).map_err(storage_error)?)
+        .map_err(storage_error)?
+        || !same_file(
+            &file,
+            &open_private_file(&path, false).map_err(storage_error)?,
+        )
+        .map_err(storage_error)?
+    {
+        return Err(ConfigError::UnsafeStorage);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -493,10 +602,7 @@ mod tests {
 
     #[cfg(unix)]
     fn write_config(directory: &Path, bytes: &[u8]) {
-        use std::os::unix::fs::PermissionsExt;
-        let path = directory.join("config.json");
-        std::fs::write(&path, bytes).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_private(&directory.join("config.json"), bytes);
     }
 
     #[test]
@@ -671,6 +777,104 @@ mod tests {
         assert_eq!(std::fs::read_dir(&paths[2]).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
+    fn write_private(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn tls_config(directory: &Path) -> CoordinatorConfig {
+        let mut value = valid();
+        value["tls_certificate"] = json!(directory.join("cert.pem"));
+        value["tls_private_key"] = json!(directory.join("key.pem"));
+        parse(&value).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn builds_tls_server_config_only_from_private_matching_material() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let (_directory, path) = private_config();
+        let config = tls_config(&path);
+        let (cert, key) = (path.join("cert.pem"), path.join("key.pem"));
+        let issued =
+            rcgen::generate_simple_self_signed(vec!["coordinator.example".into()]).unwrap();
+        let (cert_pem, key_pem) = (issued.cert.pem(), issued.signing_key.serialize_pem());
+        let tls = |expected: Option<TlsError>| {
+            assert_eq!(config.tls_server_config().err(), expected);
+        };
+        tls(Some(TlsError::StorageUnavailable));
+        write_private(&cert, cert_pem.as_bytes());
+        write_private(&key, key_pem.as_bytes());
+        tls(None);
+
+        let other = rcgen::KeyPair::generate().unwrap().serialize_pem();
+        write_private(&key, other.as_bytes());
+        tls(Some(TlsError::KeyMismatch));
+        for invalid in [
+            String::new(),
+            "secret-sentinel".into(),
+            format!("{key_pem}{other}"),
+            cert_pem.clone(),
+        ] {
+            write_private(&key, invalid.as_bytes());
+            let error = config.tls_server_config().err().unwrap();
+            assert_eq!(error, TlsError::InvalidPrivateKey);
+            assert!(!error.to_string().contains("secret-sentinel"));
+        }
+        write_private(&key, key_pem.as_bytes());
+        for invalid in [
+            String::new(),
+            key_pem.clone(),
+            format!("{cert_pem}{key_pem}"),
+            cert_pem.repeat(9),
+        ] {
+            write_private(&cert, invalid.as_bytes());
+            tls(Some(TlsError::InvalidCertificate));
+        }
+        write_private(
+            &cert,
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        );
+        tls(Some(TlsError::InvalidCertificate));
+        write_private(&cert, &vec![b' '; MAX_TLS_FILE_BYTES + 1]);
+        tls(Some(TlsError::TooLarge));
+        write_private(&cert, cert_pem.as_bytes());
+        write_private(&key, &vec![b' '; MAX_TLS_FILE_BYTES + 1]);
+        tls(Some(TlsError::TooLarge));
+        write_private(&key, key_pem.as_bytes());
+        write_private(&cert, cert_pem.repeat(8).as_bytes());
+        tls(None);
+        write_private(&cert, cert_pem.as_bytes());
+        tls(None);
+
+        for (target, unsafe_mode, private_mode) in [
+            (&cert, 0o644, 0o600),
+            (&key, 0o644, 0o600),
+            (&path, 0o755, 0o700),
+        ] {
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(unsafe_mode)).unwrap();
+            tls(Some(TlsError::UnsafeStorage));
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(private_mode))
+                .unwrap();
+            tls(None);
+        }
+        let saved = path.join("saved.pem");
+        std::fs::rename(&key, &saved).unwrap();
+        symlink(&saved, &key).unwrap();
+        tls(Some(TlsError::UnsafeStorage));
+        std::fs::remove_file(&key).unwrap();
+        std::fs::rename(&saved, &key).unwrap();
+        symlink("missing-git", path.join(".git")).unwrap();
+        tls(Some(TlsError::RepositoryStorage));
+        std::fs::remove_file(path.join(".git")).unwrap();
+        tls(None);
+        assert_eq!(std::fs::read(&key).unwrap(), key_pem.as_bytes());
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 3);
+    }
+
     #[test]
     #[cfg(not(unix))]
     fn config_loading_requires_supported_private_storage() {
@@ -682,5 +886,9 @@ mod tests {
             CoordinatorConfig::load_from_home(Path::new("unused")),
             Err(ConfigError::UnsupportedPrivateStorage)
         ));
+        assert_eq!(
+            parse(&valid()).unwrap().tls_server_config().err(),
+            Some(TlsError::UnsupportedPrivateStorage)
+        );
     }
 }
