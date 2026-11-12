@@ -1393,6 +1393,17 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(BASE).origin });
+      const choiceRequests: any[] = [], choiceResults: any[] = [];
+      page.on('websocket', socket => {
+        socket.on('framesent', ({ payload }) => {
+          const event = JSON.parse(String(payload));
+          if (event.kind === 'pane_send_input') choiceRequests.push(event);
+        });
+        socket.on('framereceived', ({ payload }) => {
+          const event = JSON.parse(String(payload));
+          if (event.kind === 'pane_send_result') choiceResults.push(event);
+        });
+      });
       await gotoPmReports(page, undefined, BASE);
       const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
@@ -1561,6 +1572,54 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await decisionRow.getByRole('button', { name: 'Copy report' }).click();
         await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('4. Cancel — stop this attempt');
         await saveEvidence('four-choice-decision', await decisionRow.screenshot(), 'image/png');
+
+        // T-ASK-SURFACE: actual Reports -> existing send path -> stopped-pane
+        // refusal. This fixture proves the request and visible failure, never
+        // a provider-accepted answer or a human Q&A capture.
+        const choices = decisionRow.locator('.pm-chat__decision-option');
+        await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
+        await choices.nth(1).focus();
+        await page.keyboard.press('Enter');
+        await expect.poll(() => choiceRequests.length).toBe(1);
+        expect(choiceRequests[0]).toEqual({ kind: 'pane_send_input', session_id: SESSION,
+          text: 'Answer to "Which recovery?": 2. Wait — keep the current state\r', request_id: expect.any(Number) });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
+          .toMatchObject({ ok: false, request_id: choiceRequests[0].request_id });
+        await expect(decisionRow.getByRole('alert')).not.toBeEmpty();
+        await expect(choices.nth(1)).toBeEnabled();
+        await expect(choices.nth(1)).toBeFocused();
+        const refusal = await decisionRow.getByRole('alert').innerText();
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const chatDecisions = pane.getByRole('region', { name: 'Decision reports', exact: true });
+        const chatDecision = chatDecisions.locator(`[data-decision-id="${mixed.reports[1].id}"]`);
+        await expect(chatDecision.getByRole('alert')).toHaveText(refusal);
+        await expect(chatDecision.locator('.pm-chat__decision-option')).toHaveCount(4);
+        const draft = pane.getByRole('textbox', { name: 'Message to PM' });
+        await draft.fill('Keep this original reply');
+        await chatDecision.getByRole('button', { name: 'Other: reply in chat', exact: true }).click();
+        await expect(draft).toBeFocused();
+        await expect(draft).toHaveValue('Keep this original reply');
+        expect(choiceRequests).toHaveLength(1);
+        await chatDecision.locator('.pm-chat__decision-option').nth(0).click();
+        await expect.poll(() => choiceRequests.length).toBe(2);
+        expect(choiceRequests[1].text).toBe('Answer to "Which recovery?": 1. Retry — repeat the check\r');
+        expect(choiceRequests[1].request_id).not.toBe(choiceRequests[0].request_id);
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
+          .toMatchObject({ ok: false });
+        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
+        await expect(draft).toHaveValue('Keep this original reply');
+        await page.setViewportSize({ width: 404, height: 1000 });
+        await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(400);
+        await expect.poll(() => chatDecisions.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+        await chatDecision.scrollIntoViewIfNeeded();
+        await saveEvidence('chat-decision-narrow', await pane.screenshot(), 'image/png');
+        await page.setViewportSize({ width: 1440, height: 1000 });
+        const retryRefusal = choiceResults.find(result => result.request_id === choiceRequests[1].request_id).error;
+        await pane.getByRole('button', { name: 'Decide', exact: true }).click();
+        await expect(pane.locator(`.task-decisions__card[data-decision-id="${mixed.reports[1].id}"]`)
+          .getByRole('alert')).toContainText(retryRefusal);
+        await pane.getByRole('button', { name: 'Reports', exact: true }).click();
+        await saveEvidence('decision-controls-requests', JSON.stringify({ choiceRequests, choiceResults }), 'application/json');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
         await expect(qaRow.locator('.pm-chat__question')).toHaveText(qaQuestion);
         await expect(qaRow.getByRole('region', { name: 'Answer', exact: true })).toContainText(qaAnswer);
