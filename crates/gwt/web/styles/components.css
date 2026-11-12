@@ -994,7 +994,7 @@ body::after {
   }
 
   .op-rail .op-rail__surface,
-  .op-rail .op-rail__item--pm {
+  #op-pm-entry {
     padding-block: var(--space-1);
   }
 }
