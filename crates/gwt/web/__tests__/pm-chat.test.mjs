@@ -946,3 +946,99 @@ test('Chat composer is Operator-styled and stays below the scrolling conversatio
     assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
   }
 });
+
+const decisionReport = (id = 'decision-1') => ({ ...structuredReport(id), kind: 'decision',
+  structured: { summary: { result: 'The launch error task is waiting for a wording choice.',
+      impact: 'The task stays stopped until you choose.', owner: 'Noah',
+      decision: { question: 'Which recovery message should the agent use?',
+        recommendation: 'Use the shorter message', reason: 'It names the next step without internal terms.',
+        options: ['Use the shorter message', 'Keep the detailed message'] } },
+    details: '', refs: [] } });
+
+test('Decide lists only decision reports and answers through the chat reply path', () => {
+  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
+  update([report(), decisionReport(), { ...report('blocker-1'), kind: 'blocker' }]);
+  view.showDecisions();
+  const decide = root.querySelector('.task-decisions');
+  assert.ok(decide, 'a Decide surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  const cards = root.querySelectorAll('.task-decisions__card');
+  assert.equal(cards.length, 1, 'progress and blocker reports are not promoted to decisions');
+  assert.match(decide.textContent, /1 decision/);
+  const options = [...cards[0].querySelectorAll('.task-decisions__option')];
+  assert.equal(options.length, 2);
+  options[1].click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'pane_send_input');
+  assert.match(sent[0].text,
+    /^Answer to "Which recovery message should the agent use\?": 2\. Keep the detailed message/);
+  options[0].click();
+  assert.equal(sent.length, 1, 'no second answer is sent while the first is in flight');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const card = root.querySelector('.task-decisions__card');
+  assert.match(card.textContent, /Answer sent: Keep the detailed message/);
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
+    'a confirmed answer cannot be answered again');
+});
+
+test('Decide keeps a decision actionable and shows the error when the answer send fails', () => {
+  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
+  update([decisionReport()]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  assert.equal(sent.length, 1);
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: false,
+    error: 'The PM pane refused the message.' });
+  const card = root.querySelector('.task-decisions__card');
+  assert.match(card.textContent, /The PM pane refused the message\./);
+  const options = card.querySelectorAll('.task-decisions__option');
+  assert.equal(options.length, 2, 'the decision stays actionable after a failed send');
+  assert.equal(options[0].disabled, false);
+});
+
+test('Decide offers the chat reply path for a decision report without a typed packet', () => {
+  const { root, view, update, sent } = fixture({ tasksDefault: true });
+  update([{ ...report('plain-decision'), kind: 'decision', body: 'Approve the release note wording?' }]);
+  view.showDecisions();
+  const card = root.querySelector('.task-decisions__card');
+  assert.ok(card, 'an untyped decision report is still listed');
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
+    'no options are invented without a typed packet');
+  const reply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Reply in chat');
+  assert.ok(reply);
+  reply.click();
+  assert.equal(sent.length, 0, 'the reply path never sends by itself');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, false, 'the chat view opens for the reply');
+});
+
+test('Home Review decisions opens the Decide surface', async () => {
+  const { root, update } = fixture({ tasksDefault: true });
+  update([decisionReport()], null, { request_tasks: taskOverview([]) });
+  // Home renders through the store's frame batching; wait for the frame to
+  // land instead of assuming a synchronous render.
+  let review = null;
+  for (let attempt = 0; attempt < 80 && !review; attempt++) {
+    review = [...root.querySelectorAll('.task-home button')]
+      .find(button => /Review 1 decision/.test(button.textContent));
+    if (!review) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(review, 'Home offers Review decisions while a decision waits');
+  review.click();
+  assert.equal(root.querySelector('.task-decisions').parentElement.hidden, false);
+  assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
+});
+
+test('Decide forgets session answers when the PM session changes', () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([decisionReport()]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent/);
+  model.bindPmWindowState('pm', 'other-session');
+  update([decisionReport()]);
+  const card = root.querySelector('.task-decisions__card');
+  assert.doesNotMatch(card.textContent, /Answer sent/);
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 2,
+    'the same decision is actionable again in the new session');
+});
