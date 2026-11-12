@@ -269,28 +269,28 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     viewport: { width: 390, height: 844 },
   });
 
-  // SPEC #6476 T-005r (AC-1): the Command Rail wrapped into three rows on a
-  // phone (213px at 390px) and left the agent terminal 312px. It must stay one
-  // row that scrolls sideways, with every entry still a 44px tap target.
-  test("command rail stays one row on a phone and leaves the screen to the terminal", async ({ page }, info) => {
+  // SPEC #6476 T-005r (AC-1): the Command Rail groups wrapped separately into
+  // three rows on a phone (213px at 390px) and left the agent terminal 312px.
+  // Every entry must stay visible without scrolling (#4777) as a 44px tap
+  // target, in at most two rows at 390px and three at 320px.
+  test("command rail stays compact on a phone and leaves the screen to the terminal", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
-    for (const width of [320, 390]) {
+    for (const [width, rows] of [[320, 3], [390, 2]] as const) {
       await page.setViewportSize({ width, height: 844 });
       const rail = (await page.locator(".op-rail").boundingBox())!;
       const bar = (await page.locator(".project-bar").boundingBox())!;
-      // One ~52px row plus a thin classic scrollbar where the platform draws one.
-      expect(rail.height, `rail height at ${width}px`).toBeLessThanOrEqual(72);
+      expect(rail.height, `rail height at ${width}px`).toBeLessThanOrEqual(rows * 48);
       expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
         "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      expect(await page.locator(".op-rail").evaluate(element => element.scrollWidth - element.clientWidth),
+        "the rail must not hide entries behind a sideways scroll").toBeLessThanOrEqual(0);
       const items = page.locator(".op-rail__item:visible");
       expect(await items.count()).toBeGreaterThanOrEqual(11);
       for (const item of await items.all()) {
-        await item.scrollIntoViewIfNeeded();
         await expect(item).toBeInViewport({ ratio: 1 });
         const box = (await item.boundingBox())!;
         expect(box.width, await item.innerText()).toBeGreaterThanOrEqual(44);
         expect(box.height, await item.innerText()).toBeGreaterThanOrEqual(44);
-        expect(box.y).toBeGreaterThanOrEqual(rail.y - 1);
         expect(box.y + box.height).toBeLessThanOrEqual(rail.y + rail.height + 1);
         expect(await item.evaluate(element => {
           const r = element.getBoundingClientRect();
@@ -298,7 +298,7 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
         }), "rail entry must be tappable").toBe(true);
       }
       const surface = (await page.locator(".surface-area").boundingBox())!;
-      expect(surface.y, "the surface starts right below the one-row rail").toBeLessThanOrEqual(bar.y + bar.height + 72 + 1);
+      expect(surface.y, "the surface starts right below the rail").toBeLessThanOrEqual(bar.y + bar.height + rows * 48 + 1);
       if (width === 390) {
         const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
         expect(screen.height, "the terminal gains the rows the wrapped rail took (312px before)").toBeGreaterThanOrEqual(412);

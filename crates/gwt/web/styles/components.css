@@ -969,33 +969,33 @@ body::after {
     height: auto;
   }
 
-  /* T-005r: wrapped rail groups took three rows of a phone screen. Keep one
-     row that scrolls sideways so the terminal keeps the height. */
-  .op-rail,
-  .op-rail__group,
-  .op-rail__group--surfaces {
-    flex-wrap: nowrap;
-  }
-
+  /* T-005r: each rail group wrapped on its own, so the strip took three
+     rows of a phone screen. Flow every entry through one wrapping row set at
+     the 44px touch height; every entry stays visible without scrolling. */
   .op-rail {
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    scrollbar-width: thin;
+    align-content: flex-start;
+    row-gap: 0;
+    padding: 0;
   }
 
-  .op-rail__group--surfaces {
-    max-width: none;
+  .op-rail__group {
+    display: contents;
   }
 
+  .op-rail__divider,
   .op-rail__spacer {
-    flex: 0 0 var(--space-2);
+    display: none;
   }
 
   .op-rail__item {
     flex-shrink: 0;
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .op-rail .op-rail__surface,
+  .op-rail .op-rail__item--pm {
+    padding-block: var(--space-1);
   }
 }
 
