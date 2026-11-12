@@ -938,7 +938,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const selectedSettings = await latestWizard(secondPage, beforeMemberSelection, true);
       expect(selectedSettings.wizard).toMatchObject({ selected_agent_member_id: memberId,
         selected_model: savedCandidate.model, selected_reasoning: savedCandidate.reasoning,
-        fast_mode: savedCandidate.fast_mode, skip_permissions: secondDefaults.skip_permissions });
+        fast_mode: false, codex_speed: "off", skip_permissions: secondDefaults.skip_permissions });
       await expect(settingsWizard.getByLabel("Model", { exact: true })).toHaveValue(savedCandidate.model);
       await expect(settingsWizard.locator('.launch-range__tick[data-active="true"]')).toHaveAttribute("data-value", savedCandidate.reasoning);
       await secondPage.locator("#wizard-cancel-button").click();
