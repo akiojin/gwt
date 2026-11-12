@@ -333,9 +333,11 @@ path・secret・時計上書きは request field にありません。発行成�
 
 #### Coordinator の HTTPS 起動（Unix・ソースからビルド）
 
-同じ binary の明示的な `serve` コマンドで配置を点検できます。現在は**すべての
-HTTP 要求に 404 を返します**。登録・signaling・client asset・スマートフォン接続は
-まだ利用できません。
+同じ binary の明示的な `serve` コマンドで配置を点検できます。現在は**全経路が
+404 を返します**。`Origin` を指定する場合は、設定済み HTTPS origin と完全一致する
+header 1 件だけを許可し、それ以外は **403** で拒否します。両応答に、script と接続を
+同じ origin に制限し frame を禁止する CSP、および `nosniff`・`no-referrer`・`no-store`
+を付けます。登録・signaling・client asset・スマートフォン接続はまだ利用できません。
 
 上記の私有 directory を用意して台帳を初期化し、対応する PEM 証明書チェーンと秘密鍵を
 repository 外の私有領域に配置してください。各 TLS file は OS ユーザー所有の
