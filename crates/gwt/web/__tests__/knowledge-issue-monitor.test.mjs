@@ -465,6 +465,69 @@ test("review holds derive shared counts and reasons from current status and open
   assert.equal(snapshot.byIssue[51].reason, "max_active reached (2/2)");
 });
 
+test("PM steering derives shared issue counts and current reasons", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const record = (issue_number, phase = "idle", reason = "Retry budget needs PM steering") => ({
+    issue_number, phase, steering: { reason, requested_at: "2026-11-13T00:00:00Z", count: 9 },
+  });
+  surface.applyIssueMonitorInbox([{ issue: { number: 51, state: "open" }, state: "queued" }]);
+  assert.equal(surface.issueMonitorModel.read().steeringAttention?.count, null,
+    "inbox without a status snapshot is unknown");
+  const status = { autonomous_issues: [record(51, "idle", "Old reason"), record(51),
+    record(52), record(53), record(54, "merged"), record(55), record(56, "unknown")] };
+  surface.applyIssueMonitorStatus(status);
+  const inbox = [51, 52, 53, 54, 55, 56].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: number === 53 ? "closed" : "open" },
+    state: [52, 55].includes(number) ? "needs_human" : "queued",
+    error_message: number === 52 ? "stopped: PM paused" : undefined,
+  }));
+  surface.applyIssueMonitorInbox(inbox);
+  const snapshot = surface.issueMonitorModel.read().steeringAttention;
+  assert.deepEqual(snapshot, { count: 1, summary: "PM steering 1",
+    byIssue: { 51: { reason: "Retry budget needs PM steering" } } });
+  assert.ok(Object.isFrozen(snapshot.byIssue[51]));
+  assert.match(monitorBand(body).pill.title, /PM steering 1/);
+  body.querySelector('[data-issue-number="51"] .knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 51, title: "Issue 51", state: "open",
+      labels: [], sections: [], related_works: [] } });
+  const rowReason = () => body.querySelector('[data-issue-number="51"] [data-key="reason"]')?.textContent;
+  const detailReason = () => body.querySelector('.issue-detail-status [data-key="reason"]')?.textContent;
+  assert.equal(rowReason(), snapshot.byIssue[51].reason);
+  assert.equal(detailReason(), rowReason());
+  for (const state of ["launch_failed", "agent_failed"]) {
+    surface.applyIssueMonitorInbox([{ ...inbox[0], state, error_message: "Latest failure" }]);
+    assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 1,
+      "failed attempts can legitimately require PM steering");
+    assert.equal(rowReason(), "Latest failure", "an older steering request must not hide a new failure");
+    assert.equal(detailReason(), rowReason());
+  }
+  surface.applyIssueMonitorInbox([{ ...inbox[0], state: "not_ready", exclusion_reason: "Latest readiness blocker" }]);
+  assert.equal(rowReason(), "Latest readiness blocker", "current readiness must outrank an older steering request");
+  assert.equal(detailReason(), rowReason());
+  surface.applyIssueMonitorInbox([inbox[0]]);
+  const held = record(51, "reviewing", " ");
+  held.review_dispatch_hold = { reason: "Review capacity", since: "2026-11-13T00:00:00Z" };
+  surface.applyIssueMonitorStatus({ autonomous_issues: [held] });
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.byIssue[51].reason, "PM steering requested");
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 1);
+  assert.equal(rowReason(), "PM steering requested", "PM steering and automatic review holds remain distinct");
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 51, phase: "idle" }] });
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 0);
+  assert.equal(rowReason(), undefined);
+  assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 1);
+  surface.applyIssueMonitorInbox([{ ...inbox[0], issue: { ...inbox[0].issue, state: "closed" } }]);
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 0);
+  surface.applyIssueMonitorInbox([inbox[0]]);
+  surface.applyIssueMonitorStatus({ enabled: true });
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 0, "omitted status list clears old requests");
+  assert.equal(snapshot.byIssue[51].reason, "Retry budget needs PM steering");
+});
+
 test("Issues band presents and clears the quota-hold provider and reset", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -754,7 +817,7 @@ test("Issues band preserves higher-priority states around quota-hold metadata", 
     });
 
     assert.equal(band.text(), "Waiting · Hold | Queue 3 | Active 0 · 0 issues · PM 0");
-    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z | Needs human 0 | Review holds 0");
+    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z | Needs human 0 | Review holds 0 | PM steering 0");
   }
 
   surface.applyIssueMonitorStatus({

@@ -427,9 +427,11 @@ function issueRowSecondaryItems({ entry, work, attention, primary, localLive = n
   const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
     issueQueueColumn(entry, work, localLive) === "active";
   const canonicalHuman = entry?.monitor_state === "needs_human" && Object.hasOwn(entry, "human_attention");
+  const steeringReason = entry?.steering_attention?.reason
+    ? entry?.readiness_diagnosis || failureReason || exclusion || entry.steering_attention.reason : "";
   const reason = cleanupPending ? "Session cleanup pending"
     : stopReason ?? (canonicalHuman ? entry.human_attention?.reason || ""
-      : entry?.review_attention?.reason || entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+      : steeringReason || entry?.review_attention?.reason || entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -1187,6 +1189,7 @@ export function createKnowledgeKanbanSurface({
       let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {},
         humanAttention: { count: null, summary: "", byIssue: {} },
+        steeringAttention: { count: null, summary: "", byIssue: {} },
         reviewAttention: { count: null, summary: "", byIssue: {} }, status: {
         enabled: false,
         state: "disabled",
@@ -1418,6 +1421,7 @@ export function createKnowledgeKanbanSurface({
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
             issueMonitorModel.read().humanAttention.summary,
             issueMonitorModel.read().reviewAttention.summary,
+            issueMonitorModel.read().steeringAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1514,7 +1518,7 @@ export function createKnowledgeKanbanSurface({
 
       }
 
-      function withReviewAttention(model) {
+      function withMonitorAttention(model) {
         const records = model.status.autonomous_issues;
         if (!Array.isArray(records) || model.humanAttention.count === null) return model;
         // Dispatch holds include automatic capacity/retry waits, not just
@@ -1531,11 +1535,24 @@ export function createKnowledgeKanbanSurface({
           reason: String(record.review_dispatch_hold.reason || "").trim() || "Review dispatch pending",
         }]));
         const count = Object.keys(byIssue).length;
-        return { ...model, reviewAttention: { count, summary: `Review holds ${count}`, byIssue } };
+        // Steering can concern exhausted failed attempts as well as live
+        // launches. Its renewal count is not the number of waiting Issues.
+        const steeringByIssue = Object.fromEntries(Object.values(current).filter(record => {
+          const live = model.inboxByIssue[record.issue_number];
+          return live && issueEntryStateKey(live.issue) === "open"
+            && !["needs_human", "merged", "released", "awaiting_measurement"].includes(live.state)
+            && !record.needs_human && ["idle", "implementing", "reviewing", "delivering"].includes(record.phase)
+            && record.steering;
+        }).map(record => [record.issue_number, {
+          reason: String(record.steering.reason || "").trim() || "PM steering requested",
+        }]));
+        const steeringCount = Object.keys(steeringByIssue).length;
+        return { ...model, reviewAttention: { count, summary: `Review holds ${count}`, byIssue },
+          steeringAttention: { count: steeringCount, summary: `PM steering ${steeringCount}`, byIssue: steeringByIssue } };
       }
 
       function applyIssueMonitorStatus(nextStatus) {
-        issueMonitorModel.update(model => withReviewAttention({ ...model, status: {
+        issueMonitorModel.update(model => withMonitorAttention({ ...model, status: {
           ...model.status,
           ...(nextStatus || {}),
           max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
@@ -1569,7 +1586,7 @@ export function createKnowledgeKanbanSurface({
             reason: String(item.error_message || "").trim() || "Human decision required",
           }]));
         const count = Object.keys(byIssue).length;
-        issueMonitorModel.update(model => withReviewAttention({ ...model, inboxByIssue,
+        issueMonitorModel.update(model => withMonitorAttention({ ...model, inboxByIssue,
           humanAttention: { count, summary: `Needs human ${count}`, byIssue } }));
       }
 
@@ -3453,9 +3470,11 @@ export function createKnowledgeKanbanSurface({
         entry = { ...entry };
         delete entry.human_attention;
         delete entry.review_attention;
+        delete entry.steering_attention;
         if (live) entry = { ...entry, review_attention:
           issueMonitorModel.read().reviewAttention.byIssue[entry.number] ?? null, human_attention:
           issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null,
+          steering_attention: issueMonitorModel.read().steeringAttention.byIssue[entry.number] ?? null,
           state: live.issue.state ?? entry.state, monitor_state: live.state,
           exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
         const diagnosis = live?.error_message;
@@ -4515,7 +4534,7 @@ export function createKnowledgeKanbanSurface({
         pill.dataset.stateKey = row.primary.key;
         explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
-        if (entry.human_attention || entry.review_attention) {
+        if (entry.human_attention || entry.review_attention || entry.steering_attention) {
           const reason = row.secondary.find(item => item.key === "reason");
           if (reason) {
             const node = createNode("span", "knowledge-row-secondary-item", reason.label);

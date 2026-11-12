@@ -218,14 +218,15 @@ export function subscribeIssueMonitorStatus(doc, model) {
   return model.subscribeFrame(state => {
     const summary = state.humanAttention?.summary;
     const reviewSummary = state.reviewAttention?.summary;
-    if (!selected || selected.status !== state.status || selected.summary !== summary || selected.reviewSummary !== reviewSummary) {
-      selected = { status: state.status, summary, reviewSummary };
+    const steeringSummary = state.steeringAttention?.summary;
+    if (!selected || selected.status !== state.status || selected.summary !== summary || selected.reviewSummary !== reviewSummary || selected.steeringSummary !== steeringSummary) {
+      selected = { status: state.status, summary, reviewSummary, steeringSummary };
     }
     return selected;
-  }, state => renderIssueMonitorStatus(doc, state.status, state.summary, state.reviewSummary));
+  }, state => renderIssueMonitorStatus(doc, state.status, state.summary, state.reviewSummary, state.steeringSummary));
 }
 
-export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "", reviewSummary = "") {
+export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "", reviewSummary = "", steeringSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
@@ -234,8 +235,8 @@ export function renderIssueMonitorStatus(doc, status = {}, humanSummary = "", re
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary, reviewSummary].filter(Boolean).join(". "));
-  cell.setAttribute("title", ["Open Issues", view.title, humanSummary, reviewSummary].filter(Boolean).join(" | "));
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
