@@ -141,7 +141,9 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
   const cell = document.querySelector(".op-status-strip__cell--waiting");
   assert.ok(value, "expected #op-strip-waiting value in the strip");
   assert.ok(cell, "expected .op-status-strip__cell--waiting cell in the strip");
-  assert.equal(value.getAttribute("aria-label"), "Agents waiting for input");
+  // SPEC #5016 AC-HS1: the cell shows the server BLOCK count under the same pulse contract.
+  assert.equal(cell.querySelector(".op-status-strip__label").textContent, "BLOCK");
+  assert.equal(value.getAttribute("aria-label"), "Agents that need you, including stopped and errored agents");
 
   applyTelemetryCounts(document, { waiting: 2 });
   assert.equal(value.textContent, "2");
