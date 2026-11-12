@@ -86,6 +86,14 @@ test("Work detail preserves all six managed hook states and pending metadata", a
 
 test("Work projection snapshots and patches update Other while retaining session history", async ({ page }, info) => {
   await boot(page);
+  const blockCell = page.locator(".op-status-strip__cell--waiting");
+  const worksBlock = page.locator('.works-counts [data-count="block"]');
+  const worksBlockCell = worksBlock.locator("..");
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "project_agent_aggregate", aggregate: {
+    revision: 100, running_count: 3, block_count: 7, idle_count: 0, error_count: 0, unread: false,
+  } }));
+  await expect(page.locator("#op-strip-waiting")).toHaveText("7");
+  await expect(worksBlock).toHaveText("7");
   const other = page.locator("details.issue-other-group");
   await other.locator("summary").click();
   await row(page, "other-paused").click();
@@ -102,6 +110,25 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveText("Await token");
   const linkedReason = page.locator('[data-issue-number="4556"] .knowledge-row-secondary-item[data-kind="reason"]');
   await expect(linkedReason).toHaveText("Await token");
+  const attention = "Workspaces needing attention 2\nLinked issue: Await token\nIndependent work: Await token";
+  await expect(blockCell).toHaveAttribute("title", attention);
+  await expect(worksBlockCell).toHaveAttribute("title", attention);
+  // The agent aggregate is unchanged: a new reason must still reach both views.
+  await page.evaluate(() => {
+    const fixture = window as any;
+    for (const id of ["other-paused", "linked-visible"]) {
+      fixture.__otherProjection.active_works.find((work: any) => work.id === id).next_action = "Await review";
+    }
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection: fixture.__otherProjection });
+  });
+  await expect(blockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
+  await expect(worksBlockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
+  await expect(page.locator("#op-strip-waiting")).toHaveText("7");
+  await expect(worksBlock).toHaveText("7");
+  await page.locator('[data-surface="works"]').click();
+  await expect(page.locator(".works-heading")).toBeVisible();
+  await page.screenshot({ path: info.outputPath("workspace-attention-shared-state.png"), fullPage: true });
+  await page.locator('[data-surface="issues"]').click();
   await page.evaluate(() => {
     const fixture = window as any;
     const projection = structuredClone(fixture.__otherProjection);
@@ -116,6 +143,8 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "paused");
   await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveCount(0);
   await expect(linkedReason).toHaveCount(0);
+  await expect(blockCell).toHaveAttribute("title", "Workspaces needing attention 0");
+  await expect(worksBlockCell).toHaveAttribute("title", "Workspaces needing attention 0");
   await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
   await page.evaluate(() => {
     const fixture = window as any;
@@ -139,6 +168,10 @@ test("Work projection snapshots and patches update Other while retaining session
     expect.objectContaining({ session_id: "ledger-other", agent_session_id: "conversation-other" }),
   ]);
   await page.screenshot({ path: info.outputPath("work-projection-patch.png") });
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection_patch",
+    projection: { id: "projection-other" } }));
+  await expect(blockCell).toHaveAttribute("title", "");
+  await expect(worksBlockCell).toHaveAttribute("title", "");
   await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection", projection: null }));
   await expect(row(page, "other-paused")).toHaveCount(0);
   await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);

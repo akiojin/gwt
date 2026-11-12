@@ -10,6 +10,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         initOperatorShell,
         applyTelemetryCounts,
         subscribeIssueMonitorStatus,
+        subscribeWorkAttentionSummary,
         applyProviderUsage,
         subscribeRuntimeHealth,
         subscribeProjectOwnerHealth,
@@ -488,6 +489,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
       const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+      subscribeWorkAttentionSummary(document, activeWorkProjectionModel);
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -5668,6 +5670,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       worksSurface = createWorksSurface({
         systemSettingsModel,
         summaryModel: projectAgentSummaryModel,
+        workProjectionModel: activeWorkProjectionModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,
