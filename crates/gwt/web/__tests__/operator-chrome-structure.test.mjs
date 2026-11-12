@@ -110,6 +110,9 @@ const frontendStyle = `${inlineStyle}\n${componentsStyle}`;
 test("Issue #6476: narrow project chrome keeps Operator tokens and shared controls", () => {
   const mobile = extractMediaBlocks(componentsStyle, "max-width: 600px");
   assert.match(mobile, /\.project-bar/, "project actions need a narrow-screen layout");
+  assert.match(mobile, /\.op-rail__group\s*\{[^}]*display:\s*contents/, "phone rail entries flow as one wrapping set");
+  assert.match(mobile, /\.op-rail__item\s*\{[^}]*min-height:\s*44px/, "rail entries keep 44px touch targets");
+  assert.doesNotMatch(mobile, /\.op-rail\s*\{[^}]*overflow-x:\s*(auto|scroll)/, "rail entries are never hidden behind a sideways scroll");
   assert.match(mobile, /var\(--space-/);
   assert.doesNotMatch(mobile, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
   assert.equal(document.querySelector("#op-theme-toggle").getAttribute("role"), "radiogroup");

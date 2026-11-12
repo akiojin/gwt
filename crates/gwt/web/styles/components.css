@@ -968,6 +968,35 @@ body::after {
   .project-actions .op-theme-toggle {
     height: auto;
   }
+
+  /* T-005r: each rail group wrapped on its own, so the strip took three
+     rows of a phone screen. Flow every entry through one wrapping row set at
+     the 44px touch height; every entry stays visible without scrolling. */
+  .op-rail {
+    align-content: flex-start;
+    row-gap: 0;
+    padding: 0;
+  }
+
+  .op-rail__group {
+    display: contents;
+  }
+
+  .op-rail__divider,
+  .op-rail__spacer {
+    display: none;
+  }
+
+  .op-rail__item {
+    flex-shrink: 0;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .op-rail .op-rail__surface,
+  #op-pm-entry {
+    padding-block: var(--space-1);
+  }
 }
 
 @media (forced-colors: active) {
