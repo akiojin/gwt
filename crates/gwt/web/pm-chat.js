@@ -633,6 +633,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
           const title = element('h3', '', task.title);
           const meta = element('p', 'pm-chat__task-meta', `${labels[task.status] || 'Unknown'} · ${task.assignee || 'Unassigned'}`);
           const fields = [title, meta];
+          if (task.child_progress) {
+            const { total, completed, cancelled } = task.child_progress;
+            fields.push(element('p', 'pm-chat__task-meta',
+              `Direct subtasks: ${completed} completed · ${cancelled} cancelled · ${total - completed - cancelled} unfinished (${total} total)`));
+          }
           if (task.parent_key) fields.push(element('p', 'pm-chat__task-meta', `Part of: ${parents.get(task.parent_key) || 'Parent outside this preview'}`));
           if (task.review_required) fields.push(element('p', 'pm-chat__task-review', 'PM reassessment required'));
           if (task.wait_reason) fields.push(element('p', '', `Waiting: ${task.wait_reason}`));

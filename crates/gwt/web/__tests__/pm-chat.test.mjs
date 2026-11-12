@@ -139,6 +139,30 @@ test('Home is the default PM view; Tasks preserves the unfinished filter and sta
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
 });
 
+test('Tasks and Chat show direct-child progress from the full projection independently of filters', () => {
+  const { root, update, view } = fixture();
+  const parent = trackedTask('parent', { child_progress: { total: 55, completed: 2, cancelled: 1 } });
+  const publish = task => update([], null, { request_tasks: taskOverview([
+    task, trackedTask('child', { parent_key: 'parent' }), trackedTask('legacy'),
+  ]) });
+  publish(parent);
+  view.showTasks();
+  const row = root.querySelector('[data-task-key="parent"]');
+  const label = 'Direct subtasks: 2 completed · 1 cancelled · 52 unfinished (55 total)';
+  assert.match(row.textContent, /Pending/);
+  assert.ok(row.textContent.includes(label), 'counts include children outside the preview');
+  assert.equal(root.querySelector('[data-task-key="legacy"]').textContent.includes('Direct subtasks'), false);
+  [...root.querySelectorAll('button')].find(node => node.textContent === 'Include completed').click();
+  assert.ok(row.textContent.includes(label), 'filtering does not recalculate from visible rows');
+  view.showChat();
+  assert.ok(row.textContent.includes(label), 'Chat uses the same progress projection');
+  publish(parent);
+  assert.equal(root.querySelector('[data-task-key="parent"]'), row, 'unchanged polls retain the row');
+  publish({ ...parent, child_progress: { total: 55, completed: 55, cancelled: 0 } });
+  assert.ok(row.textContent.includes('Direct subtasks: 55 completed · 0 cancelled · 0 unfinished (55 total)'));
+  assert.match(row.textContent, /Pending/, 'finishing children does not complete their parent');
+});
+
 test('Task criteria disclose bounded literal previews and retain the same Task disclosure', () => {
   const { root, model, update, view } = fixture();
   const criteria = { purpose: 'Keep <img src=x> as literal purpose',

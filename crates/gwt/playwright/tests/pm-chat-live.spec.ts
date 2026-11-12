@@ -1724,7 +1724,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1969,6 +1969,10 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
           purpose: criteriaPurpose, completion_conditions: criteriaConditions } };
       const childTask = { ...pendingTask, source_id: overviewSource.id, parent_id: rootTask.draft.id,
         draft: { ...draft, id: 'overview-child', title: 'Verify remaining outcome', assignee: 'Reviewer' } };
+      const doneChild = { ...childTask, status: 'completed',
+        draft: { ...draft, id: 'overview-done', title: 'Verified child outcome' },
+        completion: { condition_revision: childTask.condition_revision, review_generation: childTask.review_generation,
+          evidence: ['synthetic:verified-child-outcome'] } };
       const appendFixtureReceipt = (actor: { kind: string; id: string }, action: Record<string, unknown>, tasks: unknown[]) => {
         const operation_id = `overview-fixture-${overviewState.revision}`;
         const request = { operation_id, expected_revision: overviewState.revision, reason: 'Synthetic overview fixture only', action };
@@ -1979,13 +1983,17 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       };
       appendFixtureReceipt({ kind: 'intake', id: 'synthetic-fixture-intake' }, { kind: 'capture', source: overviewSource }, []);
       appendFixtureReceipt(fixturePm, { kind: 'decompose', source_id: overviewSource.id,
-        root: rootTask.draft, children: [childTask.draft] }, [rootTask, childTask]);
+        root: rootTask.draft, children: [childTask.draft, doneChild.draft] },
+      [rootTask, childTask, { ...doneChild, status: 'pending', completion: null }]);
+      appendFixtureReceipt(fixturePm, { kind: 'complete', task_id: doneChild.draft.id,
+        ...doneChild.completion }, [doneChild]);
       const waitingChild = { ...childTask, status: 'waiting', wait_reason: 'CI verdict', next_action: 'Review required checks' };
       appendFixtureReceipt(fixturePm, { kind: 'progress', task_id: childTask.draft.id, status: 'waiting',
         wait_reason: waitingChild.wait_reason, next_action: waitingChild.next_action }, [waitingChild]);
       overviewState.sources[overviewSource.id] = overviewSource;
       overviewState.tasks[rootTask.draft.id] = rootTask;
       overviewState.tasks[childTask.draft.id] = waitingChild;
+      overviewState.tasks[doneChild.draft.id] = doneChild;
       let overviewBytes = JSON.stringify(overviewState);
       writeFileSync(statePath, overviewBytes);
       // Real native-reader projection plus synthetic TaskStore scaffolding:
@@ -2015,7 +2023,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const completedFilter = tasksView.getByRole('button', { name: 'Include completed', exact: true });
       await completedFilter.focus();
       await page.keyboard.press('Enter');
-      await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+      await expect(tasksView.locator('.pm-chat__task')).toHaveCount(4);
       await expect(tasksView).toContainText('Cancelled');
       await expect(tasksView).toContainText('PM reassessment required');
       await expect(completedFilter).toBeFocused();
@@ -2025,6 +2033,12 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       const rootKey = createHash('sha256').update(rootTask.draft.id).digest('hex');
       const rootRow = tasksView.locator(`[data-task-key="${rootKey}"]`);
+      const progress = rootRow.locator('.pm-chat__task-meta').filter({ hasText: 'Direct subtasks:' });
+      await expect(progress).toHaveText('Direct subtasks: 1 completed · 0 cancelled · 1 unfinished (2 total)');
+      await expect(rootRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
+      await chat.getByRole('button', { name: 'Chat', exact: true }).click();
+      await expect(progress).toBeVisible();
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
       const criteria = rootRow.locator('details.pm-chat__task-criteria');
       const criteriaSummary = criteria.locator('summary');
       await expect(criteriaSummary).toHaveText('Purpose and completion criteria');
@@ -2066,7 +2080,8 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         writeFileSync(statePath, 'broken task store');
         await refreshPmReports(page);
         await expect(tasksView.getByRole('status')).toContainText('last confirmed list');
-        await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+        await expect(tasksView.locator('.pm-chat__task')).toHaveCount(4);
+        await expect(progress).toHaveText('Direct subtasks: 1 completed · 0 cancelled · 1 unfinished (2 total)');
         await expect(criteria).toHaveAttribute('open');
         await expect(criteriaSummary).toBeFocused();
         await expect(criteria.locator('ol li')).toHaveCount(5);
@@ -2075,7 +2090,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         writeFileSync(statePath, overviewBytes);
       }
       await refreshPmReports(page);
-      await expect(tasksView.getByRole('status')).toContainText('3 of 3 recorded tasks shown');
+      await expect(tasksView.getByRole('status')).toContainText('4 of 4 recorded tasks shown');
       await chat.getByRole('button', { name: 'Chat', exact: true }).click();
       const conversation = chat.getByRole('region', { name: 'PM conversation' });
       await expect(conversation).toBeVisible();
@@ -2140,11 +2155,21 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(cancelChild).toMatchObject({ state: 'ready', task: { status: 'cancelled' } });
       await refreshPmReports(page);
       await expect(tasksView.locator('.pm-chat__task').first()).toHaveAttribute('data-task-key', rootKey);
+      await expect(progress).toHaveText('Direct subtasks: 1 completed · 1 cancelled · 0 unfinished (2 total)');
+      await expect(rootRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).tasks[rootTask.draft.id].status).toBe('pending');
       await expect(criteria).toHaveAttribute('open');
       await expect(criteriaSummary).toBeFocused();
       await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
       await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
       await info.attach(`T-TASK-CRITERIA ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
+      await page.keyboard.press('Enter');
+      await expect(criteria).not.toHaveAttribute('open');
+      await progress.scrollIntoViewIfNeeded();
+      await expect(progress).toBeInViewport({ ratio: 1 });
+      await expect(criteriaSummary).toBeFocused();
+      await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
+      await info.attach(`T-TASK-CHILDREN ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
