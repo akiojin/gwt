@@ -657,6 +657,11 @@ impl AppRuntime {
         &self,
         context: &super::ProjectContext,
     ) -> Vec<OutboundEvent> {
+        if self.project_context_is_current(context) {
+            if let Some(state) = self.project_state_for_tab(&context.tab_id) {
+                state.pm_status_epoch.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         vec![OutboundEvent::project(
             context.project_key.clone(),
             self.pm_status_event(context),

@@ -4434,6 +4434,35 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn agent_roster_dispatch_prepared_events(
+        &mut self,
+        context: &ProjectContext,
+        pm_status_epoch: Option<(ProjectContext, u64)>,
+        mut events: Vec<OutboundEvent>,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let current_epoch = self.project_state_for_tab(&context.tab_id).map(|state| {
+            (
+                state.context.clone(),
+                state
+                    .pm_status_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+        });
+        if !pm_status_epoch
+            .zip(current_epoch)
+            .is_some_and(|(captured, current)| captured == current)
+        {
+            // Only a proven current owner and publication may refresh PM
+            // settings. The roster receipt remains valid independently.
+            events.retain(|event| !matches!(event.event, BackendEvent::PmStatus { .. }));
+        }
+        self.note_agent_roster_response(context, &events);
+        events
+    }
+
     pub(crate) fn note_agent_roster_response(
         &mut self,
         context: &ProjectContext,
@@ -4614,6 +4643,18 @@ impl AppRuntime {
                 },
             )];
         }
+        let pm_status_epoch = if self.project_context_is_current(context) {
+            self.project_state_for_tab(&context.tab_id).map(|state| {
+                (
+                    state.context.clone(),
+                    state
+                        .pm_status_epoch
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                )
+            })
+        } else {
+            None
+        };
         let read = matches!(action, gwt::agent_names::AgentRosterAction::Read);
         let select_pm = matches!(action, gwt::agent_names::AgentRosterAction::SelectPm { .. });
         let pm_capture = (read || select_pm)
@@ -4736,8 +4777,9 @@ impl AppRuntime {
                 };
                 events.push(OutboundEvent::reply(&reply_to, status));
             }
-            proxy.send(UserEvent::ProjectDispatch {
+            proxy.send(UserEvent::AgentRosterDispatchPrepared {
                 context: context_owned,
+                pm_status_epoch,
                 events,
             });
         });

@@ -1691,6 +1691,8 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) workspace_state_notice: Option<gwt::WorkspaceStateNoticeView>,
     /// Direct roster requests and receipts invalidate older background views.
     pub(crate) agent_roster_foreground: Arc<()>,
+    /// Authoritative PM publications fence older roster status snapshots.
+    pm_status_epoch: std::sync::atomic::AtomicU64,
     pub(crate) project_owner_health: Option<gwt::protocol::ProjectOwnerHealthView>,
     pub(crate) project_owner_connection_id: u64,
     pub(crate) project_owner_identity: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
@@ -1808,6 +1810,7 @@ pub(crate) fn initial_project_states(
                 ProjectRuntimeState {
                     workspace_state_notice: None,
                     agent_roster_foreground: Arc::new(()),
+                    pm_status_epoch: std::sync::atomic::AtomicU64::new(0),
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,
@@ -4854,6 +4857,7 @@ impl AppRuntime {
                 .or_insert_with(|| ProjectRuntimeState {
                     workspace_state_notice: None,
                     agent_roster_foreground: Arc::new(()),
+                    pm_status_epoch: std::sync::atomic::AtomicU64::new(0),
                     project_owner_health: None,
                     project_owner_connection_id: 0,
                     project_owner_identity: None,

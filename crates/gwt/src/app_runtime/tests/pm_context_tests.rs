@@ -3536,13 +3536,17 @@ fn shared_roster_watcher_broadcasts_without_mutation_and_rejects_retired_context
     runtime.refresh_agent_roster_for_project(&context);
     drain_queued_blocking_tasks(&queued);
     let (_, during_foreground, during_event) = latest_refresh();
-    let direct = recorded_events
+    let (pm_status_epoch, direct) = recorded_events
         .lock()
         .unwrap()
         .iter()
         .rev()
         .find_map(|event| match recorded_project_payload(event) {
-            UserEvent::ProjectDispatch { events, .. } => Some(events.clone()),
+            UserEvent::AgentRosterDispatchPrepared {
+                pm_status_epoch,
+                events,
+                ..
+            } => Some((pm_status_epoch.clone(), events.clone())),
             _ => None,
         })
         .expect("direct read returns its client receipt");
@@ -3564,7 +3568,7 @@ fn shared_roster_watcher_broadcasts_without_mutation_and_rejects_retired_context
         matches!(during_event.as_ref(), BackendEvent::AgentRoster { roster, .. }
         if roster.revision == direct_revision)
     );
-    runtime.note_agent_roster_response(&context, &direct);
+    let direct = runtime.agent_roster_dispatch_prepared_events(&context, pm_status_epoch, direct);
     assert!(!runtime.agent_roster_refresh_is_current(&context, &during_foreground));
     for event in [
         *during_event,
@@ -3685,7 +3689,7 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
             )
             .is_empty());
         let matches_request = |event: &UserEvent| {
-            matches!(event, UserEvent::ProjectDispatch { events, .. } if events.iter().any(|event| matches!(&event.event,
+            matches!(event, UserEvent::AgentRosterDispatchPrepared { events, .. } if events.iter().any(|event| matches!(&event.event,
             BackendEvent::AgentRoster { request_id: Some(request), .. } | BackendEvent::AgentRosterError { request_id: Some(request), .. } if request == id)))
         };
         drain_queued_blocking_tasks(&queued_tasks);
@@ -3696,14 +3700,17 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
             .find(|event| matches_request(event))
             .unwrap()
             .clone();
-        let UserEvent::ProjectDispatch {
+        let UserEvent::AgentRosterDispatchPrepared {
             context: captured,
+            pm_status_epoch,
             events,
         } = completion
         else {
             unreachable!()
         };
         assert_eq!(captured, context);
+        let events =
+            runtime.agent_roster_dispatch_prepared_events(&captured, pm_status_epoch, events);
         assert!(events.iter().all(
             |event| matches!(&event.target, DispatchTarget::Client(client) if client == "read-client")
         ));
@@ -3766,13 +3773,314 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
             _ => unreachable!(),
         }
     }
+    let capture_read =
+        |runtime: &mut AppRuntime, read_context: &super::super::ProjectContext, id: &str| {
+            assert!(runtime
+                .agent_roster_events(
+                    read_context,
+                    &"read-client".into(),
+                    gwt::agent_names::AgentRosterAction::Read,
+                    None,
+                    Some(id.into()),
+                )
+                .is_empty());
+            drain_queued_blocking_tasks(&queued_tasks);
+            recorded_events
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|event| {
+                    matches!(event, UserEvent::AgentRosterDispatchPrepared { events, .. }
+                if events.iter().any(|event| matches!(&event.event,
+                    BackendEvent::AgentRoster { request_id: Some(request), .. }
+                    if request == id)))
+                })
+                .unwrap()
+                .clone()
+        };
+    let dispatch_read = |runtime: &mut AppRuntime, completion: UserEvent| {
+        let UserEvent::AgentRosterDispatchPrepared {
+            context,
+            pm_status_epoch,
+            events,
+        } = completion
+        else {
+            panic!("expected prepared roster completion")
+        };
+        runtime.agent_roster_dispatch_prepared_events(&context, pm_status_epoch, events)
+    };
+    let save_profile = |runtime: &mut AppRuntime,
+                        write_context: &super::super::ProjectContext,
+                        request: &str,
+                        expected: String,
+                        profile| {
+        let saved = runtime.set_pm_launch_profile_events(
+            write_context,
+            &"read-client".into(),
+            super::super::pm::PmProfileEdit {
+                project_key: Some(write_context.project_key.to_string()),
+                member_id: Some(selected.agent_member_id.clone()),
+                request_id: Some(request.into()),
+                expected_profile_revision: Some(expected),
+                profile,
+            },
+        );
+        saved
+            .iter()
+            .find_map(|event| match (&event.target, &event.event) {
+                (
+                    DispatchTarget::Client(client),
+                    BackendEvent::PmLaunchProfileResult {
+                        success: true,
+                        request_id: Some(id),
+                        profile_revision: Some(revision),
+                        ..
+                    },
+                ) if client == "read-client" && id == request => Some(revision.clone()),
+                _ => None,
+            })
+            .expect("qualified real writer must acknowledge the saved profile")
+    };
+    // Materialize A through the writer so the later A -> B -> A has the exact
+    // original content identity, including the optional persisted profile.
+    let initial = gwt::pm_registry::load_pm_prefs(&path).unwrap();
+    let revision_a = save_profile(
+        &mut runtime,
+        &context,
+        "save-profile-a",
+        gwt::pm_registry::pm_profile_revision(&initial),
+        initial.settings.launch_profile_or_default(),
+    );
+    let profile_a = gwt::pm_registry::load_pm_prefs(&path).unwrap();
+    let read_a = capture_read(&mut runtime, &context, "before-profile-save");
+    assert!(
+        matches!(&read_a, UserEvent::AgentRosterDispatchPrepared { events, .. }
+        if events.iter().any(|event| matches!(&event.event,
+            BackendEvent::PmStatus { profile_revision: Some(revision), .. }
+            if revision == &revision_a)))
+    );
+    let mut profile_b = profile_a.settings.launch_profile_or_default();
+    profile_b.agent_id = if profile_b.agent_id == "claude" {
+        "codex"
+    } else {
+        "claude"
+    }
+    .into();
+    profile_b.model = None;
+    profile_b.reasoning = None;
+    assert_ne!(profile_b, profile_a.settings.launch_profile_or_default());
+    let revision_b = save_profile(
+        &mut runtime,
+        &context,
+        "save-profile-b",
+        revision_a.clone(),
+        profile_b,
+    );
+    assert_ne!(revision_b, revision_a);
+    let UserEvent::AgentRosterDispatchPrepared {
+        events: captured_events,
+        ..
+    } = &read_a
+    else {
+        unreachable!()
+    };
+    let receipt_a = serde_json::to_value(&captured_events[0].event).unwrap();
+    let delivered = dispatch_read(&mut runtime, read_a);
+    assert!(
+        delivered
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::PmStatus { .. })),
+        "an in-flight Read must not replace the newer successfully saved PM profile"
+    );
+    assert!(matches!(delivered.as_slice(), [OutboundEvent {
+        target: DispatchTarget::Client(client),
+        event: BackendEvent::AgentRoster { request_id: Some(request), roster }, ..
+    }] if client == "read-client" && request == "before-profile-save"
+        && roster.project_key == context.project_key.as_str()));
+    assert_eq!(
+        serde_json::to_value(&delivered[0].event).unwrap(),
+        receipt_a
+    );
+
+    // Roster request/receipt rotations do not invalidate another unchanged PM read.
+    let first = capture_read(&mut runtime, &context, "unchanged-first");
+    let second = capture_read(&mut runtime, &context, "unchanged-second");
+    for (completion, id) in [(first, "unchanged-first"), (second, "unchanged-second")] {
+        let delivered = dispatch_read(&mut runtime, completion);
+        assert!(delivered.iter().any(|event| matches!(&event.event,
+            BackendEvent::PmStatus { profile_revision: Some(revision), .. }
+            if revision == &revision_b)));
+        assert!(delivered.iter().any(|event| matches!((&event.target, &event.event),
+            (DispatchTarget::Client(client), BackendEvent::AgentRoster { request_id: Some(request), .. })
+            if client == "read-client" && request == id)));
+    }
+    assert_eq!(
+        save_profile(
+            &mut runtime,
+            &context,
+            "restore-profile-a",
+            revision_b,
+            profile_a.settings.launch_profile_or_default()
+        ),
+        revision_a
+    );
+    let restored = capture_read(&mut runtime, &context, "restored-profile-a");
+    let delivered = dispatch_read(&mut runtime, restored.clone());
+    assert!(
+        delivered.iter().any(|event| matches!(&event.event,
+        BackendEvent::PmStatus { profile_revision: Some(revision), .. }
+        if revision == &revision_a)),
+        "a fresh Read accepts an actual A -> B -> A profile write"
+    );
+    // An unproven epoch must withhold only the auxiliary PM status.
+    let mut unproven = restored.clone();
+    let UserEvent::AgentRosterDispatchPrepared {
+        pm_status_epoch, ..
+    } = &mut unproven
+    else {
+        unreachable!()
+    };
+    *pm_status_epoch = None;
+    let unproven = dispatch_read(&mut runtime, unproven);
+    let missing_epoch_rejected = unproven
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::PmStatus { .. }));
+    assert!(matches!(unproven.first(), Some(OutboundEvent {
+        target: DispatchTarget::Client(client),
+        event: BackendEvent::AgentRoster { request_id: Some(request), .. }, ..
+    }) if client == "read-client" && request == "restored-profile-a"));
+    assert_eq!(
+        serde_json::to_value(&unproven[0].event).unwrap(),
+        serde_json::to_value(&delivered[0].event).unwrap()
+    );
+
+    // A legacy tab alias is logically current and shares the canonical PM owner.
+    let alias_id = "tab-alias";
+    runtime.tabs.push(sample_project_tab(
+        alias_id,
+        "Alias",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    ));
+    runtime.project_tab_incarnations.insert(
+        alias_id.into(),
+        runtime.project_tab_incarnations[&context.tab_id].clone(),
+    );
+    let alias = runtime.project_context(alias_id).unwrap();
+    assert!(runtime.project_context_is_current(&alias));
+    assert!(runtime.project_state(&alias).is_none());
+    assert_eq!(
+        runtime.project_state_for_tab(alias_id).unwrap().context,
+        context
+    );
+    let alias_read = capture_read(&mut runtime, &alias, "valid-alias-read");
+    let alias_delivered = dispatch_read(&mut runtime, alias_read);
+    assert!(alias_delivered.iter().any(|event| matches!(&event.event,
+        BackendEvent::PmStatus { profile_revision: Some(revision), .. } if revision == &revision_a)),
+        "a current alias must retain its PM reload");
+    let owner_read = capture_read(&mut runtime, &context, "owner-before-alias-save");
+    let mut alias_profile_b = profile_a.settings.launch_profile_or_default();
+    alias_profile_b.agent_id = if alias_profile_b.agent_id == "claude" {
+        "codex"
+    } else {
+        "claude"
+    }
+    .into();
+    let alias_revision_b = save_profile(
+        &mut runtime,
+        &alias,
+        "alias-save-b",
+        revision_a.clone(),
+        alias_profile_b,
+    );
+    assert_ne!(alias_revision_b, revision_a);
+    let owner_delivered = dispatch_read(&mut runtime, owner_read);
+    let alias_save_invalidated = owner_delivered
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::PmStatus { .. }));
+    assert!(matches!(owner_delivered.first(), Some(OutboundEvent {
+        target: DispatchTarget::Client(client),
+        event: BackendEvent::AgentRoster { request_id: Some(request), .. }, ..
+    }) if client == "read-client" && request == "owner-before-alias-save"));
+    let recovered = capture_read(&mut runtime, &alias, "alias-after-save");
+    assert!(dispatch_read(&mut runtime, recovered).iter().any(|event| matches!(&event.event,
+        BackendEvent::PmStatus { profile_revision: Some(revision), .. } if revision == &alias_revision_b)));
+
+    // Recreating the owner resets its numeric epoch; an unchanged logical
+    // alias must not mistake a predecessor owner's epoch zero for its successor.
+    runtime.project_states = super::super::initial_project_states(&HashMap::from([(
+        context.tab_id.clone(),
+        runtime.project_tab_incarnations[&context.tab_id].clone(),
+    )]));
+    let previous_owner_read = capture_read(&mut runtime, &alias, "before-owner-recreated");
+    assert_eq!(
+        runtime
+            .project_state_for_tab(alias_id)
+            .unwrap()
+            .pm_status_epoch
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    runtime
+        .project_tab_incarnations
+        .get_mut(&context.tab_id)
+        .unwrap()
+        .generation += 1;
+    runtime.project_states = super::super::initial_project_states(&HashMap::from([(
+        context.tab_id.clone(),
+        runtime.project_tab_incarnations[&context.tab_id].clone(),
+    )]));
+    assert_eq!(
+        runtime
+            .project_state_for_tab(alias_id)
+            .unwrap()
+            .pm_status_epoch
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(runtime.project_context_is_current(&alias));
+    let recreated_delivered = dispatch_read(&mut runtime, previous_owner_read);
+    let owner_recreated_rejected = recreated_delivered
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::PmStatus { .. }));
+    assert!(matches!(recreated_delivered.first(), Some(OutboundEvent {
+        target: DispatchTarget::Client(client),
+        event: BackendEvent::AgentRoster { request_id: Some(request), .. }, ..
+    }) if client == "read-client" && request == "before-owner-recreated"));
+    let fresh_alias = capture_read(&mut runtime, &alias, "alias-new-owner");
+    assert!(
+        dispatch_read(&mut runtime, fresh_alias)
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::PmStatus { .. })),
+        "a fresh alias Read recovers against the recreated owner"
+    );
+    assert!(missing_epoch_rejected && alias_save_invalidated && owner_recreated_rejected,
+        "PM status requires proven owner freshness: missing epoch rejected={missing_epoch_rejected}, alias save invalidated old owner Read={alias_save_invalidated}, recreated owner rejected predecessor Read={owner_recreated_rejected}");
+    let context = runtime.project_context(&context.tab_id).unwrap();
+    let restored = capture_read(&mut runtime, &context, "current-owner-scope-fence");
+    let UserEvent::AgentRosterDispatchPrepared {
+        pm_status_epoch,
+        events,
+        ..
+    } = restored
+    else {
+        unreachable!()
+    };
+
     assert!(!gwt::issue_monitor_prefs_path_for_repo_path(&repo).exists());
     let mut foreign = context.clone();
     foreign.project_key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
     assert!(!runtime.project_context_is_current(&foreign));
+    assert!(runtime
+        .agent_roster_dispatch_prepared_events(&foreign, pm_status_epoch.clone(), events.clone())
+        .is_empty());
     runtime.project_tab_incarnations.remove(&context.tab_id);
+    assert!(runtime
+        .agent_roster_dispatch_prepared_events(&context, pm_status_epoch, events)
+        .is_empty());
     assert!(
         !runtime.project_context_is_current(&context),
-        "the existing ProjectDispatch guard drops this completion after project retirement"
+        "the prepared roster dispatch guard drops this completion after project retirement"
     );
 }

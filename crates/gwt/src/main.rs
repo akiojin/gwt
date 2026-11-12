@@ -2254,6 +2254,11 @@ enum UserEvent {
         context: app_runtime::ProjectContext,
         events: Vec<OutboundEvent>,
     },
+    AgentRosterDispatchPrepared {
+        context: app_runtime::ProjectContext,
+        pm_status_epoch: Option<(app_runtime::ProjectContext, u64)>,
+        events: Vec<OutboundEvent>,
+    },
     PreparedActiveWorkDispatch {
         context: app_runtime::ProjectContext,
         tab_id: String,
@@ -11488,6 +11493,9 @@ fn main() -> std::io::Result<()> {
                         "RuntimeHook Active Work projection profile"
                     );
                 }
+            }
+            Event::UserEvent(UserEvent::AgentRosterDispatchPrepared { context, pm_status_epoch, events }) => {
+                clients.dispatch(app.agent_roster_dispatch_prepared_events(&context, pm_status_epoch, events));
             }
             Event::UserEvent(UserEvent::ProjectDispatch { context, events }) if app.project_context_is_current(&context) => {
                 app.note_agent_roster_response(&context, &events);
