@@ -275,6 +275,58 @@ class SearchMultiContractTests(unittest.TestCase):
             or []
         )
 
+    def test_file_record_pool_queries_exact_pinned_membership_and_detects_missing_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project, db_root, model = self._build_v2_view_fixture(
+                Path(tmp),
+                {"src/changed.rs": "//! MARK_POOL_OLD alpha\n",
+                 "src/keep.rs": "//! MARK_POOL_KEEP alpha\n"},
+                {},
+                {"MARK_POOL_OLD": 0.001, "MARK_POOL_KEEP": 0.2, "MARK_POOL_NEW": 0.1},
+            )
+            old = runner._select_file_index_v2_view(
+                REPO_HASH, WORKTREE_HASH, db_root, repair_corruption=False
+            )["view"]
+            self._write_fixture_sources(project, {"src/changed.rs": "//! MARK_POOL_NEW alpha\n"})
+            with mock.patch.object(runner, "_get_embedding_model", return_value=model), mock.patch.object(
+                runner, "_expected_file_index_vector_dimension", return_value=model.DIMENSION
+            ):
+                built = runner.action_index_files_v2(
+                    str(project), REPO_HASH, WORKTREE_HASH, db_root=db_root,
+                    file_index_protocol="v2", compatibility_descriptor=old["compatibility"]
+                )
+            self.assertTrue(built.get("ok"), built)
+            latest = self._search_v2_view(project, db_root, model)
+            latest_results = self._scope_file_results(latest, "files")
+            self.assertEqual(len(latest_results), 2, latest)
+            self.assertIn("MARK_POOL_NEW", latest_results[0]["description"])
+            old_result = runner._search_file_index_v2_scope(
+                old, "files", "alpha", 10, "semantic", [1.0] + [0.0] * 15
+            )
+            self.assertIn("MARK_POOL_OLD", old_result["results"][0]["description"])
+            hash_only = runner._search_file_index_v2_scope(
+                old, "files", old["base_members"]["files"][0][:16], 10,
+                "all_terms", [1.0] + [0.0] * 15
+            )
+            self.assertEqual(hash_only["results"], [])
+            self.assertEqual(len(hash_only["suggestions"]), 2)
+            latest_view = runner._select_file_index_v2_view(
+                REPO_HASH, WORKTREE_HASH, db_root, repair_corruption=False
+            )["view"]
+            client, collection = runner._open_file_index_v2_collection(
+                latest_view["overlay_store"], runner.V2_FILES_CODE_COLLECTION
+            )
+            try:
+                collection.delete(ids=latest_view["overlay_members"]["files"])
+                self.assertEqual(collection.count(), 2)  # Same as the logical view count.
+            finally:
+                runner._close_chroma_client(client)
+            fallback = runner._select_file_index_v2_view(
+                REPO_HASH, WORKTREE_HASH, db_root, repair_corruption=False
+            )
+            self.assertEqual(fallback["state"], "stale", fallback)
+            self.assertEqual(fallback["view"]["view_id"], old["view_id"])
+
     def test_v2_view_search_excludes_tombstone_and_uses_overlay_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             project, db_root, model = self._build_v2_view_fixture(
@@ -350,17 +402,18 @@ class SearchMultiContractTests(unittest.TestCase):
             collection_counts = {}
             real_search = runner._search_collection_v2
 
-            def record_fetch(collection, query, n_results, query_embedding=None):
-                collection_identity = str(collection.id)
+            def record_fetch(collection, query, n_results, query_embedding=None, ids=None):
+                collection_identity = (str(collection.id), tuple(ids) if ids is not None else None)
                 fetch_requests_by_collection.setdefault(collection_identity, []).append(
                     n_results
                 )
-                collection_counts.setdefault(collection_identity, collection.count())
+                collection_counts.setdefault(collection_identity, len(ids) if ids is not None else collection.count())
                 return real_search(
                     collection,
                     query,
                     n_results,
                     query_embedding=query_embedding,
+                    ids=ids,
                 )
 
             with mock.patch.object(
@@ -1252,12 +1305,16 @@ class SearchWorkerTests(unittest.TestCase):
         fake_chroma = mock.Mock()
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
-            store = Path(tmp) / "memory.gen" / "gen-active"
-            store.mkdir(parents=True)
-            with runner._search_worker_read_clients():
-                client, _ = runner._open_chroma_collection(store, runner.V2_MEMORY_COLLECTION)
-                runner._close_chroma_client(client)
-                client.close.assert_called_once()
+            for store, name in (
+                (Path(tmp) / "memory.gen" / "gen-active", runner.V2_MEMORY_COLLECTION),
+                (runner._issue_record_pool(Path(tmp) / "issues"), runner.V2_ISSUES_COLLECTION),
+            ):
+                store.mkdir(parents=True)
+                fake_chroma.reset_mock()
+                with runner._search_worker_read_clients():
+                    client, _ = runner._open_chroma_collection(store, name)
+                    runner._close_chroma_client(client)
+                    client.close.assert_called_once()
 
     def test_worker_transport_failure_remains_retryable(self):
         args = argparse.Namespace(action="search-multi", qos=None,

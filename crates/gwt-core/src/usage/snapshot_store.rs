@@ -265,6 +265,7 @@ mod tests {
             account_label: Some("someone@example.com".to_string()),
             plan: Some("pro".to_string()),
             extra_usage: None,
+            credits: None,
             windows: vec![UsageWindow::new(
                 WindowKind::Weekly,
                 100.0,

@@ -303,7 +303,12 @@ fn deserialize_writer_protocol<'de, D>(deserializer: D) -> Result<String, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_exact_string(deserializer, "file-index-v2")
+    let value = String::deserialize(deserializer)?;
+    if matches!(value.as_str(), "file-index-v2" | "file-index-v2-records") {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("unsupported file-index writer protocol"))
+    }
 }
 
 fn deserialize_scope_set<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -475,7 +480,9 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = FileGenerationReference::deserialize(deserializer)?;
-    if value.store == "store" && value.collection == expected_collection {
+    if matches!(value.store.as_str(), "store" | "records")
+        && value.collection == expected_collection
+    {
         Ok(value)
     } else {
         Err(D::Error::custom("invalid file-index generation reference"))
@@ -902,6 +909,18 @@ mod tests {
         let base: BaseGenerationDescriptor = serde_json::from_value(base_json.clone()).unwrap();
         assert_eq!(serde_json::to_value(base).unwrap(), base_json);
 
+        let mut records_base_json = base_json.clone();
+        records_base_json["compatibility"]["writer_protocol"] =
+            serde_json::json!("file-index-v2-records");
+        records_base_json["files_generation"]["store"] = serde_json::json!("records");
+        records_base_json["files_docs_generation"]["store"] = serde_json::json!("records");
+        let records_base: BaseGenerationDescriptor =
+            serde_json::from_value(records_base_json.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(records_base).unwrap(),
+            records_base_json
+        );
+
         let overlay_json = serde_json::json!({
             "schema_version": 1,
             "kind": "overlay",
@@ -924,6 +943,18 @@ mod tests {
         let overlay: OverlayGenerationDescriptor =
             serde_json::from_value(overlay_json.clone()).unwrap();
         assert_eq!(serde_json::to_value(overlay).unwrap(), overlay_json);
+
+        let mut records_overlay_json = overlay_json.clone();
+        records_overlay_json["compatibility"]["writer_protocol"] =
+            serde_json::json!("file-index-v2-records");
+        records_overlay_json["files_generation"]["store"] = serde_json::json!("records");
+        records_overlay_json["files_docs_generation"]["store"] = serde_json::json!("records");
+        let records_overlay: OverlayGenerationDescriptor =
+            serde_json::from_value(records_overlay_json.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(records_overlay).unwrap(),
+            records_overlay_json
+        );
 
         let view_json = signed_view_json(compatibility);
         assert_eq!(
@@ -954,6 +985,12 @@ mod tests {
     fn persisted_descriptors_reject_unknown_fields_and_invalid_semantic_fields() {
         let compatibility = serde_json::to_value(compatibility()).unwrap();
         let valid_view = signed_view_json(compatibility.clone());
+
+        let mut unknown_writer = compatibility.clone();
+        unknown_writer["writer_protocol"] = serde_json::json!("file-index-v3");
+        assert!(
+            serde_json::from_value::<FileIndexCompatibilityDescriptor>(unknown_writer).is_err()
+        );
 
         let mut unknown = valid_view.clone();
         unknown["unexpected"] = serde_json::json!(true);
@@ -1001,7 +1038,15 @@ mod tests {
         assert!(serde_json::from_value::<BaseGenerationDescriptor>(invalid_base.clone()).is_err());
         invalid_base["kind"] = serde_json::json!("base");
         invalid_base["build_state"] = serde_json::json!("staged");
-        assert!(serde_json::from_value::<BaseGenerationDescriptor>(invalid_base).is_err());
+        assert!(serde_json::from_value::<BaseGenerationDescriptor>(invalid_base.clone()).is_err());
+        invalid_base["build_state"] = serde_json::json!("verified");
+        for unsafe_store in ["../records", "/records", "records/child", "unknown"] {
+            invalid_base["files_generation"]["store"] = serde_json::json!(unsafe_store);
+            assert!(
+                serde_json::from_value::<BaseGenerationDescriptor>(invalid_base.clone()).is_err(),
+                "unexpected generation store {unsafe_store:?} must be rejected"
+            );
+        }
 
         let mut overflow_counts = serde_json::json!({
             "schema_version": 1,

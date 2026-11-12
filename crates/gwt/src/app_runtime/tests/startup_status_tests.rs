@@ -502,7 +502,7 @@ fn resumed_output_releases_the_api_error_hold() {
     );
 }
 
-/// AC-1/AC-2 end to end: the canvas snapshot is what the Issue Monitor joins
+/// AC-1/AC-2 end to end: the canvas snapshot is what Issues joins
 /// into its status rows, so the state and the reason have to survive the trip
 /// out of the runtime, not just exist inside it.
 #[test]
@@ -780,6 +780,7 @@ fn a_corroborated_quota_notice_holds_immediately() {
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             100.0,
@@ -894,6 +895,7 @@ fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: Vec::new(),
         limit_reached: true,
         state: gwt_core::usage::UsageState::Ok,
@@ -3694,7 +3696,7 @@ fn bootstrap_lists_the_worktrees_once_on_the_startup_path() {
 
 /// Issue #4378 AC-2: bootstrap no longer runs the generation reaper on the
 /// startup path. It runs on the blocking worker and reports back with an
-/// event. Issue Monitor launch deliveries that arrive first wait for that
+/// event. Issues launch deliveries that arrive first wait for that
 /// event, so a launch never races a generation the reaper is about to reap.
 /// Issue #4804 AC-7: canvas-ready first must still wait for the reaper.
 #[test]

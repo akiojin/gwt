@@ -193,7 +193,7 @@ function createHubApp({ document: doc, window: win }) {
       row.append(projectLink(project));
       if (project.owner_health) {
         const health = project.owner_health;
-        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "degraded" ? "Unavailable" : "Connecting");
+        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "wedged" ? "Wedged" : health.state === "degraded" ? "Unavailable" : "Connecting");
         badge.dataset.projectHealth = project.project_key;
         badge.dataset.state = health.state;
         badge.title = health.detail || "";
@@ -446,7 +446,20 @@ function createHubApp({ document: doc, window: win }) {
       catalogConnectionFresh = true;
       connection.send(JSON.stringify({ kind: "frontend_ready" }));
       closeController.reconnect();
-      for (const message of queued.splice(0)) connection.send(JSON.stringify(message));
+      const replayedCloneSearchQueries = [];
+      for (const message of queued.splice(0)) {
+        connection.send(JSON.stringify(message));
+        if (message.kind === "github_repository_search") replayedCloneSearchQueries.push(message.query);
+      }
+      const query = cloneState.query.trim();
+      if (cloneState.open && cloneState.searching && !cloneState.cloning) {
+        if (!query) {
+          cloneState = { ...cloneState, searching: false };
+          renderClone();
+        } else if (!replayedCloneSearchQueries.includes(query)) {
+          send({ kind: "github_repository_search", query });
+        }
+      }
     });
     connection.addEventListener("message", (message) => {
       if (socket !== connection) return;

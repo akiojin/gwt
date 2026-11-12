@@ -72,6 +72,44 @@ impl<T: Clone> RemoteReadCache<T> {
 
 static LINKED_PR_READS: RemoteReadCache<Vec<crate::cli::LinkedPrSummary>> = RemoteReadCache::new();
 static PR_LIFECYCLE_READS: RemoteReadCache<PrLifecycle> = RemoteReadCache::new();
+static BRANCH_PROTECTION_READS: RemoteReadCache<
+    gwt_git::branch_protection::BranchProtectionStatus,
+> = RemoteReadCache::new();
+/// Reviewing PRs whose gate last routed to "required CI still running".
+static CI_WAIT_HOLDS: RemoteReadCache<()> = RemoteReadCache::new();
+
+/// Issue #6877 AC-2: how long a Reviewing PR whose required CI is still
+/// running waits before a timer-driven scan reads its gate evidence again.
+const ISSUE_MONITOR_CI_WAIT_RECHECK: Duration = Duration::from_secs(60);
+
+/// Base-branch protection for the autonomous gate, cached per repository and
+/// branch within the scan's read max age. Failures are never cached.
+fn fetch_branch_protection_for_monitor(
+    repo_path: &Path,
+    repo_slug: &str,
+    branch: &str,
+) -> gwt_core::Result<gwt_git::branch_protection::BranchProtectionStatus> {
+    cached_remote_read(
+        &BRANCH_PROTECTION_READS,
+        format!("{}|{repo_slug}|{branch}", repo_path.display()),
+        monitor_read_max_age(),
+        Instant::now(),
+        || gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, branch),
+    )
+}
+
+fn ci_wait_hold_key(repo_path: &Path, pr: u64) -> String {
+    format!("{}#{pr}", repo_path.display())
+}
+
+/// True while a timer-driven scan should leave a CI-pending PR unread. Manual
+/// scans have no read max age and always read fresh.
+fn ci_wait_hold_active(repo_path: &Path, pr: u64, now: Instant) -> bool {
+    let max_age = monitor_read_max_age().map(|age| age.min(ISSUE_MONITOR_CI_WAIT_RECHECK));
+    CI_WAIT_HOLDS
+        .get(&ci_wait_hold_key(repo_path, pr), now, max_age)
+        .is_some()
+}
 
 /// Launch discovery spreads cold and deep timelines over scans. Completion
 /// probes below retain their separate, strict full-read contract.
@@ -131,7 +169,7 @@ fn fetch_open_linked_prs_for_monitor(
                 target: "gwt.issue_monitor.scan",
                 completed_issues = linked.len(),
                 pending = !pending.is_empty(),
-                "Issue Monitor incremental timeline readback"
+                "Issues incremental timeline readback"
             );
             Ok(linked)
         },
@@ -273,7 +311,7 @@ pub(crate) fn record_scan_failure_ledger(
         tracing::info!(
             stage = phase,
             continuation,
-            "Issue Monitor readback budget deferred"
+            "Issues readback budget deferred"
         );
         return;
     }
@@ -331,13 +369,13 @@ pub(crate) fn observe_optional_readback<T, E: fmt::Display>(
     if deferred {
         tracing::info!(
             project_root = %project_root.display(), operation, consecutive = count,
-            "Issue Monitor optional readback deferred"
+            "Issues optional readback deferred"
         );
         if count == 3 {
             tracing::warn!(
                 project_root = %project_root.display(), operation, consecutive = count,
                 error = error.as_deref().unwrap_or_default(),
-                "Issue Monitor readback repeatedly deferred; preserving previous observations"
+                "Issues readback repeatedly deferred; preserving previous observations"
             );
         }
     }
@@ -448,7 +486,7 @@ impl LoadedIssueMonitorCandidates {
     }
 }
 
-/// External stage owned by one side-effect-free Issue Monitor scan proposal.
+/// External stage owned by one side-effect-free Issues scan proposal.
 /// The stage is retained in errors so operators and tests can distinguish the
 /// boundary that failed instead of observing a lossy bool/None/default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,7 +557,7 @@ impl fmt::Display for IssueMonitorScanFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "issue monitor scan failed at {} stage: {}",
+            "Issues scan failed at {} stage: {}",
             self.stage, self.detail
         )
     }
@@ -728,7 +766,7 @@ where
         stage = stage.as_str(),
         duration_ms = started.elapsed().as_secs_f64() * 1_000.0,
         success = result.is_ok(),
-        "Issue Monitor readback stage"
+        "Issues readback stage"
     );
     result
 }
@@ -765,7 +803,7 @@ impl IssueMonitorScanTiming {
             target: "gwt.issue_monitor.scan",
             stage = self.phase,
             state = "started",
-            "Issue Monitor scan stage"
+            "Issues scan stage"
         );
     }
 
@@ -777,7 +815,7 @@ impl IssueMonitorScanTiming {
             duration_ms = elapsed.as_secs_f64() * 1_000.0,
             remaining_budget_ms = ?gwt_core::operation_deadline::current().map(|deadline|
                 deadline.saturating_duration_since(gwt_core::operation_deadline::now()).as_millis()),
-            "Issue Monitor scan stage"
+            "Issues scan stage"
         );
     }
 }
@@ -1462,7 +1500,7 @@ pub fn reconcile_issue_monitor_windows_with_observations(
             released = ?outcome.released,
             rebound = ?outcome.rebound,
             pane_closes = ?outcome.pane_closes,
-            "released idle Issue Monitor windows"
+            "released idle Issues windows"
         );
     }
     outcome
@@ -1492,7 +1530,7 @@ pub fn issue_monitor_daemon_payloads(
                     event: "toast".to_string(),
                     payload: serde_json::json!({
                         "level": "info",
-                        "message": "Issue Monitor launch requested",
+                        "message": "Issues launch requested",
                         "issue_number": request.issue_number,
                     }),
                 });
@@ -1565,12 +1603,12 @@ pub fn issue_monitor_read_only_daemon_payloads(
     vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(status).expect("issue monitor status serializes"),
+            payload: serde_json::to_value(status).expect("Issues status serializes"),
         },
         IssueMonitorDaemonPayload {
             event: "inbox".to_string(),
             payload: serde_json::to_value(monitor.inbox_view_at(&now))
-                .expect("issue monitor inbox serializes"),
+                .expect("Issues inbox serializes"),
         },
     ]
 }
@@ -2343,7 +2381,7 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
         let result = load_cached_issue_monitor_candidates(cache_root);
         if let Err(error) = &result {
             tracing::warn!(
-                "issue monitor cache fallback failed for {}: {error}",
+                "Issues cache fallback failed for {}: {error}",
                 cache_root.display()
             );
         }
@@ -3050,7 +3088,7 @@ pub fn reconcile_issue_monitor_merges(
     if !merged.is_empty() {
         tracing::info!(
             issues = ?merged,
-            "issue monitor reconciled merged work deliveries and freed active slots"
+            "Issues reconciled merged work deliveries and freed active slots"
         );
     }
 
@@ -3067,7 +3105,7 @@ pub fn reconcile_issue_monitor_merges(
                 if monitor.record_untracked_completion(issue_number) {
                     tracing::info!(
                         issue = issue_number,
-                        "issue monitor recovered a completion its launch tracking had lost"
+                        "Issues recovered a completion its launch tracking had lost"
                     );
                     merged.push(issue_number);
                 }
@@ -3083,7 +3121,7 @@ pub fn reconcile_issue_monitor_merges(
                 tracing::warn!(
                     issue = issue_number,
                     error = %error,
-                    "issue monitor untracked completion probe failed; issue stays launchable"
+                    "Issues untracked completion probe failed; issue stays launchable"
                 );
             }
         }
@@ -3268,7 +3306,7 @@ const DEFAULT_BASE_BRANCH_FALLBACK: &str = "main";
 /// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
 pub fn resolve_default_base_branch(repo_path: &Path) -> String {
     try_resolve_default_base_branch(repo_path).unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "issue monitor default base branch unavailable");
+        tracing::warn!(error = %error, "Issues default base branch unavailable");
         DEFAULT_BASE_BRANCH_FALLBACK.to_string()
     })
 }
@@ -3336,7 +3374,7 @@ pub fn apply_autonomous_eligibility(
 ) {
     if let Err(error) = try_apply_autonomous_eligibility(monitor, issues, repo_slug, repo_path, now)
     {
-        tracing::warn!(error = %error, "issue monitor autonomous eligibility scan failed");
+        tracing::warn!(error = %error, "Issues autonomous eligibility scan failed");
     }
 }
 
@@ -3363,7 +3401,7 @@ pub fn try_apply_autonomous_eligibility(
     // last successful scan gave it, and the launch stage still runs — inventing
     // a decision from an absent snapshot is the one thing that stays forbidden.
     let protection = match run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
-        gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, &base_branch)
+        fetch_branch_protection_for_monitor(repo_path, repo_slug, &base_branch)
     }) {
         Ok(protection) => protection,
         Err(failure) => {
@@ -3427,7 +3465,7 @@ pub fn advance_autonomous_in_flight(
     if let Err(error) =
         try_advance_autonomous_in_flight(monitor, issues, repo_slug, repo_path, daemon_secret, now)
     {
-        tracing::warn!(error = %error, "issue monitor autonomous progress scan failed");
+        tracing::warn!(error = %error, "Issues autonomous progress scan failed");
     }
 }
 
@@ -3513,7 +3551,7 @@ pub(crate) fn try_advance_autonomous_in_flight_with_inventory(
                 issue = issue_number,
                 stage = %failure.stage,
                 error = %failure.detail,
-                "issue monitor readback degraded; keeping the previous value"
+                "Issues readback degraded; keeping the previous value"
             );
             degradations.push(IssueMonitorScanDegradation::new(
                 failure,
@@ -3590,7 +3628,7 @@ fn read_open_pr_inventory(
                 stage = %failure.stage,
                 error = %failure.detail,
                 implementing,
-                "issue monitor open-PR inventory degraded; keeping the previous phases"
+                "Issues open-PR inventory degraded; keeping the previous phases"
             );
             degradations.push(IssueMonitorScanDegradation::new(
                 failure,
@@ -3700,7 +3738,7 @@ fn advance_one_autonomous_issue(
                 // the readback stays after admission, as before.
                 let retry_head = if monitor.review_attempts_recorded(issue_number) {
                     run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                        gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                        gwt_git::pr_status::try_fetch_pr_head_sha_for_monitor(repo_path, pr)
                     })?
                 } else {
                     None
@@ -3712,14 +3750,17 @@ fn advance_one_autonomous_issue(
                         issue = issue_number,
                         pr,
                         reason = %hold.reason,
-                        "issue monitor: review dispatch held"
+                        "Issues: review dispatch held"
                     );
                     monitor.hold_review_dispatch(issue_number, hold);
                     return Ok(());
                 }
                 let sha = match retry_head {
-                    Some(sha) => Some(sha),
-                    None => {
+                    Some(sha) if monitor_read_max_age().is_none() => Some(sha),
+                    _ => {
+                        // A periodic retry head is discovery from the shared
+                        // inventory. Bind dispatch to live evidence; its final
+                        // review_dispatch_hold check also uses this fresh SHA.
                         run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
                             gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
                         })?
@@ -3768,7 +3809,7 @@ fn advance_one_autonomous_issue(
                             issue = issue_number,
                             pr,
                             reason = %hold.reason,
-                            "issue monitor: review dispatch held"
+                            "Issues: review dispatch held"
                         );
                     }
                 }
@@ -3779,28 +3820,33 @@ fn advance_one_autonomous_issue(
             }
         }
         crate::AutonomousPhase::Reviewing => {
+            // Issue #6877: gate inputs cannot use remote evidence until both
+            // local review fields arrive. Keep rejecting verdicts eligible.
+            if record.reviewed_sha.is_none() || record.review_passed.is_none() {
+                return Ok(());
+            }
             let Some(pr) = record.pr_number else {
                 return Ok(());
             };
+            // Issue #6877 AC-2: a PR whose required CI was still running a
+            // moment ago is not re-read on every timer scan.
+            if ci_wait_hold_active(repo_path, pr, Instant::now()) {
+                return Ok(());
+            }
             let protection =
                 run_budgeted_readback_stage(IssueMonitorScanStage::BranchProtection, || {
-                    gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, base_branch)
+                    fetch_branch_protection_for_monitor(repo_path, repo_slug, base_branch)
                 })?;
-            let rollup =
-                run_budgeted_readback_stage(IssueMonitorScanStage::StatusCheckReadback, || {
-                    gwt_git::pr_status::try_fetch_pr_status_check_rollup(repo_path, pr)
-                })?;
-            let head = run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
-            })?
-            .unwrap_or_default();
             // Issue #4726 AC-1: an auto-merge armed on a conflicting / behind
-            // PR never merges, so the gate reads mergeability too.
-            let mergeability =
-                run_budgeted_readback_stage(IssueMonitorScanStage::MergeabilityReadback, || {
-                    gwt_git::pr_status::try_fetch_pr_merge_readback(repo_path, pr)
-                })?
-                .mergeability;
+            // PR never merges, so the gate reads mergeability too. Issue #6877
+            // AC-2: rollup, head and mergeability come from one `gh` call.
+            let gate_readback =
+                run_budgeted_readback_stage(IssueMonitorScanStage::StatusCheckReadback, || {
+                    gwt_git::pr_status::try_fetch_pr_gate_readback(repo_path, pr)
+                })?;
+            let rollup = gate_readback.status_check_rollup;
+            let head = gate_readback.head_sha.unwrap_or_default();
+            let mergeability = gate_readback.merge.mergeability;
             let body = issues
                 .iter()
                 .find(|issue| issue.number == issue_number)
@@ -3825,6 +3871,9 @@ fn advance_one_autonomous_issue(
             // environment fact about the launch, and Issue #3944 AC-1 reserves
             // the retry counter for the agent's own failures.
             let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
+            if matches!(routed, crate::issue_monitor_gate::GateAction::WaitForCi) {
+                CI_WAIT_HOLDS.insert(ci_wait_hold_key(repo_path, pr), Instant::now(), ());
+            }
             // Issue #5876 T-4a: a transient required CI failure gets one
             // persisted failed-jobs retry before it can create a fix generation.
             // Review/acceptance/head/mergeability failures retain their routing.
@@ -3987,7 +4036,7 @@ fn advance_one_autonomous_issue(
                         issue = issue_number,
                         pr,
                         exit = ?exit,
-                        "issue monitor: delivery left the merge-watch unmerged"
+                        "Issues: delivery left the merge-watch unmerged"
                     );
                     monitor.exit_delivering(issue_number, pr, exit, now);
                 }
@@ -4299,9 +4348,17 @@ mod linked_pr_batch_tests {
 
     #[test]
     fn issue_3924_completion_batch_failure_is_recorded_once() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // HOME fixtures must remain under OS temp when compiler TEMP moves volumes.
+        // KnownFolder can cache a failure while another fixture replaces USERPROFILE.
         #[cfg(windows)]
-        let temp = tempfile::tempdir_in(dirs::data_local_dir().unwrap().join("Temp")).unwrap();
+        let temp = tempfile::tempdir_in(
+            std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("OS local app data"))
+                .join("Temp"),
+        )
+        .unwrap();
         #[cfg(not(windows))]
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -6408,7 +6465,7 @@ pub(crate) mod tests {
         assert_eq!(status.payload["state"], "error");
         assert_eq!(
             status.payload["last_error"],
-            "Issue Monitor scan stalled; last scan at 2000-01-01T00:00:00Z"
+            "Issues scan stalled; last scan at 2000-01-01T00:00:00Z"
         );
         assert_eq!(status.payload["last_scan_at"], "2000-01-01T00:00:00Z");
     }
@@ -6735,6 +6792,7 @@ pub(crate) mod tests {
             session_mode: gwt_agent::SessionMode::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::default(),
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
@@ -9192,6 +9250,9 @@ pub(crate) mod tests {
     /// exhausted one — the production fan-out failure this Issue is about.
     #[test]
     fn a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window() {
+        use gwt_core::operation_deadline::{now, ScopedOperationClock, ScopedOperationDeadline};
+        use std::time::{Duration, Instant};
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9199,47 +9260,50 @@ pub(crate) mod tests {
             "GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS",
             "50",
         );
-        let scan_window = std::time::Duration::from_secs(30);
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + scan_window,
-        );
+        let started = Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let scan_window = Duration::from_secs(30);
+        let _scan_deadline = ScopedOperationDeadline::enter(started + scan_window);
 
         let observed = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
             let remaining = gwt_core::operation_deadline::current()
                 .expect("the readback runs under a deadline")
-                .saturating_duration_since(std::time::Instant::now());
+                .saturating_duration_since(now());
             Ok::<_, String>(remaining)
         })
         .expect("the stage itself succeeds");
 
-        assert!(
-            observed <= std::time::Duration::from_millis(50),
-            "the call must see its own budget, got {observed:?}"
+        assert_eq!(
+            observed,
+            // test-hygiene: allow-short-duration Logical budget under the fixed operation clock; no real-time wait.
+            Duration::from_millis(50),
+            "the call must see its own budget"
         );
 
         // The scan window is intact afterwards, so the next candidate is not
         // paying for this one.
         let remaining = gwt_core::operation_deadline::current()
             .expect("the scan deadline is restored")
-            .saturating_duration_since(std::time::Instant::now());
-        assert!(
-            remaining > std::time::Duration::from_secs(20),
-            "the shared scan window must survive one readback, got {remaining:?}"
+            .saturating_duration_since(now());
+        assert_eq!(
+            remaining, scan_window,
+            "the shared scan window must survive one readback"
         );
     }
 
     /// Issue #3933: the fan-out yields before it eats the launch stage's budget.
     #[test]
     fn the_readback_fan_out_stops_while_the_launch_stage_still_has_budget() {
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
         assert!(
             readback_fan_out_has_budget(),
             "no ambient deadline imposes no fan-out limit"
         );
 
-        let _almost_spent = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + ISSUE_MONITOR_LAUNCH_RESERVE
-                - std::time::Duration::from_millis(1),
-        );
+        let started = std::time::Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let _almost_spent = ScopedOperationDeadline::enter(started + ISSUE_MONITOR_LAUNCH_RESERVE);
 
         assert!(
             !readback_fan_out_has_budget(),
@@ -9886,6 +9950,13 @@ exit 1
     /// failure Issue #3348 observed in production.
     fn write_bare_repo_bound_fake_gh(bin_dir: &Path, call_log: &Path) -> PathBuf {
         std::fs::create_dir_all(bin_dir).expect("create fake gh bin dir");
+        let pulls_response = bin_dir.join("open-pulls.txt");
+        std::fs::write(
+            &pulls_response,
+            "HTTP/1.1 200 OK\r\n\r\n[{\"number\":7,\"head\":{\"ref\":\"work/issue-42\",\"sha\":\"abc123\"}}]\n",
+        )
+        .expect("write open pulls response");
+        let pulls_response = pulls_response.display().to_string();
         let call_log = call_log.display().to_string();
         #[cfg(windows)]
         {
@@ -9898,6 +9969,10 @@ if not exist \"HEAD\" goto notbare\r\n\
 if not exist \"objects\\\" goto notbare\r\n\
 if not exist \"refs\\\" goto notbare\r\n\
 echo %*>>\"{call_log}\"\r\n\
+if \"%~1\"==\"api\" (\r\n\
+  type \"{pulls_response}\"\r\n\
+  exit /b 0\r\n\
+)\r\n\
 echo %* | findstr /C:\"mergeCommit\" >nul\r\n\
 if not errorlevel 1 (\r\n\
   echo {{\"mergeCommit\":{{\"oid\":\"squash999\"}}}}\r\n\
@@ -9931,6 +10006,7 @@ if [ ! -f HEAD ] || [ ! -d objects ] || [ ! -d refs ]; then
 fi
 printf '%s\n' "$*" >> "{call_log}"
 case "$*" in
+  api\ *) cat "{pulls_response}" ;;
   *mergeCommit*) printf '%s\n' '{{"mergeCommit":{{"oid":"squash999"}}}}' ;;
   *headRefOid*)  printf '%s\n' '{{"headRefOid":"abc123"}}' ;;
   *)             printf '%s\n' '{{}}' ;;
@@ -10057,6 +10133,7 @@ exit 0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let container_root = tmp.path().join("workspace");
         std::fs::create_dir_all(&container_root).expect("create container root");
         let bare_repo = container_root.join("repo.git");
@@ -10137,6 +10214,44 @@ exit 0
             monitor.autonomous_record(42).map(|record| record.phase),
             Some(crate::AutonomousPhase::Reviewing)
         );
+        // Issue #6877: before a verdict arrives, gate readback cannot be used.
+        // An exhausted read budget makes any attempted remote stage observable
+        // without running gh or relying on wall-clock scheduling.
+        let reviewing = monitor.autonomous_record(42).cloned();
+        let calls_before_wait = std::fs::read_to_string(&call_log).unwrap();
+        {
+            let deadline = Instant::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            assert_eq!(scan(&mut monitor, "2026-07-28T00:10:01Z"), 0);
+            let _timer = gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(
+                ISSUE_MONITOR_PERIODIC_READ_MAX_AGE,
+            );
+            assert_eq!(scan(&mut monitor, "2026-07-28T00:10:02Z"), 0);
+            assert_eq!(monitor.autonomous_record(42), reviewing.as_ref());
+            assert!(monitor.pending_effects().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(&call_log).unwrap(),
+                calls_before_wait
+            );
+            for passed in [false, true] {
+                let mut ready = monitor.clone();
+                ready.record_review_verdict(42, passed);
+                let failure = advance_one_autonomous_issue(
+                    &mut ready,
+                    &issues,
+                    "owner/repo",
+                    &container_root,
+                    "develop",
+                    Some(&open_prs),
+                    b"secret",
+                    42,
+                    "2026-07-28T00:10:03Z",
+                )
+                .expect_err("either completed verdict must resume live gate readback");
+                assert_eq!(failure.stage, IssueMonitorScanStage::BranchProtection);
+            }
+        }
         // The review window fails to start.
         monitor.record_launch_failed_at(42, "spawn failed: os error 206", "2026-07-28T00:10:05Z");
         let attempts = monitor
@@ -10151,8 +10266,17 @@ exit 0
 
         // Two scans inside the backoff: the PR is re-detected, nothing is
         // dispatched, and the hold names the backoff on the record.
+        let periodic =
+            gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
         assert_eq!(scan(&mut monitor, "2026-07-28T00:10:30Z"), 0);
         assert_eq!(scan(&mut monitor, "2026-07-28T00:10:50Z"), 0);
+        let calls = std::fs::read_to_string(&call_log).expect("gh calls");
+        assert_eq!(
+            calls.matches("headRefOid").count(),
+            1,
+            "held timer scans reuse the open-pulls page, not per-PR head reads"
+        );
+        assert_eq!(calls.matches("pulls?state=open").count(), 1);
         assert!(monitor
             .autonomous_record(42)
             .and_then(|record| record.review_dispatch_hold.clone())
@@ -10169,11 +10293,36 @@ exit 0
             Some(MonitorInboxState::Launched)
         );
 
-        // After the backoff the same head is dispatched exactly once more.
+        // The cached discovery head is still abc123, but actual dispatch must
+        // read the live head (which moved) instead of binding to that cache.
+        let script = std::fs::read_to_string(&fake_gh).unwrap();
+        std::fs::write(
+            &fake_gh,
+            script.replace("\"headRefOid\":\"abc123\"", "\"headRefOid\":\"def456\""),
+        )
+        .unwrap();
         assert_eq!(scan(&mut monitor, "2026-07-28T00:12:00Z"), 1);
         assert_eq!(
             monitor.autonomous_record(42).map(|record| record.phase),
             Some(crate::AutonomousPhase::Reviewing)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .reviewed_sha
+                .as_deref(),
+            Some("def456"),
+            "dispatch is bound to fresh evidence"
+        );
+        drop(periodic);
+        monitor.record_launch_failed_at(42, "spawn failed", "2026-07-28T00:12:05Z");
+        assert_eq!(scan(&mut monitor, "2026-07-28T00:12:30Z"), 0);
+        let calls = std::fs::read_to_string(&call_log).expect("gh calls");
+        assert_eq!(
+            calls.matches("headRefOid").count(),
+            3,
+            "initial dispatch, resumed dispatch and explicit scan each read live"
         );
     }
     #[test]
@@ -10278,12 +10427,8 @@ exit 0
 case "$*" in
   *repos/owner/repo/branches/develop/protection)
     printf '%s\n' '{"required_status_checks":{"contexts":["Rust"]},"allow_force_pushes":{"enabled":false}}' ;;
-  'pr view 7 --json statusCheckRollup')
-    printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}]}' ;;
-  'pr view 7 --json headRefOid')
-    printf '%s\n' '{"headRefOid":"abc123"}' ;;
-  'pr view 7 --json state,mergeable,mergeStateStatus')
-    printf '%s\n' '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
+  'pr view 7 --json statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus')
+    printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}],"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   'api /repos/owner/repo/actions/runs/90')
     cat "$GWT_TEST_CI_RERUN_FIXTURES/run.json" ;;
   *) printf '%s\n' "unexpected gh call: $*" >&2; exit 1 ;;
@@ -10399,6 +10544,27 @@ mod remote_read_cache_tests {
     use std::cell::Cell;
 
     #[test]
+    fn ci_wait_hold_skips_reviewing_rereads_only_in_timer_scans() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let now = Instant::now();
+        CI_WAIT_HOLDS.insert(ci_wait_hold_key(repo, 7), now, ());
+        assert!(
+            !ci_wait_hold_active(repo, 7, now),
+            "manual scans read fresh"
+        );
+        let _timer =
+            gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+        assert!(ci_wait_hold_active(repo, 7, now));
+        assert!(!ci_wait_hold_active(repo, 8, now), "other PRs still read");
+        assert!(!ci_wait_hold_active(
+            repo,
+            7,
+            now + ISSUE_MONITOR_CI_WAIT_RECHECK + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
     fn optional_readback_budget_deferrals_do_not_become_scan_errors() {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -10450,7 +10616,7 @@ mod remote_read_cache_tests {
             for _ in 0..3 {
                 defer();
             }
-            let warning = "Issue Monitor readback repeatedly deferred";
+            let warning = "Issues readback repeatedly deferred";
             assert_eq!(
                 std::fs::read_to_string(&log)
                     .unwrap()
@@ -10794,7 +10960,7 @@ mod live_readonly_stage_observation {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("valid trace JSON"))
             .filter(|row| {
-                row["fields"]["message"] == "Issue Monitor readback stage"
+                row["fields"]["message"] == "Issues readback stage"
                     && row["fields"]["stage"] == "open-pr-readback"
             })
             .map(|row| {

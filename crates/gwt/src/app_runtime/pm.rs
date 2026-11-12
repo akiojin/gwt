@@ -16,7 +16,7 @@
 //! Fresh spawns read the project's own `PmSettings::launch_profile` and fall
 //! back to a fixed default. They deliberately avoid the Launch Wizard profile
 //! machinery: those profiles are derived from unrelated launches and do not
-//! exist at all on a fresh project (the Issue Monitor bootstrap trap), and the
+//! exist at all on a fresh project (Issues bootstrap trap), and the
 //! PM must come up regardless.
 
 use std::collections::HashSet;
@@ -462,7 +462,7 @@ impl AppRuntime {
         // project store. One repository can own two stores after a scope split
         // (#3466), and each store's `pm.json` — `auto_start` included — is
         // invisible to the other, so both auto-started and two PMs ended up
-        // rewriting one repository's Issue Monitor order and launch orders.
+        // rewriting one repository's Issues order and launch orders.
         // Refusing here rather than at registration keeps the second store from
         // ever spawning the pane.
         if let Some(window_id) = self.live_pm_window_id_in_another_store(&project_root) {
@@ -559,6 +559,8 @@ impl AppRuntime {
                 configured_agent_id: String::new(),
                 configured_model: None,
                 configured_reasoning: None,
+                configured_codex_speed: None,
+                configured_fast_mode: None,
                 running_agent_id: None,
                 running_model: None,
                 running_reasoning: None,
@@ -684,6 +686,8 @@ impl AppRuntime {
         agent_id: &str,
         model: Option<String>,
         reasoning: Option<String>,
+        codex_speed: Option<gwt_agent::CodexSpeed>,
+        fast_mode: Option<bool>,
     ) -> Vec<OutboundEvent> {
         let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
@@ -700,6 +704,8 @@ impl AppRuntime {
             model,
             reasoning,
             version: None,
+            codex_speed,
+            fast_mode,
         }
         .normalized();
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
@@ -1430,13 +1436,13 @@ impl AppRuntime {
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
-                    "woke the resident PM for new Issue Monitor activity"
+                    "woke the resident PM for new Issues activity"
                 );
             }
             Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed) => {
                 tracing::info!(
                     window_id = %decision.window_id,
-                    "Issue Monitor wake deferred until the PM composer is empty"
+                    "Issues wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -2334,9 +2340,21 @@ impl AppRuntime {
         worktree: &Path,
     ) -> Vec<OutboundEvent> {
         let profile = pm_registry::pm_prefs_path_for_repo_path(project_root);
-        let profile = pm_registry::load_pm_prefs(&profile)
+        let mut profile = pm_registry::load_pm_prefs(&profile)
             .map(|prefs| prefs.settings.launch_profile_or_default())
             .unwrap_or_else(|_| pm_registry::PmLaunchProfile::default_profile());
+        if let Some(defaults) = gwt::load_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| {
+            prefs.launch_profile_pool().into_iter().find(|candidate| {
+                gwt_agent::resolve_agent_id(&candidate.agent_id)
+                    == gwt_agent::resolve_agent_id(&profile.agent_id)
+            })
+        }) {
+            profile = profile.with_agent_defaults(&defaults);
+        }
         // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
         // skill that managed-asset materialization writes into this worktree.
         // Writing it here instead would be futile — the launch's own asset
@@ -2403,7 +2421,7 @@ impl AppRuntime {
     /// Permissions are always skipped (FR-012, user ruling 2026-08-06). The PM
     /// subscribes, reconciles, registers Issues, and instructs launches with no
     /// user present, so a permission prompt in that loop is a deadlock nobody
-    /// is watching. Same reasoning as the Issue Monitor's
+    /// is watching. Same reasoning as Issues'
     /// `force_skip_permissions_for_autonomous`, and likewise not a per-project
     /// choice — a PM that can be configured into a hang will eventually hang.
     pub(crate) fn pm_launch_config(
@@ -2415,7 +2433,9 @@ impl AppRuntime {
             .unwrap_or(gwt_agent::AgentId::ClaudeCode);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
             .working_dir(worktree.to_path_buf())
-            .skip_permissions(true);
+            .skip_permissions(true)
+            .codex_speed(profile.codex_speed.unwrap_or_default())
+            .fast_mode(profile.fast_mode.unwrap_or(false));
         if pm_registry::pm_autonomous_bootstrap_allowed(worktree) {
             builder = builder.extra_arg(PM_BOOTSTRAP_PROMPT);
         }

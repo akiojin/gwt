@@ -1,0 +1,99 @@
+{
+  "captured_at": "2026-11-10T03:03:39.5502051+00:00",
+  "process": {
+    "pid": 33516,
+    "started_at": "2026-11-09T14:26:55.1233765Z",
+    "version": "9.156.0",
+    "sha256": "B8CB7B43399F0C8ECA66B4839BB469F8AD49BA8897DA7C8E0D718EC4312DADBE",
+    "profile": "installed release",
+    "source_match": false
+  },
+  "cpu": {
+    "start": "2026-11-10T03:03:34.4914215+00:00",
+    "end": "2026-11-10T03:03:39.5502051+00:00",
+    "elapsed_secs": 5.0542357,
+    "start_cpu_secs": 19728.34375,
+    "end_cpu_secs": 19736.265625,
+    "cpu_percent": 156.7373480425537,
+    "formula": "100 * delta process CPU seconds / delta wall seconds; one logical core = 100%",
+    "rss_mb": 835.08984375,
+    "private_mb": 1300.11328125
+  },
+  "evaluated_base": "56abfcb8341ca12c96ed7a9d17ba8bd408261d91",
+  "log_window": {
+    "start_inclusive": "2026-11-10T11:45:00+09:00",
+    "end_exclusive": "2026-11-10T11:55:00+09:00",
+    "duration_secs": 600,
+    "log_file": "gwt.log.2026-11-10",
+    "first_record": "2026-11-10T11:45:00.061349100+09:00",
+    "last_record": "2026-11-10T11:54:59.869814500+09:00",
+    "scan_gh_starts": 139,
+    "by_label": [
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh api graphql issue timelines",
+        "count": 53
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh api issues",
+        "count": 23
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh api repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1",
+        "count": 3
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh api repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1 --include",
+        "count": 6
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh pr view 6611 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+        "count": 9
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh pr view 6958 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+        "count": 9
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh pr view 6967 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+        "count": 9
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh pr view 6969 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+        "count": 9
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh pr view 6970 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+        "count": 9
+      },
+      {
+        "project_root": "E:\\gwt",
+        "label": "gh pr view 6971 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+        "count": 9
+      }
+    ],
+    "git_cherry_starts_all_logged_processes": 0,
+    "scan_totals_with_project_root": {
+      "E:\\gwt": 46
+    },
+    "parent_pid_available": false
+  },
+  "pane_snapshot": {
+    "captured_at": "2026-11-10T12:03:00.819477+09:00",
+    "running_implementation_agents": 6,
+    "continuous_six_agent_window_proven": false
+  },
+  "acceptance": {
+    "AC-2": "not established for evaluated source; running binary predates PR #6928",
+    "AC-4": "not established for evaluated source; isolated five-second sample of old installed process",
+    "AC-5": "not measured; no matched five-minute/sixty-minute pair"
+  }
+}

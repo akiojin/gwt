@@ -433,7 +433,7 @@ pub fn discard_failed_pending_update(version: &str) -> Result<(), String> {
 }
 
 /// Issue #4038 (AC-3): one project the GUI had open when the update apply
-/// began. `update_drain` records whether the Issue Monitor of that project
+/// began. `update_drain` records whether Issues of that project
 /// was holding new launches (#4037) so the post-restart bootstrap can release
 /// exactly the holds the apply created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -689,7 +689,7 @@ pub enum UpdateResumeOutcome {
 }
 
 /// Issue #4038 (AC-4 / AC-5): the marker as it was found plus the outcome of
-/// settling it. `marker.projects` tells the caller which Issue Monitor holds
+/// settling it. `marker.projects` tells the caller which Issues holds
 /// to release and which sessions to resume regardless of age.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateResumeSettlement {

@@ -390,14 +390,14 @@ resource-allocation agreements remain separate follow-up work.
   escalations back to the user.
 - You never implement production code yourself, and your sub-agents
   never modify the production working tree. Implementation is always
-  performed by implementation agents that the Issue Monitor launches
+  performed by implementation agents launched by Issues
   through its claim/slot path.
 - **PM-facing fixes are implementation work too.** Changes to what the
   PM itself needs in order to operate (the PM guidance and the PM skill,
   the `issue.monitor.*` / `pm.*` operations the PM calls, the Board and
   escalation surfaces the PM rules through, and defects that leave the
   PM unable to observe, order, or settle work) are implemented by the
-  implementation agents the Issue Monitor launches, like any other
+  implementation agents launched by Issues, like any other
   Issue (user instruction, 2026-10-06). Do not implement them in the PM
   worktree. An implementation agent must not declare itself blocked
   because the target is PM-facing. When the fleet cannot be steered
@@ -410,7 +410,7 @@ Hard limits, no exceptions:
   pane and is not a coordination channel.
 - Read scrollback to diagnose and to report, never to hand an agent
   instructions behind the Monitor's back.
-- Never edit Issue Monitor state files directly, never submit a review verdict
+- Never edit Issues state files directly, never submit a review verdict
   into the internal review gate, and never alter acceptance-criteria snapshots.
   An explicitly authorized GitHub review uses `pr.review.submit` and retains
   reviewer, self-review and CI checks. The merge gate decides merges on its own.
@@ -597,6 +597,14 @@ Approved existing operations:
   naming Issue numbers created, changed, or launched. If none were taken,
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
+- A user question or instruction that arrived while you were working, or whose
+  response deadline has passed, still gets its Q&A report. Post it with the
+  same `instruction` object and no `authorizations`; with no current human turn
+  to bind, it is saved as a display-only Q&A that grants no authority.
+- Never let a report disappear silently. When `pm.report.post` fails, read
+  `pm.report.list`; if the report is absent, retry once with the same payload,
+  and if it still fails, tell the user in the conversation that the report was
+  not saved and why.
 - When an action needs a newly saved instruction before it can run, the one Q&A
   report acknowledges the request and concrete action plan first. Save its
   `instruction.authorizations`, obtain the instruction ID, then perform the
@@ -922,8 +930,8 @@ it does not turn that owner into a raw report or exclude its repair.
   infer adoption from silence, labels, bot notifications or approval text in a
   report. Present a `needs_human` summary, recommendation and evidence through
   the existing PM conversation and Reports decision wait; keep current status
-  waiting with the concrete owner action. Do not invent an Issue Monitor
-  NeedsHuman row or queue the raw report to manufacture one.
+  waiting with the concrete owner action. Do not invent a NeedsHuman row in Issues
+  or queue the raw report to manufacture one.
 - Record the actual owner's adopt / reject / defer decision and rationale on
   the report so the reporter can follow it. Only actually adopted requests
   proceed to a trusted curated `gwt-spec` owner with approved requirements,
@@ -1019,7 +1027,7 @@ You own the backlog for its whole life, not just at creation.
   `auto-merge` acceptance-block guard of `issue.create` applies to the
   edited result too: a body or label change that leaves an `auto-merge`
   Issue without a `- [ ] AC-N:` block is refused.
-- Readiness format the Issue Monitor reads: a `## Acceptance Criteria`,
+- Readiness format read by Issues: a `## Acceptance Criteria`,
   `## 受け入れ基準` or `## 受け入れ条件` heading (never `## 成功基準`)
   followed by `- [ ] AC-N:` checkbox lines. A `- [ ]` line without the
   `AC-N:` prefix is accepted and numbered by position, so the prefix is
@@ -1072,7 +1080,7 @@ body cannot hold `plan` / `tasks` sections.
   read those before concluding that a queued-looking Issue is simply
   waiting its turn.
 - Read `source` before you read any number in that snapshot. `daemon`
-  means a live Issue Monitor answered. `degraded_cache` means nothing
+  means the live Issues runtime answered. `degraded_cache` means nothing
   answered and the projection was rebuilt from preferences and the
   local Issue cache: every count is a lower bound, `active_launches` is
   marked `active_launches_incomplete`, `gui_status.state` reads
@@ -1355,9 +1363,8 @@ drive them.
   `pm.operation.execute` with `operation:"pm.message.send"` and the exact
   target `id` and response `text` in `params`. `pane.send` remains forbidden.
 - A `waiting` pane is a runtime observation state, including for manually
-  launched panes. It does not create or imply an Issue Monitor
-  `needs_human` record; never mutate Monitor state or invent a NeedsHuman
-  row from `pane.list`.
+  launched panes. It does not create or imply a `needs_human` record in Issues;
+  never mutate Monitor state or invent a NeedsHuman row from `pane.list`.
 - `board.post` with `params.kind` and `params.mentions` is how you speak
   to another agent. Delivery is pull-based — the recipient sees it at
   its next intent boundary, not immediately. A Board post never
@@ -1491,9 +1498,18 @@ same profile to try again.
 ### Stop during blocked authority recovery
 
 When `issue.monitor.status` reports `authority recovery is blocked`,
-`issue.monitor.config.set` remains fail-closed, including OFF and
-`max_active` changes. Record the error and its preferences/fence paths;
-do not delete the fence or hand-edit the preferences to bypass it.
+the registered PM may use `issue.monitor.config.set` for OFF and capacity changes
+through the typed emergency transaction. ON and unrelated configuration changes
+remain refused. A malformed/unreadable authority fence can also prevent transport
+before this reply; use the direct stop fallback below in that case. Record the
+error and its preferences/fence paths; do not delete the fence or hand-edit the
+preferences to bypass it.
+
+For a launch storm, five launches of one Issue within 300 seconds exhaust its
+budget. The next launch stops Monitor and parks that Issue in `needs_human`.
+Inspect the recorded reason, resolve the cause, then use `issue.monitor.requeue`
+and enable Monitor after the five-minute window expires. Restarting the app does
+not reset this budget.
 
 - Apply `issue.label {number, action:"add", labels:["hold"]}` to each
   affected owner and require successful GitHub readback. A `hold` label
@@ -1675,13 +1691,13 @@ act.
 - Route `waiting_for_human` / `report_to_human` through the existing digest
   and human-input path; the observation does not create a Monitor NeedsHuman row.
   For `close_or_relaunch` and `stop_and_requeue`, preserve the existing authority,
-  canonical settlement checks, the configured close grace, and the Issue Monitor's
+  canonical settlement checks, the configured close grace, and the Issues
   launch path. A recommendation never authorizes an immediate close or relaunch.
 - The directive goes through the ruling channels only: `board.post`
   with a mention when the agent will pick it up at its next intent
   boundary, `pm.message.send` when the pane is idle and must move now.
   Never spawn, relaunch, or inject launch or bootstrap instructions
-  past the Issue Monitor's launch path, and never `pane.send` into
+  past the Issues launch path, and never `pane.send` into
   another pane: steering tells a running agent what to do next; it
   never starts one.
 - A launch waiting on a `verify.lease` holder, held by a provider quota,
@@ -1762,7 +1778,7 @@ re-derives the failure from the persisted hold, so the row does not move.
   lock), the requeued issue fails the same way on its next scan. Read the
   `error_message` first and resolve the cause, then requeue.
 
-Never repair Issue Monitor state by editing `issue-monitor.json`. A hand
+Never repair Issues state by editing `issue-monitor.json`. A hand
 edit is invisible to every process that already holds the same state in
 memory: they re-stamp what you removed on their next commit, so the
 repair silently un-happens and the row comes back. `issue.monitor.requeue`
@@ -1921,14 +1937,15 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   unattended work, use `issue.monitor.config.set` under the existing
   registered-PM authority and `expected_config_token` rules, then read back
   status before attempting a launch. Respect an explicit instruction to keep
-  the Monitor off; the standing mandate does not override it. Config success
-  alone is not proof of launch availability or launch success.
+  the Monitor off; the standing mandate does not override it.
+  A launch-storm shutdown stays off until its cause is resolved, the affected Issue is explicitly
+  requeued, and the five-minute window expires; do not auto-enable it for other work.
+  Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
   approval/owner-handoff rules before asking the user to act. When recovery
   actually needs a human decision, present a NeedsHuman conversation with the
-  observed obstacle and concrete recovery action. Do not manufacture an Issue
-  Monitor `needs_human` row or requeue healthy Issues to represent a project
+  observed obstacle and concrete recovery action. Do not manufacture a `needs_human` row in Issues or requeue healthy Issues to represent a project
   configuration obstacle. A disabled Monitor is not a no-change success or
   proof that an agent launched while intended launch work remains blocked;
   continue the other resident duties within their authority.
@@ -2007,7 +2024,7 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 ## Concern supervision
 
 Every resident cycle supervises durable Concerns independently of whether the
-Issue Monitor queue changed or became empty:
+Issues queue changed or became empty:
 
 - Begin with `concern.list` and read its summary so the unresolved count and
   oldest unresolved `raised_at` are visible before deciding that the cycle is
@@ -2053,7 +2070,7 @@ Issue Monitor queue changed or became empty:
 
 Every resident cycle reads the open pull request inventory through
 `pr.list`. Do not wait to be asked, and do not skip the read because
-the Issue Monitor queue looks quiet — agent windows disappear, PRs do
+the Issues queue looks quiet — agent windows disappear, PRs do
 not. The read itself is budget-aware (Issue #3891), so a cycle never
 has to choose between inventorying and protecting the shared GitHub
 quota:
@@ -2244,7 +2261,7 @@ PR | owner Issue | dwell | conflicting files | behind | recommendation
 `conflict.conflicting_file_count` (`-` when the PR is not conflicted),
 and `behind` is `conflict.behind_by`. Use `?` for a fact the row did not
 measure; never leave a column out and never guess one.
-- When `default_action_executable` is false the Issue Monitor cannot
+- When `default_action_executable` is false the Issues runtime cannot
   perform the default action and `blocker` says why: `stale_pr_inventory`,
   `owner_unknown`
   (no closing Issue and no launch ref naming one) or
@@ -2415,7 +2432,7 @@ gap stays invisible until someone happens to look (Issue #3516).
 ## GitHub read budget
 
 Your own survey is the most likely cause of a shared-quota exhaustion
-that then stalls the Issue Monitor scan and every agent's PR handoff.
+that then stalls the Issues scan and every agent's PR handoff.
 
 - Issue and PR reads are cache-first. Pass `refresh:true` only when the
   decision at hand needs the live state (a launch, a ruling, a close
@@ -2679,6 +2696,8 @@ a quiet queue or a handed-off PR alone does not finish the PM role.
 ## References
 
 Choose the reference for the current action; read only the relevant sections.
+Read references and project memory by absolute path (the file-read tool or
+`cat <absolute path>`); do not `cd` into them.
 
 - At startup or before an authority decision: [Role, boundaries, and user instructions](references/role-and-boundaries.md).
 - For request intake, Issue ownership, queue order, or launches: [Intake and priority](references/intake-and-priority.md).
@@ -2887,6 +2906,10 @@ mod tests {
             assert!(
                 root.contains("## Completion"),
                 "completion must be visible at entry"
+            );
+            assert!(
+                root.contains("do not `cd` into them"),
+                "Issue #6989: references are read by absolute path"
             );
             assert!(
                 root.len() <= 2500,
@@ -3148,7 +3171,7 @@ mod tests {
             "pane's window title",
             "Without applicable authority, do not call `pm.message.send`",
             "only the human may resolve that prompt in the pane",
-            "does not create or imply an Issue Monitor `needs_human` record",
+            "does not create or imply a `needs_human` record in Issues",
             "Never include raw command text, filesystem paths, tokens, secrets, or tool arguments",
             // FR-066: stopping a pane is allowed and bounded. This is the
             // explicit amendment to FR-023's blanket prohibition.
@@ -3199,7 +3222,7 @@ mod tests {
             "the one component that tolerates silence",
             "stranded_launch",
             "has waited eight",
-            "Never repair Issue Monitor state by editing `issue-monitor.json`",
+            "Never repair Issues state by editing `issue-monitor.json`",
             "they re-stamp what you removed on their next commit",
             "Recovering a row does not fix why it failed",
             // Issue #3607: the PM singleton is per repository, and an orphan
@@ -3379,7 +3402,7 @@ mod tests {
                 "actual `akiojin` adoption",
                 "override generic default-permission and adoption policies",
                 "existing PM conversation and Reports decision wait",
-                "Do not invent an Issue Monitor NeedsHuman row",
+                "Do not invent a NeedsHuman row in Issues",
                 "adopt / reject / defer",
             ] {
                 assert!(intake.contains(required), "{provider} intake is missing {required}");
@@ -3411,7 +3434,8 @@ mod tests {
         let guidance = unwrapped(&render_contract());
         for phrase in [
             "authority recovery is blocked",
-            "`issue.monitor.config.set` remains fail-closed",
+            "registered PM may use `issue.monitor.config.set` for OFF and capacity changes",
+            "A launch-storm shutdown stays off",
             "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
             "The direct `issue.monitor.stop` path still works when typed preferences are readable",
             "preserves the authority fence",
@@ -3862,7 +3886,7 @@ mod tests {
                 "Respect an explicit instruction to keep the Monitor off",
                 "`pm.capabilities` and the existing approval/owner-handoff rules",
                 "NeedsHuman conversation with the observed obstacle and concrete recovery action",
-                "Do not manufacture an Issue Monitor `needs_human` row",
+                "Do not manufacture a `needs_human` row in Issues",
                 "A disabled Monitor is not a no-change success or proof that an agent launched",
                 "check fresh `has_launch_profile` before attempting unattended launches",
                 "Initialize only an empty saved pool",
@@ -3898,7 +3922,7 @@ mod tests {
                 "`close_or_relaunch` and `stop_and_requeue`",
                 "The health operation does not execute mutations",
                 "the configured close grace",
-                "Issue Monitor's launch path",
+                "Issues launch path",
             ] {
                 assert!(contract.contains(required), "{provider}: missing {required}");
             }
@@ -3934,7 +3958,7 @@ mod tests {
             "stopped for no visible reason",
             "`board.post` with a mention",
             "`pm.message.send`",
-            "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issue Monitor's launch path",
+            "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issues launch path",
             "never `pane.send`",
             "The steering judgment precedes the no-change judgment",
             "a launch requiring intervention left idle without a directive is never a no-change cycle",
@@ -4665,7 +4689,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane"
         ));
         assert!(body.contains(
-            "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
+            "It does not create or imply a `needs_human` record in Issues; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
         ));
         assert!(!body.contains("the PM may resolve a `waiting` pane"));
     }

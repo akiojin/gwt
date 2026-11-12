@@ -1015,7 +1015,7 @@ fn app_runtime_issue_monitor_enable_reports_missing_origin_detail() {
             ..gwt::IssueMonitorPrefs::default()
         },
     )
-    .expect("save issue monitor prefs");
+    .expect("save Issues prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -1030,7 +1030,7 @@ fn app_runtime_issue_monitor_enable_reports_missing_origin_detail() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     let error = status.last_error.as_deref().expect("origin error");
     assert!(
         error.starts_with("Git origin remote is not configured"),
@@ -1333,7 +1333,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
         window_id.to_string(),
         LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
+            title: "Issues".to_string(),
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
@@ -1720,10 +1720,10 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
             );
             assert_eq!(fs::read(&candidate_path).unwrap(), replacement);
             assert!(pane.pty.tree_exit_confirmed());
-            assert!(durable_launch_recovery_exists(
-                &sessions,
-                &fresh.pending.binding.session_id
-            ));
+            assert!(
+                durable_launch_recovery_exists(&sessions, &fresh.pending.binding.session_id)
+                    .unwrap()
+            );
             assert_eq!(
                 gwt::cli::execution_state::continuation_attempt_for_operation(
                     &fresh.repo,
@@ -1807,7 +1807,8 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
                 assert!(durable_launch_recovery_exists(
                     &sessions,
                     &fresh.pending.binding.session_id
-                ));
+                )
+                .unwrap());
                 assert_eq!(
                     gwt::cli::execution_state::continuation_attempt_for_operation(
                         &fresh.repo,
@@ -1989,7 +1990,7 @@ fn app_runtime_agent_failed_fallback_is_fail_closed_on_corrupt_prefs() {
         window_id.to_string(),
         LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
+            title: "Issues".to_string(),
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),

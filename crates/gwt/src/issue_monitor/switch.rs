@@ -168,11 +168,10 @@ impl IssueMonitorState {
             reasons.push("target_closed: wait for a canonical Reopened revision".into());
         }
         if !proposed.has_launch_profile() {
-            reasons
-                .push("launch_profile_missing: configure an Issue Monitor launch profile".into());
+            reasons.push("launch_profile_missing: configure an Issues launch profile".into());
         }
         if proposed.launch_auth_required {
-            reasons.push("github_auth_required: restore Issue Monitor authentication".into());
+            reasons.push("github_auth_required: restore Issues authentication".into());
         }
         if let Some(hold) = proposed.launch_admission_hold_at(&now) {
             reasons.push(format!("launch_admission_held: {hold:?}"));
@@ -189,7 +188,7 @@ impl IssueMonitorState {
             reasons.push("target_capacity_held: no normal launch slot after source exit".into());
         }
         if !self.config.enabled {
-            reasons.push("issue_monitor_disabled: enable Issue Monitor before switching".into());
+            reasons.push("issue_monitor_disabled: enable Issues before switching".into());
         }
         reasons
     }

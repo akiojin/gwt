@@ -810,8 +810,8 @@ mod tests {
                 "expected an explicit auto-merge opt-out path: {relative}"
             );
             assert!(
-                issue_skill.contains("Issue Monitor"),
-                "expected the Issue Monitor eligibility alignment note: {relative}"
+                issue_skill.contains("Issues"),
+                "expected the Issues eligibility alignment note: {relative}"
             );
         }
     }
@@ -2362,10 +2362,8 @@ mod tests {
             );
             // Modes.
             assert!(
-                content.contains("--mode quick")
-                    && content.contains("--mode full")
-                    && content.contains("--mode pre-pr"),
-                "{relative} must document the quick / full / pre-pr modes"
+                content.contains("--mode full") && content.contains("--mode pre-pr"),
+                "{relative} must document the full / pre-pr modes"
             );
             // FR-123: Diff baseline.
             assert!(
@@ -2396,6 +2394,27 @@ mod tests {
                     content.contains(phrase),
                     "{provider} pre-pr guidance is missing {phrase}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn materialized_verification_guidance_only_advertises_supported_modes() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            for reference in ["contract-modes.md", "execution.md", "test-matrix.md"] {
+                let path = materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/references")
+                    .join(reference);
+                let content = std::fs::read_to_string(path).unwrap();
+                assert!(
+                    !content.contains("quick"),
+                    "{provider}/{reference} advertises unsupported quick mode"
+                );
+                assert!(content.contains("full") && content.contains("pre-pr"));
             }
         }
     }
@@ -2555,7 +2574,7 @@ mod tests {
         }
     }
 
-    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issue Monitor)
+    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issues)
     /// launch must never wait for a human to look at a screen, and the agent's
     /// own headed browser-check must be recorded as its own evidence line
     /// instead of being laundered into the user's verification result. Manual

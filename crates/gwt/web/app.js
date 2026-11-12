@@ -191,7 +191,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
-      subscribeProjectOwnerHealth(document, projectOwnerHealthModel);
+      subscribeProjectOwnerHealth(document, projectOwnerHealthModel, { send, createFocusTrap });
       const runtimeHealthModel = createUiStateStore(null);
       subscribeRuntimeHealth(document, runtimeHealthModel, {
         focusWindow: (windowId) => requestWindowFrame(windowId),
@@ -933,7 +933,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -1343,6 +1343,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (socketProjectKey) projectPageMetadata.reportAttention();
         let replayedReleaseNotesId = null;
         let replayedRecoveryCenterId = null;
+        const replayedWorkAdvisoryIds = [];
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1358,7 +1359,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
           if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
+          if (pending.message.kind === "request_work_advisory") replayedWorkAdvisoryIds.push(pending.message.request_id);
         }
+        resyncWorkAdvisory(replayedWorkAdvisoryIds);
         recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -1375,7 +1378,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         releaseNotesWindow.reconnect(replayedReleaseNotesId);
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
-        requestSupportedAgentRefresh();
+        if (socketProjectKey && rosterHost) {
+          // Registration needs both catalogs even when Settings is not mounted.
+          send({ kind: "list_supported_agents" });
+          send({ kind: "list_custom_agents" });
+        } else {
+          requestSupportedAgentRefresh();
+        }
       }
 
       function handleSocketMessage(event) {
@@ -1510,7 +1519,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (hubSocket !== connection) return;
           if (socket === connection) handleSocketOpen();
           else connection.send(JSON.stringify({ kind: "frontend_ready" }));
-          for (const message of pendingHubMessages.splice(0)) connection.send(JSON.stringify(message));
+          const replayedCloneSearchQueries = [];
+          for (const message of pendingHubMessages.splice(0)) {
+            connection.send(JSON.stringify(message));
+            if (message.kind === "github_repository_search") replayedCloneSearchQueries.push(message.query);
+          }
+          resyncCloneProjectSearch(replayedCloneSearchQueries);
         });
         connection.addEventListener("message", (event) => {
           if (hubSocket === connection) dispatcher.handle(event);
@@ -1648,7 +1662,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // are different faces. Collapsing them to one "Issue" label made an open
           // window's title unable to say which face it was.
           issue: "Issue",
-          issue_monitor: "Issue Monitor",
+          issue_monitor: "Issues",
           spec: "SPEC",
           // SPEC-3671 FR-015: the wire preset is `work` (`workspace` is only a
           // legacy deserialization alias), and the surface lists Works.
@@ -3594,12 +3608,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyIssueMonitorQueueResult,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
+        applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
         windowMap,
@@ -3967,6 +3983,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
@@ -4083,6 +4100,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const {
         sendOpenProjectDialog,
         closeCloneProjectModal,
+        resyncCloneProjectSearch,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -4184,7 +4202,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4245,6 +4263,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
+          onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onSend: text => {
+            const request = requestPmChatSend(windowData.id, text);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
+            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
+            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
+          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -4271,6 +4297,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (windowData.is_pm && view && view.logHost.hidden) {
             const request = requestPmReports(windowData.id, resync);
             if (request) send(request);
+            const conversation = view.controller?.isChatVisible() ? requestPmConversation(windowData.id) : null;
+            if (conversation) send(conversation);
           }
         }
       }
@@ -4443,6 +4471,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
+        applySettingsRepositoryLabels,
+        applySettingsLabelsFailure,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
@@ -4852,12 +4882,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
+        if (event?.level === "error" && event.message?.toLowerCase().includes("allowed labels")) {
+          applySettingsLabelsFailure({ ...event, project_root: activeProjectTab()?.project_root });
+        }
         if (!event) return;
         if (event.level === "error") {
           const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
           if (diagnostic) {
             const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
-            const notice = { ...diagnostic, title: `${transition?.title || "Issue Monitor"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
             if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
             else notificationCenter.recordError(notice);
           }
@@ -4865,12 +4898,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // Repeated launch attempts update one Issue notice until it is dismissed.
         if (event.level === "info" && !event.notification_transition
-          && event.message === "Issue Monitor launch requested"
+          && event.message === "Issues launch requested"
           && Number.isInteger(event.issue_number) && event.issue_number > 0) {
           notificationCenter.recordSurfaceNotice({
             key: `issue-monitor:launch-requested:${event.issue_number}`,
             level: event.level,
-            title: `Issue Monitor #${event.issue_number}`,
+            title: `Issues #${event.issue_number}`,
             message: event.message,
           });
           return;
@@ -4889,7 +4922,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         notificationCenter.record({
           kind: "issue-monitor",
           level: event?.level,
-          title: monitorNotice?.title || "Issue Monitor",
+          title: monitorNotice?.title || "Issues",
           message: event?.message,
           issueNumber: event?.issue_number,
         });
@@ -5168,7 +5201,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "runtime_health":
             runtimeHealthModel.update(() => event.snapshot || {});
             break;
-          case "pm_reports": {
+          case "pm_reports":
+          case "pm_conversation":
+          case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }
@@ -5182,6 +5217,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyIssueSettingsStatus(event.status || {}, activeProjectTab()?.project_root);
             // Issue #3906 AC-12: the update CTA shows the drain progress.
             break;
+          case "repository_labels":
+            applySettingsRepositoryLabels(event);
+            applyRepositoryLabels(event);
+            break;
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
             break;
@@ -5189,6 +5228,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyIssueMonitorProfilesError(event);
             break;
           case "issue_monitor_allowed_labels_write_failed":
+            applySettingsLabelsFailure(event);
             applyKnowledgeReceiveEvent(event);
             break;
           case "issue_monitor_queue_result":

@@ -800,9 +800,9 @@ mod tests {
         fs::create_dir_all(&registered).unwrap();
         fs::create_dir_all(&unregistered).unwrap();
         register_pm(&registered, "current-pm");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() - std::time::Duration::from_secs(1),
-        );
+        let expiry = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expiry);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expiry);
         for (repo, session) in [
             (&registered, "ordinary-session"),
             (&registered, "old-pm"),

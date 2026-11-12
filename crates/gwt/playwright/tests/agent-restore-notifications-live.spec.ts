@@ -6,10 +6,79 @@ import { dirname, join } from "node:path";
 import { startExactRelaunchFixture } from "./_helpers/exact-relaunch";
 import {
   gotoLiveGwt,
+  sendLiveGwtEvent,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+
+// Issue #3730: real backend candidate filtering; Rust tests inject metadata
+// errors. A newer receipt-backed history must not hide the eligible history.
+test("recovery receipt excludes saved history from Launch Wizard QuickStart", async ({ page }, info) => {
+  test.skip(process.env.GWT_PLAYWRIGHT_RECOVERY_RECEIPTS !== "1",
+    "requires freshly built checkout binaries and an isolated saved-session fixture");
+  test.setTimeout(180_000);
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const histories = [
+    { id: "receipt-ready", native: randomUUID(), timestamp: "2026-01-01T00:00:00Z" },
+    { id: "receipt-pending", native: randomUUID(), timestamp: "2026-01-02T00:00:00Z" },
+  ];
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  const fixture = await startExactRelaunchFixture(info, {
+    async beforeStart({ home, project, preferences }) {
+      const sessions = join(home, ".gwt/sessions");
+      const recovery = join(sessions, "execution-launch-recovery");
+      await mkdir(recovery, { recursive: true });
+      const hash = dirname(preferences).split(/[\\/]/).at(-1)!;
+      for (const history of histories) {
+        await writeFile(join(sessions, `${history.id}.toml`), [
+          `id = ${JSON.stringify(history.id)}`, `worktree_path = ${JSON.stringify(project)}`,
+          `project_state_root = ${JSON.stringify(project)}`, `repo_hash = ${JSON.stringify(hash)}`,
+          'branch = "main"', 'agent_id = { type = "Codex" }', 'display_name = "Codex"',
+          `agent_session_id = ${JSON.stringify(history.native)}`, 'status = "Stopped"',
+          'session_mode = "Resume"', 'restore_window_on_startup = false', 'schema_version = 5',
+          `created_at = ${JSON.stringify(history.timestamp)}`, `updated_at = ${JSON.stringify(history.timestamp)}`,
+          `last_activity_at = ${JSON.stringify(history.timestamp)}`, "",
+        ].join("\n"));
+      }
+      // Presence is the candidate fence; no recovery transaction is fabricated.
+      await writeFile(join(recovery, `${histories[1].id}.json`), "{}");
+    },
+  });
+  try {
+    await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+    await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: fixture.branch });
+    const entries = await page.waitForFunction(after => {
+      const wizard = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "launch_wizard_state"
+        && entry.payload.wizard && !entry.payload.wizard.is_hydrating)?.payload.wizard;
+      return wizard?.show_start_methods ? wizard.quick_start_entries : null;
+    }, after, { timeout: 60_000 }).then(handle => handle.jsonValue());
+    expect(entries.map((entry: any) => entry.resume_session_id)).toEqual([histories[0].native]);
+    const wizard = page.locator("#wizard-modal");
+    await expect(wizard).toBeVisible();
+    const resume = wizard.getByRole("button", { name: /Continue last session/ });
+    await expect(resume).toBeEnabled();
+    await expect(resume).toContainText(histories[0].native);
+    await expect(wizard).not.toContainText(histories[1].native);
+    expect(await fixture.launches(), "opening saved history never spawns a provider").toEqual([]);
+    expect(errors, "console and page errors").toEqual([]);
+    await info.attach(`recovery-receipt-${theme}`, {
+      body: await page.screenshot({ fullPage: true }), contentType: "image/png",
+    });
+    await info.attach(`recovery-receipt-evidence-${theme}`, {
+      body: JSON.stringify({ histories, entries, errors }), contentType: "application/json",
+    });
+  } finally {
+    try { await page.close(); } finally { await fixture.stop(); }
+  }
+  expect(errors, "console and page errors including owned cleanup").toEqual([]);
+});
 
 // Issue #6725: this runs two actual checkout GUI processes over the same
 // isolated HOME. Only the saved history and local landed ref are fixtures;
@@ -277,7 +346,7 @@ test("automatic restore errors stay in Notifications while manual errors open a 
 
 // Issue #4222: this checks presentation of backend fallback reasons; native
 // conversation ownership and resume selection are exercised by Rust tests.
-test("Issue Monitor fresh-session notifications retain each native conversation fallback reason", async ({ page }, testInfo) => {
+test("Issues fresh-session notifications retain each native conversation fallback reason", async ({ page }, testInfo) => {
   test.skip(!BASE || !process.env.GWT_PLAYWRIGHT_CHECK_HOME,
     "requires browser-check checkout binaries and a fresh HOME");
   const errors: string[] = [];
@@ -300,10 +369,10 @@ test("Issue Monitor fresh-session notifications retain each native conversation 
     await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
 
     const messages = [
-      "Issue Monitor started a fresh session because native conversation is missing",
-      "Issue Monitor started a fresh session because native conversation ownership does not match this worktree",
-      "Issue Monitor started a fresh session because native conversation could not be verified",
-      "Issue Monitor started a fresh session because native conversation is already held by window holder-window",
+      "Issues started a fresh session because native conversation is missing",
+      "Issues started a fresh session because native conversation ownership does not match this worktree",
+      "Issues started a fresh session because native conversation could not be verified",
+      "Issues started a fresh session because native conversation is already held by window holder-window",
     ];
     for (const [index, message] of messages.entries()) {
       await page.evaluate(message => {
@@ -380,7 +449,7 @@ test("degraded resume warnings retain the reason and Start Work recovery without
     await expect(drawer).toBeVisible();
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toHaveAttribute("data-level", "warn");
-    await expect(rows.first().locator(".notification-center__title")).toHaveText("Issue Monitor #3626");
+    await expect(rows.first().locator(".notification-center__title")).toHaveText("Issues #3626");
     await expect(rows.first().locator(".notification-center__message")).toHaveText(warning);
     await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
     await expect(drawer).toBeHidden();

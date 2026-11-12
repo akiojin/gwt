@@ -142,6 +142,18 @@ Investigation-First discussion and approval contract.
 Permission, safety, and verification gates still apply, as do existing
 lifecycle ownership and recovery requirements.
 
+## Delegated helpers
+
+For a delegated helper or subagent sharing the parent's gwt Session:
+Return results to the parent through your delegation channel.
+Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`.
+Do not commit or push. Report progress, blockers, and completion to the parent;
+finishing your subtask does not finish the parent's Work or execution.
+The parent owns final Work delivery, lifecycle transitions, PR operations,
+and commit/push. The Board/Work and terminal delivery instructions below apply
+to the parent, not to helpers sharing its Session. An inherited `GWT_SESSION_ID`
+does not grant a helper authority to mutate the parent's state.
+
 ## Board (coordination history)
 
 When you cross a reasoning milestone (phase change, alternative chosen,
@@ -241,7 +253,7 @@ posting output and every PM-facing surface repeat back to you:
 
 ### Waiting is not a stall: declare it
 
-The Issue Monitor judges a launched agent stuck when it sees no activity
+The Issues runtime judges a launched agent stuck when it sees no activity
 for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
 costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
 serialization ruling, or on a long verification run you must not touch
@@ -265,8 +277,8 @@ Clear it the moment you resume:
     JSON
 
 Always pass `number`. Omitting it resolves the owner Issue from
-`GWT_AUTONOMOUS_ISSUE`, which only exists directly inside a session the
-Issue Monitor launched - a bootstrap script, a subshell, a wrapper
+`GWT_AUTONOMOUS_ISSUE`, which only exists directly inside a session
+launched by Issues - a bootstrap script, a subshell, a wrapper
 process, or an agent you started yourself does not have it, and there the
 call is refused with `issue_unknown`.
 
@@ -665,6 +677,18 @@ implementation / verification / PR / settlement の次工程へ進みます。
 既存 permission / delivery gate は維持し、一時的な admission / CI 待ちは
 `issue.monitor.wait` で active のまま宣言し、条件が満たされたら再開します。
 
+## Delegated helpers
+
+For a delegated helper or subagent sharing the parent's gwt Session:
+Return results to the parent through your delegation channel.
+Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`.
+Do not commit or push. Report progress, blockers, and completion to the parent;
+finishing your subtask does not finish the parent's Work or execution.
+The parent owns final Work delivery, lifecycle transitions, PR operations,
+and commit/push. The Board/Work and terminal delivery instructions below apply
+to the parent, not to helpers sharing its Session. An inherited `GWT_SESSION_ID`
+does not grant a helper authority to mutate the parent's state.
+
 ## Board (coordination history)
 
 推論の節目（phase change / alternative chosen / concern raised）または
@@ -754,7 +778,7 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
 
 ### 待機は停滞ではない: 申告する
 
-Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+Issues は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
 を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
 排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
 の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
@@ -775,7 +799,7 @@ PM は `issue.monitor.status` の自分の行の `waiting` フィールドから
     JSON
 
 `number` は必ず渡してください。省略した場合は `GWT_AUTONOMOUS_ISSUE` から
-担当 Issue を解決しますが、この env は Issue Monitor が起動したセッションの
+担当 Issue を解決しますが、この env は Issues が起動したセッションの
 直下にしか存在しません。bootstrap スクリプト、サブシェル、ラッパープロセス、
 自分で起動した agent には届かず、そこでは `issue_unknown` で拒否されます。
 
@@ -1532,6 +1556,28 @@ mod tests {
     }
 
     #[test]
+    fn delegated_helpers_return_results_without_parent_delivery_mutations() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA, &render_contract()] {
+            for phrase in [
+                "## Delegated helpers",
+                "Return results to the parent",
+                "Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`",
+                "Do not commit or push",
+                "The parent owns final Work delivery",
+            ] {
+                assert!(
+                    body.contains(phrase),
+                    "missing delegated helper boundary: {phrase}"
+                );
+            }
+            assert!(
+                body.find("## Delegated helpers") < body.find("## Board"),
+                "delegation scope must be established before mandatory Board/Work actions"
+            );
+        }
+    }
+
+    #[test]
     fn guidance_commits_immutable_shards_and_freezes_the_legacy_monolith() {
         for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
             for phrase in [
@@ -2000,7 +2046,7 @@ mod tests {
     /// Issue #4334 AC-1 / AC-4 / AC-5: every shipped `issue.monitor.wait`
     /// example must pass `number` explicitly.
     ///
-    /// Omitting it only resolves inside a session the Issue Monitor launched,
+    /// Omitting it only resolves inside a session launched by Issues,
     /// where `GWT_AUTONOMOUS_ISSUE` names the owner. Anywhere else — a
     /// bootstrap script, a subshell, a manually started agent — the operation
     /// refuses with `issue_unknown`, and agents put the clear call in a

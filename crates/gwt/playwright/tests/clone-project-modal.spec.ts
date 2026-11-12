@@ -56,6 +56,15 @@ test("shared clone state preserves drafts, query fences and clone actions", asyn
   await dialog.locator("#clone-project-search-input").fill(" fixture ");
   await dialog.locator(".clone-project-search-row button").click();
   await expect(dialog).toHaveAttribute("aria-busy", "true");
+  await dialog.locator('[data-clone-mode="url"]').click();
+  await page.evaluate(() => {
+    const hub = (window as any).__gwtPlaywrightSockets.find((socket: WebSocket) =>
+      socket.readyState === WebSocket.OPEN && !new URL(socket.url).searchParams.has('repo_hash'));
+    hub.close();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__cloneActions.length)).toBe(2);
+  await dialog.locator('[data-clone-mode="search"]').click();
+  await expect(dialog.locator('#clone-project-search-input')).toHaveValue(' fixture ');
   await inject({ kind: "github_repository_search_results", query: "stale", repositories: [{ full_name: "Stale" }] });
   await inject({ kind: "github_repository_search_error", query: "stale", message: "Stale failure" });
   await expect(dialog).toContainText("Searching repositories...");
@@ -134,6 +143,7 @@ test("shared clone state preserves drafts, query fences and clone actions", asyn
   await expect(modal).toHaveAttribute("aria-hidden", "true");
   await expect(trigger).toBeFocused();
   expect(await page.evaluate(() => (window as any).__cloneActions)).toEqual([
+    { kind: "github_repository_search", query: "fixture" },
     { kind: "github_repository_search", query: "fixture" },
     { kind: "github_repository_search", query: "fixture" },
     { kind: "clone_project_start", url: repository.url, parent_path: "/fixture/manual" },

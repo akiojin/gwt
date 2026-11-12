@@ -70,7 +70,7 @@
 
 ## 条件と限界
 
-- fresh HOME、8個の disposable Git Project、各1個の実 builtin Codex。PM / Issue Monitor の自動起動は無効。識別用 origin は接続しない `.invalid`。
+- fresh HOME、8個の disposable Git Project、各1個の実 builtin Codex。PM / Issues の自動起動は無効。識別用 origin は接続しない `.invalid`。
 - 実 agent が fixture を読み、40分のコマンドを開始する。コマンドは5秒ごとの heartbeat と private progress receipt だけを生成し、実装・build・Git / GitHub mutation は行わない。
 - 通常の実装作業、production の大きな Work / Issue 状態、他 provider の混在を再現した測定ではない。他のホスト負荷も固定していない。
 - 実 agent を模した shell provider や録画再生ではない。実 provider のプロセスと tool-result hash を保存し、prompt / terminal本文 / 認証情報は転記しない。

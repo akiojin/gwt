@@ -110,7 +110,7 @@ test("AC-23: the toolbar is two bands and no summary/settings/quick/error/status
       node.classList.contains("workspace-toolbar") ||
       node.classList.contains("knowledge-monitor-bar"),
   );
-  assert.equal(bands.length, 2, "exactly the Issue band and the Monitor band");
+  assert.equal(bands.length, 2, "exactly the Issue band and the Issues band");
   for (const gone of [
     ".knowledge-monitor-panel",
     ".knowledge-monitor-summary",
@@ -292,7 +292,7 @@ test("AC-24: a monitor error links the pill to its center item without adding a 
   assert.equal(root.childElementCount, childCount, "no row is added to the toolbar");
   assert.deepEqual(reported.at(-1), {
     key: monitorDiagnostic({ message: "issue #3785: scan failed\nstack line" }).key,
-    title: "Issue Monitor",
+    title: "Issues",
     message: "issue #3785: scan failed\nstack line",
   });
 });
@@ -309,7 +309,7 @@ test("AC-24: a fleet outage is announced through the pill and the center, not a 
   assert.equal(pill.dataset.notificationKey, "issue-monitor:agent_blackout");
   assert.deepEqual(reported.at(-1), {
     key: "issue-monitor:agent_blackout",
-    title: "Issue Monitor",
+    title: "Issues",
     message: outage,
   });
 
@@ -786,7 +786,7 @@ test("Issue #4499: running profile is separate from next-tier overrides in both 
   assert.doesNotMatch(body.querySelector(".issue-detail-tier").textContent, /Running tier|gpt-6-luna/);
 });
 
-test("Monitor list bursts render once while controls and notifications stay synchronous", async (t) => {
+test("Issues list bursts render once while controls and notifications stay synchronous", async (t) => {
   const frames = new Set();
   let renders = 0;
   const { body, surface, state, reported, resolved, sent } = await makeFixture({ surface: {
@@ -816,7 +816,7 @@ test("Monitor list bursts render once while controls and notifications stay sync
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active —", "inbox updates cannot prove local child liveness");
   body.querySelector('[data-action="monitor-toggle"]').click();
   assert.ok(sent.some(message => message.kind === "set_issue_monitor_enabled" && message.enabled === true));
-  assert.equal(renders, 0, "Monitor receipts wait for the shared frame before rendering the list");
+  assert.equal(renders, 0, "Issues receipts wait for the shared frame before rendering the list");
   assert.equal(body.querySelector(".knowledge-row"), row);
   assert.equal(frames.size, 1);
   for (const run of [...frames]) { frames.delete(run); run(); }

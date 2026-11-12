@@ -2,7 +2,7 @@
 
 FR-385: thread environment must be configured before any ML / numeric
 library import. Background QoS caps embedding threads at 2 and lowers the
-process priority (Unix nice 10 / Windows Below Normal); interactive QoS caps
+process priority (Unix nice 10 / Windows background mode); interactive QoS caps
 at 4. Inter-op parallelism is 1 and tokenizer parallelism is disabled.
 """
 
@@ -105,6 +105,32 @@ class QosThreadEnvTests(unittest.TestCase):
         ) as configure, mock.patch.object(runner, "_serve_search_worker", return_value=0):
             self.assertEqual(runner.main(), 0)
         configure.assert_called_once_with("interactive", single_query=True)
+
+    def test_windows_background_qos_lowers_io_priority(self):
+        kernel = mock.Mock()
+        kernel.GetCurrentProcess.return_value = 123
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            ctypes, "windll", types.SimpleNamespace(kernel32=kernel), create=True
+        ):
+            runner._lower_process_priority()
+        self.assertEqual(
+            kernel.SetPriorityClass.call_args_list,
+            [mock.call(123, 0x00100000), mock.call(123, 0x00004000)],
+        )
+        self.assertEqual(kernel.GetCurrentProcess.restype, ctypes.wintypes.HANDLE)
+
+    def test_windows_background_mode_failure_keeps_cpu_priority_fallback(self):
+        kernel = mock.Mock()
+        kernel.GetCurrentProcess.return_value = 123
+        kernel.SetPriorityClass.return_value = 0
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            ctypes, "windll", types.SimpleNamespace(kernel32=kernel), create=True
+        ):
+            runner._lower_process_priority()
+        self.assertEqual(
+            kernel.SetPriorityClass.call_args_list,
+            [mock.call(123, 0x00100000), mock.call(123, 0x00004000)],
+        )
 
     @unittest.skipIf(os.name == "nt", "POSIX process priority uses nice")
     def test_background_qos_lowers_process_priority_on_posix(self):

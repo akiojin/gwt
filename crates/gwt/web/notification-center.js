@@ -1,10 +1,13 @@
 // SPEC #3206 v2 — notification center: bell + unread badge + history drawer.
 //
 // Every notification the operator can miss (agent completion / attention /
-// Board mention / autonomous Issue Monitor events / surface errors) is
+// Board mention / autonomous Issues events / surface errors) is
 // recorded here regardless of whether a transient toast was shown (FR-011).
 // The center is a pure sink (FR-016): it never decides whether to fire and it
-// never dedups the callers' singleton ids — the history is one row per notice.
+// never dedups the callers' singleton ids. Issue #5016 AC-HS3: a notice whose
+// content is identical to a live row (kind, id, level, title, Issue, message)
+// is one more occurrence of that row — the row keeps an occurrence count and
+// the latest time, and moves to the top. Different content stays separate.
 //
 // The list is the shared toast-host stack mounted inside the drawer body, so
 // cap / newest-on-top / dropped / per-item dismiss / clear-all come from the
@@ -130,6 +133,8 @@ export function createNotificationCenter({
   // FR-017 / Issue #5284: source-keyed surface notices update one history row.
   // Only recurring errors increase its occurrence count.
   const surfaceRows = new Map();
+  // Issue #5016 AC-HS3: content identity -> { item, count, onActivate }.
+  const occurrenceRows = new Map();
 
   function liveUnread() {
     for (const item of unread) {
@@ -253,13 +258,61 @@ export function createNotificationCenter({
   /**
    * Record one notification into the history.
    * `notice` = { kind, level, title?, message?, issueNumber?, onActivate? }.
-   * Callers' `id` / `timeoutMs` are deliberately NOT forwarded: the history
-   * has no dedup and never auto-expires.
+   * Callers' `id` / `timeoutMs` are deliberately NOT forwarded as toast ids and
+   * the history never auto-expires; `id` only separates content identities.
    */
   function record(notice) {
     if (!notice) {
       return null;
     }
+    const identity = JSON.stringify([
+      notice.kind == null ? "" : String(notice.kind),
+      notice.id == null ? "" : String(notice.id),
+      HISTORY_LEVELS.includes(notice.level) ? notice.level : "info",
+      notice.title || "Notification",
+      notice.issueNumber || "",
+      notice.message == null ? null : String(notice.message),
+    ]);
+    const existing = occurrenceRows.get(identity);
+    if (existing?.item.isConnected) {
+      existing.count += 1;
+      const { item } = existing;
+      // The latest jump-to wins; an occurrence without one keeps the previous.
+      if (typeof notice.onActivate === "function") {
+        if (typeof existing.onActivate !== "function") {
+          stack.enableActivation(item, () => existing.onActivate?.());
+        }
+        existing.onActivate = notice.onActivate;
+      }
+      item.parentNode?.insertBefore(item, item.parentNode.firstChild);
+      const time = item.querySelector(".notification-center__time");
+      if (time) {
+        const stamp = now();
+        time.dateTime = stamp.toISOString();
+        time.textContent = formatClock(stamp);
+      }
+      renderErrorCount(item, existing.count);
+      if (!isOpen) unread.add(item);
+      notifyUnread();
+      return item;
+    }
+    const entry = { item: null, count: 1, onActivate: notice.onActivate };
+    const item = pushRow({
+      ...notice,
+      onActivate: typeof notice.onActivate === "function" ? () => entry.onActivate?.() : undefined,
+    });
+    if (item) {
+      entry.item = item;
+      // Rows that left through ×, clear-all or the cap retire their identity.
+      for (const [key, row] of occurrenceRows) {
+        if (!row.item.isConnected) occurrenceRows.delete(key);
+      }
+      occurrenceRows.set(identity, entry);
+    }
+    return item;
+  }
+
+  function pushRow(notice) {
     const issue = notice.issueNumber ? ` #${notice.issueNumber}` : "";
     const item = stack.push({
       level: notice.level,
@@ -391,7 +444,7 @@ export function createNotificationCenter({
       }
       renderErrorCount(item, existing.count);
     } else {
-      item = record({ kind, level, title: notice.title, message: notice.message,
+      item = pushRow({ kind, level, title: notice.title, message: notice.message,
         onActivate: key && typeof notice.onActivate === "function"
           ? () => surfaceRows.get(key)?.onActivate?.() : notice.onActivate });
       if (!item) return null;
@@ -528,6 +581,7 @@ export function createNotificationCenter({
     stack.clear();
     unread.clear();
     surfaceRows.clear();
+    occurrenceRows.clear();
     syncEmptyState();
     notifyUnread();
   }

@@ -347,7 +347,7 @@ pub(crate) fn activity_from_samples(
 /// (Issue #4561).
 ///
 /// The daemon is where the work was started from, not the work: it runs
-/// Issue Monitor scans and hook children of its own, and counting its CPU as
+/// Issues scans and hook children of its own, and counting its CPU as
 /// this lease's progress would answer "progressing" for a holder whose
 /// commands died. Issue #4633 measured exactly that — a dead holder reported
 /// progressing on its daemon's hook children — so only the children that lead
@@ -855,7 +855,7 @@ mod tests {
         );
     }
 
-    /// The daemon is the launcher, not the work. Its own CPU — Issue Monitor
+    /// The daemon is the launcher, not the work. Its own CPU — Issues
     /// scans, hook children — must not stand in for a workload that is gone,
     /// or the verdict flips to "progressing" for a holder with nothing left
     /// running.

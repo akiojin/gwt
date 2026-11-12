@@ -884,3 +884,59 @@ test("project health renders its immutable latest frame without changing ONLINE"
   unsubscribe();
   assert.equal(frames.size, 0, "unmount cancels the pending frame");
 });
+
+
+test("Issue #6992: wedged recovery requires a current explicit confirmation", async () => {
+  const { subscribeProjectOwnerHealth } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const sent = [];
+  const unsubscribe = subscribeProjectOwnerHealth(document, model, { send: message => { sent.push(message); return "sent"; } });
+  const flush = () => { const pending = [...frames]; frames.clear(); pending.forEach(callback => callback()); };
+  model.update(() => ({ state: "wedged", recovery_id: "wedge-test-1", detail: "Health timed out repeatedly" })); flush();
+  const cell = document.querySelector("[data-project-owner-health]");
+  assert.equal(cell.dataset.state, "wedged");
+  assert.match(cell.textContent, /Wedged/);
+  const restart = cell.querySelector("[data-owner-restart]");
+  assert.ok(restart);
+  restart.click();
+  const modal = document.querySelector("#owner-restart-modal");
+  const dialog = modal.querySelector(".modal-shell");
+  assert.equal(dialog.getAttribute("role"), "dialog");
+  assert.equal(dialog.getAttribute("aria-modal"), "true");
+  for (const primitive of ["modal-header", "modal-body", "modal-footer"]) assert.ok(dialog.querySelector(`.${primitive}`));
+  assert.match(modal.textContent, /all agents/i);
+  assert.match(modal.textContent, /SIGTERM.*SIGKILL/s);
+  assert.equal(sent.length, 0, "opening the dialog grants no termination authority");
+  modal.querySelector("[data-owner-restart-cancel]").click();
+  assert.equal(sent.length, 0);
+  restart.click();
+  model.update(() => ({ state: "healthy" })); flush();
+  assert.equal(modal.classList.contains("open"), false, "recovery invalidates stale confirmation");
+  assert.equal(restart.hidden, true);
+  model.update(() => ({ state: "wedged", recovery_id: "wedge-test-1" })); flush();
+  restart.click();
+  model.update(() => ({ state: "wedged", recovery_id: "wedge-test-2" }));
+  modal.querySelector("[data-owner-restart-confirm]").click();
+  assert.equal(sent.length, 0, "receive invalidates confirmation before its display frame");
+  flush();
+  assert.equal(modal.classList.contains("open"), false, "a different wedged incarnation invalidates the old confirmation");
+  modal.querySelector("[data-owner-restart-confirm]").click();
+  assert.equal(sent.length, 0);
+  restart.click();
+  modal.querySelector("[data-owner-restart-confirm]").click();
+  assert.deepEqual(sent, [{ kind: "restart_wedged_owner", confirmed: true, recovery_id: "wedge-test-2" }]);
+  assert.equal(modal.classList.contains("open"), false);
+  assert.equal(restart.disabled, true, "duplicate clicks do not replay confirmation");
+  model.update(() => ({ state: "wedged", recovery_id: "wedge-test-2", detail: "Diagnostics could not be saved; retry available" })); flush();
+  assert.equal(restart.disabled, false, "a fresh health observation allows retry after backend refusal");
+  restart.click();
+  assert.equal(modal.classList.contains("open"), true);
+  assert.equal(sent.length, 1, "retry still requires a new explicit confirmation");
+  modal.querySelector("[data-owner-restart-cancel]").click();
+  unsubscribe();
+  assert.equal(document.querySelector("#owner-restart-modal"), null);
+});

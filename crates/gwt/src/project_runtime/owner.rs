@@ -73,10 +73,19 @@ pub(crate) struct WindowRuntime {
     pub(crate) pane: Arc<Mutex<Pane>>,
     pub(crate) output_thread: Option<thread::JoinHandle<()>>,
     pub(crate) status_thread: Option<thread::JoinHandle<()>>,
+    pending_exit: Option<PendingExit>,
+    exit_drained: bool,
+    worker_error: Option<String>,
     pty_status: crate::WindowProcessStatus,
     hook_status: Option<crate::WindowProcessStatus>,
     output_bytes: u64,
     pub(crate) agent: Option<AgentRuntimeRecord>,
+}
+
+struct PendingExit {
+    status: WindowProcessStatus,
+    detail: Option<String>,
+    pm_crash_candidate: bool,
 }
 
 impl Drop for WindowRuntime {
@@ -345,6 +354,7 @@ pub(crate) struct AgentPrepared {
 #[derive(Clone, Copy)]
 pub(crate) enum CloseCause {
     ExplicitClose,
+    ExplicitStop,
     NaturalExit,
     DiagnosticExit,
     PmGenericCrash,
@@ -353,7 +363,9 @@ pub(crate) enum CloseCause {
 impl CloseCause {
     fn restore_policy(self) -> Option<bool> {
         match self {
-            Self::ExplicitClose | Self::NaturalExit | Self::DiagnosticExit => Some(false),
+            Self::ExplicitClose | Self::ExplicitStop | Self::NaturalExit | Self::DiagnosticExit => {
+                Some(false)
+            }
             Self::PmGenericCrash | Self::GuiLifetime => None,
         }
     }
@@ -430,6 +442,16 @@ pub(crate) struct LegacyFocusPublication {
 }
 
 pub(crate) enum OwnerMessage {
+    ExitReaped {
+        id: String,
+        incarnation: u64,
+        result: Result<(), String>,
+    },
+    ExitDrained {
+        id: String,
+        incarnation: u64,
+        result: Result<(), String>,
+    },
     #[cfg(any(test, feature = "test-gh-guard"))]
     SetOperationClock(Option<std::time::Instant>, oneshot::Sender<()>),
     #[cfg(any(test, feature = "test-gh-guard"))]
@@ -486,6 +508,11 @@ pub(crate) enum OwnerMessage {
     },
     MonitorNotificationFinished {
         result: Result<(), String>,
+    },
+    MonitorFailureFinished {
+        id: String,
+        incarnation: u64,
+        result: Result<Option<u64>, String>,
     },
     MonitorCommitted {
         id: String,
@@ -599,6 +626,12 @@ pub(crate) enum OwnerMessage {
         cause: CloseCause,
         result: Result<(), String>,
     },
+    CloseAfterStop {
+        id: String,
+        incarnation: u64,
+        result: OwnerReply,
+        reply: oneshot::Sender<OwnerReply>,
+    },
     Retired {
         id: String,
         incarnation: u64,
@@ -652,8 +685,14 @@ pub(crate) enum OwnerMessage {
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
-    GuiAttached(oneshot::Sender<Result<u64, String>>),
-    GuiDetached(u64),
+    GuiAttached {
+        instance: uuid::Uuid,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    GuiDetached {
+        id: u64,
+        quit: bool,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -724,17 +763,20 @@ impl OwnerHandle {
     pub(crate) fn residency(&self) -> tokio::sync::watch::Receiver<ResidencySnapshot> {
         self.residency.clone()
     }
-    pub(crate) async fn attach_gui(&self) -> Result<u64, String> {
+    pub(crate) async fn attach_gui(&self, instance: uuid::Uuid) -> Result<u64, String> {
         let (send, receive) = oneshot::channel();
         self.sender
-            .send(OwnerMessage::GuiAttached(send))
+            .send(OwnerMessage::GuiAttached {
+                instance,
+                reply: send,
+            })
             .map_err(|_| "project owner unavailable".to_string())?;
         receive
             .await
             .map_err(|_| "project owner stopped before GUI attachment".to_string())?
     }
-    pub(crate) fn detach_gui(&self, id: u64) {
-        let _ = self.sender.send(OwnerMessage::GuiDetached(id));
+    pub(crate) fn detach_gui(&self, id: u64, quit: bool) {
+        let _ = self.sender.send(OwnerMessage::GuiDetached { id, quit });
     }
     pub async fn request(&self, request: OwnerRequest) -> OwnerReply {
         let (send, receive) = oneshot::channel();
@@ -990,10 +1032,23 @@ enum ProjectChoiceError {
     Unconfirmed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ReconciliationTarget {
+    Registry,
+    Retirement(String, u64),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReconciliationAttempt {
+    Scheduled(std::time::Instant),
+    Attempted,
+    NeedsHuman,
+}
+
 struct ReconciliationRecovery {
     timeout: std::time::Duration,
     retry_at: Option<std::time::Instant>,
-    attempted: bool,
+    attempts: HashMap<ReconciliationTarget, ReconciliationAttempt>,
     needs_human: bool,
 }
 
@@ -1002,11 +1057,63 @@ impl Default for ReconciliationRecovery {
         Self {
             timeout: std::time::Duration::from_secs(30),
             retry_at: None,
-            attempted: false,
+            attempts: HashMap::new(),
             needs_human: false,
         }
     }
 }
+
+impl ReconciliationRecovery {
+    fn advance(
+        &mut self,
+        now: std::time::Instant,
+        retained: &HashSet<ReconciliationTarget>,
+        failed: &HashSet<ReconciliationTarget>,
+    ) -> (Vec<ReconciliationTarget>, Vec<ReconciliationTarget>) {
+        // In-flight cleanup keeps its attempt history, but needs no scheduled timer.
+        self.attempts.retain(|target, attempt| {
+            retained.contains(target)
+                && (failed.contains(target)
+                    || !matches!(attempt, ReconciliationAttempt::Scheduled(_)))
+        });
+        let deadline = now
+            .checked_add(self.timeout)
+            .unwrap_or(now + std::time::Duration::from_secs(30));
+        let mut retry = Vec::new();
+        let mut exhausted = Vec::new();
+        for target in failed {
+            let attempt = self
+                .attempts
+                .entry(target.clone())
+                .or_insert(ReconciliationAttempt::Scheduled(deadline));
+            match *attempt {
+                ReconciliationAttempt::Scheduled(due) if now >= due => {
+                    *attempt = ReconciliationAttempt::Attempted;
+                    retry.push(target.clone());
+                }
+                ReconciliationAttempt::Attempted => {
+                    *attempt = ReconciliationAttempt::NeedsHuman;
+                    exhausted.push(target.clone());
+                }
+                _ => {}
+            }
+        }
+        self.retry_at = self
+            .attempts
+            .values()
+            .filter_map(|attempt| match attempt {
+                ReconciliationAttempt::Scheduled(due) => Some(*due),
+                _ => None,
+            })
+            .min();
+        self.needs_human = self
+            .attempts
+            .values()
+            .any(|attempt| matches!(attempt, ReconciliationAttempt::NeedsHuman));
+        (retry, exhausted)
+    }
+}
+
 impl From<String> for ProjectChoiceError {
     fn from(message: String) -> Self {
         Self::BeforeSave(message)
@@ -1225,8 +1332,8 @@ impl OwnerState {
                 next_project_policy_check = now + std::time::Duration::from_secs(1);
             }
             if !self.stopping
-                && !continue_active
-                && self.gui_presence.expired(std::time::Instant::now())
+                && (self.gui_presence.quit_requested()
+                    || (!continue_active && self.gui_presence.expired(std::time::Instant::now())))
             {
                 self.begin_shutdown(None);
             }
@@ -1653,20 +1760,25 @@ impl OwnerState {
                     let _ = reply.send(result.map(|_| json!({"updated":true})));
                     self.resume_agent_transport();
                 }
-                OwnerMessage::GuiAttached(reply) => {
+                OwnerMessage::GuiAttached { instance, reply } => {
                     if self.stopping {
                         let _ = reply.send(Err("project owner is shutting down".into()));
                     } else {
                         self.next_gui_presence_id += 1;
                         let id = self.next_gui_presence_id;
-                        self.gui_presence.attach(id);
+                        self.gui_presence.attach(id, instance);
                         if reply.send(Ok(id)).is_err() {
                             self.gui_presence.detach(id, std::time::Instant::now());
                         }
                     }
                 }
-                OwnerMessage::GuiDetached(id) => {
-                    self.gui_presence.detach(id, std::time::Instant::now())
+                OwnerMessage::GuiDetached { id, quit } => {
+                    if quit {
+                        self.gui_presence
+                            .detach_for_quit(id, std::time::Instant::now());
+                    } else {
+                        self.gui_presence.detach(id, std::time::Instant::now());
+                    }
                 }
                 OwnerMessage::Request(ref request, _)
                     if self.stopping
@@ -1674,6 +1786,7 @@ impl OwnerState {
                             request.command,
                             OwnerCommand::Health
                                 | OwnerCommand::Close { .. }
+                                | OwnerCommand::Stop { .. }
                                 | OwnerCommand::PendingCancelExact { .. }
                         ) =>
                 {
@@ -1755,11 +1868,20 @@ impl OwnerState {
                         }
                     }
                     if result.is_ok() {
-                        if let Retirement::SwitchStoppedWindow { proof, .. } = &captured {
+                        let removed_session = match &captured {
+                            Retirement::SwitchStoppedWindow { proof, .. } => {
+                                Some(proof.session_id.clone())
+                            }
+                            Retirement::StoppedWindow(capture) if capture.expected.is_none() => {
+                                capture.cleanup.expected_session_id.clone()
+                            }
+                            _ => None,
+                        };
+                        if let Some(session_id) = removed_session {
                             let _ = self.events.send(OwnerEvent::WindowRemoved {
                                 id: id.clone(),
                                 incarnation,
-                                session_id: Some(proof.session_id.clone()),
+                                session_id: Some(session_id),
                             });
                         }
                     }
@@ -1806,6 +1928,42 @@ impl OwnerState {
                     cause,
                     result,
                 } => self.closed(id, incarnation, runtime, cause, result),
+                OwnerMessage::CloseAfterStop {
+                    id,
+                    incarnation,
+                    result,
+                    reply,
+                } => {
+                    self.input_jobs = self.input_jobs.saturating_sub(1);
+                    if result
+                        .as_ref()
+                        .is_ok_and(|receipt| receipt["explicit_stop"] == true)
+                    {
+                        self.request(
+                            OwnerRequest {
+                                project_key: self.project_key.clone(),
+                                command: OwnerCommand::Close { id, incarnation },
+                            },
+                            reply,
+                        );
+                    } else {
+                        let _ = reply.send(result);
+                    }
+                }
+                OwnerMessage::ExitDrained {
+                    id,
+                    incarnation,
+                    result,
+                } => {
+                    self.exit_drained(id, incarnation, result);
+                }
+                OwnerMessage::ExitReaped {
+                    id,
+                    incarnation,
+                    result,
+                } => {
+                    self.exit_reaped(id, incarnation, result);
+                }
                 OwnerMessage::AgentMaterialized {
                     operation_id,
                     id,
@@ -1919,6 +2077,22 @@ impl OwnerState {
                     self.input_jobs -= 1;
                     if let Err(error) = result {
                         tracing::warn!(%error, "owner Monitor notification is unconfirmed");
+                    }
+                }
+                OwnerMessage::MonitorFailureFinished {
+                    id,
+                    incarnation,
+                    result,
+                } => {
+                    self.input_jobs -= 1;
+                    match result {
+                        Ok(Some(issue)) => {
+                            self.retire_retried_monitor_runtime(&id, incarnation, issue);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, window_id = %id, "owner Monitor notification is unconfirmed");
+                        }
                     }
                 }
                 OwnerMessage::MonitorCommitted {
@@ -2066,7 +2240,7 @@ impl OwnerState {
     fn begin_shutdown(&mut self, reply: Option<oneshot::Sender<()>>) {
         tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
             gui_presence_count = self.gui_presence.count(), retained_cleanups = self.retirements.len(),
-            reason = if reply.is_some() { "shutdown_requested" } else { "gui_presence_expired" },
+            reason = if reply.is_some() { "shutdown_requested" } else if self.gui_presence.quit_requested() { "gui_quit" } else { "gui_presence_expired" },
             "project owner shutdown started");
         self.stopping = true;
         self.pm_wake_permits.cancel_mobile_for_pane(None);
@@ -2134,73 +2308,67 @@ impl OwnerState {
 
     fn reconcile_failed_retirements(&mut self, now: std::time::Instant) {
         let registry_failed = self.agent_registry.is_err();
-        if self.retirements.is_empty() && !registry_failed {
-            self.reconciliation.retry_at = None;
-            self.reconciliation.attempted = false;
-            self.reconciliation.needs_human = false;
-            return;
-        }
-        let failed = self
+        let mut retained = self
+            .retirements
+            .keys()
+            .map(|(id, incarnation)| ReconciliationTarget::Retirement(id.clone(), *incarnation))
+            .chain(self.closing.iter().map(|(id, closing)| {
+                ReconciliationTarget::Retirement(id.clone(), closing.incarnation)
+            }))
+            .collect::<HashSet<_>>();
+        let mut failed = self
             .retirements
             .iter()
-            .filter_map(|(key, captured)| captured.is_some().then_some(key.clone()))
-            .collect::<Vec<_>>();
-        if failed.is_empty() && !registry_failed {
-            self.reconciliation.retry_at = None;
-            return;
-        }
-        if self.reconciliation.attempted {
-            if !self.reconciliation.needs_human {
-                self.reconciliation.needs_human = true;
-                use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
-                let message = "Project owner exact cleanup recovery needs_human; retained identities require reconciliation";
-                tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key,
-                    identities = ?failed, registry_failed, recovery = "needs_human", "{message}");
-                let mut record = ErrorRecord::new(
-                    ErrorKind::DaemonFault,
-                    message,
-                    ErrorTarget {
-                        project_root: Some(self.root.to_string_lossy().into_owned()),
-                        ..Default::default()
-                    },
-                )
-                .with_context(std::collections::BTreeMap::from([
-                    ("operation".into(), "project_owner_reconciliation".into()),
-                    ("recovery".into(), "needs_human".into()),
-                    ("identities".into(), format!("{failed:?}")),
-                ]));
-                record.id = format!(
-                    "project-owner-reconciliation-{}-{}",
-                    self.project_key, self.host_instance_id
-                );
-                if let Err(error) = gwt_core::error_ledger::record_once(record) {
-                    tracing::warn!(%error, "could not record project owner reconciliation recovery");
-                }
-            }
-            return;
-        }
-        let Some(retry_at) = self.reconciliation.retry_at else {
-            self.reconciliation.retry_at = Some(
-                now.checked_add(self.reconciliation.timeout)
-                    .unwrap_or(now + std::time::Duration::from_secs(30)),
-            );
-            tracing::warn!(target: "gwt.owner.recovery", project_key = %self.project_key,
-                identities = ?failed, registry_failed, timeout_secs = self.reconciliation.timeout.as_secs(),
-                "exact owner cleanup scheduled for automatic reconciliation");
-            return;
-        };
-        if now < retry_at {
-            return;
-        }
-        self.reconciliation.retry_at = None;
-        self.reconciliation.attempted = true;
-        tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
-            identities = ?failed, registry_failed, "retrying exact owner cleanup");
+            .filter(|(_, captured)| captured.is_some())
+            .map(|((id, incarnation), _)| {
+                ReconciliationTarget::Retirement(id.clone(), *incarnation)
+            })
+            .collect::<HashSet<_>>();
         if registry_failed {
-            self.agent_registry = super::agent_dispatch::load_owner_registry(&self.root);
-            self.refresh_registry_projection();
+            retained.insert(ReconciliationTarget::Registry);
+            failed.insert(ReconciliationTarget::Registry);
         }
-        for (id, incarnation) in failed {
+        let previous_retry_at = self.reconciliation.retry_at;
+        let (retry, exhausted) = self.reconciliation.advance(now, &retained, &failed);
+        if self.reconciliation.retry_at.is_some()
+            && self.reconciliation.retry_at != previous_retry_at
+        {
+            tracing::warn!(target: "gwt.owner.recovery", project_key = %self.project_key,
+                attempts = ?self.reconciliation.attempts, timeout_secs = self.reconciliation.timeout.as_secs(),
+                "exact owner cleanup scheduled for automatic reconciliation");
+        }
+        if !exhausted.is_empty() {
+            use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+            let message = "Project owner exact cleanup recovery needs_human; retained identities require reconciliation";
+            tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key,
+                identities = ?exhausted, recovery = "needs_human", "{message}");
+            let record = ErrorRecord::new(
+                ErrorKind::DaemonFault,
+                message,
+                ErrorTarget {
+                    project_root: Some(self.root.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            )
+            .with_context(std::collections::BTreeMap::from([
+                ("operation".into(), "project_owner_reconciliation".into()),
+                ("recovery".into(), "needs_human".into()),
+                ("identities".into(), format!("{exhausted:?}")),
+            ]));
+            if let Err(error) = gwt_core::error_ledger::record_once(record) {
+                tracing::warn!(%error, "could not record project owner reconciliation recovery");
+            }
+        }
+        if !retry.is_empty() {
+            tracing::info!(target: "gwt.owner.recovery", project_key = %self.project_key,
+                identities = ?retry, "retrying exact owner cleanup");
+        }
+        for target in retry {
+            let ReconciliationTarget::Retirement(id, incarnation) = target else {
+                self.agent_registry = super::agent_dispatch::load_owner_registry(&self.root);
+                self.refresh_registry_projection();
+                continue;
+            };
             let Some(captured) = self
                 .retirements
                 .get_mut(&(id.clone(), incarnation))
@@ -2286,6 +2454,9 @@ impl OwnerState {
                 pane,
                 output_thread: Some(output_thread),
                 status_thread: Some(status_thread),
+                pending_exit: None,
+                exit_drained: false,
+                worker_error: None,
                 pty_status: crate::WindowProcessStatus::Running,
                 hook_status: None,
                 output_bytes: 0,
@@ -3102,6 +3273,7 @@ impl OwnerState {
                 | OwnerCommand::RestoreSavedSession { .. }
                 | OwnerCommand::ContinueWork { .. }
                 | OwnerCommand::Close { .. }
+                | OwnerCommand::Stop { .. }
                 | OwnerCommand::CloseStoppedSession { .. }
         ) {
             let issues = match &request.command {
@@ -3464,6 +3636,7 @@ impl OwnerState {
             }
             return;
         }
+        let explicit_stop = matches!(&request.command, OwnerCommand::Stop { .. });
         let result = match request.command {
             OwnerCommand::PromoteStandalone => {
                 self.gui_presence.promote();
@@ -3495,16 +3668,39 @@ impl OwnerState {
                 "reconciliation":self.retirements.keys().map(|(id,incarnation)| json!({"id":id,"incarnation":incarnation})).collect::<Vec<_>>(),
             })),
 
-            OwnerCommand::Close { id, incarnation } => {
+            OwnerCommand::Close { id, incarnation } | OwnerCommand::Stop { id, incarnation } => {
                 if self
                     .closing
                     .get(&id)
                     .is_some_and(|closing| closing.incarnation == incarnation)
                 {
-                    self.close_replies
-                        .entry((id, incarnation))
-                        .or_default()
-                        .push(reply);
+                    if explicit_stop {
+                        self.close_replies
+                            .entry((id, incarnation))
+                            .or_default()
+                            .push(reply);
+                    } else {
+                        // Close must still remove the row when a preceding STOP
+                        // is currently draining the same physical incarnation.
+                        let (completed, receive) = oneshot::channel();
+                        self.close_replies
+                            .entry((id.clone(), incarnation))
+                            .or_default()
+                            .push(completed);
+                        let sender = self.sender.clone();
+                        self.input_jobs += 1;
+                        spawn_owner_worker(move || {
+                            let result = receive.blocking_recv().unwrap_or_else(|_| {
+                                Err("owner stopped before close acknowledgement".into())
+                            });
+                            let _ = sender.send(OwnerMessage::CloseAfterStop {
+                                id,
+                                incarnation,
+                                result,
+                                reply,
+                            });
+                        });
+                    }
                     return;
                 }
                 if let Some(captured) = self
@@ -3515,6 +3711,12 @@ impl OwnerState {
                     match captured {
                         Retirement::Runtime { runtime, cause } => {
                             self.retirements.remove(&(id.clone(), incarnation));
+                            let cause =
+                                if !explicit_stop && matches!(cause, CloseCause::ExplicitStop) {
+                                    CloseCause::ExplicitClose
+                                } else {
+                                    cause
+                                };
                             self.start_close(id, *runtime, cause, reply);
                         }
                         captured => {
@@ -3528,10 +3730,27 @@ impl OwnerState {
                     .get(&id)
                     .is_some_and(|runtime| runtime.incarnation == incarnation)
                 {
+                    if !explicit_stop {
+                        if let Some(capture) = self.stopped_window_close_capture(&id, incarnation) {
+                            self.start_retirement(
+                                id,
+                                incarnation,
+                                Retirement::StoppedWindow(Box::new(capture)),
+                                Some(reply),
+                                None,
+                            );
+                            return;
+                        }
+                    }
                     Err("pane incarnation mismatch".into())
                 } else {
                     let runtime = self.runtimes.remove(&id).expect("validated exact pane");
-                    self.start_close(id, runtime, CloseCause::ExplicitClose, reply);
+                    let cause = if explicit_stop {
+                        CloseCause::ExplicitStop
+                    } else {
+                        CloseCause::ExplicitClose
+                    };
+                    self.start_close(id, runtime, cause, reply);
                     return;
                 }
             }
@@ -5309,6 +5528,11 @@ impl OwnerState {
             },
         );
         let snapshot = self.owner_monitor_window_snapshot(&id);
+        let runtime_handles = self
+            .runtimes
+            .iter()
+            .map(|(id, runtime)| (id.clone(), runtime.pty.clone()))
+            .collect();
         let snapshot_tabs: std::collections::BTreeSet<String> = snapshot
             .windows
             .iter()
@@ -5348,7 +5572,17 @@ impl OwnerState {
         let linked_issue_number = config.linked_issue_number;
         #[cfg(any(test, feature = "test-gh-guard"))]
         let test_pty_start_gate = self.test_pty_start_gate.clone();
+        let launch_requested = std::time::Instant::now();
         spawn_owner_worker(move || {
+            let launch_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_owner_launch",
+                issue_number = linked_issue_number,
+                delivery_id = metadata.launch_feedback_context.as_ref()
+                    .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()).unwrap_or("none"),
+                window_id = %id, operation_id = %operation_id);
+            let _launch_span = launch_span.enter();
+            tracing::info!(target: "gwt.launch.timing", phase = "owner_dispatch", state = "finished",
+                elapsed_ms = launch_requested.elapsed().as_secs_f64() * 1000.0, "Issues owner launch phase");
+            let owner_phase = super::launch::LaunchPhaseTimer::start("owner_materialization");
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
             );
@@ -5527,6 +5761,7 @@ impl OwnerState {
             let is_restart = continuation.is_none()
                 && metadata.inherited_agent_name.is_some()
                 && config.predecessor_session_id.is_some();
+            let admission_feedback = metadata.launch_feedback_context.clone();
             let mut input = InstallAgentLaunchInput {
                 auto_resume_source_snapshot: restore.as_ref().map(|restore| restore.source.clone()),
                 auto_resume_source_session_id: config
@@ -5607,6 +5842,7 @@ impl OwnerState {
                         gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
                     );
                     preparation.map_err(AgentLaunchError::from)?;
+                    let phase = super::launch::LaunchPhaseTimer::start("owner_admission");
                     let host_project_roots = super::installation::owner_host_project_roots(&root)
                         .map_err(AgentLaunchError::from)?;
                     let mut admitted = super::installation::prepare_owner_agent_admission(
@@ -5619,6 +5855,7 @@ impl OwnerState {
                             host_project_roots: &host_project_roots,
                             snapshot,
                             snapshot_tabs,
+                            runtime_handles: &runtime_handles,
                             known_names: &known_names,
                             metadata: *metadata,
                             is_continue_work: input.is_continue_work,
@@ -5627,6 +5864,7 @@ impl OwnerState {
                         &mut config,
                     )
                     .map_err(AgentLaunchError::from)?;
+                    phase.finish();
                     input.workspace_resume_context = admitted.workspace_resume_context.take();
                     input.launch_feedback_context = admitted.launch_feedback_context.take();
                     input.pending_pm_project_root = config
@@ -6052,16 +6290,65 @@ impl OwnerState {
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
             let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
+            let cleanup_monitor_window_record = || -> Result<(), String> {
+                if let (Ok(registry), Ok(expected)) = (&owner_registry, &expected_registry_row) {
+                    super::agent_dispatch::OwnedWindowRecordCleanup {
+                        registry: registry.clone(),
+                        registry_path: owner_registry_path.clone(),
+                        root: root.clone(),
+                        project_key: cleanup_project_key.clone(),
+                        canonical_id: id.clone(),
+                        expected_session_id: expected
+                            .as_ref()
+                            .and_then(|row| row.session_id.clone()),
+                    }
+                    .finish()?;
+                }
+                Ok(())
+            };
+            let mut monitor_failure_committed = false;
+            if let Err(error) = &result {
+                if !input.physical_spawn_started
+                    && input.failure_session.is_none()
+                    && input.failed_launch.is_none()
+                    && materialized_snapshot.is_none()
+                    && input.auto_resume_source_snapshot.is_none()
+                    && input.pending_fresh_execution.is_none()
+                    && input.pending_continue_work.is_none()
+                    && expected_registry_row
+                        .as_ref()
+                        .is_ok_and(|row| row.as_ref().is_none_or(|row| row.session_id.is_none()))
+                {
+                    match retry_unclaimed_monitor_capacity(
+                        &root,
+                        admission_feedback.as_ref(),
+                        &input.current,
+                        &error.detail,
+                    ) {
+                        Ok(true) => match cleanup_monitor_window_record() {
+                            Ok(()) => monitor_failure_committed = true,
+                            Err(error) => {
+                                tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                            }
+                        },
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "capacity retry remains unconfirmed");
+                        }
+                    }
+                }
+            }
             if let Some(error) = result.as_ref().err().filter(|_| {
-                restore
-                    .as_ref()
-                    .filter(|restore| {
-                        restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
-                    })
-                    .and_then(|restore| restore.refusal.as_ref())
-                    .is_none_or(|refusal| {
-                        !super::installation::is_expected_restore_exclusion(&refusal.code)
-                    })
+                !monitor_failure_committed
+                    && restore
+                        .as_ref()
+                        .filter(|restore| {
+                            restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                        })
+                        .and_then(|restore| restore.refusal.as_ref())
+                        .is_none_or(|refusal| {
+                            !super::installation::is_expected_restore_exclusion(&refusal.code)
+                        })
             }) {
                 let source = restore
                     .as_ref()
@@ -6090,7 +6377,6 @@ impl OwnerState {
                     },
                 );
             }
-            let mut monitor_failure_committed = false;
             if let Err(error) = &result {
                 let launch = restored_monitor_launch.or_else(|| {
                     let feedback = input.launch_feedback_context.as_ref().filter(|feedback| {
@@ -6118,7 +6404,8 @@ impl OwnerState {
                     })
                 });
                 if let Some(launch) = launch.filter(|_| {
-                    input.failed_launch.is_none()
+                    !monitor_failure_committed
+                        && input.failed_launch.is_none()
                         && (!input.physical_spawn_started
                             || unspawned_runtime_retired
                             || durable_candidate_removed)
@@ -6158,21 +6445,7 @@ impl OwnerState {
                                         );
                                     }
                                 }
-                                if let (Ok(registry), Ok(expected)) =
-                                    (&owner_registry, &expected_registry_row)
-                                {
-                                    super::agent_dispatch::OwnedWindowRecordCleanup {
-                                        registry: registry.clone(),
-                                        registry_path: owner_registry_path.clone(),
-                                        root: root.clone(),
-                                        project_key: cleanup_project_key.clone(),
-                                        canonical_id: id.clone(),
-                                        expected_session_id: expected
-                                            .as_ref()
-                                            .and_then(|row| row.session_id.clone()),
-                                    }
-                                    .finish()?;
-                                }
+                                cleanup_monitor_window_record()?;
                                 if let Some(pending) = input.pending_fresh_execution.as_ref() {
                                     crate::session_launch::recovery::clear_durable_launch_recovery(
                                         &sessions_dir,
@@ -6323,6 +6596,11 @@ impl OwnerState {
                         .and_then(|success| success.capability_token.as_deref())
                         .and_then(|token| issuer.grant_for_test(token)),
                 });
+            }
+            if completion.result.is_ok() {
+                owner_phase.finish();
+            } else {
+                drop(owner_phase);
             }
             if let Err(error) = sender.send(OwnerMessage::AgentPrepared(Box::new(completion))) {
                 if let OwnerMessage::AgentPrepared(mut prepared) = error.0 {
@@ -6887,9 +7165,19 @@ impl OwnerState {
                 self.agent_operations
                     .values()
                     .filter(|operation| {
+                        // Before materialization the Monitor's delivery already
+                        // reserves this slot; there is no physical pane yet.
+                        let preparing_monitor = operation.session_id.is_none()
+                            && operation
+                                .request
+                                .pointer(
+                                    "/metadata/launch_feedback_context/issue_monitor_issue_number",
+                                )
+                                .is_some_and(serde_json::Value::is_u64);
                         operation.result.is_none()
                             && operation.id != excluded_id
                             && operation.request["type"] != "check_launch_permission"
+                            && !preparing_monitor
                     })
                     .map(|operation| {
                         let metadata = operation
@@ -7278,6 +7566,7 @@ impl OwnerState {
                 id: id.clone(),
                 incarnation,
                 error: result.as_ref().err().cloned(),
+                explicit_stop: matches!(cause, CloseCause::ExplicitStop),
                 final_screen,
             });
             if result.is_err() {
@@ -7290,7 +7579,20 @@ impl OwnerState {
             } else {
                 self.retirements.remove(&(id.clone(), incarnation));
             }
-            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle}))
+            if result.is_ok() && matches!(cause, CloseCause::ExplicitStop) {
+                for operation in self
+                    .agent_operations
+                    .values_mut()
+                    .filter(|operation| operation.id == id && operation.incarnation == incarnation)
+                {
+                    if let Some(Ok(receipt)) = operation.result.as_mut() {
+                        receipt["closed"] = json!(true);
+                        receipt["explicit_stop"] = json!(true);
+                        receipt["status"] = json!(crate::WindowProcessStatus::Stopped);
+                    }
+                }
+            }
+            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle,"explicit_stop":matches!(cause, CloseCause::ExplicitStop)}))
         };
         for reply in self
             .close_replies
@@ -8763,6 +9065,64 @@ impl OwnerState {
             let _ = sender.send(OwnerMessage::OwnerLayoutCommitted { result, reply });
         });
     }
+    fn stopped_window_close_capture(
+        &self,
+        id: &str,
+        incarnation: u64,
+    ) -> Option<super::agent_dispatch::StoppedWindowRetirement> {
+        if self.runtimes.contains_key(id)
+            || self.pending.contains_key(id)
+            || self.closing.contains_key(id)
+            || self
+                .retirements
+                .keys()
+                .any(|(candidate, _)| candidate == id)
+            || self
+                .agent_operations
+                .values()
+                .any(|operation| operation.id == id && operation.incarnation > incarnation)
+        {
+            return None;
+        }
+        let operation = self.agent_operations.values().find(|operation| {
+            operation.id == id
+                && operation.incarnation == incarnation
+                && !operation.current.load(Ordering::Acquire)
+                && operation.result.as_ref().is_some_and(|result| {
+                    result.as_ref().is_ok_and(|receipt| {
+                        receipt["closed"] == true && receipt["explicit_stop"] == true
+                    })
+                })
+        })?;
+        let session_id = operation.session_id.as_ref()?;
+        let raw = id.strip_prefix(&format!("{}::", self.project_key))?;
+        let row = self
+            .registry_projection
+            .windows
+            .iter()
+            .find(|row| row.id == raw)?;
+        if row.session_id.as_ref() != Some(session_id)
+            || row.status != crate::WindowProcessStatus::Stopped
+            || row.persist
+        {
+            return None;
+        }
+        Some(super::agent_dispatch::StoppedWindowRetirement {
+            sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+            // The exact successful STOP already committed Session/Work and
+            // reaped its tree. This retirement removes only that retained row.
+            expected: None,
+            cleanup: super::agent_dispatch::OwnedWindowRecordCleanup {
+                registry: self.agent_registry.as_ref().ok()?.clone(),
+                registry_path: crate::persistence::workspace_state_path(&self.root),
+                root: self.root.clone(),
+                project_key: self.project_key.clone(),
+                canonical_id: id.into(),
+                expected_session_id: Some(session_id.clone()),
+            },
+        })
+    }
+
     fn close_stopped_owner_session(
         &mut self,
         session_id: String,
@@ -8915,7 +9275,7 @@ impl OwnerState {
                 && !snapshot
                     .launch_args
                     .iter()
-                    .any(|arg| arg.contains(crate::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE))
+                    .any(|arg| crate::issue_monitor::has_issue_monitor_launch_provenance(arg))
             {
                 return None;
             }
@@ -9216,6 +9576,10 @@ impl OwnerState {
             })
         });
         let readiness_nonce = event.continuation_readiness_nonce.take();
+        let native_prompt_id = event
+            .native_prompt_id
+            .take()
+            .filter(|id| !id.trim().is_empty());
         if event.kind != crate::RuntimeHookEventKind::RuntimeState {
             self.dispatch_project(
                 crate::BackendEvent::RuntimeHookEvent {
@@ -9259,10 +9623,21 @@ impl OwnerState {
             self.begin_readiness(&id, readiness_nonce, false, None);
         }
         let hook_status = crate::window_state::runtime_hook_window_state(&event);
+        let grok = self
+            .runtimes
+            .get(&id)
+            .and_then(|runtime| runtime.agent.as_ref())
+            .is_some_and(|agent| agent.snapshot.agent_id == gwt_agent::AgentId::GrokBuild);
+        // Grok's pre-submit hook can still be rejected by a later hook.
+        // Its session-end Stop has no prompt ID and proves no accepted turn.
         let progress = matches!(
             event.source_event.as_deref(),
-            Some("UserPromptSubmit" | "PreToolUse" | "PostToolUse")
-        );
+            Some("PreToolUse" | "PostToolUse")
+        ) || if grok {
+            event.source_event.as_deref() == Some("Stop") && native_prompt_id.is_some()
+        } else {
+            event.source_event.as_deref() == Some("UserPromptSubmit")
+        };
         if hook_status.is_none() && !progress {
             return;
         }
@@ -9949,6 +10324,16 @@ impl OwnerState {
         if self.exact(&id, incarnation).is_err() {
             return;
         }
+        let runtime = self.runtimes.get_mut(&id).expect("exact owner status");
+        if !exit_confirmed && raw_status == WindowProcessStatus::Error {
+            runtime.worker_error =
+                Some(detail.clone().unwrap_or_else(|| "PTY worker failed".into()));
+        }
+        // Duplicate exit observations and delayed reader errors cannot classify
+        // a partial screen or overwrite the final classification.
+        if runtime.pending_exit.is_some() || runtime.exit_drained {
+            return;
+        }
         // The EOF reader can deliver a pre-exit Running snapshot after the
         // independent status worker has recorded the physical exit.
         if raw_status == crate::WindowProcessStatus::Running
@@ -9962,6 +10347,9 @@ impl OwnerState {
             })
         {
             return;
+        }
+        if raw_status == WindowProcessStatus::Running {
+            self.runtimes.get_mut(&id).unwrap().worker_error = None;
         }
         // Capture current ownership before terminal status revokes its writer.
         // Only the registered PM's actual nonzero exit can bypass the generic
@@ -10005,7 +10393,115 @@ impl OwnerState {
         }
         if exit_confirmed {
             self.persist_owner_exit_receipt(&id);
+            let runtime = self.runtimes.get_mut(&id).expect("exact exiting runtime");
+            runtime.pending_exit = Some(PendingExit {
+                status: raw_status,
+                detail,
+                pm_crash_candidate,
+            });
+            let pty = runtime.pty.clone();
+            let sender = self.sender.clone();
+            // Keep both reader handles until tree exit is proven. A failed
+            // reap must remain recoverable without joining a live slave.
+            spawn_owner_worker(move || {
+                let result = crate::session_finalizer::kill_and_reap(&pty, &id)
+                    .map_err(|error| error.to_string())
+                    .and_then(|exited| {
+                        exited
+                            .then_some(())
+                            .ok_or_else(|| "owned process tree did not exit".into())
+                    });
+                if result.is_ok() {
+                    // ConPTY needs descriptor release before reader EOF.
+                    pty.release_descriptors();
+                }
+                let _ = sender.send(OwnerMessage::ExitReaped {
+                    id,
+                    incarnation,
+                    result,
+                });
+            });
+            return;
         }
+        self.classify_owner_status(
+            id,
+            incarnation,
+            raw_status,
+            detail,
+            false,
+            pm_crash_candidate,
+        );
+    }
+
+    fn exit_reaped(&mut self, id: String, incarnation: u64, result: Result<(), String>) {
+        if self.exact(&id, incarnation).is_err() {
+            return;
+        }
+        if let Err(error) = result {
+            // The existing exact finalizer owns retry/reconciliation. Retain
+            // both original worker handles and never select NaturalExit.
+            let mut runtime = self.runtimes.remove(&id).unwrap();
+            runtime.pty_status = WindowProcessStatus::Error;
+            runtime.detail = Some(error);
+            runtime.policy.recoverable_error = true;
+            let (reply, _) = oneshot::channel();
+            self.start_close(id, runtime, CloseCause::DiagnosticExit, reply);
+            return;
+        }
+        let runtime = self.runtimes.get_mut(&id).unwrap();
+        let output = runtime.output_thread.take();
+        let status = runtime.status_thread.take();
+        let sender = self.sender.clone();
+        // Explicit Close, shutdown and Drop still join the same drain before
+        // acknowledging cleanup, including when this completion arrives late.
+        runtime.output_thread = Some(spawn_owner_worker(move || {
+            let mut result = Ok(());
+            for (worker, name) in [(output, "output"), (status, "status")] {
+                if let Some(worker) = worker {
+                    result =
+                        result.and(worker.join().map_err(|_| format!("{name} worker panicked")));
+                }
+            }
+            let _ = sender.send(OwnerMessage::ExitDrained {
+                id,
+                incarnation,
+                result,
+            });
+        }));
+    }
+
+    fn exit_drained(&mut self, id: String, incarnation: u64, result: Result<(), String>) {
+        if self.exact(&id, incarnation).is_err() {
+            // Explicit close/replacement owns the captured wrapper now. It
+            // must never resurrect a pane when this completion arrives late.
+            return;
+        }
+        let runtime = self.runtimes.get_mut(&id).unwrap();
+        let Some(exit) = runtime.pending_exit.take() else {
+            return;
+        };
+        runtime.exit_drained = true;
+        let error = result.err().or_else(|| runtime.worker_error.take());
+        if error.is_some() {
+            runtime.policy.recoverable_error = true;
+        }
+        let pm_crash_candidate = exit.pm_crash_candidate && error.is_none();
+        let (status, detail) = match error {
+            Some(error) => (WindowProcessStatus::Error, Some(error)),
+            None => (exit.status, exit.detail),
+        };
+        self.classify_owner_status(id, incarnation, status, detail, true, pm_crash_candidate);
+    }
+
+    fn classify_owner_status(
+        &mut self,
+        id: String,
+        incarnation: u64,
+        raw_status: WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+        pm_crash_candidate: bool,
+    ) {
         let runtime = self.runtimes.get_mut(&id).expect("exact owner status");
         let screen = runtime
             .pane
@@ -10384,7 +10880,7 @@ impl OwnerState {
                     .clone()
                     .unwrap_or(super::launch_payload::LaunchFeedbackContext {
                         client_id: "__issue_monitor__".into(),
-                        title: "Issue Monitor".into(),
+                        title: "Issues".into(),
                         issue_monitor_issue_number: Some(issue_number),
                         issue_monitor_delivery_id: delivery_id.clone(),
                         issue_monitor_project_root: Some(self.root.clone()),
@@ -10502,7 +10998,7 @@ impl OwnerState {
             agent.monitor_owner = Some((self.root.clone(), self.host_instance_id.clone()));
             agent.feedback = Some(super::launch_payload::LaunchFeedbackContext {
                 client_id: "__issue_monitor__".into(),
-                title: "Issue Monitor".into(),
+                title: "Issues".into(),
                 issue_monitor_issue_number: Some(issue_number),
                 issue_monitor_delivery_id: delivery_id,
                 issue_monitor_project_root: Some(self.root.clone()),
@@ -10584,6 +11080,11 @@ impl OwnerState {
                             snapshot: None,
                             snapshot_tabs: Default::default(),
                         };
+                        let claim_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_claim",
+                            issue_number = claim.issue_number, delivery_id = %claim.delivery_id,
+                            window_id = %claim.materializer_window_id);
+                        let _claim_span = claim_span.enter();
+                        let phase = super::launch::LaunchPhaseTimer::start("claim");
                         if !claim
                             .claim_from_worker()
                             .map_err(|error| error.to_string())?
@@ -10593,6 +11094,7 @@ impl OwnerState {
                                     .into(),
                             );
                         }
+                        phase.finish();
                     }
                 }
                 launch.commit_launch(ready)
@@ -10642,9 +11144,38 @@ impl OwnerState {
         let sender = self.sender.clone();
         let detail = detail.to_string();
         spawn_owner_worker(move || {
-            let result = launch.failure(&detail, failure.as_ref(), terminal);
-            let _ = sender.send(OwnerMessage::MonitorNotificationFinished { result });
+            let result = if terminal {
+                launch.terminal_failure_retry(&detail, failure.as_ref())
+            } else {
+                launch
+                    .failure(&detail, failure.as_ref(), false)
+                    .map(|()| None)
+            };
+            let _ = sender.send(OwnerMessage::MonitorFailureFinished {
+                id: launch.id,
+                incarnation: launch.incarnation,
+                result,
+            });
         });
+    }
+
+    fn retire_retried_monitor_runtime(&mut self, id: &str, incarnation: u64, issue: u64) {
+        if self.pending.contains_key(id)
+            || self.closing.contains_key(id)
+            || !self.runtimes.get(id).is_some_and(|runtime| {
+                runtime.incarnation == incarnation
+                    && Self::is_failed_monitor_runtime(runtime, issue)
+                    && runtime.pty.try_wait().ok().flatten().is_some()
+            })
+        {
+            return;
+        }
+        let runtime = self
+            .runtimes
+            .remove(id)
+            .expect("exact exited Monitor runtime");
+        let (reply, _) = oneshot::channel();
+        self.start_close(id.into(), runtime, CloseCause::ExplicitClose, reply);
     }
 
     fn next_monitor_deadline(&self) -> Option<std::time::Instant> {
@@ -11413,7 +11944,12 @@ pub(crate) fn close_runtime(
             .join()
             .map_err(|_| "status worker panicked".to_string())?;
     }
-    if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
+    if matches!(cause, CloseCause::ExplicitStop) {
+        if let Some(cleanup) = runtime.registry_cleanup.as_ref() {
+            cleanup.retain_stopped()?;
+            runtime.registry_cleanup = None;
+        }
+    } else if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
         if let Some(cleanup) = runtime.registry_cleanup.as_ref() {
             cleanup.finish()?;
             runtime.registry_cleanup = None;
@@ -11556,7 +12092,7 @@ pub(crate) fn close_runtime(
     if let Some(agent) = runtime.agent.as_ref() {
         let pm_cause = match cause {
             CloseCause::PmGenericCrash => super::pm_delivery::PmLifecycleCause::Crash,
-            CloseCause::ExplicitClose | CloseCause::NaturalExit => {
+            CloseCause::ExplicitClose | CloseCause::ExplicitStop | CloseCause::NaturalExit => {
                 super::pm_delivery::PmLifecycleCause::Deregister
             }
             CloseCause::DiagnosticExit
@@ -11577,6 +12113,71 @@ pub(crate) fn close_runtime(
     }
     tracing::info!(target: "gwt.pane.teardown", window_id = %id, incarnation = runtime.incarnation, stage = "close_finalizer", outcome = "completed", "pane close finalizer completed");
     Ok(())
+}
+
+fn retry_unclaimed_monitor_capacity(
+    root: &Path,
+    feedback: Option<&super::launch_payload::LaunchFeedbackContext>,
+    current: &AtomicBool,
+    detail: &str,
+) -> Result<bool, String> {
+    let Some(feedback) = feedback.filter(|feedback| {
+        detail.starts_with("Issues max_active reached (")
+            && !feedback.issue_monitor_review_dispatch
+            && feedback.issue_monitor_autonomous_handoff.is_none()
+            && current.load(Ordering::Acquire)
+    }) else {
+        return Ok(false);
+    };
+    let (Some(issue), Some(delivery_id)) = (
+        feedback.issue_monitor_issue_number,
+        feedback.issue_monitor_delivery_id.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    let path = crate::issue_monitor_prefs_path_for_repo_path(root);
+    let expected = crate::load_issue_monitor_prefs(&path)
+        .map_err(|error| error.to_string())?
+        .pending_launch_deliveries
+        .into_iter()
+        .find(|delivery| delivery.issue_number == issue && delivery.delivery_id == delivery_id);
+    let Some(expected) = expected.filter(|delivery| {
+        delivery.materializer_id.is_none()
+            && delivery.materializer_pid.is_none()
+            && delivery.materializer_window_id.is_none()
+            && delivery.materialized_window_id.is_none()
+            && delivery.workspace_durable_window_id.is_none()
+    }) else {
+        return Ok(false);
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let (_, requeued) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        // Capacity may have recovered since rejection. Only the same unclaimed
+        // delivery may be returned; never release another materializer's work.
+        if !current.load(Ordering::Acquire)
+            || !prefs
+                .pending_launch_deliveries
+                .iter()
+                .filter(|delivery| delivery.issue_number == issue)
+                .eq(std::iter::once(&expected))
+        {
+            return Ok(false);
+        }
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        if monitor.has_monitor_pane_for_issue(issue)
+            || monitor.launch_identity(issue).window_id.is_some()
+        {
+            return Ok(false);
+        }
+        monitor.record_transient_launch_retry(issue, detail.to_string(), &now);
+        *prefs = monitor.prefs();
+        Ok(true)
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(requeued)
 }
 
 #[cfg(test)]
@@ -11655,6 +12256,190 @@ mod worker_tests {
     use super::*;
 
     #[test]
+    fn quota_release_does_not_count_unmaterialized_operations_twice() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut owner, _, _) = owner_fixture(temp.path());
+        owner.agent_operations.insert(
+            "preparing".into(),
+            AgentOperation {
+                session_id: None,
+                early_events: VecDeque::new(),
+                request: json!({
+                    "type": "launch_agent",
+                    "config": {"linked_issue_number": 7},
+                    "metadata": {"launch_feedback_context": {"issue_monitor_issue_number": 7}}
+                }),
+                id: format!("{}::preparing", owner.project_key),
+                incarnation: 1,
+                current: Arc::new(AtomicBool::new(true)),
+                replies: Vec::new(),
+                cancel_replies: Vec::new(),
+                cancellation_cleaned: false,
+                manual_predecessor_stopped: None,
+                retained_manual_failure: None,
+                pending_continue: None,
+                failed_session: None,
+                result: None,
+            },
+        );
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 8,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                launching_issues: (1..=8)
+                    .map(
+                        |issue_number| crate::issue_monitor::IssueMonitorLaunchingIssue {
+                            issue_number,
+                            claimed_at: None,
+                        },
+                    )
+                    .collect(),
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".into(),
+                    "2026-11-11T00:00:00Z".into(),
+                )]),
+                ..Default::default()
+            },
+        );
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor.clear_provider_quota_hold("codex", "quota reset", "2026-11-10T00:00:00Z");
+        monitor.record_window_snapshot(owner.owner_monitor_window_snapshot("current"));
+        assert_eq!(monitor.agent_status().occupied_slot_count, Some(8));
+        assert!(monitor.has_capacity_for_monitor_spawn(8, false));
+
+        owner
+            .agent_operations
+            .get_mut("preparing")
+            .unwrap()
+            .session_id = Some("session-7".into());
+        let snapshot = owner.owner_monitor_window_snapshot("current");
+        assert_eq!(
+            snapshot.windows.len(),
+            1,
+            "materialized windows remain visible"
+        );
+        assert_eq!(snapshot.windows[0].session_id.as_deref(), Some("session-7"));
+
+        let operation = owner.agent_operations.get_mut("preparing").unwrap();
+        operation.session_id = None;
+        operation.request["metadata"] = json!({});
+        assert_eq!(
+            owner.owner_monitor_window_snapshot("current").windows.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn capacity_refusal_requeues_only_the_unclaimed_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
+        let mut record = crate::issue_monitor::AutonomousIssueRecord::new(42);
+        record.attempts = 3;
+        record.phase = crate::issue_monitor::AutonomousPhase::Implementing;
+        let mut prefs = crate::IssueMonitorPrefs {
+            autonomous_records: vec![record],
+            pending_launch_deliveries: vec![serde_json::from_value(json!({
+                "delivery_id": "delivery-42", "issue_number": 42,
+                "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+                "claim_id": "claim-42", "created_at": "2026-11-10T00:47:09Z"
+            }))
+            .unwrap()],
+            ..Default::default()
+        };
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.terminal_queue_push(&[42], "test", "2026-11-10T00:47:09Z");
+        prefs = monitor.prefs();
+        let feedback = serde_json::from_value(json!({
+            "client_id": "test", "title": "capacity",
+            "issue_monitor_issue_number": 42, "issue_monitor_delivery_id": "delivery-42",
+            "issue_monitor_review_dispatch": false
+        }))
+        .unwrap();
+        let current = AtomicBool::new(false);
+        let message = "Issues max_active reached (8/8) before launching Issue #42";
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+
+        current.store(true, Ordering::Release);
+        prefs.pending_launch_deliveries[0].materializer_id = Some("successor".into());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        let mut successor = prefs.pending_launch_deliveries[0].clone();
+        successor.delivery_id = "successor-delivery".into();
+        prefs.pending_launch_deliveries[0].materializer_id = None;
+        prefs.pending_launch_deliveries.push(successor);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        prefs.pending_launch_deliveries.pop();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        // The resident daemon can still hold this in-flight reservation when
+        // the physical owner's capacity refusal commits through another writer.
+        let mut driver = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        driver.set_source_repository(Some(("example", "project")));
+        driver.record_candidate(
+            serde_json::from_value(json!({
+                "number": 42, "title": "capacity", "labels": ["gwt-queued"], "state": "open"
+            }))
+            .unwrap(),
+        );
+        assert!(driver.launch_identity(42).active);
+        assert!(
+            retry_unclaimed_monitor_capacity(temp.path(), Some(&feedback), &current, message)
+                .unwrap()
+        );
+        driver.rebase_daemon_driver_prefs(&crate::load_issue_monitor_prefs(&path).unwrap());
+        assert!(
+            !driver.launch_identity(42).active,
+            "a committed capacity retry must revoke the stale daemon's reservation"
+        );
+        assert!(driver.prefs().pending_launch_deliveries.is_empty());
+        assert!(driver.queued_issue_numbers().contains(&42));
+        assert_eq!(driver.attempt_count(42), 3);
+        assert_eq!(
+            driver.autonomous_record(42).unwrap().phase,
+            crate::issue_monitor::AutonomousPhase::Idle
+        );
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor.record_candidate(
+            serde_json::from_value(json!({
+                "number": 42, "title": "capacity", "labels": ["gwt-queued"], "state": "open"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(monitor.attempt_count(42), 3);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            crate::issue_monitor::AutonomousPhase::Idle
+        );
+    }
+
+    #[test]
     fn owner_worker_preserves_the_scoped_durable_control_budget() {
         use gwt_core::deadline_budget::{ScopedDeadlineBudget, HANG_GUARD};
 
@@ -11713,6 +12498,96 @@ mod tests {
         .unwrap();
         (session, pane)
     }
+    #[tokio::test]
+    async fn dispatch_close_without_writer_tears_down_runtime_and_drains_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (snapshot, pane) = unbound_fixture(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state.project_key = gwt_core::paths::project_scope_hash(root.path()).to_string();
+        let id = format!("{}::pane", state.project_key);
+        let registry = state.agent_registry.as_ref().unwrap().clone();
+        let row = super::super::agent_dispatch::owned_process_window_state(
+            root.path(),
+            &id,
+            Some(&snapshot),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        super::super::agent_dispatch::publish_owned_process_window(
+            &registry,
+            root.path(),
+            &id,
+            None,
+            row,
+            &AtomicBool::new(true),
+        )
+        .map_err(|error| error.detail)
+        .unwrap();
+        state.refresh_registry_projection();
+        state
+            .install_pane(id.clone(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let pty = state.runtimes[&id].pty.clone();
+        assert!(crate::session_finalizer::kill_and_reap(&pty, &id).unwrap());
+        // Terminal status handling removes this entry before a later close.
+        state.pty_writers.write().unwrap().remove(&id).unwrap();
+        let caller = gwt_agent::Session::new(
+            root.path(),
+            "main",
+            gwt_agent::AgentId::Custom("caller".into()),
+        );
+        caller.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let token = state.issuer.issue(root.path(), &caller.id).unwrap().token;
+        let grant = state.issuer.grant_for_test(&token).unwrap();
+        state.dispatch_agent_frontend(
+            "origin".into(),
+            grant,
+            crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                id: id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        );
+        let mut completion = loop {
+            match receiver
+                // test-hygiene: allow-wall-clock-deadline Hang guard for the real dispatch completion, not an elapsed-time assertion.
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+            {
+                OwnerMessage::AgentDispatchFinished(completion) => break completion,
+                _ => continue,
+            }
+        };
+        let close = completion.close.as_mut().expect("captured close");
+        let result = close.result.clone();
+        let accepted = close.accepted;
+        let runtime = close.runtime.as_mut().unwrap();
+        let joined = runtime.output_thread.is_none() && runtime.status_thread.is_none();
+        // Keep the regression failure from leaving physical fixture workers behind.
+        if !joined {
+            close_runtime(&id, runtime, CloseCause::ExplicitClose).unwrap();
+            close.result = Ok(());
+        }
+        state.agent_dispatch_finished(*completion);
+        let drained = state.closing.is_empty() && state.retirements.is_empty();
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        // test-hygiene: allow-wall-clock-deadline Hang guard for actual owner drain.
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
+            .await
+            .unwrap();
+        actor.join().unwrap();
+        assert!(accepted, "close must pass the normal authorization gates");
+        assert!(
+            result.is_ok(),
+            "writer absence must not prevent teardown: {result:?}"
+        );
+        assert!(joined, "accepted close must join both runtime workers");
+        assert!(drained, "accepted close must not leave deferred retirement");
+    }
+
     fn active_fixture(root: &std::path::Path, session: &gwt_agent::Session) -> ActiveAgentSession {
         ActiveAgentSession {
             window_id: "pane".into(),
@@ -12579,6 +13454,7 @@ mod tests {
             source_event: Some("SessionStart".into()),
             gwt_session_id: Some("materialized-session".into()),
             continuation_readiness_nonce: Some("private-challenge".into()),
+            native_prompt_id: None,
             agent_session_id: None,
             project_root: Some(root.path().display().to_string()),
             branch: None,
@@ -12905,7 +13781,7 @@ mod tests {
             state.start_initial_gui_attach_grace();
             run_fixture_owner(state, receiver);
         });
-        let attached = handle.attach_gui().await;
+        let attached = handle.attach_gui(uuid::Uuid::new_v4()).await;
         handle.shutdown().await;
         actor.join().unwrap();
         assert!(
@@ -13264,6 +14140,9 @@ mod tests {
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: Some(finalizer),
+            pending_exit: None,
+            exit_drained: false,
+            worker_error: None,
             pty_status: crate::WindowProcessStatus::Running,
             hook_status: None,
             output_bytes: 0,
@@ -13379,7 +14258,88 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn committed_monitor_retry_removes_only_its_exact_exited_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        let (mut snapshot, pane) = unbound_fixture(root.path());
+        snapshot.linked_issue_number = Some(4131);
+        snapshot.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let current = Arc::new(AtomicBool::new(true));
+        state
+            .install_pane("pane".into(), 1, pane, current.clone())
+            .unwrap();
+        let runtime = state.runtimes.get_mut("pane").unwrap();
+        runtime.pty_status = WindowProcessStatus::Error;
+        runtime.policy.recoverable_error = true;
+        runtime.agent = Some(AgentRuntimeRecord {
+            feedback: Some(super::super::launch_payload::LaunchFeedbackContext {
+                client_id: "fixture".into(),
+                title: "Issues".into(),
+                issue_monitor_issue_number: Some(4131),
+                issue_monitor_delivery_id: None,
+                issue_monitor_project_root: Some(root.path().into()),
+                issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+                issue_monitor_autonomous_handoff: None,
+                issue_monitor_autonomous_submit_started: false,
+                issue_monitor_review_dispatch: false,
+            }),
+            monitor_owner: None,
+            monitor_terminal_failure: None,
+            monitor_answer_inflight: false,
+            binding_repair_inflight: false,
+            monitor_source: None,
+            monitor_commit_inflight: false,
+            monitor_ready: false,
+            monitor_retry_at: None,
+            monitor_startup_at: None,
+            monitor_adopt_claim: false,
+            monitor_ack_replies: Vec::new(),
+            current,
+            active: active_fixture(root.path(), &snapshot),
+            snapshot,
+            capability_token: None,
+            issuer: state.issuer.clone(),
+            pending_fresh: None,
+            pending_continue: None,
+            purpose_title: None,
+            readiness_deadline: None,
+        });
+        state.retire_retried_monitor_runtime("pane", 1, 4131);
+        assert!(
+            state.runtimes.contains_key("pane"),
+            "a live quota/trust pane stays"
+        );
+        assert!(
+            crate::session_finalizer::kill_and_reap(&state.runtimes["pane"].pty, "pane").unwrap()
+        );
+        state.retire_retried_monitor_runtime("pane", 2, 4131);
+        state.retire_retried_monitor_runtime("pane", 1, 4132);
+        assert!(
+            state.runtimes.contains_key("pane"),
+            "replacement or foreign ownership stays"
+        );
+        state.retire_retried_monitor_runtime("pane", 1, 4131);
+        assert!(
+            !state.runtimes.contains_key("pane"),
+            "the retried dead pane must not block admission"
+        );
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        handle.shutdown().await;
+        actor.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
+        check_exit_after_reader_drain(false).await;
+    }
+
+    #[tokio::test]
+    async fn reader_failure_before_clean_exit_retains_diagnostics_after_drain() {
+        check_exit_after_reader_drain(true).await;
+    }
+
+    async fn check_exit_after_reader_drain(reader_error: bool) {
         let root = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -13418,22 +14378,75 @@ mod tests {
             readiness_deadline: None,
         });
         let mut events = handle.subscribe();
+        if reader_error {
+            // Queue a real exit 0, then deliver the reader failure before the
+            // actor consumes either worker's terminal observation.
+            state.runtimes["pane"]
+                .pty
+                .write_machine_input(b"finish\n")
+                .unwrap();
+            state.runtimes["pane"].pty.wait().unwrap();
+            state.runtimes["pane"]
+                .pane
+                .lock()
+                .unwrap()
+                .check_status()
+                .unwrap();
+            state.owner_status_event(
+                "pane".into(),
+                1,
+                WindowProcessStatus::Error,
+                Some("reader failed before EOF".into()),
+                false,
+            );
+        }
         let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
-        handle
-            .request(request(OwnerCommand::Input {
-                id: "pane".into(),
-                incarnation: 1,
-                data: b"finish\n".to_vec(),
-            }))
-            .await
-            .unwrap();
+        if !reader_error {
+            handle
+                .request(request(OwnerCommand::Input {
+                    id: "pane".into(),
+                    incarnation: 1,
+                    data: b"finish\n".to_vec(),
+                }))
+                .await
+                .unwrap();
+        }
         // test-hygiene: allow-wall-clock-deadline Bounds the actual terminal owner event; durable/process assertions determine success.
         let terminal = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
-                if matches!(events.recv().await.unwrap(), OwnerEvent::Status { ref id, incarnation: 1, exit_confirmed: true, .. } if id == "pane") { break; }
+                if let OwnerEvent::Status {
+                    ref id,
+                    incarnation: 1,
+                    exit_confirmed: true,
+                    status,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    if id == "pane" {
+                        break status;
+                    }
+                }
             }
-        }).await;
+        })
+        .await;
         handle.request(request(OwnerCommand::Health)).await.unwrap();
+        if reader_error {
+            assert_eq!(terminal.unwrap(), WindowProcessStatus::Error);
+            let inventory = handle
+                .request(request(OwnerCommand::ListPanes))
+                .await
+                .unwrap();
+            assert_eq!(
+                inventory["panes"].as_array().unwrap().len(),
+                1,
+                "reader failure must not become a clean natural close after drain"
+            );
+            assert!(!std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, OwnerEvent::WindowRemoved { .. })));
+            handle.shutdown().await;
+            actor.join().unwrap();
+            return;
+        }
         let observed =
             gwt_agent::Session::load(&sessions.join(format!("{}.toml", snapshot.id))).unwrap();
         let child_gone = !crate::process::is_process_alive(child_pid);
@@ -13829,6 +14842,124 @@ mod drop_tests {
     use std::time::Duration;
 
     #[test]
+    fn later_failed_cleanup_gets_its_own_recovery_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (mut state, _receiver, _handle) = owner_fixture(root.path());
+        let first = ReconciliationTarget::Retirement("first".into(), 1);
+        let later = ReconciliationTarget::Retirement("later".into(), 2);
+        state.retirements.insert(("first".into(), 1), None);
+        state
+            .reconciliation
+            .attempts
+            .insert(first.clone(), ReconciliationAttempt::Attempted);
+        let registry = state.agent_registry.as_ref().unwrap().clone();
+        let project_key = state.project_key.clone();
+        let capture = |id: &str| {
+            Some(Retirement::StoppedWindow(Box::new(
+                super::super::agent_dispatch::StoppedWindowRetirement {
+                    sessions_dir: root.path().into(),
+                    expected: None,
+                    cleanup: super::super::agent_dispatch::OwnedWindowRecordCleanup {
+                        registry: registry.clone(),
+                        registry_path: root.path().join("workspace.json"),
+                        root: root.path().into(),
+                        project_key: project_key.clone(),
+                        canonical_id: id.into(),
+                        expected_session_id: None,
+                    },
+                },
+            )))
+        };
+        state
+            .retirements
+            .insert(("later".into(), 2), capture("later"));
+        let now = std::time::Instant::now();
+        let tick = |seconds| {
+            // test-hygiene: allow-wall-clock-deadline Advances only the injected recovery clock; no real-time wait or latency assertion.
+            now + Duration::from_secs(seconds)
+        };
+
+        state.reconcile_failed_retirements(tick(31));
+
+        assert_eq!(state.reconciliation.retry_at, Some(tick(61)));
+        assert!(!state.reconciliation.needs_human);
+        state
+            .retirements
+            .insert(("first".into(), 1), capture("first"));
+        state.reconcile_failed_retirements(tick(32));
+        assert!(state.reconciliation.needs_human);
+        assert_eq!(state.reconciliation.retry_at, Some(tick(61)));
+
+        // Observe the real scheduling decision without starting another finalizer.
+        // The existing PTY regression covers dispatch and physical completion.
+        let retained = HashSet::from([first.clone(), later.clone()]);
+        assert_eq!(
+            state.reconciliation.advance(tick(60), &retained, &retained),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            state.reconciliation.advance(tick(61), &retained, &retained),
+            (vec![later.clone()], vec![]),
+            "the later identity gets its own retry while the first is exhausted"
+        );
+        state.reconcile_failed_retirements(tick(62));
+        state.reconcile_failed_retirements(tick(100));
+        let records = gwt_core::error_ledger::list_since(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                row.context.get("operation").map(String::as_str)
+                    == Some("project_owner_reconciliation")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records.len(),
+            2,
+            "each newly exhausted cohort is recorded once"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|row| row.context["identities"].clone())
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                format!("{:?}", std::slice::from_ref(&first)),
+                format!("{:?}", std::slice::from_ref(&later)),
+            ]),
+            "a diagnostic includes only identities whose own retry failed"
+        );
+
+        state.agent_registry = Err("registry temporarily unavailable".into());
+        state.reconcile_failed_retirements(tick(101));
+        assert_eq!(
+            state.reconciliation.retry_at,
+            Some(tick(131)),
+            "registry recovery is independent"
+        );
+        state.agent_registry = Ok(registry);
+        state.retirements.clear();
+        state.closing.insert(
+            "first".into(),
+            ClosingRuntime {
+                incarnation: 1,
+                pm_worktree: false,
+            },
+        );
+        state.reconcile_failed_retirements(tick(102));
+        assert_eq!(state.reconciliation.attempts.len(), 1);
+        assert!(matches!(
+            state.reconciliation.attempts.get(&first),
+            Some(ReconciliationAttempt::NeedsHuman)
+        ));
+        assert!(state.reconciliation.retry_at.is_none());
+        state.closing.get_mut("first").unwrap().incarnation = 2;
+        state.reconcile_failed_retirements(tick(103));
+        assert!(state.reconciliation.attempts.is_empty());
+        assert!(!state.reconciliation.needs_human);
+    }
+
+    #[test]
     fn inflight_retirement_clears_scheduled_reconciliation_deadline() {
         let root = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
@@ -13840,7 +14971,7 @@ mod drop_tests {
         state.reconcile_failed_retirements(now);
 
         assert!(state.reconciliation.retry_at.is_none());
-        assert!(!state.reconciliation.attempted);
+        assert!(state.reconciliation.attempts.is_empty());
     }
 
     struct TestPtyGuard(Arc<PtyHandle>);
@@ -14303,6 +15434,9 @@ mod drop_tests {
             pane: pane.clone(),
             output_thread: None,
             status_thread: None,
+            pending_exit: None,
+            exit_drained: false,
+            worker_error: None,
             pty_status: crate::WindowProcessStatus::Running,
             hook_status: None,
             output_bytes: 0,

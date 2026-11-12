@@ -1,6 +1,6 @@
 //! Issue #3906: pure decisions for the drain-and-apply self-update flow.
 //!
-//! Everything here is side-effect free so the Issue Monitor / update wiring
+//! Everything here is side-effect free so Issues / update wiring
 //! can be table-tested without a daemon, a PTY, or a lease file:
 //!
 //! - AC-8: [`update_quiescence`] decides whether the host is quiet enough to

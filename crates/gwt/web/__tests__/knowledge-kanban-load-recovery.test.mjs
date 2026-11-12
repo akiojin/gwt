@@ -1689,12 +1689,30 @@ test("virtualized 500-row selection keeps mounted row identity and updates the r
       number: index + 1,
       title: `Issue ${index + 1}`,
       state: "open",
-      labels: index % 2 === 0 ? ["bug"] : ["gwt-spec"],
+      labels: index === 1 ? [] : index % 2 === 0 ? ["bug", "long label", "third", "fourth", "fifth"] : ["gwt-spec"],
       phase: "backlog",
     }));
     state.baseEntries = state.entries.slice();
     state.refreshEnabled = true;
+    surface.applyRepositoryLabels({ labels: [{ name: "bug", color: "d73a4a" }], loaded: true });
     surface.renderKnowledgeBridge("win-1");
+    const firstLabels = element.querySelector(".issue-card-labels");
+    assert.equal(firstLabels.querySelectorAll(".issue-card-label").length, 3);
+    assert.equal(firstLabels.querySelector(".issue-card-label-overflow").textContent, "+2");
+    assert.equal(firstLabels.querySelector(".issue-card-label").style.getPropertyValue("--github-label-color"), "#d73a4a");
+
+    const coloredRow = element.querySelector('[data-issue-number="1"]');
+    const unlabeledRow = element.querySelector('[data-issue-number="2"]');
+    const unrelatedRow = element.querySelector('[data-issue-number="4"]');
+    assert.ok(unlabeledRow && unrelatedRow);
+    surface.applyRepositoryLabels({ labels: [{ name: "bug", color: "0075ca" }], loaded: true });
+    assert.ok(element.querySelector('[data-issue-number="2"]') === unlabeledRow,
+      "catalog updates must preserve unlabeled row identity during pointer actions");
+    assert.ok(element.querySelector('[data-issue-number="4"]') === unrelatedRow,
+      "catalog updates must preserve rows whose label colors did not change");
+    assert.ok(element.querySelector('[data-issue-number="1"]') !== coloredRow);
+    assert.equal(element.querySelector('[data-issue-number="1"] .issue-card-label')
+      .style.getPropertyValue("--github-label-color"), "#0075ca");
 
     state.searching = true;
     surface.renderKnowledgeBridge("win-1");

@@ -471,6 +471,93 @@ fn automatic_restore_retires_finished_sources_and_keeps_real_errors() {
     }
 }
 
+/// Issue #6991 (AC-1 / AC-3): a saved Session the user closed (restore flag
+/// cleared) but whose status is not `Stopped` still passes the GUI's legacy
+/// "window was open" check. The owner's `window_closed` refusal is an
+/// expected exclusion: no `launch_failure`, no error toast, no window, and no
+/// second attempt on the next startup.
+#[test]
+fn automatic_restore_discards_session_no_longer_marked_for_restore_quietly() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = restore_fixture_tab(
+        "tab-unmarked",
+        &repo,
+        &[("agent-unmarked".into(), "session-unmarked".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-unmarked"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-unmarked",
+        &repo,
+        Some("native-unmarked"),
+        Some(6991),
+    );
+    let path = runtime.sessions_dir.join("session-unmarked.toml");
+    let mut source = gwt_agent::Session::load(&path).unwrap();
+    source.status = gwt_agent::AgentStatus::Interrupted;
+    source.restore_window_on_startup = false;
+    source.save(&runtime.sessions_dir).unwrap();
+    save_workspace_state(
+        &workspace_state_path(&repo),
+        runtime.tabs[0].workspace.persisted(),
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    drain_startup_auto_resume(&mut runtime);
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+        AppEventProxy::Stub(events) => events,
+        _ => panic!("recorded restore completion"),
+    });
+    assert_eq!(
+        completion
+            .restore_refusal
+            .as_ref()
+            .map(|refusal| refusal.code.as_str()),
+        Some("window_closed")
+    );
+    let events = runtime.handle_remote_owner_launch_complete(completion);
+    assert!(
+        !events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, .. } if level == "error")),
+        "no Agent error toast: {events:?}"
+    );
+    let launch_failures = gwt_core::error_ledger::list_since(None)
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.kind == gwt_core::error_ledger::ErrorKind::LaunchFailure)
+        .collect::<Vec<_>>();
+    assert!(launch_failures.is_empty(), "{launch_failures:?}");
+    let windows = &runtime.tabs[0].workspace.persisted().windows;
+    assert!(
+        windows
+            .iter()
+            .all(|window| window.status != WindowProcessStatus::Error),
+        "an expected exclusion is not a runtime error: {windows:?}"
+    );
+    assert!(runtime.runtimes.is_empty());
+    owner_fixture_block_on(owner.shutdown());
+
+    let mut tab = restore_fixture_tab("tab-unmarked", &repo, &[]);
+    tab.workspace =
+        WindowRegistry::from_persisted(load_workspace_state(&workspace_state_path(&repo)).unwrap());
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-unmarked"));
+    restarted.sessions_dir = runtime.sessions_dir.clone();
+    restarted.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert!(
+        restarted.pending_startup_auto_resume_sessions.is_empty(),
+        "no second attempt"
+    );
+}
+
 #[test]
 fn restore_pending_worktree_reservation_ends_when_window_closes() {
     let temp = tempdir().expect("tempdir");

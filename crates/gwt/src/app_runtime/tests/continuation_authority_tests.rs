@@ -3599,7 +3599,8 @@ fn assert_fresh_execution_preserves_terminal_work(
     assert!(!durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         candidate_session_id
-    ));
+    )
+    .unwrap());
     assert!(probe.has_capability_bearer(fixture.captured.grant.as_ref().unwrap()));
     assert!(probe.issuer.grant_is_current(probe.grant.as_ref().unwrap()));
     assert_eq!(
@@ -3674,6 +3675,7 @@ fn assert_fresh_execution_preserves_terminal_work(
     let (status, update) = fixture
         .executor
         .block_on(probe.workspace_update(&gwt::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: candidate_session_id.to_string(),
             observation: gwt::observe_agent_runtime(&repo).unwrap(),

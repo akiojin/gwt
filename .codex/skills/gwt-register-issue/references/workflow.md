@@ -71,12 +71,12 @@ If duplicate search finds an existing owner SPEC, treat that SPEC as the decisio
 ## Autonomous Eligibility Defaults
 
 The registration template produces Issues that qualify for autonomous
-resolution by the Issue Monitor by default (acceptance-criteria checkboxes
+resolution by Issues by default (acceptance-criteria checkboxes
 plus the `auto-merge` label):
 
 - The plain Issue body MUST contain an `## Acceptance Criteria` section with
   `- [ ] AC-N:` checkbox lines. Every criterion is one verifiable statement.
-- Readiness format (what the Issue Monitor's classifier actually reads):
+- Readiness format (what the Issues classifier actually reads):
   - Recognized headings: `## Acceptance Criteria`, `## 受け入れ基準`,
     `## 受け入れ条件`. `## 成功基準` is not scanned.
   - Items: `- [ ] AC-N: <text>` checkbox lines directly under that heading
@@ -106,7 +106,7 @@ plus the `auto-merge` label):
   for human review, or the change touches surfaces where auto-merge is
   forbidden (hooks/gates, launch authority, release machinery, security
   boundaries). State the opt-out reason in the Issue body `## Notes`.
-- Alignment: the Issue Monitor treats `auto-merge` + AC checkboxes as the
+- Alignment: Issues treats `auto-merge` + AC checkboxes as the
   autonomous-eligibility signal; an opted-out Issue stays on the human gate.
 - The `issue.create` operation itself stays neutral: `labels` is optional and
   no label is applied unconditionally. The default lives in this template.

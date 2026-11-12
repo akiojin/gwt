@@ -177,7 +177,7 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   panel.applyStatus(RUNNING_STATUS);
   const view = views[0];
   for (const [role, meaning] of [
-    ["pm-autonomy-status", /coordination.*Issue Monitor/i],
+    ["pm-autonomy-status", /coordination.*Issues/i],
     ["pm-pause-toggle", /keeping the Project Manager available/i],
     ["pm-agent-select", /after restart/i], ["pm-model-input", /after restart/i],
     ["pm-effort-select", /after restart/i], ["pm-loop-interval", /Minimum: 10 seconds/i],
@@ -388,6 +388,20 @@ test("FR-026: Running as は稼働中エージェントを名乗る", () => {
     /Not running/,
     "停止中は稼働中を名乗らない",
   );
+});
+
+test("Issue #7030: PM Codex speed is restored and Claude has no Ultrafast option", () => {
+  const { document, sent, panel } = fixture();
+  panel.applyStatus({ ...RUNNING_STATUS, configured_agent_id: "codex", configured_codex_speed: "ultrafast" });
+  const speed = document.querySelector('[data-role="pm-speed-select"]');
+  assert.ok(speed);
+  assert.equal(speed.value, "ultrafast");
+  assert.deepEqual([...speed.querySelectorAll("option")].map(option => option.value), ["", "off", "fast", "ultrafast"]);
+  chooseAgent(document, speed, "fast");
+  assert.equal(sent.at(-1).codex_speed, "fast");
+  panel.applyStatus({ ...RUNNING_STATUS, configured_fast_mode: true });
+  assert.deepEqual([...speed.querySelectorAll("option")].map(option => option.value), ["", "off", "fast"]);
+  assert.equal(speed.value, "fast");
 });
 
 test("FR-026: agent select は pm_status の選択肢から作られ set_pm_launch_profile を送る", () => {
@@ -618,7 +632,7 @@ test("#3812 AC-5: Pause/Resume is unavailable before project hydration", () => {
   assert.deepEqual(sent, []);
 });
 
-test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Monitor", () => {
+test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Issues", () => {
   const { document, views, sent, panel } = fixture({ mounts: 2 });
   panel.applyStatus({ ...RUNNING_STATUS, is_running: false, paused: false });
   const toggle = required(views[0], '[data-role="pm-pause-toggle"]');
@@ -775,6 +789,12 @@ test("FR-026: Restart は confirm を通ったときだけ restart_pm_agent を�
   accepted.panel.applyStatus(RUNNING_STATUS);
   required(accepted.document, '[data-role="pm-restart"]').click();
   assert.deepEqual(accepted.sent.at(-1), { kind: "restart_pm_agent" });
+});
+
+test("Issue #7030: inherited PM model and effort do not create a false Pending chip", () => {
+  const { document, panel } = fixture();
+  panel.applyStatus({ ...RUNNING_STATUS, running_model: "gpt-6-astra", running_reasoning: "high" });
+  assert.equal(document.querySelector('[data-role="pm-pending-chip"]').hidden, true);
 });
 
 test("FR-026: Pending チップは configured != running のときだけ出る", () => {

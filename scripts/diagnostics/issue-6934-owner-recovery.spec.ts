@@ -117,7 +117,10 @@ test("four Agent windows retain input and snapshot service without owner drain",
     await expect.poll(async () => {
       const listed = await ownerCommand(fixture.repo_hash, { type: "list_panes" });
       return listed.panes.filter((pane: any) => agents.some(agent => agent.session_id === pane.session_id)).length;
-    }, { timeout: 60_000 }).toBe(0);
+    }, { timeout: 60_000 }).toBe(0).catch(error => {
+      if (passed) throw error;
+      console.error(`Cleanup poll failed after an earlier failure: ${error}`);
+    });
   }
 });
 

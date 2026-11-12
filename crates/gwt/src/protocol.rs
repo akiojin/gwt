@@ -86,6 +86,28 @@ impl From<gwt_core::pm_report::PmReport> for PmReportView {
     }
 }
 
+/// PM replies are Markdown; their render-only HTML comes from the same host
+/// sanitizer as Reports. User text stays plain so the client never parses it.
+fn serialize_pm_conversation_snapshot<S: serde::Serializer>(
+    snapshot: &crate::pm_conversation::PmConversationSnapshot,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::pm_conversation::PmConversationRole;
+    let mut rendered = serde_json::to_value(snapshot).map_err(serde::ser::Error::custom)?;
+    for (message, value) in snapshot
+        .messages
+        .iter()
+        .zip(rendered["messages"].as_array_mut().into_iter().flatten())
+    {
+        if message.role == PmConversationRole::Assistant {
+            value["text_html"] = serde_json::Value::String(
+                crate::board_remote::markdown::markdown_to_html(&message.text),
+            );
+        }
+    }
+    rendered.serialize(serializer)
+}
+
 fn serialize_release_notes_entries<S: serde::Serializer>(
     entries: &[gwt_core::release_notes::ReleaseEntry],
     serializer: S,
@@ -478,6 +500,11 @@ pub enum PmRequestTaskResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
+    /// Explicitly confirmed recovery of the authenticated project owner.
+    RestartWedgedOwner {
+        confirmed: bool,
+        recovery_id: String,
+    },
     RefreshOrphanDaemons,
     ReapOrphanDaemon {
         observation_token: String,
@@ -561,6 +588,10 @@ pub enum FrontendEvent {
         model: Option<String>,
         #[serde(default)]
         reasoning: Option<String>,
+        #[serde(default)]
+        codex_speed: Option<gwt_agent::CodexSpeed>,
+        #[serde(default)]
+        fast_mode: Option<bool>,
     },
     /// SPEC-3431 FR-026: stop the live PM and bring it back on the configured
     /// profile. Starts a NEW conversation — a history cannot cross agents.
@@ -1098,6 +1129,11 @@ pub enum FrontendEvent {
         allowed_labels: Vec<String>,
         #[serde(default)]
         request_id: Option<u64>,
+    },
+    /// Read the current project's label catalog; refresh explicitly bypasses its cache.
+    GetRepositoryLabels {
+        #[serde(default)]
+        refresh: bool,
     },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
@@ -1659,10 +1695,13 @@ pub enum ProjectOwnerHealthState {
     Connecting,
     Healthy,
     Degraded,
+    Wedged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectOwnerHealthView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_id: Option<String>,
     pub project_key: String,
     pub state: ProjectOwnerHealthState,
     pub detail: Option<String>,
@@ -2080,7 +2119,7 @@ pub struct ActiveWorkItemView {
 }
 
 /// Read-only membership measured from this GUI host's current agent children.
-/// This does not grant launch, close, or Issue Monitor slot authority.
+/// This does not grant launch, close, or Issues slot authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalAgentActivityView {
     pub project_key: String,
@@ -2101,6 +2140,12 @@ pub struct LocalAgentActivityAgentView {
     pub is_pm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_task: Option<String>,
+    /// Issue #7035 AC-1: an independent review window holds an Issues slot
+    /// without a roster member, so the Agents surface lists it separately.
+    #[serde(default)]
+    pub review_dispatch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2480,6 +2525,7 @@ pub enum BackendEvent {
     PmConversation {
         id: String,
         session_id: Option<String>,
+        #[serde(serialize_with = "serialize_pm_conversation_snapshot")]
         snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
     PmReports {
@@ -2492,6 +2538,9 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
+        /// Current-card failure only; `reports` remain authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_error: Option<String>,
     },
     PmRequestTask {
         id: String,
@@ -2617,6 +2666,10 @@ pub enum BackendEvent {
         configured_agent_id: String,
         configured_model: Option<String>,
         configured_reasoning: Option<String>,
+        #[serde(default)]
+        configured_codex_speed: Option<gwt_agent::CodexSpeed>,
+        #[serde(default)]
+        configured_fast_mode: Option<bool>,
         running_agent_id: Option<String>,
         running_model: Option<String>,
         running_reasoning: Option<String>,
@@ -2651,6 +2704,12 @@ pub enum BackendEvent {
     IssueMonitorAllowedLabelsWriteFailed {
         request_id: u64,
         outcome_unknown: bool,
+    },
+    RepositoryLabels {
+        project_root: String,
+        labels: Vec<crate::issue_cache::RepositoryLabel>,
+        loaded: bool,
+        error: Option<String>,
     },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
@@ -3602,6 +3661,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "repository_labels",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_inbox",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -4058,6 +4122,7 @@ impl BackendEvent {
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }
+            BackendEvent::RepositoryLabels { .. } => "repository_labels",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorQueueResult { .. } => "issue_monitor_queue_result",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
@@ -4316,7 +4381,7 @@ mod tests {
             matches!(request, FrontendEvent::LoadPmReports { request_id: 7, version: Some(cursor), .. } if cursor == version)
         );
         let event = BackendEvent::PmReports {
-            id: "pm".into(), session_id: Some("session".into()), error: None,
+            id: "pm".into(), session_id: Some("session".into()), error: None, current_error: None,
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
@@ -4653,6 +4718,8 @@ mod tests {
             configured_agent_id: "claude".to_string(),
             configured_model: None,
             configured_reasoning: None,
+            configured_codex_speed: None,
+            configured_fast_mode: None,
             running_agent_id: None,
             running_model: None,
             running_reasoning: None,
@@ -5382,6 +5449,47 @@ mod tests {
         }))
         .expect("PM conversation is requested through the authenticated window");
         assert!(format!("{request:?}").contains("tab-1::pm"));
+    }
+
+    #[test]
+    fn pm_conversation_renders_only_assistant_markdown_on_the_host() {
+        use crate::pm_conversation::{
+            PmConversationAvailability, PmConversationMessage, PmConversationRole,
+            PmConversationSnapshot,
+        };
+        let snapshot = PmConversationSnapshot {
+            conversation_id: Some("conversation".to_owned()),
+            availability: PmConversationAvailability::Ready,
+            messages: vec![
+                PmConversationMessage {
+                    id: "u1".to_owned(),
+                    role: PmConversationRole::User,
+                    text: "# not a heading <b>raw</b>".to_owned(),
+                },
+                PmConversationMessage {
+                    id: "a1".to_owned(),
+                    role: PmConversationRole::Assistant,
+                    text: "# Plan\n\n- one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n\n<script>alert(1)</script>".to_owned(),
+                },
+            ],
+            detail: None,
+        };
+        let value = serde_json::to_value(BackendEvent::PmConversation {
+            id: "pm".to_owned(),
+            session_id: Some("session".to_owned()),
+            snapshot: snapshot.clone(),
+        })
+        .unwrap();
+        let messages = value["snapshot"]["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["text"], snapshot.messages[0].text);
+        assert!(messages[0].get("text_html").is_none());
+        assert_eq!(messages[1]["text"], snapshot.messages[1].text);
+        let html = messages[1]["text_html"].as_str().unwrap();
+        for tag in ["<h1>", "<li>", "<table>", "<pre>"] {
+            assert!(html.contains(tag), "{tag} missing from {html}");
+        }
+        assert!(!html.contains("<script"), "{html}");
+        assert_eq!(value["snapshot"]["availability"], "ready");
     }
 
     #[test]

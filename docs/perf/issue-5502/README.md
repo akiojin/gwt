@@ -6,13 +6,13 @@ the source change, then rebuild and run
 `node scripts/verify-issue-5502.mjs --label after` after the change.
 
 The harness launches only this checkout's `target/debug/gwt.exe` with
-`--no-tray --no-open`, a fresh HOME, PM auto-start off, and Issue Monitor
+`--no-tray --no-open`, a fresh HOME, PM auto-start off, and Issues
 disabled. It uses the stopped PM Reports fixture from `verify-issue-5023.sh`
 and the Windows launch and hook-authority conventions used by existing
 browser checks. It retains the shared runtime directory only; project and
 session state are synthetic. It never starts an implementation agent.
 
-Each run seeds a 524 KiB Issue Monitor preferences file, 691 dead host
+Each run seeds a 524 KiB Issues preferences file, 691 dead host
 directories containing 4,047 runtime sidecars, and 4,047 foreign historical
 Session ledgers. Once the Reports pane is ready and startup has settled, it
 reseeds the fixed input and sets a valid `claim_diagnostics` entry's

@@ -155,6 +155,7 @@ fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention
         assert_eq!(fs::read(predecessor_path).unwrap(), *predecessor_bytes);
         let (status, body) = executor
             .block_on(probe.workspace_update(&gwt::AgentWorkspaceUpdateRequest {
+                primary_provider_session_id: None,
                 schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: fixture.pending.binding.session_id.clone(),
                 observation: gwt::observe_agent_runtime(&fixture.repo).unwrap(),
@@ -952,7 +953,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
 
 /// SPEC #3200 FR-052: a fresh linked-owner launch is not producing until
 /// SessionStart authenticates, so `spawn_agent_window_with_options` defers
-/// the Issue Monitor completion. The SessionStart finalizer therefore owns the
+/// Issues completion. The SessionStart finalizer therefore owns the
 /// durable delivery ACK — if it emitted the plain "launch succeeded" events the
 /// delivery tuple would stay pending forever and the daemon would redeliver it.
 #[test]
@@ -1050,6 +1051,172 @@ fn issue_5415_startup_timeout_preserves_submitted_and_replaced_sessions() {
 }
 
 #[test]
+fn issue_3706_grok_rejected_initial_prompt_keeps_startup_deadline() {
+    assert_grok_startup_progress(None);
+}
+
+#[test]
+fn issue_3706_grok_accepted_work_cancels_startup_deadline() {
+    for source in ["PreToolUse", "Stop"] {
+        assert_grok_startup_progress(Some(source));
+    }
+}
+
+fn assert_grok_startup_progress(accepted: Option<&str>) {
+    use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
+    let fixture = owner_monitor_fresh_fixture_with_control_budget(
+        temp.path(),
+        "grok-blocked-initial-prompt",
+        true,
+        false,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |config| {
+            config.agent_id = gwt_agent::AgentId::GrokBuild;
+            configure_owner_fixture_tools(&temp.path().join("monitor-project"), &["grok"]);
+            pin_config_fixture_runners(config, temp.path(), &["grok"]);
+            let runner = temp
+                .path()
+                .join("fixture-runner-bin")
+                .join(if cfg!(windows) { "grok.cmd" } else { "grok" });
+            // The start gate eventually executes this runner. Keep its
+            // health probe finite and its actual PTY alive until teardown.
+            #[cfg(windows)]
+            fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\npowershell -NoProfile -Command \"while ($null -ne [Console]::ReadLine()) {}\"\r\n").unwrap();
+            #[cfg(not(windows))]
+            fs::write(&runner, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit 0; fi\nexec cat >/dev/null\n").unwrap();
+            config.command = runner.display().to_string();
+            config.args.clear();
+        },
+    );
+    commit_owner_fresh_readiness(&fixture);
+    wait_owner_monitor_fresh_ack(&fixture);
+    let id = fixture.captured.id.clone();
+    let incarnation = fixture.captured.incarnation;
+    let pane = fixture
+        .executor
+        .block_on(fixture.owner.probe(&id, incarnation))
+        .unwrap();
+    assert_eq!(
+        pane.session.as_ref().unwrap().agent_id,
+        gwt_agent::AgentId::GrokBuild
+    );
+    let due = pane.monitor_startup_at.expect("original startup deadline");
+    for source in ["UserPromptSubmit", "Stop"] {
+        let mut hook = runtime_hook_coordination_event(&fixture.pending.binding.session_id);
+        hook.source_event = Some(source.into());
+        hook.native_prompt_id = (source == "UserPromptSubmit").then(|| "grok-turn".into());
+        hook.project_root = Some(fixture.repo.display().to_string());
+        hook.branch = Some("work/issue-2359".into());
+        fixture
+            .owner
+            .transport_event(gwt::project_transport::TransportEvent::RuntimeHook(hook));
+        fixture
+            .executor
+            .block_on(fixture.owner.command(OwnerCommand::Health))
+            .unwrap();
+        let observed = fixture
+            .executor
+            .block_on(fixture.owner.probe(&id, incarnation))
+            .unwrap()
+            .monitor_startup_at;
+        if observed != Some(due) {
+            fixture.shutdown();
+            assert_eq!(observed, Some(due), "{source} is not an accepted Grok turn");
+            unreachable!();
+        }
+    }
+    if let Some(source) = accepted {
+        let mut hook = runtime_hook_coordination_event(&fixture.pending.binding.session_id);
+        hook.source_event = Some(source.into());
+        hook.native_prompt_id = (source == "Stop").then(|| "grok-turn".into());
+        hook.project_root = Some(fixture.repo.display().to_string());
+        hook.branch = Some("work/issue-2359".into());
+        fixture
+            .owner
+            .transport_event(gwt::project_transport::TransportEvent::RuntimeHook(hook));
+        fixture
+            .executor
+            .block_on(fixture.owner.command(OwnerCommand::Health))
+            .unwrap();
+        let observed = fixture
+            .executor
+            .block_on(fixture.owner.probe(&id, incarnation))
+            .unwrap()
+            .monitor_startup_at;
+        fixture
+            .executor
+            .block_on(fixture.owner.check_monitor_deadlines(due))
+            .unwrap();
+        let live = fixture
+            .executor
+            .block_on(fixture.owner.probe(&id, incarnation))
+            .is_ok();
+        fixture.shutdown();
+        assert!(
+            observed.is_none() && live,
+            "{source} proves accepted Grok work: deadline={observed:?}, live={live}"
+        );
+        return;
+    }
+    let mut events = fixture.owner.subscribe();
+    fixture
+        .executor
+        .block_on(fixture.owner.check_monitor_deadlines(due))
+        .unwrap();
+    let retired = fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Only bounds physical retirement; the original deadline is explicitly advanced above.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                if let OwnerEvent::WindowRemoved {
+                    id: removed,
+                    incarnation: generation,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    if removed == id && generation == incarnation {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+    });
+    let remained = fixture
+        .executor
+        .block_on(fixture.owner.probe(&id, incarnation))
+        .is_ok();
+    let finalized = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", fixture.pending.binding.session_id)),
+    )
+    .unwrap();
+    let monitor = owner_monitor_read(&fixture.repo, 2359);
+    fixture.shutdown();
+    assert!(retired.is_ok() && !remained);
+    assert!(pane.pty.tree_exit_confirmed());
+    assert_eq!(finalized.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!finalized.restore_window_on_startup);
+    assert_eq!(monitor.attempt_count(2359), 0);
+    assert_eq!(
+        monitor.inbox_item(2359).unwrap().state,
+        gwt::MonitorInboxState::Queued
+    );
+    assert!(monitor
+        .inbox_item(2359)
+        .unwrap()
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("startup timed out after 180s"));
+}
+
+#[test]
 fn fresh_monitor_readiness_failure_stops_delivery_once() {
     assert_fresh_monitor_startup_failures_stop(&["readiness"]);
 }
@@ -1094,6 +1261,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             true,
             prepty,
             control_budget,
+            |_| {},
         );
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
         let id = fixture.captured.id.clone();
@@ -1275,7 +1443,8 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                 assert!(durable_launch_recovery_exists(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &fixture.pending.binding.session_id
-                ));
+                )
+                .unwrap());
                 let health = fixture
                     .executor
                     .block_on(fixture.owner.command(OwnerCommand::Health))
@@ -1310,7 +1479,8 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         assert!(!durable_launch_recovery_exists(
             &gwt_core::paths::gwt_sessions_dir(),
             &fixture.pending.binding.session_id
-        ));
+        )
+        .unwrap());
         assert!(!gwt_core::paths::gwt_sessions_dir()
             .join(format!("{}.toml", fixture.pending.binding.session_id))
             .exists());
@@ -1351,7 +1521,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             .as_deref()
             .expect("durable actionable failure");
         if failure.starts_with("startup-timeout") {
-            assert!(reason.starts_with("Issue Monitor startup timed out after "));
+            assert!(reason.starts_with("Issues startup timed out after "));
             assert!(gwt_agent::is_transient_launch_failure(reason));
             assert_eq!(
                 monitor.inbox_item(2359).unwrap().state,
@@ -1765,7 +1935,8 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
             assert!(durable_launch_recovery_exists(
                 &gwt_core::paths::gwt_sessions_dir(),
                 &fixture.pending.binding.session_id
-            ));
+            )
+            .unwrap());
         }
         fixture.shutdown();
     }
@@ -1774,21 +1945,13 @@ fn issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidat
 #[cfg(windows)]
 #[test]
 fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_acknowledges() {
+    use base64::Engine;
+
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let fixture =
-        owner_monitor_fresh_fixture(temp.path(), "monitor-powershell-ready", false, false);
-    let probe = fixture
-        .executor
-        .block_on(
-            fixture
-                .owner
-                .probe(&fixture.captured.id, fixture.captured.incarnation),
-        )
-        .unwrap();
     let binary = std::env::current_exe()
         .unwrap()
         .parent()
@@ -1804,6 +1967,51 @@ fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_ackno
     fs::create_dir_all(&spaced_bin).unwrap();
     let hook_bin = spaced_bin.join("gwtd.exe");
     fs::copy(binary, &hook_bin).unwrap();
+    let request = temp.path().join("hook-request.txt");
+    let receipt = temp.path().join("hook-result.txt");
+    // The hook must descend from the actual PTY child, with its captured
+    // launch environment, rather than from this test harness.
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+             while (!(Test-Path -LiteralPath '{request}')) {{ Start-Sleep -Milliseconds 100 }}\n\
+             & $env:COMSPEC /d /s /c ([IO.File]::ReadAllText('{request}'))\n\
+             [IO.File]::WriteAllText('{receipt}.pending', [string]$LASTEXITCODE)\n\
+             [IO.File]::Move('{receipt}.pending', '{receipt}')\n\
+             while ($true) {{ Start-Sleep -Milliseconds 100 }}\n",
+        request = request.display().to_string().replace('\'', "''"),
+        receipt = receipt.display().to_string().replace('\'', "''"),
+    );
+    let script = base64::engine::general_purpose::STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let fixture = owner_monitor_fresh_fixture_with_control_budget(
+        temp.path(),
+        "monitor-powershell-ready",
+        false,
+        false,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |config| {
+            config.command = "powershell".into();
+            config.args = vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-EncodedCommand".into(),
+                script,
+            ];
+            config.env_vars.extend([
+                ("HOME".into(), temp.path().display().to_string()),
+                ("USERPROFILE".into(), temp.path().display().to_string()),
+                (
+                    gwt_agent::GWT_BIN_PATH_ENV.into(),
+                    hook_bin.display().to_string(),
+                ),
+            ]);
+            config.remove_env.push("CODEX_THREAD_ID".into());
+        },
+    );
     gwt_skills::generate_codex_hooks_for_mode(
         &fixture.repo,
         gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
@@ -1814,40 +2022,45 @@ fn fresh_monitor_powershell_session_start_activates_prepared_successor_and_ackno
     let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    let output = probe.with_agent_environment(|| {
-        let mut child = gwt_core::process::hidden_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", command])
-            .current_dir(&fixture.repo)
-            .env(gwt_agent::GWT_BIN_PATH_ENV, &hook_bin)
-            .env(
-                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
-                &fixture.pending.readiness_nonce,
-            )
-            .env_remove("CODEX_THREAD_ID")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(
-                serde_json::json!({
-                    "session_id":"native-monitor-powershell", "cwd":fixture.repo,
-                    "hook_event_name":"SessionStart", "source":"startup"
-                })
-                .to_string()
-                .as_bytes(),
-            )
-            .unwrap();
-        child.wait_with_output().unwrap()
+    let input = temp.path().join("hook-input.json");
+    let stdout = temp.path().join("hook-stdout.txt");
+    let stderr = temp.path().join("hook-stderr.txt");
+    fs::write(
+        &input,
+        serde_json::json!({
+            "session_id":"native-monitor-powershell", "cwd":fixture.repo,
+            "hook_event_name":"SessionStart", "source":"startup"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let pending = request.with_extension("pending");
+    fs::write(
+        &pending,
+        format!(
+            "{command} < \"{}\" > \"{}\" 2> \"{}\"",
+            input.display(),
+            stdout.display(),
+            stderr.display(),
+        ),
+    )
+    .unwrap();
+    fs::rename(pending, &request).unwrap();
+    fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual generated hook exit receipt; success is its exit code, not elapsed time.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !receipt.exists() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("generated startup hook exit receipt")
     });
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        fs::read_to_string(receipt).unwrap().trim(),
+        "0",
         "generated startup hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&fs::read(stderr).unwrap())
     );
     wait_owner_monitor_fresh_ack(&fixture);
     assert_eq!(
@@ -2037,6 +2250,7 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
     let (status, body) = fixture
         .executor
         .block_on(active.workspace_update(&gwt::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: fixture.pending.binding.session_id.clone(),
             observation: gwt::observe_agent_runtime(&fixture.repo).unwrap(),
@@ -2143,7 +2357,7 @@ fn leave_owner_fresh_activated_before_projection_commit(fixture: &OwnerFreshLaun
             assert!(durable_launch_recovery_exists(
                 &sessions_dir,
                 &fixture.pending.binding.session_id
-            ));
+            ).unwrap());
             Ok(())
         },
     )
@@ -2206,7 +2420,8 @@ fn fresh_execution_continue_repairs_activated_response_loss_before_acknowledging
     assert!(!durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         &fixture.pending.binding.session_id
-    ));
+    )
+    .unwrap());
     fixture.shutdown();
 }
 
@@ -2703,10 +2918,9 @@ fn assert_owner_fresh_worker_completion(scenario: &str) {
             assert!(
                 !gwt_agent::runtime_state_path(&sessions, &pending.binding.session_id).exists()
             );
-            assert!(!durable_launch_recovery_exists(
-                &sessions,
-                &pending.binding.session_id
-            ));
+            assert!(
+                !durable_launch_recovery_exists(&sessions, &pending.binding.session_id).unwrap()
+            );
             assert_eq!(
                 gwt::cli::execution_state::load_generation_ledger(&repo, authority)
                     .unwrap()
@@ -2958,10 +3172,9 @@ fn fresh_execution_generic_close_preserves_activated_or_replaced_candidate() {
             assert!(outcome.is_err());
         }
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(durable_launch_recovery_exists(
-            &sessions,
-            &fixture.pending.binding.session_id
-        ));
+        assert!(
+            durable_launch_recovery_exists(&sessions, &fixture.pending.binding.session_id).unwrap()
+        );
         assert_eq!(
             gwt::cli::execution_state::continuation_attempt_for_operation(
                 &fixture.repo,
@@ -3224,7 +3437,7 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
         let pending = captured.pending_fresh_execution.as_ref().unwrap();
         let source = captured.session.as_ref().unwrap();
         assert!(captured.pty.is_none());
-        assert!(durable_launch_recovery_exists(&sessions, &source.id));
+        assert!(durable_launch_recovery_exists(&sessions, &source.id).unwrap());
         assert!(!pending.readiness_nonce.is_empty());
         let binding = source.execution_binding.as_ref().unwrap();
         let grant = captured.grant.as_ref().unwrap();
@@ -3603,10 +3816,7 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
     assert!(!sessions_dir
         .join(format!("{retained_session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &sessions_dir,
-        &retained_session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&sessions_dir, &retained_session_id,).unwrap());
 }
 
 #[test]
@@ -3671,10 +3881,7 @@ fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candi
     assert!(sessions
         .join(format!("{}.toml", pending.binding.session_id))
         .exists());
-    assert!(durable_launch_recovery_exists(
-        &sessions,
-        &pending.binding.session_id
-    ));
+    assert!(durable_launch_recovery_exists(&sessions, &pending.binding.session_id).unwrap());
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-unrelated-after-fresh-callback-failure",

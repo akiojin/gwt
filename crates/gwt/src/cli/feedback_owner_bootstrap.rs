@@ -236,8 +236,8 @@ mod native {
                     WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, EVENT_MODIFY_STATE,
                     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
                     PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-                    SYNCHRONIZATION_SYNCHRONIZE,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                    STARTF_USESTDHANDLES, STARTUPINFOEXW, SYNCHRONIZATION_SYNCHRONIZE,
                 },
             },
         },
@@ -652,12 +652,14 @@ mod native {
         storage: Vec<usize>,
         initialized: bool,
         _handles: &'a [HANDLE],
+        _jobs: &'a [HANDLE],
     }
     impl<'a> Attributes<'a> {
-        fn new(handles: &'a [HANDLE]) -> io::Result<Self> {
+        fn new(handles: &'a [HANDLE], jobs: &'a [HANDLE]) -> io::Result<Self> {
+            let count = if jobs.is_empty() { 1 } else { 2 };
             let mut bytes = 0;
             // The first call reports the required opaque-list allocation size.
-            let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut bytes) };
+            let _ = unsafe { InitializeProcThreadAttributeList(None, count, None, &mut bytes) };
             if bytes == 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -665,9 +667,12 @@ mod native {
                 storage: vec![0; bytes.div_ceil(std::mem::size_of::<usize>())],
                 initialized: false,
                 _handles: handles,
+                _jobs: jobs,
             };
-            unsafe { InitializeProcThreadAttributeList(Some(list.pointer()), 1, None, &mut bytes) }
-                .map_err(win_error)?;
+            unsafe {
+                InitializeProcThreadAttributeList(Some(list.pointer()), count, None, &mut bytes)
+            }
+            .map_err(win_error)?;
             list.initialized = true;
             unsafe {
                 UpdateProcThreadAttribute(
@@ -681,6 +686,22 @@ mod native {
                 )
             }
             .map_err(win_error)?;
+            if !jobs.is_empty() {
+                // Job membership is installed by the kernel at creation, so no
+                // owner exit can leave a suspended child outside the Job.
+                unsafe {
+                    UpdateProcThreadAttribute(
+                        list.pointer(),
+                        0,
+                        PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                        Some(jobs.as_ptr().cast()),
+                        std::mem::size_of_val(jobs),
+                        None,
+                        None,
+                    )
+                }
+                .map_err(win_error)?;
+            }
             Ok(list)
         }
         fn pointer(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
@@ -708,9 +729,13 @@ mod native {
         root: &Path,
         descriptor: &Bootstrap,
         owner: Option<BorrowedHandle<'_>>,
+        job: Option<BorrowedHandle<'_>>,
     ) -> io::Result<SpawnedPrivate> {
         descriptor.clock.remaining_work()?;
+        // A sender is created inside its kill-on-close Job (Issue #6953):
+        // there is no window between creation and assignment to survive in.
         if (descriptor.role == Role::Sender) != owner.is_some()
+            || (descriptor.role == Role::Sender) != job.is_some()
             || owner.map(creation_identity).transpose()? != descriptor.owner_identity
         {
             return Err(invalid("private owner binding mismatch"));
@@ -754,7 +779,8 @@ mod native {
         if let Some(owner) = owner.as_ref() {
             handles.push(raw(owner.as_handle()));
         }
-        let mut attributes = Attributes::new(&handles)?;
+        let jobs: Vec<HANDLE> = job.map(raw).into_iter().collect();
+        let mut attributes = Attributes::new(&handles, &jobs)?;
         let exe_path = std::env::current_exe()?;
         let exe = wide(exe_path.as_os_str())?;
         // Only fixed role and decimal handle arguments follow the trusted argv0.
@@ -914,6 +940,100 @@ mod native {
             // Ownership transfers once through argv. receive closes both
             // references on rejection; the test must not close them again.
             assert!(receive(&argv, Role::Supervisor).is_err());
+        }
+
+        const SUSPENDED_SENDER_OWNER: &str =
+            "cli::feedback_owner_bootstrap::native::tests::suspended_sender_owner";
+        const SENDER_PID: &str = "suspended-sender-pid=";
+
+        /// Owner half of the Issue #6953 proof. It runs only when re-executed
+        /// by the test below, creates the sender exactly as the supervisor
+        /// does, and then waits to be force-terminated before any resume.
+        #[test]
+        fn suspended_sender_owner() {
+            use std::io::{Read, Write};
+
+            let args: Vec<_> = std::env::args().collect();
+            if !args.iter().any(|arg| arg == "--exact")
+                || !args.iter().any(|arg| arg == SUSPENDED_SENDER_OWNER)
+            {
+                return;
+            }
+            let job = gwt_core::process_tree::WindowsJobObject::new().unwrap();
+            let owner = current_owner_handle().unwrap();
+            let identity = creation_identity(owner.as_handle()).unwrap();
+            let root = std::env::current_dir().unwrap();
+            let sender = spawn_private(
+                &root,
+                &descriptor().sender(identity),
+                Some(owner.as_handle()),
+                job.job_handle(),
+            )
+            .unwrap();
+            println!("{SENDER_PID}{}", sender.child.identity.pid);
+            std::io::stdout().flush().unwrap();
+            // The parent kills this process here. If it closes stdin instead,
+            // the Job and the suspended child are released normally.
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        }
+
+        #[test]
+        fn force_killed_owner_leaves_no_suspended_sender_behind() {
+            use std::io::BufRead;
+            use windows::Win32::System::Threading::OpenProcess;
+
+            let mut command = gwt_core::process::resolved_command(
+                gwt_core::process::ProcessPlanRequest::new(std::env::current_exe().unwrap()),
+            )
+            .unwrap();
+            command
+                .args([
+                    "--exact",
+                    SUSPENDED_SENDER_OWNER,
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            let mut owner = command.spawn().unwrap();
+            let mut reader = std::io::BufReader::new(owner.stdout.take().unwrap());
+            let mut line = String::new();
+            // libtest may print the test name on the same line under --nocapture.
+            let pid: u32 = loop {
+                line.clear();
+                assert!(
+                    reader.read_line(&mut line).unwrap() > 0,
+                    "owner exited before reporting its suspended sender"
+                );
+                if let Some(pid) = line.split(SENDER_PID).nth(1) {
+                    break pid.trim().parse().unwrap();
+                }
+            };
+            // The owner still holds the sender handle, so this PID is exact.
+            let sender = owned(
+                unsafe {
+                    OpenProcess(
+                        PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        false,
+                        pid,
+                    )
+                }
+                .unwrap(),
+            );
+            assert_eq!(
+                unsafe { WaitForSingleObject(raw(sender.as_handle()), 0) },
+                WAIT_TIMEOUT,
+                "the sender must still be alive and suspended before the owner dies"
+            );
+            // Force-terminate the owner before it ever resumes the sender.
+            owner.kill().unwrap();
+            owner.wait().unwrap();
+            assert_eq!(
+                unsafe { WaitForSingleObject(raw(sender.as_handle()), 30_000) },
+                WAIT_OBJECT_0,
+                "a suspended sender (with inherited handles and environment) outlived its killed owner"
+            );
         }
     }
 }

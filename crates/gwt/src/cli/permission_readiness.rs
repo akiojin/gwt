@@ -246,7 +246,7 @@ pub fn record_prompt_regression(
 /// Build the gate decision for a launch whose permission mode cannot be
 /// honored, without writing anything.
 ///
-/// Split from [`block_launch_if_unready`] so the Issue Monitor can ask the
+/// Split from [`block_launch_if_unready`] so Issues can ask the
 /// same question about a launch it has not started — and must not start — in a
 /// worktree it may not even have materialized yet (Issue #4544 AC-2).
 #[must_use]
@@ -408,7 +408,7 @@ pub fn settlement_refusal(worktree: &Path) -> Option<String> {
 
 /// The same refusal, addressed by owner rather than by worktree.
 ///
-/// The Issue Monitor scans from the project root, so it never holds the work
+/// Issues scans from the project root, so it never holds the work
 /// worktree's path. The owner generation ledger does — `diagnose_owner` is
 /// repository-scoped and reports the holder worktree — and that is the only
 /// way Deliver and merge can consult a record written in a different

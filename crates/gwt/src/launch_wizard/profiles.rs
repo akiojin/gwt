@@ -117,6 +117,7 @@ pub fn quick_start_entries_from_sessions(
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
     let fast_mode = session.fast_mode_enabled();
+    let codex_speed = session.codex_speed();
     let hermes = hermes_preferences_from_session(&session);
     LaunchWizardPreviousProfile {
         agent_id: session.agent_id.command().to_string(),
@@ -125,6 +126,7 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         session_mode: session.session_mode,
         skip_permissions: session.skip_permissions,
         fast_mode,
+        codex_speed,
         runtime_target: session.runtime_target,
         docker_service: session.docker_service,
         docker_lifecycle_intent: session.docker_lifecycle_intent,
@@ -302,6 +304,33 @@ mod tests {
     use super::super::test_support::*;
     use super::super::*;
     use super::*;
+
+    #[test]
+    fn agent_settings_override_session_defaults_without_changing_runtime() {
+        let profile = |value| -> LaunchWizardPreviousProfile {
+            serde_json::from_value::<crate::IssueMonitorLaunchProfile>(value)
+                .unwrap()
+                .into()
+        };
+        let previous = profile(
+            serde_json::json!({"agent_id":"codex", "model":"gpt-6.1-sol", "reasoning":"low", "runtime_target":"Docker", "docker_service":"dev"}),
+        );
+        let defaults = profile(
+            serde_json::json!({"agent_id":"codex", "model":"gpt-6-astra", "reasoning":"high", "codex_speed":"ultrafast"}),
+        );
+        let ignored = profile(serde_json::json!({"agent_id":"codex", "model":"ignored"}));
+        let merged = LaunchWizardPreviousProfiles::from_profile(Some(previous))
+            .with_agent_defaults([defaults, ignored]);
+        let restored = merged.profile_for("codex").unwrap();
+        assert_eq!(restored.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(restored.reasoning.as_deref(), Some("high"));
+        assert_eq!(restored.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
+        assert_eq!(
+            restored.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(restored.docker_service.as_deref(), Some("dev"));
+    }
 
     #[test]
     fn load_previous_launch_profile_uses_latest_session_for_repo_without_reusing_branch() {
