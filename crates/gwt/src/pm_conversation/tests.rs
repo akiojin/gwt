@@ -43,6 +43,9 @@ fn native_record_excerpts_project_only_visible_conversation_text() {
         ),
     ] {
         let result = parse_native(&agent, fixture, "conversation", Path::new("/work/project"));
+        let identity = serde_json::to_vec(&(agent.command(), "conversation", user_id)).unwrap();
+        let source_id = format!("native:{}", gwt_core::pm_authorization::digest(&identity));
+        let source_key = gwt_core::pm_authorization::digest(source_id.as_bytes());
         assert_eq!(result.availability, PmConversationAvailability::Ready);
         assert_eq!(result.conversation_id.as_deref(), Some("conversation"));
         assert_eq!(
@@ -52,15 +55,33 @@ fn native_record_excerpts_project_only_visible_conversation_text() {
                     id: user_id.into(),
                     role: PmConversationRole::User,
                     text: user_text.into(),
+                    source_key: Some(source_key.clone()),
                 },
                 PmConversationMessage {
                     id: assistant_id.into(),
                     role: PmConversationRole::Assistant,
                     text: "Assistant reply".into(),
+                    source_key: None,
                 },
             ],
             "{agent:?} must exclude internal records while preserving text block order"
         );
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value["messages"][0]["source_key"], source_key,
+            "{agent:?} human messages must match captured native sources"
+        );
+        assert!(value["messages"][1].get("source_key").is_none());
+        assert!(!value.to_string().contains(&source_id));
+        let mut legacy = value;
+        legacy["messages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_key");
+        let legacy: PmConversationSnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["messages"][0]
+            .get("source_key")
+            .is_none());
     }
 }
 

@@ -2153,6 +2153,11 @@ the same PM session's terminal. The PM entry brings you back to Chat with your
 unsent draft preserved. You can also open the terminal from the PM row in
 **Works**. Use **Execution log** to attach images.
 
+Chat also shows the same **Tasks** preview beside the conversation (above it in
+narrow windows). **Show in conversation** returns to a task's original message
+and keeps your unsent draft. If that message is outside the current conversation
+preview, the button is unavailable and the reason is shown.
+
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
 the answer and action results; use **Report kind** to filter the history. It is

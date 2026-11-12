@@ -115,6 +115,7 @@ export function createPmWindowModel() {
         const snapshot = event.snapshot;
         const conversation = { availability: snapshot.availability || 'unavailable', detail: snapshot.detail || null,
           messages: (snapshot.messages || []).map(message => ({ id: message.id, role: message.role,
+            sourceKey: message.role === 'user' && typeof message.source_key === 'string' ? message.source_key : null,
             content: message.role === 'assistant'
               ? { type: 'markdown', body: message.text || '', body_html: message.text_html || '' }
               : { type: 'text', body: message.text || '' } })) };
@@ -321,7 +322,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   transcript.setAttribute('aria-label', 'PM reports');
   historyHeader.append(element('h2', '', 'Reports'), filter);
   body.append(currentCard, historyHeader, notice, transcript);
-  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, tasksBody, body, chatBody);
+  const taskWorkspace = element('div', 'pm-chat__workspace');
+  taskWorkspace.append(chatBody, tasksBody);
+  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, body, taskWorkspace);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -343,11 +346,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     activeView = value;
     logs = value === 'log';
     body.hidden = value !== 'reports';
-    tasksBody.hidden = value !== 'tasks';
+    taskWorkspace.hidden = value !== 'tasks' && value !== 'chat';
+    tasksBody.hidden = value !== 'tasks' && value !== 'chat';
     chatBody.hidden = value !== 'chat';
     taskHome.element.hidden = value !== 'home';
     taskDecisions.element.hidden = value !== 'decide';
     root.classList.toggle('pm-chat--logs', logs);
+    root.classList.toggle('pm-chat--chat', value === 'chat');
     homeButton.setAttribute('aria-pressed', String(value === 'home'));
     decideButton.setAttribute('aria-pressed', String(value === 'decide'));
     chatButton.setAttribute('aria-pressed', String(value === 'chat'));
@@ -497,7 +502,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     const error = state?.requestTasksError;
     const rows = overview?.state === 'ready' ? overview.tasks : [];
     const visible = rows.filter(task => includeCompleted || !['completed', 'cancelled'].includes(task.status));
-    const nextDigest = JSON.stringify([includeCompleted, rows]);
+    const sources = state?.conversation?.availability === 'ready'
+      ? state.conversation.messages.filter(message => message.role === 'user' && message.sourceKey)
+      : [];
+    const nextDigest = JSON.stringify([includeCompleted, rows, sources.map(message => [message.sourceKey, message.id])]);
     if (nextDigest !== tasksDigest) {
       tasksDigest = nextDigest;
       const parents = new Map(rows.map(task => [task.key, task.title]));
@@ -509,7 +517,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
           row.dataset.taskKey = task.key;
           taskRows.set(task.key, row);
         }
-        const digest = JSON.stringify([task, parents.get(task.parent_key)]);
+        const source = sources.find(message => message.sourceKey === task.source_key);
+        const digest = JSON.stringify([task, parents.get(task.parent_key), source?.id]);
         if (row.dataset.digest !== digest) {
           row.dataset.digest = digest;
           row.classList.toggle('pm-chat__task--child', !!task.parent_key);
@@ -520,6 +529,22 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
           if (task.review_required) fields.push(element('p', 'pm-chat__task-review', 'PM reassessment required'));
           if (task.wait_reason) fields.push(element('p', '', `Waiting: ${task.wait_reason}`));
           if (task.next_action) fields.push(element('p', '', `Next: ${task.next_action}`));
+          const link = element('button', '', 'Show in conversation');
+          link.type = 'button';
+          link.disabled = !source;
+          link.addEventListener('click', () => {
+            if (disposed || latestState?.conversation?.availability !== 'ready') return;
+            const message = latestState.conversation.messages.find(message => message.role === 'user'
+              && message.sourceKey && message.sourceKey === task.source_key);
+            if (!message) return;
+            showChat();
+            const bubble = [...chatLog.querySelectorAll('.pm-chat__bubble--user')]
+              .find(node => node.dataset.messageId === message.id);
+            bubble?.scrollIntoView({ block: 'center' });
+            bubble?.focus({ preventScroll: true });
+          });
+          fields.push(link);
+          if (!source) fields.push(element('p', 'pm-chat__task-meta', 'The original message is not in the current conversation preview.'));
           row.replaceChildren(...fields);
         }
         return row;
@@ -553,6 +578,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       bubble.dataset.messageId = message.id;
       bubble.dataset.role = user ? 'user' : 'assistant';
       bubble.setAttribute('aria-label', user ? 'You' : 'PM');
+      if (user) bubble.setAttribute('tabindex', '-1');
       bubble.append(renderUiContent(document, message.content, 'pm-chat__text'));
       return bubble;
     };
@@ -807,7 +833,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     terminalButton.removeEventListener('click', openTerminal);
     kindSelect.removeEventListener('change', filterReports);
     root.replaceChildren();
-    root.classList.remove('pm-chat', 'pm-chat--logs');
+    root.classList.remove('pm-chat', 'pm-chat--logs', 'pm-chat--chat');
   }
   homeButton.addEventListener('click', showHome);
   decideButton.addEventListener('click', showDecisions);
