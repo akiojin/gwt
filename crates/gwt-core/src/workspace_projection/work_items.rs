@@ -787,6 +787,18 @@ impl WorkItemsProjection {
                 .iter_mut()
                 .find(|existing| workspace_execution_container_same(existing, &container))
             {
+                // A later absolute event can complete a branch-only snapshot.
+                // Never replace a known host path or infer one from a relative path.
+                if existing.worktree_path.is_none()
+                    && existing.branch.is_some()
+                    && existing.branch == container.branch
+                    && container
+                        .worktree_path
+                        .as_deref()
+                        .is_some_and(std::path::Path::is_absolute)
+                {
+                    existing.worktree_path = container.worktree_path.clone();
+                }
                 merge_workspace_pr_metadata(existing, &container);
             } else {
                 item.execution_containers.push(container);
@@ -1688,6 +1700,7 @@ mod tests {
             "work/issue-3697",
             "/repo/work/issue-3697",
         ));
+        start.execution_container.as_mut().unwrap().worktree_path = None;
         projection.apply_event(start);
 
         let mut pr = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
@@ -1711,6 +1724,10 @@ mod tests {
             "same worktree must not duplicate the container"
         );
         let container = &item.execution_containers[0];
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(std::path::Path::new("/repo/work/issue-3697"))
+        );
         assert_eq!(container.pr_number, Some(3672));
         assert_eq!(
             container.pr_url.as_deref(),
@@ -1737,8 +1754,13 @@ mod tests {
             "work/issue-3697",
             "/repo/work/issue-3697",
         ));
+        update.execution_container.as_mut().unwrap().worktree_path = None;
         projection.apply_event(update);
         let container = &projection.work_items[0].execution_containers[0];
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(std::path::Path::new("/repo/work/issue-3697"))
+        );
         assert_eq!(container.pr_number, Some(3672));
         assert_eq!(container.pr_state.as_deref(), Some("CLOSED"));
     }
