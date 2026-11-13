@@ -10296,6 +10296,7 @@ impl Drop for GrokTrustCleanup {
 #[test]
 fn grok_trust_cleanup_preserves_existing_and_intervening_entries() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let path = temp.path().join("trusted_folders.toml");
     fs::write(
         &path,
@@ -10341,6 +10342,7 @@ fn grok_trust_cleanup_preserves_existing_and_intervening_entries() {
 #[test]
 fn grok_trust_cleanup_runs_while_fixture_unwinds() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let path = temp.path().join("trusted_folders.toml");
     fs::write(
         &path,
