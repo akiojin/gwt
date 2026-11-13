@@ -6495,7 +6495,10 @@ body.route-body {
 
 /* SPEC #6476: keep phone tabs tappable and toolbar rows clear of each other. */
 @media (max-width: 600px) {
-  .issue-bridge-root .knowledge-state-filter button { min-height: 44px; }
+  .issue-bridge-root .knowledge-state-filter button,
+  .issue-bridge-root .knowledge-monitor-controls :is(button, input),
+  .issue-bridge-root .knowledge-search,
+  .issue-bridge-root .workspace-toolbar-actions button { min-height: 44px; }
   .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
   .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
 }
