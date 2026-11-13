@@ -350,6 +350,11 @@
    size. Make every control a 44px tap target below 601px. */
 @media (max-width: 600px) {
   .agents-surface :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
+  /* T-005wo: each Works row's Open terminal (28px) and member name link
+     (24px) kept their desktop text-button size. The full header's name is a
+     .work-member too and is meant to get the same target; it already sits in
+     the 44px control row from T-005h, so the header stays three rows. */
+  .works-surface :is(.work-open, .work-member) { min-width: 44px; min-height: 44px; }
 }
 @media (max-width: 480px) {
   .agents-surface { padding: var(--space-3); }
