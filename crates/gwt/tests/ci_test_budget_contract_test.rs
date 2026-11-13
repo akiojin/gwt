@@ -39,14 +39,27 @@ fn macos_socket_targets_compile_before_the_execution_budget() {
         .unwrap();
     assert!(preparation["if"].is_null() && preparation["continue-on-error"].is_null());
     let commands = preparation["run"].as_str().unwrap();
+    assert!(commands
+        .lines()
+        .any(|line| line.trim() == "cargo check -p gwt-core -p gwt"));
     for command in [
-        "cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
-        "cargo test -p gwt --lib --test runtime_tests --no-run",
+        "CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
+        "CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt --lib --test runtime_tests --no-run",
     ] {
         assert!(
             commands.lines().any(|line| line.trim() == command),
             "prepare every socket fixture target before the execution budget: {command}"
         );
+    }
+    assert_eq!(steps[execution]["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
+    // Keep default builds and cache keys on the ordinary profile. Only these
+    // test artifacts omit line tables, including when the script reuses them.
+    assert!(workflow["jobs"]["check-macos"]["env"].is_null());
+    for (index, step) in steps.iter().enumerate() {
+        assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        if index != execution {
+            assert!(step["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+        }
     }
 }
 
