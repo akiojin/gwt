@@ -1514,7 +1514,14 @@ fn configure_grok_repository_trust(
     {
         return Ok(None);
     }
-    let Ok(repository) = gwt_git::Repository::discover(cwd) else {
+    // A missing cwd otherwise makes the PTY inherit gwt's own directory.
+    // Keep the logged trust key and the eventual provider process aligned.
+    let launch_cwd = config
+        .working_dir
+        .get_or_insert_with(|| cwd.to_path_buf())
+        .clone();
+    let provider_cwd = pm_provider_runtime_dir(config).unwrap_or(launch_cwd);
+    let Ok(repository) = gwt_git::Repository::discover(&provider_cwd) else {
         return Ok(None);
     };
     let main = gwt_git::worktree::main_worktree_root(repository.path())
@@ -1938,6 +1945,11 @@ mod grok_repository_trust_tests {
             assert_eq!(
                 configure_grok_repository_trust(&mut config, cwd).unwrap(),
                 Some(canonical_launch_path(expected, "expected trust root").unwrap())
+            );
+            assert_eq!(
+                config.working_dir.as_deref(),
+                Some(cwd.as_path()),
+                "the spawned Grok must use the directory whose trust was resolved"
             );
             assert_eq!(config.args[0], "--trust");
             assert_eq!(&config.args[1..], original);
