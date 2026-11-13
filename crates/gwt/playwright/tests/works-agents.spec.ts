@@ -649,12 +649,12 @@ test.describe("Works and Agents approved baseline", () => {
   // member name link (about 40x24px) kept their desktop size on a phone. Below
   // 601px both are 44px tap targets that still open the full terminal view or
   // the member in Agents; wider layouts keep their size.
-  test("Works Open terminal is a 44px tap target on a phone and keeps its desktop size", async ({ page }, info) => {
+  test("Works row controls are 44px tap targets on a phone and keep their desktop size", async ({ page }, info) => {
     const open = works(page).locator(".work-row :is(.work-open, .work-member):visible");
     await expect(open).toHaveCount(5);
-    const minHeights = () => open.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+    const minHeights = () => open.evaluateAll(nodes => nodes.map(node => `${getComputedStyle(node).minWidth}x${getComputedStyle(node).minHeight}`));
     const desktop = await minHeights();
-    expect(desktop).not.toContain("44px");
+    expect(desktop.join(" ")).not.toContain("44px");
     await page.setViewportSize({ width: 601, height: 1000 });
     expect(await minHeights(), "601px keeps the desktop size").toEqual(desktop);
     for (const width of [320, 390]) {
