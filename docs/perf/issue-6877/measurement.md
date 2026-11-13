@@ -18,6 +18,47 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-13: recovered source delivery（鈴木 和斗）
+
+Producer commit `c830090e7249d84339a2b15e775c89c35ac13410` was recovered from
+`origin/work/issue-6877` and merged into the existing macOS worktree. The
+previous source-unavailable blocker no longer applies. No production code was
+rewritten. The narrow delivery target remains SPEC #4093 FR-6877-8 / T-R28.
+
+Fetched `origin/main` at `a431860c89d5ec94c698977a537ec33473359ff9` contains the
+previous performance slices through PR #7120, but not this producer commit.
+AC-1 and AC-3 retain their delivered status. AC-2 remains unproven for the
+changed runtime; AC-4 and AC-5 still lack the specified six-agent and
+five-minute/sixty-minute measurements. The historical pre-change measurements
+below cannot establish acceptance of this source. The Issue stays open.
+
+The independent diff review found no blocking defect: optional discovery keeps
+local, urgent, stored-grant, settlement, and auto-refill candidates; omitted
+observations preserve known holds; pending timeline pages are pruned when
+outside the selected set. Completion probes and live prelaunch authority stay
+unchanged. Existing regression tests are reused for the delivery verification.
+The local worker suite passed 102 tests with 0 failures and its existing
+opt-in live probe ignored; formatting and diff checks passed.
+
+Acceptance Surface: non-user-facing (background optional association reads;
+no rendering, browser contract, or interactive control changes).
+
+Delivery follows the repository's `work/issue-6877 -> develop -> release -> main`
+path. The main source-branch check is preserved. A release version/changelog
+requires the release owner's approval; this source delivery does not change
+those artifacts or the running fleet.
+
+AC-2 measurement preflight: `issue.monitor.status` projects cached state and
+cannot execute a scan. The daemon scan also performs claim/settlement/effect
+work; a second daemon sharing the live HOME would not be a read-only probe.
+An isolated loader-only probe omits completion and in-flight readers and cannot
+prove the whole-scan threshold. Re-measure the deployed matching binary over a
+complete 600-second window after the release owner coordinates deployment.
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## 2026-11-13: local admission discovery（サチ）
 
 fresh fetch 後の HEAD / `origin/develop` はともに
