@@ -407,6 +407,32 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  // SPEC #6476 T-005t (AC-1): tapping a rail entry raised its explanation from
+  // the compatibility mouseover a tap emits and, with no mouseout on touch,
+  // left it over the top of the opened surface. A mouse still hovers it open
+  // and a keyboard still focuses it open.
+  test("tapping the rail does not leave an explanation over the surface", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const explanation = page.locator("#rail-control-explanation");
+    for (const name of ["Agents", "Board", "Works"]) {
+      await page.getByRole("button", { name, exact: true }).tap();
+      await expect(page.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
+      await page.waitForTimeout(300);
+      await expect(explanation, `no explanation after tapping ${name}`).toBeHidden();
+    }
+    await page.screenshot({ path: info.outputPath("rail-tap-no-explanation.png") });
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await page.getByRole("button", { name: "Agents", exact: true }).hover();
+    await expect(explanation).toHaveText("Agents: project members, capacity and assignment history");
+    await page.mouse.move(700, 450);
+    await expect(explanation).toBeHidden();
+    await page.getByRole("button", { name: "Board", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await expect(explanation).toHaveText(/^Board:/);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     await setActiveAgentTab(page, "agent-2");
