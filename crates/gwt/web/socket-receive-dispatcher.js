@@ -409,13 +409,18 @@ function coalesceByKind(
           state.push(event);
         }
       }
+    } else if (kind === "terminal_status" || kind === "window_state") {
+      // Workspace snapshots also carry runtime status. Keep both status event
+      // forms in arrival order with the surviving snapshot, or an older
+      // Starting snapshot can overwrite the SessionStart Idle that followed it.
+      activationState.push(event);
     } else if (kind && orderedStateKinds.has(kind)) {
       state.push(event);
     } else {
       streamed.push(event);
     }
   }
-  // Apply the surviving project activation before scoped snapshots and action
+  // Apply project activation and runtime status before scoped snapshots and action
   // outcomes. A dropped intermediate workspace_state must not leave a stale
   // project outcome ahead of the latest active-project fence.
   const orderedState = activationState.concat(state);

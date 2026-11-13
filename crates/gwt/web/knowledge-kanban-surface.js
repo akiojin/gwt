@@ -1196,7 +1196,8 @@ export function createKnowledgeKanbanSurface({
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, counts: issueMonitorCounts(),
         humanAttention: { count: null, summary: "", byIssue: {} },
         steeringAttention: { count: null, summary: "", byIssue: {} },
-        reviewAttention: { count: null, summary: "", byIssue: {} }, status: {
+        reviewAttention: { count: null, summary: "", byIssue: {} },
+        decisionAttention: { count: null, summary: "" }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1424,9 +1425,7 @@ export function createKnowledgeKanbanSurface({
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
-            issueMonitorModel.read().humanAttention.summary,
-            issueMonitorModel.read().reviewAttention.summary,
-            issueMonitorModel.read().steeringAttention.summary,
+            issueMonitorModel.read().decisionAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1523,7 +1522,22 @@ export function createKnowledgeKanbanSurface({
 
       }
 
+      // SPEC #5016 AC-HS1/HS2: the one place that combines the components.
+      // An Issue in several components counts once; views read only this value.
+      function withDecisionAttention(model) {
+        const parts = [model.humanAttention, model.reviewAttention, model.steeringAttention]
+          .filter(part => part?.count != null);
+        if (!parts.length) return { ...model, decisionAttention: { count: null, summary: "" } };
+        const count = new Set(parts.flatMap(part => Object.keys(part.byIssue || {}))).size;
+        return { ...model, decisionAttention: { count,
+          summary: [`Awaiting attention ${count}`, ...parts.map(part => part.summary)].join(" | ") } };
+      }
+
       function withMonitorAttention(model) {
+        return withDecisionAttention(withMonitorHolds(model));
+      }
+
+      function withMonitorHolds(model) {
         const records = model.status.autonomous_issues;
         if (!Array.isArray(records) || model.humanAttention.count === null) return model;
         // Dispatch holds include automatic capacity/retry waits, not just

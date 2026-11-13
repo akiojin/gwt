@@ -261,6 +261,9 @@ test("needs_human snapshot shares counts and reasons across Issue views", async 
   await emit("needs_human", "Choose credentials");
   await expect(pill).toHaveAttribute("title", /Needs human 1/);
   await expect(strip).toHaveAttribute("title", /Needs human 1/);
+  // SPEC #5016 AC-HS1/HS2: both views read the one combined attention value.
+  await expect(pill).toHaveAttribute("title", /Awaiting attention 1 \| Needs human 1/);
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 1 \| Needs human 1/);
   await expect(rowReason).toHaveText("Choose credentials");
   await expect(detailReason).toHaveText("Choose credentials");
   await emit("needs_human");
@@ -268,8 +271,8 @@ test("needs_human snapshot shares counts and reasons across Issue views", async 
   await expect(detailReason).toHaveText("Human decision required");
   await page.screenshot({ path: info.outputPath("needs-human-shared-state.png"), fullPage: true });
   await emit("queued");
-  await expect(pill).toHaveAttribute("title", /Needs human 0/);
-  await expect(strip).toHaveAttribute("title", /Needs human 0/);
+  await expect(pill).toHaveAttribute("title", /Awaiting attention 0 \| Needs human 0/);
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 0 \| Needs human 0/);
   await expect(rowReason).toHaveCount(0);
   await expect(detailReason).toHaveCount(0);
 });
