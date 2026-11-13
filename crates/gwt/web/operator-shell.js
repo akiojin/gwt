@@ -222,11 +222,16 @@ export function subscribeWorkAttentionSummary(doc, model) {
 
 export function subscribeIssueMonitorStatus(doc, model) {
   let selected;
+  let selectedKey;
   return model.subscribeFrame(state => {
     const summary = state.humanAttention?.summary;
     const reviewSummary = state.reviewAttention?.summary;
     const steeringSummary = state.steeringAttention?.summary;
-    if (!selected || selected.status !== state.status || selected.counts !== state.counts || selected.summary !== summary || selected.reviewSummary !== reviewSummary || selected.steeringSummary !== steeringSummary) {
+    // Subscribe to the strip's presentation, not unrelated Monitor settings.
+    const key = JSON.stringify([issueMonitorStatusStripView(state.status ?? {},
+      state.counts ?? { queue: 0, active: 0, maxActive: 1 }), summary, reviewSummary, steeringSummary]);
+    if (!selected || selectedKey !== key) {
+      selectedKey = key;
       selected = { status: state.status, counts: state.counts, summary, reviewSummary, steeringSummary };
     }
     return selected;

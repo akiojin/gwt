@@ -57,14 +57,33 @@ test("Issues strip batches the latest status while model reads and other subscri
     model.update(state => ({ ...state, unrelated: true }));
     flush();
     assert.equal(renders, 1);
+    model.update(state => ({ ...state, status: { ...state.status, total_candidates: 73, allowed_labels: ["ready"] },
+      counts: { ...state.counts } }));
+    assert.equal(frames.size, 0, "status fields outside the strip and equal counts must not reserve a frame");
+    flush();
+    assert.equal(renders, 1, "unchanged strip presentation must not redraw");
+    for (const [field, summary] of [["humanAttention", "Needs human 1"], ["reviewAttention", "Review holds 2"], ["steeringAttention", "PM steering 3"]]) {
+      model.update(state => ({ ...state, [field]: { summary } }));
+      flush();
+      assert.ok(cell.title.includes(summary));
+    }
+    model.update(state => ({ ...state, status: { ...state.status, quota_hold: { provider: "codex", reset_at: "tomorrow" } } }));
+    flush();
+    assert.equal(value.textContent, "Hold Q49 A1/1");
+    assert.match(cell.title, /Provider codex.*Reset tomorrow/);
     model.update(state => ({ ...state, status: { enabled: true, state: "error", last_error: "scan failed" } }));
     flush();
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
+    assert.match(cell.title, /scan failed/);
     model.update(state => ({ ...state, status: { enabled: true, state: "idle" },
       counts: { queue: 0, active: 0, maxActive: 1 } }));
     flush();
     assert.equal(value.textContent, "Idle Q0 A0/1");
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+    model.update(state => ({ ...state, status: { ...state.status, state: "scan_waiting" } }));
+    flush();
+    assert.equal(value.textContent, "Idle Q0 A0/1");
+    assert.equal(cell.dataset.state, "scan_waiting", "equal labels must not hide a changed semantic state");
     const commands = [];
     fixture.document.addEventListener("op:command", event => commands.push(event.detail.id));
     cell.dispatchEvent(new fixture.window.Event("click"));
