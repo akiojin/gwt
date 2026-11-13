@@ -702,7 +702,7 @@ impl IssueMonitorState {
         let id = match self.scheduled_agent_member_id(number) {
             Some(id) => id,
             None if legacy => return None,
-            None => return Some("agent_plan_missing: expected a local member reservation, current plan is absent; read issue.monitor.schedule.read or wait for the next Monitor scan".into()),
+            None => return Some(format!("agent_plan_missing: expected a local member reservation, current plan is absent; read issue.monitor.schedule.read or wait for the next Monitor scan; member exclusions: {:?}", self.agent_schedule_ineligible)),
         };
         if let Some(reason) = self.agent_schedule_ineligible.get(id) {
             return Some(format!(
@@ -2167,6 +2167,11 @@ mod tests {
         let reason = monitor
             .agent_schedule_launch_exclusion(41)
             .expect("a manual reservation must not bypass an observed runner health failure");
+        assert!(reason.contains("runner_health_check_failed"), "{reason}");
+
+        monitor.agent_issue_schedule.reservations.clear();
+        let reason = monitor.agent_schedule_launch_exclusion(41).unwrap();
+        assert!(reason.starts_with("agent_plan_missing:"), "{reason}");
         assert!(reason.contains("runner_health_check_failed"), "{reason}");
     }
 

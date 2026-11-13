@@ -4516,9 +4516,9 @@ fn test_monitor_with_prefs(
     monitor
 }
 
-/// Issue #7181 AC-3: an opt-in, real-hour observation with the installed broken
-/// Hermes runner. Only isolated scheduler state is exercised; no GitHub claims
-/// or agent processes are launched.
+/// Issue #7181: optional real-runner scheduler soak. This exercises isolated
+/// state without GitHub claims or agent launches; it does not measure the live
+/// Monitor's launch_failed events and cannot establish AC-3 on its own.
 #[test]
 #[ignore = "requires an unhealthy installed Hermes runner and one real hour"]
 fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
@@ -4578,7 +4578,7 @@ fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
     record(serde_json::json!({
         "event":"start", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
         "runner":runner, "duration_secs":3600,
-        "mode":"isolated_scheduler_real_installed_runner", "actual_agent_launches":0
+        "mode":"isolated_scheduler_real_installed_runner"
     }));
     let mut samples = 0_u64;
     loop {
@@ -4634,10 +4634,9 @@ fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
             "event":"sample", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
             "elapsed_secs":started.elapsed().as_secs(), "sample":samples,
             "hermes_health":"failed", "new_member":"soak-codex",
-            "retry_member":"soak-codex", "pinned_hermes":"excluded",
-            "hermes_launch_failed":0, "actual_agent_launches":0
+            "retry_member":"soak-codex", "pinned_hermes":"excluded"
         }));
-        // test-hygiene: allow-wall-clock-deadline AC-3 explicitly requires one real hour with the installed unhealthy runner; this soak is opt-in, outside normal CI.
+        // test-hygiene: allow-wall-clock-deadline This optional scheduler soak deliberately observes the installed unhealthy runner for one real hour; live Monitor AC-3 needs separate evidence.
         if started.elapsed() >= Duration::from_secs(3600) {
             break;
         }
@@ -4649,6 +4648,6 @@ fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
     record(serde_json::json!({
         "event":"end", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
         "elapsed_secs":started.elapsed().as_secs(), "samples":samples,
-        "hermes_launch_failed":0, "actual_agent_launches":0, "result":"pass"
+        "result":"pass"
     }));
 }
