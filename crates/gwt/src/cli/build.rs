@@ -3559,6 +3559,30 @@ format_version: Some(1),
             )
             .unwrap();
         }
+        // Preserve the older compactor's missing inline Done with valid proof.
+        let mut legacy =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        legacy
+            .work_items
+            .iter_mut()
+            .find(|work| work.id == fixture.work_id)
+            .unwrap()
+            .events
+            .retain(|event| event.kind != gwt_core::workspace_projection::WorkEventKind::Done);
+        let legacy = serde_json::to_string_pretty(&legacy).unwrap();
+        let proof_path = works_path.with_extension("close-proofs.json");
+        let mut proofs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+        proofs["snapshots"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["projection_hash"] =
+            gwt_core::work_events_intake::content_fingerprint(&legacy).into();
+        std::fs::write(&works_path, legacy).unwrap();
+        std::fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
         assert!(fixture
             .canonical_work()
             .events
