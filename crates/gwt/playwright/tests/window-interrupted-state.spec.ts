@@ -95,7 +95,11 @@ test("operation failure preserves runtime state while a true PTY error still ren
   expect(operation).toBeTruthy();
   await inject({ ...operation, id: "agent-1" });
   await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toBeVisible();
-  await expect(page.locator(".toast-alerts__item").filter({ hasText: operation.message })).toBeVisible();
+  // SPEC #7007 T-014: the toast body is the typed presentation (impact +
+  // next action) for the operation. The raw backend message travels as
+  // notification-history details and must not headline the toast.
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: "The terminal size may be out of date. Reopen the window to refresh it." })).toBeVisible();
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: operation.message })).toHaveCount(0);
   await expect(agentWindow.locator(".status-label")).toHaveText("Running");
   await expect(agentWindow.locator(".status-chip")).not.toHaveClass(/\berror\b/);
   await expect(page.locator(".toast-alerts__item").filter({ hasText: "Agent error" })).toHaveCount(0);
