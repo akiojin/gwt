@@ -46,6 +46,60 @@ const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-is
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
 
+test.describe("Issues touch navigation", () => {
+  test.use({ hasTouch: true });
+  test("Issues mode and preview tabs are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const detail = root.locator(".knowledge-detail-pane");
+    const controls = root.locator(".knowledge-state-filter button:visible");
+    const heights = () => controls.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+    await row(page, 1).locator(".knowledge-row-select").click();
+    await expect(detail).toContainText("Description for #1");
+    await expect(controls).toHaveCount(5);
+    const desktopHeights = await heights();
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await heights(), "601px retains desktop control heights").toEqual(desktopHeights);
+    await detail.locator('[data-action="close-issue-preview"]').tap();
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await root.locator('[data-issue-view="split"]').tap();
+      await expect(root).toHaveAttribute("data-view-mode", "split");
+      await expect(root.locator('[data-issue-view="split"]')).toHaveAttribute("aria-pressed", "true");
+      await root.locator('[data-issue-view="list"]').tap();
+      await expect(root).toHaveAttribute("data-view-mode", "list");
+      await row(page, 1).locator(".knowledge-row-select").tap();
+      await expect(detail).toContainText("Description for #1");
+      await expect(controls).toHaveCount(5);
+      const main = (await root.locator(".workspace-toolbar-main").boundingBox())!;
+      const actions = (await root.locator(".workspace-toolbar-actions").boundingBox())!;
+      expect(actions.y, "toolbar actions do not cover the mode tabs").toBeGreaterThanOrEqual(main.y + main.height);
+      expect(await root.locator(".issue-filter-hint").evaluate(node => node.scrollWidth <= node.clientWidth),
+        "the existing view hint fits its column").toBe(true);
+      const sizes = await controls.evaluateAll(nodes => nodes.map(node => {
+        const rect = node.getBoundingClientRect();
+        return { label: node.textContent, width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+      }));
+      for (const size of sizes) {
+        expect(size.width, `${size.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(size.height, `${size.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(size.left, `${size.label} left edge at ${width}px`).toBeGreaterThanOrEqual(0);
+        expect(size.right, `${size.label} right edge at ${width}px`).toBeLessThanOrEqual(width);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await detail.locator('[data-issue-detail-view="output"]').tap();
+      await expect(detail.locator('[data-issue-detail-view="output"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(detail).toContainText("No agent is running for this issue.");
+      await detail.locator('[data-issue-detail-view="issue"]').tap();
+      await expect(detail.locator('[data-issue-detail-view="issue"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(detail).toContainText("Description for #1");
+      await page.screenshot({ path: info.outputPath(`issues-tabs-${width}.png`) });
+      await detail.locator('[data-action="close-issue-preview"]').tap();
+      await expect(detail).toBeHidden();
+    }
+  });
+});
+
 test("Issue #6994 merged work awaits measurement in Backlog with an explicit requeue action", async ({ page }) => {
   const reason = "Waiting for one day of production observations: AC-4";
   await page.evaluate(reason => {

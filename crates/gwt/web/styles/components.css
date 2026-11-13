@@ -4774,6 +4774,11 @@ button.workspace-board-ref:focus-visible {
     max-width: 100%;
   }
 
+  :root[data-theme] .settings-tabs .settings-tab {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   :root[data-theme] .settings-body {
     padding: var(--space-2);
   }
@@ -6016,6 +6021,7 @@ button.workspace-board-ref:focus-visible {
   }
   .workspace-state-notice span {
     max-height: 25vh;
+    max-height: min(25vh, 4lh);
     overflow-y: auto;
   }
 }

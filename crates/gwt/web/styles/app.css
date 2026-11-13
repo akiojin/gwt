@@ -6483,6 +6483,13 @@ body.route-body {
 .issue-bridge-root .knowledge-heading { display: none; }
 .issue-bridge-root .knowledge-search { width: 100%; }
 
+/* SPEC #6476: keep phone tabs tappable and toolbar rows clear of each other. */
+@media (max-width: 600px) {
+  .issue-bridge-root .knowledge-state-filter button { min-height: 44px; }
+  .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
+  .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
+}
+
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root[data-preview-hidden="true"] .knowledge-detail-pane { display: none; }
 /* Issue #5321: compact summary and selection preview. */
