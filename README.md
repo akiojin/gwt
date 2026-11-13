@@ -153,7 +153,11 @@ unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgp
 
   Grok Build is provided by xAI's official `grok` command. Install it with
   `npm install -g @xai-official/grok`, then authenticate on first launch or set
-  `XAI_API_KEY` for API-key workflows.
+  `XAI_API_KEY` for API-key workflows. For host launches, gwt passes Grok’s
+  official `--trust` for the launched Git repository, including its main checkout
+  and linked worktrees. This enables project hooks, MCP/LSP, instructions, and
+  skills for that repository; manual CLI defaults and other repositories are
+  unchanged.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`

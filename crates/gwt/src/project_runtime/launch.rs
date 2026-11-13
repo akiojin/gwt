@@ -328,6 +328,13 @@ pub fn prepare_agent_launch(
                 });
             }
         }
+        if let Some(repository) = configure_grok_repository_trust(&mut config, &worktree_path)? {
+            tracing::info!(
+                repository = %repository.display(),
+                worktree = %worktree_path.display(),
+                "Grok repository trust requested with native --trust"
+            );
+        }
         resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
         phases.mark("environment");
         phase.finish();
@@ -1495,6 +1502,35 @@ fn canonical_launch_path(path: &Path, role: &str) -> Result<PathBuf, String> {
         .map_err(|error| format!("failed to canonicalize {role} {}: {error}", path.display()))
 }
 
+/// Request native repository trust only when gwt launches Grok on the Host.
+/// Grok shares a normal repository's trust across its linked worktrees; a
+/// worktree of a bare repository has no main workdir and uses its own root.
+fn configure_grok_repository_trust(
+    config: &mut gwt_agent::LaunchConfig,
+    cwd: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if config.agent_id != gwt_agent::AgentId::GrokBuild
+        || config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+    {
+        return Ok(None);
+    }
+    let Ok(repository) = gwt_git::Repository::discover(cwd) else {
+        return Ok(None);
+    };
+    let main = gwt_git::worktree::main_worktree_root(repository.path())
+        .map_err(|error| error.to_string())?;
+    let root = if main.join(".git").is_dir() {
+        main.as_path()
+    } else {
+        repository.path()
+    };
+    let root = canonical_launch_path(root, "Grok repository trust root")?;
+    if !config.args.iter().any(|arg| arg == "--trust") {
+        config.args.insert(0, "--trust".to_string());
+    }
+    Ok(Some(root))
+}
+
 pub fn validate_issue_monitor_managed_codex_worktree(
     candidate: Option<&IssueMonitorTrustCandidate>,
     actual_project_root: &Path,
@@ -1811,4 +1847,140 @@ pub(crate) fn record_named_launch_assignment(
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod grok_repository_trust_tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = gwt_core::process::run_git_logged(args, Some(cwd)).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn grok_repository_trust_matches_main_and_linked_git_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let bare = temp.path().join("bare.git");
+        let bare_linked = temp.path().join("bare-linked");
+        git(
+            temp.path(),
+            &["init", "--quiet", "-b", "main", main.to_str().unwrap()],
+        );
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=Grok trust test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                main.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                bare_linked.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        for (cwd, expected) in [
+            (&main, &main),
+            (&linked, &main),
+            (&bare_linked, &bare_linked),
+        ] {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+                .working_dir(cwd)
+                .extra_arg("$gwt-execute #7183")
+                .build();
+            if cwd == &main {
+                // The central launch path also uses the project root when
+                // LaunchConfig has no explicit working directory.
+                config.working_dir = None;
+            }
+            let original = config.args.clone();
+            assert!(!original.iter().any(|arg| arg == "--trust"));
+            assert_eq!(
+                configure_grok_repository_trust(&mut config, cwd).unwrap(),
+                Some(canonical_launch_path(expected, "expected trust root").unwrap())
+            );
+            assert_eq!(config.args[0], "--trust");
+            assert_eq!(&config.args[1..], original);
+            configure_grok_repository_trust(&mut config, cwd).unwrap();
+            assert_eq!(
+                config.args.iter().filter(|arg| *arg == "--trust").count(),
+                1
+            );
+        }
+
+        let mut codex = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&main)
+            .build();
+        let original = codex.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut codex, &main).unwrap(),
+            None
+        );
+        assert_eq!(codex.args, original);
+
+        let mut docker = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(&linked)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .build();
+        let original = docker.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut docker, &linked).unwrap(),
+            None
+        );
+        assert_eq!(docker.args, original);
+    }
+
+    #[test]
+    fn grok_repository_trust_leaves_non_git_launch_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(temp.path())
+            .build();
+        let original = config.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut config, temp.path()).unwrap(),
+            None
+        );
+        assert_eq!(config.args, original);
+    }
 }

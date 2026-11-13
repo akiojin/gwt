@@ -10309,97 +10309,193 @@ fn grok_monitor_auto_launch_delivers_initial_task_before_first_response() {
 }
 
 #[test]
-#[ignore = "requires explicit opt-in, installed Grok and XAI_API_KEY; makes one paid model request"]
+#[ignore = "requires explicit opt-in, installed Grok and authentication; makes one paid model request"]
 fn grok_live_native_initial_task_starts_first_response() {
-    use gwt_terminal::pty::{PtyHandle, SpawnConfig};
-    use std::io::Read;
+    use gwt::project_runtime::events::OwnerEvent;
 
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(std::env::var("GWT_GROK_LIVE_SMOKE").as_deref(), Ok("1"));
-    assert!(std::env::var_os("XAI_API_KEY").is_some_and(|key| !key.is_empty()));
+    // The test harness isolates HOME before this test starts. The opt-in
+    // caller must explicitly identify the already-authenticated Grok home.
+    let live_home = PathBuf::from(
+        std::env::var_os("GWT_GROK_LIVE_HOME")
+            .expect("set GWT_GROK_LIVE_HOME to the existing authenticated Grok home"),
+    );
+    assert!(live_home.is_absolute());
+    let trust_path = live_home.join("trusted_folders.toml");
+    let previous_trust = fs::read_to_string(&trust_path)
+        .map(|text| toml::from_str::<toml::Value>(&text).expect("existing native trust store"))
+        .ok();
     let binary = std::env::var_os("GWT_GROK_LIVE_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| which::which("grok").expect("installed Grok executable"));
     assert!(binary.is_absolute() && binary.is_file());
+    let gwtd = PathBuf::from(
+        std::env::var_os("GWT_GROK_LIVE_GWTD")
+            .expect("set GWT_GROK_LIVE_GWTD to the freshly built checkout gwtd"),
+    );
+    assert!(gwtd.is_absolute() && gwtd.is_file());
     #[cfg(windows)]
     assert!(binary
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")));
-    let temp = tempdir().expect("isolated live cwd");
-    let mut args = gwt_agent::canonical_launch_args(&gwt_agent::AgentId::GrokBuild);
-    args.push("Do not use tools or modify files. Reply only with the uppercase spelling of: gwt_grok_live_response".into());
-    let pty = PtyHandle::spawn(SpawnConfig {
-        command: binary.display().to_string(),
-        args,
-        cols: 160,
-        rows: 40,
-        env: HashMap::from([(
-            "GROK_HOME".into(),
-            temp.path().join("grok-home").display().to_string(),
-        )]),
-        remove_env: std::env::vars_os()
-            .filter_map(|(key, _)| {
-                key.to_str()
-                    .filter(|key| key.starts_with("GWT_"))
-                    .map(str::to_owned)
-            })
-            .collect(),
-        cwd: Some(temp.path().to_path_buf()),
-    })
-    .expect("spawn real Grok CLI");
-    let reader = pty.reader();
-    if reader.is_err() {
-        let _ = pty.terminate_and_wait_for_tree(Duration::from_secs(10));
-        let _ = pty.wait();
-    }
-    let mut reader = reader.expect("real Grok PTY reader");
-    let (sender, receiver) = mpsc::channel();
-    let reading = thread::spawn(move || {
-        let mut buffer = [0_u8; 4096];
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
-                break;
+    let temp = tempdir().expect("isolated live Monitor");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &live_home);
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join("codex-home"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "grok-live-initial-task",
+        MonitorProviderConversationFixture::Missing,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    // Synthetic history belongs to the fixture; only the real CLI uses the
+    // existing authentication home. Never read or copy credential files.
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &temp.path().join("fixture-grok-home"));
+    let runner_root = temp.path().join("grok-runner");
+    pin_monitor_fixture_agents(
+        &fixture,
+        &runner_root,
+        &[
+            (gwt_agent::session::GWT_BIN_PATH_ENV, gwtd.to_str().unwrap()),
+            ("GROK_HOME", live_home.to_str().unwrap()),
+        ],
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let mut observed = owner.subscribe();
+    let runner = runner_root
+        .join("fixture-runner-bin")
+        .join(if cfg!(windows) { "grok.cmd" } else { "grok" });
+    // Preserve the actual Issues-generated task and launch arguments. Limit
+    // this paid smoke to one harmless response, without forging any hook.
+    let rules = "This is an isolated launch verification. Do not use tools or modify files. Reply only with GWT_GROK_LIVE_RESPONSE.";
+    #[cfg(unix)]
+    let script = format!(
+        "#!/bin/sh\nexec '{}' \"$@\" --max-turns 1 --rules '{}'\n",
+        binary.to_str().unwrap().replace('\'', "'\\''"),
+        rules,
+    );
+    #[cfg(windows)]
+    let script = format!(
+        "@echo off\r\n\"{}\" %* --max-turns 1 --rules \"{}\"\r\n",
+        binary.display(),
+        rules,
+    );
+    fs::write(&runner, script).expect("route Monitor launch to the installed Grok");
+    let started = Instant::now();
+    let events = prepare_monitor_relaunch(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
+    let pane = pane.expect("real Grok Monitor launch");
+    let session = pane.session.as_ref().expect("registered Grok Session");
+    assert_eq!(session.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(session.linked_issue_number, Some(3165));
+    assert!(session.launch_args.iter().any(|arg| arg == "--trust"));
+    let result = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The owner has a real 180-second startup contract; only native accepted-turn evidence proves success.
+        tokio::time::timeout(Duration::from_secs(180), async {
+            let mut accepted_turn = false;
+            loop {
+                while let Ok(event) = observed.try_recv() {
+                    if let OwnerEvent::Hook { event } = event {
+                        if event.gwt_session_id.as_deref() == Some(session.id.as_str()) {
+                            accepted_turn |= matches!(
+                                event.source_event.as_deref(),
+                                Some("PreToolUse" | "PostToolUse" | "Stop")
+                            );
+                        }
+                    }
+                }
+                let current = owner.probe(&pane.id, pane.incarnation).await?;
+                // The owner clears Grok's watch only for a tool event or a
+                // Stop carrying its native prompt id; pre-submit is insufficient.
+                if accepted_turn
+                    && current.monitor_startup_at.is_none()
+                    && current
+                        .pane
+                        .lock()
+                        .unwrap()
+                        .screen()
+                        .contents()
+                        .contains("GWT_GROK_LIVE_RESPONSE")
+                {
+                    // test-hygiene: allow-wall-clock-deadline Measure the live 180-second startup contract after accepted native work and the response; elapsed time is not synchronization.
+                    return Ok::<_, String>(started.elapsed());
+                }
+                tokio::task::yield_now().await;
             }
-        }
+        })
+        .await
     });
-    let mut terminal = vt100::Parser::new(40, 160, 0);
-    // test-hygiene: allow-wall-clock-deadline Bound the opt-in live model request; only the generated uppercase response establishes success.
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let responded = loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break false;
-        };
-        // test-hygiene: allow-wall-clock-deadline Bound the real CLI reader wait so timeout still reaches process-tree cleanup; only response content proves success.
-        let Ok(chunk) = receiver.recv_timeout(remaining) else {
-            break false;
-        };
-        if chunk.windows(4).any(|bytes| bytes == b"\x1b[6n") {
-            let _ = pty.write_input(b"\x1b[1;1R");
+    let screen =
+        gwt_core::process_console::redact_line(&pane.pane.lock().unwrap().screen().contents());
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    fixture
+        .runtime
+        .test_project_owners
+        .remove(&fixture.project_root);
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("drained live Grok owner")
+            .shutdown(),
+    );
+    let elapsed = result
+        .unwrap_or_else(|_| panic!("Grok native acceptance timed out; screen={screen}"))
+        .unwrap_or_else(|error| panic!("Grok native acceptance failed: {error}; screen={screen}"));
+    assert!(elapsed < Duration::from_secs(180));
+    let trust =
+        fs::read_to_string(trust_path).expect("Grok must persist the managed worktree's trust");
+    let current_trust: toml::Value = toml::from_str(&trust).expect("valid native trust store");
+    fn assert_preserved_trust(before: &toml::Value, after: &toml::Value) {
+        match (before, after) {
+            (toml::Value::Table(before), toml::Value::Table(after)) => {
+                for (key, value) in before {
+                    assert_preserved_trust(value, after.get(key).expect("existing trust key"));
+                }
+            }
+            (toml::Value::Array(before), toml::Value::Array(after)) => {
+                assert!(before.iter().all(|value| after.contains(value)));
+            }
+            _ => assert_eq!(before, after, "an existing native trust entry changed"),
         }
-        terminal.process(&chunk);
-        if terminal
-            .screen()
-            .contents()
-            .contains("GWT_GROK_LIVE_RESPONSE")
-        {
-            break true;
-        }
-    };
-    let tree_exited = pty.terminate_and_wait_for_tree(Duration::from_secs(10));
-    let reaped = pty.wait();
-    pty.release_descriptors();
-    drop(receiver);
-    let reader_stopped = reading.join();
-    assert!(tree_exited.expect("terminate real Grok process tree"));
-    reaped.expect("reap real Grok CLI");
-    reader_stopped.expect("drain real Grok PTY reader");
-    assert!(
-        responded,
-        "real Grok did not start the requested response; screen={}",
-        terminal.screen().contents()
+    }
+    if let Some(previous) = previous_trust.as_ref() {
+        assert_preserved_trust(previous, &current_trust);
+    }
+    let repository_key = fs::canonicalize(&fixture.project_root).unwrap();
+    let native_key = repository_key.to_string_lossy();
+    let recorded = current_trust["folders"]
+        .get(native_key.as_ref())
+        .expect("Grok records the shared repository key");
+    assert_eq!(recorded["trusted"].as_bool(), Some(true));
+    let before_keys = previous_trust
+        .as_ref()
+        .and_then(|value| value.get("folders"))
+        .and_then(toml::Value::as_table);
+    for key in current_trust["folders"].as_table().unwrap().keys() {
+        assert!(
+            key == native_key.as_ref() || before_keys.is_some_and(|keys| keys.contains_key(key)),
+            "the launch must not grant another repository: {key}"
+        );
+    }
+    eprintln!(
+        "Grok live Issues launch: issue=3165, accepted native turn in {elapsed:?}, startup watch cleared, trusted repository={}",
+        repository_key.display(),
     );
 }
 
