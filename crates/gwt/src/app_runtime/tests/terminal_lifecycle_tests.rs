@@ -2176,7 +2176,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     fs::write(repo.join(".codex/hooks.json"), "{\n  \"hooks\": {}\n}\n").expect("seed hooks");
     run_git(&repo, &["add", "README.md", ".codex/hooks.json"]);
     run_git(&repo, &["commit", "-qm", "seed"]);
-    run_git(&repo, &["branch", "work/gwt-writes"]);
+    run_git(&repo, &["branch", "work/issue-3447"]);
     run_git(
         &repo,
         &["update-ref", "refs/remotes/origin/develop", "develop"],
@@ -2184,19 +2184,24 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     // The materialization rewrite every launch performs: same managed shape,
     // different bytes, so git reports a tracked modification.
     fs::write(repo.join(".codex/hooks.json"), "{ \"hooks\": {} }\n").expect("rewrite hooks");
+    // Issue #3447: the canonical agent work log is bookkeeping too. Leave it
+    // untracked, so a collapsed `?? tasks/` status must be expanded safely.
+    fs::create_dir_all(repo.join("tasks")).expect("create tasks");
+    fs::write(repo.join("tasks/todo.md"), "agent work log\n").expect("write work log");
 
     // Recording the Work event is what writes `.gwt/work/`, exactly as the
     // runtime does in a real worktree.
     gwt_core::workspace_projection::record_workspace_work_event(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Update,
+            gwt_core::workspace_projection::WorkEventKind::Done,
             "work-gwt-writes-row",
             chrono::Utc::now(),
         );
         event.title = Some("gwt writes only".to_string());
+        event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-                branch: Some("work/gwt-writes".to_string()),
+                branch: Some("work/issue-3447".to_string()),
                 worktree_path: Some(repo.clone()),
                 pr_number: None,
                 pr_url: None,
@@ -2250,7 +2255,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         "gwt's own runtime writes must not make a branch dirty: {dirty_branches:?}"
     );
     assert!(
-        cleanup_ready_branches.contains_key("work/gwt-writes"),
+        cleanup_ready_branches.contains_key("work/issue-3447"),
         "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
          {cleanup_ready_branches:?}"
     );
@@ -2265,7 +2270,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
         .readiness
-        .base_target(&repo, "work/gwt-writes", &tips)
+        .base_target(&repo, "work/issue-3447", &tips)
         .unwrap()
         .is_some());
     assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
@@ -2273,6 +2278,17 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     drop(caches);
     runtime.invalidate_project_caches(&repo);
     assert!(!runtime.work_merge_status_cache.borrow().contains_key(&repo));
+
+    // A project may keep production code in the same directory. Ignoring all
+    // of `tasks/` would silently discard it alongside the agent work log.
+    fs::write(repo.join("tasks/worker.rs"), "fn main() {}\n").expect("write production task");
+    assert!(super::super::work_branch_has_dirty_worktree(
+        &super::super::WorkBranchScanTarget {
+            branch: "work/issue-3447".to_string(),
+            worktree_paths: vec![repo],
+            has_merged_pr: false,
+        }
+    ));
 }
 
 #[test]
@@ -2564,7 +2580,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
     let control = counts(&control);
     let treatment = counts(&treatment);
     assert_eq!(
-        control.get("git --no-optional-locks status --porcelain=v1"),
+        control.get("git --no-optional-locks status --porcelain=v1 --untracked-files=all"),
         Some(&10)
     );
     assert!(treatment.is_empty());

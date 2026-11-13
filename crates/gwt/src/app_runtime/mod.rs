@@ -14433,9 +14433,6 @@ fn work_branch_scan_targets(
 ) -> Vec<WorkBranchScanTarget> {
     let mut by_branch: HashMap<String, WorkBranchScanTarget> = HashMap::new();
     for item in &projection.work_items {
-        if item.is_terminal() {
-            continue;
-        }
         for container in &item.execution_containers {
             let Some(branch) = container
                 .branch
@@ -14445,6 +14442,17 @@ fn work_branch_scan_targets(
             else {
                 continue;
             };
+            // Issue #3447: closing Work does not remove its materialization.
+            // Keep scanning existing issue worktrees without reopening Work.
+            if item.is_terminal()
+                && (!branch.starts_with("work/issue-")
+                    || !container
+                        .worktree_path
+                        .as_ref()
+                        .is_some_and(|path| path.is_dir()))
+            {
+                continue;
+            }
             let target = by_branch
                 .entry(branch.clone())
                 .or_insert_with(|| WorkBranchScanTarget {
@@ -14540,7 +14548,12 @@ fn work_branch_dirty_state(target: &WorkBranchScanTarget) -> gwt_core::Result<bo
         // This scan only reads status. Refreshing/writing the index would
         // invalidate its own inputs (including creation of an empty index).
         let output = gwt_core::process::run_git_logged(
-            &["--no-optional-locks", "status", "--porcelain=v1"],
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
             Some(path),
         )
         .map_err(|error| gwt_core::GwtError::Git(format!("status: {error}")))?;
@@ -14565,6 +14578,8 @@ fn work_branch_dirty_state(target: &WorkBranchScanTarget) -> gwt_core::Result<bo
 /// user work marked nearly every worktree dirty and starved `CLEAN UP READY`.
 /// Only the hook configs that still hold *no* user content are discounted, so
 /// a hand-edited one keeps its worktree.
+/// Issue #3447: also discount the canonical agent work log, not arbitrary
+/// files in `tasks/`, which may contain production code.
 fn work_branch_status_entry_is_gwt_write(
     worktree: &Path,
     entry: &gwt_git::diff::FileEntry,
@@ -14572,7 +14587,8 @@ fn work_branch_status_entry_is_gwt_write(
     let Some(relative) = entry.path.to_str() else {
         return false;
     };
-    gwt_git::worktree::status_entry_is_gwt_runtime_write(relative)
+    relative == "tasks/todo.md"
+        || gwt_git::worktree::status_entry_is_gwt_runtime_write(relative)
         || crate::runtime_support::intake_hook_config_is_disposable(worktree, relative)
 }
 
