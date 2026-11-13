@@ -6380,27 +6380,36 @@ def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     return _cached_issue_source(repo_hash, "documents", lambda: _read_cached_issue_documents(repo_hash))
 
 
-def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
-    root = _issue_cache_root(repo_hash)
-    if not root.is_dir():
-        return []
+def _load_cached_issue_metadata(repo_hash: str) -> List[tuple[Path, int, Dict[str, Any]]]:
+    def load() -> List[tuple[Path, int, Dict[str, Any]]]:
+        root = _issue_cache_root(repo_hash)
+        if not root.is_dir():
+            return []
+        metadata = []
+        for entry in sorted(root.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir():
+                continue
+            try:
+                number = int(entry.name)
+            except ValueError:
+                continue
+            meta_path = entry / "meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
+                continue
+            metadata.append((entry, number, meta))
+        return metadata
 
+    return _cached_issue_source(repo_hash, "metadata", load)
+
+
+def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     issues: List[Dict[str, Any]] = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
-            continue
-        try:
-            number = int(entry.name)
-        except ValueError:
-            continue
-        meta_path = entry / "meta.json"
+    for entry, number, meta in _load_cached_issue_metadata(repo_hash):
         body_path = entry / "body.md"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            continue
         try:
             body = (
                 body_path.read_text(encoding="utf-8") if body_path.is_file() else ""
@@ -6563,31 +6572,14 @@ def _load_cached_spec_documents(
 def _read_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    root = _issue_cache_root(repo_hash)
-    if not root.is_dir():
-        return [], []
-
     specs: List[Dict[str, Any]] = []
     manifest_entries: List[Dict[str, Any]] = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
-            continue
-        try:
-            number = int(entry.name)
-        except ValueError:
-            continue
-        meta_path = entry / "meta.json"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            continue
-
+    for entry, number, meta in _load_cached_issue_metadata(repo_hash):
         labels = _normalize_labels(meta.get("labels", []))
         if not _is_spec_issue(labels):
             continue
 
+        meta_path = entry / "meta.json"
         spec_path = entry / "sections" / "spec.md"
         body_path = entry / "body.md"
         source_path = spec_path if spec_path.is_file() else body_path
