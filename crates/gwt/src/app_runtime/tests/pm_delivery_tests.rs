@@ -57,7 +57,7 @@ fn pm_delivery_owner_fixture_for_agent(
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
     }
     #[cfg(windows)]
-    fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"while ($null -ne [Console]::ReadLine()) {}\"\r\n").unwrap();
+    fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; [Console]::WriteLine('pm-fixture-ready'); while ($true) { [void][Console]::ReadKey($true) }\"\r\n").unwrap();
     let location = control_launch_config(&repo, 43);
     let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
         .working_dir(location.working_dir.unwrap())
@@ -80,10 +80,9 @@ fn pm_delivery_owner_fixture_for_agent(
     );
     assert_eq!(target.session.as_ref().unwrap().agent_id, agent_id);
     // Issue #6071: the PTY start gate and runner write startup output
-    // asynchronously. Wait until the runner's post-`stty` marker has been
-    // parsed so no late startup bytes can redraw over a test-painted surface.
+    // asynchronously. Wait until the non-echoing runner's ready marker has
+    // been parsed so no late startup bytes can redraw a test-painted surface.
     // A runner that never reports is bounded by the nextest per-test timeout.
-    #[cfg(not(windows))]
     while !target
         .pane
         .lock()

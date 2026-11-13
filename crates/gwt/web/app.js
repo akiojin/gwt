@@ -3165,6 +3165,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
           macOptionClickForcesSelection: true,
+          // The context menu copies the existing range on every platform.
+          rightClickSelectsWord: false,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });

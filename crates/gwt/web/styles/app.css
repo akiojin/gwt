@@ -3838,6 +3838,16 @@ body {
 .toast-alerts__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005c: a 20px dismiss is too small to tap on a phone. The
+   negative block margins extend the 44px target into the item's top padding
+   and keep the title row at its original 20px, so the message stays close. */
+@media (max-width: 600px) {
+  .toast-alerts__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: calc(-1 * var(--space-2)) calc(var(--space-5) + var(--space-2) - 44px);
+  }
+}
 @keyframes toast-alerts-in {
   from {
     opacity: 0;

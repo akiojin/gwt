@@ -1134,10 +1134,12 @@ test.describe('PM reports', () => {
         cwd: ROOT, env: childEnv, encoding: 'utf8', timeout: 30_000,
         input: JSON.stringify({ schema_version: 1, operation: 'pm.report.post', params }),
       });
-      const refused = post({ kind: 'qa', question: '$gwt-pm', body: 'No change from the automatic prompt' });
-      expect(refused.error).toBeUndefined();
-      expect(refused.status).toBe(1);
-      expect(refused.stdout + refused.stderr).toContain('Automatic PM prompts');
+      for (const question of ['$gwt-pm', '$gwt-pm\n$gwt-pm']) {
+        const refused = post({ kind: 'qa', question, body: 'No change from the automatic prompt' });
+        expect(refused.error).toBeUndefined();
+        expect(refused.status).toBe(1);
+        expect(refused.stdout + refused.stderr).toContain('Automatic PM prompts');
+      }
       await refreshPmReports(page);
       await expect(reports.locator('article')).toHaveCount(originalRows);
       await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
