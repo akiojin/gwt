@@ -518,6 +518,8 @@ impl OwnerDaemonFixture {
             capacity_override: None,
             #[cfg(test)]
             control_retry_observer: None,
+            #[cfg(test)]
+            rejected_scan_observer: None,
             #[cfg(all(test, unix))]
             scan_concurrency_probe: None,
             #[cfg(all(test, unix))]
@@ -854,6 +856,132 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
     shutdown.request();
     worker.await.unwrap();
     assert_eq!(result.unwrap(), Some((None, Some(600), None)));
+}
+
+/// A failed effect must not make its rejected concurrent scan retry it again.
+#[cfg(test)]
+#[tokio::test]
+async fn rejected_scan_does_not_restart_a_failed_pending_effect() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let scope = RuntimeScope::new(
+        "abcdef0123456789",
+        "feedfacecafebeef",
+        root.clone(),
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .unwrap();
+    crate::save_issue_monitor_prefs(
+        &crate::issue_monitor_prefs_path_for_repo_path(&root),
+        &crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![crate::PendingIssueMonitorEffect::prepared(
+                "release:42:claim-42",
+                7,
+                crate::IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number: 42,
+                    claim_id: "claim-42".into(),
+                    owner: "host/session".into(),
+                },
+            )],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let scans = Arc::new(AtomicUsize::new(0));
+    let (rejected_tx, mut rejected_rx) = mpsc::unbounded_channel();
+    let (effect_start_tx, effect_start_rx) = std::sync::mpsc::channel();
+    let effect_start_rx = std::sync::Mutex::new(effect_start_rx);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let hub = BroadcastHub::new();
+    let shutdown = Arc::new(DaemonShutdown::new());
+    let worker = spawn_issue_monitor_worker_with_lease(
+        scope,
+        hub.clone(),
+        shutdown.clone(),
+        crate::IssueMonitorConfig::default(),
+        gwt_core::deadline_budget::HANG_GUARD,
+        IssueMonitorWorkerTestHooks {
+            scan_override: Some(Arc::new({
+                let scans = scans.clone();
+                move |monitor| {
+                    let index = scans.fetch_add(1, Ordering::SeqCst);
+                    if index == 0 {
+                        effect_start_tx.send(()).unwrap();
+                    }
+                    if index == 0 {
+                        gwt_core::test_support::recv_event(
+                            &release_rx.lock().unwrap(),
+                            "release observed scan",
+                        );
+                    }
+                    Ok(monitor)
+                }
+            })),
+            effect_override: Some(Arc::new(move |effect, _| {
+                if effect.attempt == 0 {
+                    gwt_core::test_support::recv_event(
+                        &effect_start_rx.lock().unwrap(),
+                        "first scan captured revision",
+                    );
+                }
+                IssueMonitorEffectOutcome::Release(Err(
+                    gwt_github::client::OwnerMutationError::PreSubmit(
+                        gwt_github::ApiError::Network("offline".into()),
+                    ),
+                ))
+            })),
+            state_observer: Some(Arc::new({
+                let scans = scans.clone();
+                move |monitor| {
+                    if let Some(effect) = monitor.pending_effects().first() {
+                        let _ = observed_tx.send((
+                            scans.load(Ordering::SeqCst),
+                            effect.state,
+                            effect.attempt,
+                        ));
+                    }
+                }
+            })),
+            rejected_scan_observer: Some(Arc::new(move |requested| {
+                let _ = rejected_tx.send(requested);
+            })),
+            admission_override: Some(Arc::new(Ok)),
+            ..Default::default()
+        },
+        None,
+    );
+    // test-hygiene: allow-wall-clock-deadline Channels order the driver; the timeout only bounds a broken fixture.
+    let observed = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+        while let Some((_, state, attempt)) = observed_rx.recv().await {
+            if state == crate::IssueMonitorEffectState::Prepared && attempt > 0 {
+                break;
+            }
+        }
+        release_tx.send(()).unwrap();
+        rejected_rx
+            .recv()
+            .await
+            .expect("the failed effect fences the first scan")
+    })
+    .await;
+    shutdown.request();
+    drop(release_tx);
+    // test-hygiene: allow-wall-clock-deadline Bound teardown after releasing the blocked scan.
+    tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, worker)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !observed.unwrap(),
+        "a rejected scan must not retry an effect that already failed during that scan"
+    );
 }
 
 /// A successful heartbeat must not turn routine scans into fresh GitHub reads;
@@ -1395,6 +1523,8 @@ struct IssueMonitorWorkerTestHooks {
     control_retry_observer: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     #[cfg(any(test, feature = "test-gh-guard"))]
     state_observer: Option<Arc<IssueMonitorStateObserver>>,
+    #[cfg(test)]
+    rejected_scan_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     #[cfg(any(test, feature = "test-gh-guard"))]
     scan_idle_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     #[cfg(any(test, feature = "test-gh-guard"))]
@@ -2323,12 +2453,20 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // epoch. The rejected commit rebases that newer
                                 // snapshot into `monitor`; reconcile any adopted
                                 // journal before the coalesced retry.
-                                effect_execution_requested =
-                                    !monitor.pending_effects().is_empty();
+                                // A failed effect already fenced this scan. Re-requesting
+                                // that same journal here would fail and fence every retry.
+                                // Only an adopted authority needs immediate reconciliation.
+                                effect_execution_requested |=
+                                    captured_authority_epoch != monitor.effect_authority_epoch()
+                                        && !monitor.pending_effects().is_empty();
                                 // Preserve deliveries until a fresh scan commits. In particular,
                                 // a host-drain deferral must not immediately emit itself again.
                                 publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                                 periodic_scan_requested = true;
+                                #[cfg(test)]
+                                if let Some(observe) = &test_hooks.rejected_scan_observer {
+                                    observe(effect_execution_requested);
+                                }
                                 tokio::task::yield_now().await;
                             }
                         }
