@@ -30520,6 +30520,7 @@ exit 1
                     "verify.run",
                     "workspace.ensure",
                     "workspace.reopen",
+                    "workspace.repair_close_proof",
                     "workspace.update",
                 ],
             );
