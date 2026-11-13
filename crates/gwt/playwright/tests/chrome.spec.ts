@@ -59,6 +59,14 @@ test.describe("mobile project chrome", () => {
       await page.screenshot({ path: testInfo.outputPath(`mobile-chrome-${width}-${theme}.png`) });
     }
     await page.setViewportSize({ width: 320, height: 568 });
+    // SPEC #6476: usage must not let the footer consume the workspace when
+    // a persistence diagnostic is also visible on a short phone screen.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "provider_usage", accounts: [{ provider: "codex", plan: "pro",
+        windows: [{ kind: "five_hour", used_percent: 25, resets_at: "2030-01-02T03:04:05Z" }],
+        state: { kind: "ok" } }], sessions: [], consumption: [] },
+    })));
+    await expect(page.locator("#op-strip-usage")).toBeVisible();
     const diagnostic = {
       kind: "load_error",
       path: "/Users/example/nested-project-state-directory/nested-project-state-directory/.gwt/projects/99a8660247f5bc49/workspace/current.json",

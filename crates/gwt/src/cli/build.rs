@@ -2078,7 +2078,7 @@ mod tests {
                 &self.session.id,
                 &self.binding,
                 crate::AgentWorkTerminalizationRequest {
-                    primary_provider_session_id: None,
+                    primary_provider_session_id: self.session.agent_session_id.clone(),
                     schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: self.session.id.clone(),
                     observation: crate::observe_agent_runtime(&self.git.repo)
@@ -3559,6 +3559,30 @@ format_version: Some(1),
             )
             .unwrap();
         }
+        // Preserve the older compactor's missing inline Done with valid proof.
+        let mut legacy =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        legacy
+            .work_items
+            .iter_mut()
+            .find(|work| work.id == fixture.work_id)
+            .unwrap()
+            .events
+            .retain(|event| event.kind != gwt_core::workspace_projection::WorkEventKind::Done);
+        let legacy = serde_json::to_string_pretty(&legacy).unwrap();
+        let proof_path = works_path.with_extension("close-proofs.json");
+        let mut proofs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+        proofs["snapshots"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["projection_hash"] =
+            gwt_core::work_events_intake::content_fingerprint(&legacy).into();
+        std::fs::write(&works_path, legacy).unwrap();
+        std::fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
         assert!(fixture
             .canonical_work()
             .events
@@ -4363,6 +4387,140 @@ format_version: Some(1),
             );
             server.receive();
         }
+    }
+
+    #[test]
+    fn managed_build_completes_after_explicit_repair_of_unprojected_done() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut fixture = BoundTerminalFixture::new();
+        let primary = "private-unprojected-producer-primary";
+        fixture.session.agent_session_id = Some(primary.into());
+        fixture
+            .session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .unwrap();
+        let _native = ScopedEnvVar::set("CODEX_THREAD_ID", primary);
+        let start = fixture.canonical_work().events[0].clone();
+        let legacy = gwt_core::paths::gwt_repo_local_work_events_path(&fixture.git.repo);
+        // Complete replay must see real accepted history in both the worktree
+        // and its fetched ref, not the generic fixture's sentinel legacy row.
+        std::fs::write(&legacy, serde_json::to_string(&start).unwrap() + "\n").unwrap();
+        fixture.git.stage_events();
+        fixture
+            .git
+            .commit("chore(work): seed complete producer Work history");
+        fixture.git.push();
+        let current_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.git.repo);
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let proof_path = works_path.with_extension("close-proofs.json");
+        let current_before = std::fs::read(&current_path).unwrap();
+        let works_before = std::fs::read(&works_path).unwrap();
+        let proof_before = std::fs::read(&proof_path).unwrap();
+        fixture.terminalize_canonical_done();
+        let closes_path =
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&fixture.git.repo);
+        let closes_before = std::fs::read(&closes_path).unwrap();
+        // Reproduce interruption after the real authenticated close was made
+        // durable but before its derived Current/Works/proof publication.
+        std::fs::write(&current_path, &current_before).unwrap();
+        std::fs::write(&works_path, &works_before).unwrap();
+        std::fs::write(&proof_path, &proof_before).unwrap();
+        assert!(fixture.canonical_work().is_incomplete());
+        let execution_path = crate::cli::execution_state::state_path(&fixture.git.repo);
+        let execution_before = std::fs::read(&execution_path).unwrap();
+        let session_path =
+            gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", fixture.session.id));
+        let session_before = std::fs::read(&session_path).unwrap();
+        let sources_before = std::fs::read(&legacy).unwrap();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::Emitted),
+        );
+        with_terminal_bridge_env(&fixture, &server, |env| {
+            let action = SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            };
+            record_current_work_terminal_before_finalize(env, &action)
+                .expect_err("post-Emitted confirmation stays read-only until explicit repair");
+            server.receive();
+            assert_eq!(std::fs::read(&works_path).unwrap(), works_before);
+            assert_eq!(std::fs::read(&closes_path).unwrap(), closes_before);
+            assert!(
+                crate::agent_project_state::close_proof_repair_needed_for_session(
+                    &fixture.git.repo,
+                    &fixture.session.id,
+                    Some(primary),
+                )
+                .expect("the current producer must discover recovery for its unprojected Done")
+            );
+            let diagnosis =
+                crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+            assert!(diagnosis
+                .recovery_probes
+                .iter()
+                .any(|probe| probe.operation == "workspace.repair_close_proof"
+                    && probe.state == crate::cli::governance::RecoveryProbeState::Available));
+            let receipt =
+                crate::agent_project_state::apply_authenticated_workspace_close_proof_repair(
+                    &fixture.git.repo,
+                    &fixture.session.id,
+                    crate::AgentWorkspaceCloseProofRepairRequest {
+                        schema_version: crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+                        claimed_session_id: fixture.session.id.clone(),
+                        primary_provider_session_id: Some(primary.into()),
+                        observation: crate::observe_agent_runtime(&fixture.git.repo).unwrap(),
+                        reason: "restore the producer's accepted durable Done".into(),
+                    },
+                )
+                .expect("complete canonical replay restores the real unprojected Done");
+            assert!(!receipt.already_applied);
+            let repaired = fixture.canonical_work();
+            assert!(repaired.is_terminal());
+            assert!(!repaired.discarded);
+            let repaired_bytes = std::fs::read(&works_path).unwrap();
+            record_current_work_terminal_before_finalize(env, &action)
+                .expect("the normal producer completion guard converges after explicit repair");
+            assert_eq!(std::fs::read(&works_path).unwrap(), repaired_bytes);
+        });
+        server.assert_no_request();
+        assert_eq!(std::fs::read(&current_path).unwrap(), current_before);
+        assert_eq!(std::fs::read(&closes_path).unwrap(), closes_before);
+        assert_eq!(std::fs::read(&legacy).unwrap(), sources_before);
+        assert_eq!(std::fs::read(&execution_path).unwrap(), execution_before);
+        assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+        with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None
+                    },
+                    &mut output
+                )
+                .unwrap(),
+                0,
+                "{output}"
+            );
+            assert!(
+                !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+        });
+        server.assert_no_request();
+        assert_eq!(std::fs::read(&closes_path).unwrap(), closes_before);
     }
 
     #[test]
@@ -5546,12 +5704,10 @@ format_version: Some(1),
         let home = tempfile::tempdir().expect("trusted store home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let url = format!(
-            "http://{}/internal/hook-live",
-            listener.local_addr().unwrap()
-        );
-        drop(listener);
+        // Reserve the port without listening so parallel servers cannot claim it.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let url = format!("http://{}/internal/hook-live", socket.local_addr().unwrap());
         let (code, output, fixture) = run_start_action(Some(&url), Some("terminal-secret"), true);
         assert_eq!(code, 2, "{output}");
         let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();

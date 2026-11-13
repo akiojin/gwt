@@ -641,6 +641,12 @@ impl HookForwardTarget {
         Ok(url)
     }
 
+    pub fn workspace_close_proof_repair_url(&self) -> Result<Url, String> {
+        let mut url = self.workspace_update_url()?;
+        url.set_path("/internal/workspace-close-proof-repair");
+        Ok(url)
+    }
+
     pub fn work_terminalization_url(&self) -> Result<Url, String> {
         self.validate()?;
         let mut url =
@@ -1324,6 +1330,65 @@ pub(crate) fn send_workspace_reopen_via_agent_bridge(
         return Err(AgentBridgeFailure::new(
             AgentBridgeFailureReason::ReceiptMismatch,
             "Host workspace reopen returned invalid receipt evidence; no local fallback was attempted",
+        ));
+    }
+    Ok(receipt)
+}
+
+pub(crate) fn send_workspace_close_proof_repair_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceCloseProofRepairRequest,
+) -> Result<crate::AgentWorkspaceCloseProofRepairReceipt, AgentBridgeFailure> {
+    require_primary_bridge_claim(request.primary_provider_session_id.as_deref())?;
+    let url = target.workspace_close_proof_repair_url().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host close proof repair target is invalid",
+        )
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // A complete multi-worktree replay can take longer than a small mutation.
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "failed to build the Host close proof repair client",
+            )
+        })?;
+    let response = client.post(url).bearer_auth(&target.token).json(request).send()
+        .map_err(|_| AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host close proof repair is unavailable; no local fallback was attempted and its outcome may be unknown",
+        ))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host close proof repair rejection could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        return Err(AgentBridgeFailure::rejected(
+            AgentBridgeFailureReason::OperationRejected,
+            status,
+            diagnostic.as_ref(),
+            false,
+            "Host rejected close proof repair; no local fallback was attempted",
+        ));
+    }
+    let receipt = response.json::<crate::AgentWorkspaceCloseProofRepairReceipt>().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host close proof repair returned an invalid success response; no local fallback was attempted",
+        )
+    })?;
+    if receipt.schema_version != crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION
+        || receipt.work_id.trim().is_empty()
+    {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host close proof repair returned invalid receipt evidence; no local fallback was attempted",
         ));
     }
     Ok(receipt)
@@ -3956,6 +4021,44 @@ mod tests {
         request.primary_provider_session_id = Some("private-primary-id".into());
         let missing_route = send_workspace_reopen_via_agent_bridge(&target, &request)
             .expect_err("older Host without reopen must fail closed");
+        assert!(missing_route.is_missing_route_rejection());
+        assert!(!missing_route.is_exact_workspace_ensure_required());
+        assert!(!format!("{missing_route:?}").contains("private-primary-id"));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "must not fall back to another mutation route"
+        );
+    }
+
+    #[test]
+    fn workspace_close_proof_repair_missing_route_and_missing_primary_fail_closed() {
+        let server = BindingProbeServer::start(StatusCode::OK, serde_json::json!({}));
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "secret".into(),
+        };
+        let mut request = crate::AgentWorkspaceCloseProofRepairRequest {
+            schema_version: crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+            claimed_session_id: "session-reopen".into(),
+            primary_provider_session_id: None,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/repo".into(),
+                git_toplevel: "/repo".into(),
+                repo_hash: "repo".into(),
+                branch: "work/reopen".into(),
+            },
+            reason: "continue unfinished work".into(),
+        };
+        let missing_claim = send_workspace_close_proof_repair_via_agent_bridge(&target, &request)
+            .expect_err("missing claim must be rejected before HTTP");
+        assert_eq!(
+            missing_claim.error_code(),
+            Some(crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired)
+        );
+        assert!(missing_claim.http_status.is_none());
+        request.primary_provider_session_id = Some("private-primary-id".into());
+        let missing_route = send_workspace_close_proof_repair_via_agent_bridge(&target, &request)
+            .expect_err("older Host without proof repair must fail closed");
         assert!(missing_route.is_missing_route_rejection());
         assert!(!missing_route.is_exact_workspace_ensure_required());
         assert!(!format!("{missing_route:?}").contains("private-primary-id"));

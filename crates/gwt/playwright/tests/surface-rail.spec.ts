@@ -865,6 +865,49 @@ test.describe("Surface rail", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  // SPEC #6476 T-005s5: keep Settings navigation tappable without resizing
+  // other tab controls or the desktop sidebar.
+  test.describe("Settings touch navigation", () => {
+    test.use({ hasTouch: true });
+    test("Settings navigation tabs are 44px tap targets on a phone", async ({ page }, info) => {
+      const errors = captureBrowserErrors(page);
+      await installSurfaceAssets(page);
+      await installSurfaceRailBackend(page);
+      await page.goto(surfaceAppUrl);
+      await page.locator("#op-rail [data-surface='settings']").click();
+      const settings = page.locator(".settings-root:visible");
+      const tabs = settings.locator(".settings-tabs [role='tab']");
+      await expect(tabs).toHaveCount(8);
+      const heights = () => tabs.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+      expect(await heights()).toEqual(Array(8).fill(30));
+      await page.setViewportSize({ width: 601, height: 900 });
+      expect(await heights(), "601px retains desktop tab heights").toEqual(Array(8).fill(30));
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        const sizes = await tabs.evaluateAll(nodes => nodes.map(node => {
+          const rect = node.getBoundingClientRect();
+          return { label: node.textContent, width: rect.width, height: rect.height };
+        }));
+        for (const size of sizes) {
+          expect(size.width, `${size.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(size.height, `${size.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        }
+        expect(await settings.locator(".settings-tabs").evaluate(node => node.scrollWidth <= node.clientWidth),
+          "tab labels fit the navigation width").toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+          "the page does not scroll sideways").toBe(true);
+        await tabs.filter({ hasText: "Custom Agents" }).tap();
+        await expect(settings.locator('[data-settings-panel="custom-agents"]')).toBeVisible();
+        await expect(tabs.filter({ hasText: "Custom Agents" })).toHaveAttribute("aria-selected", "true");
+        await settings.getByRole("tab", { name: "System", exact: true }).tap();
+        await expect(settings.locator('[data-settings-panel="system"]')).toBeVisible();
+        await expect(settings.locator('[data-settings-panel="custom-agents"]')).toBeHidden();
+        await page.screenshot({ path: info.outputPath(`settings-tabs-${width}.png`) });
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+  });
+
   // SPEC #6476 T-005b2 (AC-1): on a phone the Board header filters were 19px
   // tall, Refresh 24px, the destination chip 27px and the composer recipient
   // 32px and Post 36px. Below 601px the header and composer controls are

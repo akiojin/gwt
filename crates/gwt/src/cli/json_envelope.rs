@@ -570,6 +570,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
             })
         }
+        "workspace.repair_close_proof" => {
+            reject_unknown_params(params, &["reason"], "workspace.repair_close_proof")?;
+            CliCommand::Workspace(WorkspaceCommand::RepairCloseProof {
+                reason: required_nonempty_workspace_reopen_string(params, "reason")?,
+            })
+        }
         "workspace.reopen" => CliCommand::Workspace(WorkspaceCommand::Reopen {
             reason: required_nonempty_workspace_reopen_string(params, "reason")?,
             observed_done_event_id: required_nonempty_workspace_reopen_string(

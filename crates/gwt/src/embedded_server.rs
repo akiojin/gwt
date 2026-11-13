@@ -2567,10 +2567,12 @@ mod tests {
             .issue(project.path(), "session-reopen")
             .expect("agent capability");
         let mut url = reqwest::Url::parse(&target.url).expect("agent URL");
-        url.set_path("/internal/workspace-reopen");
-        let response = reqwest::blocking::Client::new()
-            .post(url)
-            .json(&serde_json::json!({
+        for endpoint in [
+            "/internal/workspace-reopen",
+            "/internal/workspace-close-proof-repair",
+        ] {
+            url.set_path(endpoint);
+            let mut request = serde_json::json!({
                 "schema_version": 1,
                 "claimed_session_id": "session-reopen",
                 "observation": {
@@ -2578,14 +2580,20 @@ mod tests {
                     "repo_hash": "repo", "branch": "work/reopen"
                 },
                 "primary_provider_session_id": "private-primary-id",
-                "reason": "continue after premature completion",
-                "observed_done_event_id": "done-event"
-            }))
-            .send()
-            .expect("reopen request without bearer");
-        assert_eq!(response.status(), HttpStatusCode::UNAUTHORIZED);
-        let body = response.text().expect("rejection body");
-        assert!(!body.contains("private-primary-id"));
+                "reason": "restore unfinished work"
+            });
+            if endpoint == "/internal/workspace-reopen" {
+                request["observed_done_event_id"] = serde_json::json!("done-event");
+            }
+            let response = reqwest::blocking::Client::new()
+                .post(url.clone())
+                .json(&request)
+                .send()
+                .expect("protected recovery request without bearer");
+            assert_eq!(response.status(), HttpStatusCode::UNAUTHORIZED);
+            let body = response.text().expect("rejection body");
+            assert!(!body.contains("private-primary-id"));
+        }
         server.shutdown();
     }
 
