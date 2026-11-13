@@ -4774,6 +4774,11 @@ button.workspace-board-ref:focus-visible {
     max-width: 100%;
   }
 
+  :root[data-theme] .settings-tabs .settings-tab {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   :root[data-theme] .settings-body {
     padding: var(--space-2);
   }
@@ -5082,6 +5087,13 @@ button.workspace-board-ref:focus-visible {
 .op-status-strip:has(> #op-strip-usage:not([hidden])) {
   flex-wrap: wrap;
   min-height: 28px;
+}
+
+@media (max-width: 600px) {
+  .op-status-strip:has(> #op-strip-usage:not([hidden])) {
+    max-height: 56px;
+    overflow-y: auto;
+  }
 }
 
 .op-status-strip__cell--usage {

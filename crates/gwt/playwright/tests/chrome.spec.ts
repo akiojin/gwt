@@ -59,6 +59,14 @@ test.describe("mobile project chrome", () => {
       await page.screenshot({ path: testInfo.outputPath(`mobile-chrome-${width}-${theme}.png`) });
     }
     await page.setViewportSize({ width: 320, height: 568 });
+    // SPEC #6476: usage must not let the footer consume the workspace when
+    // a persistence diagnostic is also visible on a short phone screen.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "provider_usage", accounts: [{ provider: "codex", plan: "pro",
+        windows: [{ kind: "five_hour", used_percent: 25, resets_at: "2030-01-02T03:04:05Z" }],
+        state: { kind: "ok" } }], sessions: [], consumption: [] },
+    })));
+    await expect(page.locator("#op-strip-usage")).toBeVisible();
     const diagnostic = {
       kind: "load_error",
       path: "/Users/example/nested-project-state-directory/nested-project-state-directory/.gwt/projects/99a8660247f5bc49/workspace/current.json",
@@ -75,6 +83,10 @@ test.describe("mobile project chrome", () => {
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(noticeBounds!.y);
     }
     expect((await page.locator(".surface-area").boundingBox())!.height).toBeGreaterThan(0);
+    const strip = page.locator(".op-status-strip");
+    expect((await strip.boundingBox())!.height).toBeLessThanOrEqual(56);
+    await page.locator("#op-strip-usage").scrollIntoViewIfNeeded();
+    await expect(page.locator("#op-strip-usage")).toBeInViewport({ ratio: 1 });
     const detail = notice.locator("span");
     await expect(detail).toHaveText(`${diagnostic.path}: ${diagnostic.message}`);
     const retry = notice.getByRole("button", { name: "Retry" });
