@@ -248,7 +248,7 @@ export function createPmWindowModel() {
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
 export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onSend = () => {}, onOpenTerminal = () => false,
-  onViewNotification = () => {}, onDecisionsWaiting = () => {},
+  onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -260,6 +260,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let chatSend = null;
   let draftSend = null;
   let publishedWaiting;
+  let publishedReviews;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -599,6 +600,15 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (key === publishedWaiting) return;
     publishedWaiting = key;
     onDecisionsWaiting(ids && { waiting: ids.length, ids });
+  }
+  // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+  // shared attention model; `null` when this window has not observed them.
+  function publishReviewAttention(facts) {
+    const items = Array.isArray(facts?.review_attention) ? facts.review_attention : null;
+    const key = JSON.stringify(items);
+    if (key === publishedReviews) return;
+    publishedReviews = key;
+    onReviewAttention(items);
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
@@ -1030,6 +1040,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
+    publishReviewAttention(state.current?.facts);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);

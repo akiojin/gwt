@@ -17,10 +17,11 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [], sent = [], waiting = [];
+  const visibility = [], copied = [], sent = [], waiting = [], reviews = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
     onDecisionsWaiting: decisions => waiting.push(decisions),
+    onReviewAttention: items => reviews.push(items),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
@@ -38,7 +39,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, sent, waiting, update };
+  return { root, model, view, visibility, copied, sent, waiting, reviews, update };
 }
 
 test('Chat opens its bound PM terminal in Works without losing the draft', () => {
@@ -1437,6 +1438,22 @@ test('PM decisions waiting are published from the one derivation Home reads', as
   const published = waiting.length;
   view.update(model.readPmWindowState().windows.pm);
   assert.equal(waiting.length, published, 'an unchanged waiting set is not republished');
+});
+
+// SPEC #5016 HSV: unresolved reviews observed by the PM current facts are
+// published once per change; an absent observation is unknown, not zero.
+test('PM current review attention is published from the facts the PM window received', () => {
+  const { reviews, update } = fixture({ tasksDefault: true });
+  update([], null, { facts: { source: 'daemon', active_windows: [] } });
+  assert.equal(reviews.at(-1), null, 'facts without the observation publish unknown');
+  const items = [{ pr_number: 71, issue_numbers: [5016], reason: 'Changes requested' }];
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.deepEqual(reviews.at(-1), items);
+  const published = reviews.length;
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.equal(reviews.length, published, 'an unchanged observation is not republished');
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: [] } });
+  assert.deepEqual(reviews.at(-1), [], 'an observed empty list clears the count');
 });
 
 test('Decide forgets session answers when the PM session changes', () => {

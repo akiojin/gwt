@@ -488,6 +488,48 @@ test("awaiting attention adds each PM window's unanswered decisions once", async
   assert.equal(snapshot.count, 4, "older snapshots stay unchanged");
 });
 
+// SPEC #5016 HSV: unresolved reviews join the same Issue union.
+test("awaiting attention counts an Issue with an unresolved review once", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  surface.applyIssueMonitorInbox([71, 72].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: "open" },
+    state: number === 71 ? "needs_human" : "queued",
+    error_message: number === 71 ? "Choose credentials" : undefined,
+  })));
+  surface.applyPmReviewAttention("pm-1", [
+    { pr_number: 801, issue_numbers: [71], reason: "Changes requested" },
+    { pr_number: 802, issue_numbers: [72], reason: "2 unresolved review threads" },
+    { pr_number: 803, issue_numbers: [], reason: "Changes requested" },
+  ]);
+  // The same PR observed by a second PM window is still one review.
+  surface.applyPmReviewAttention("pm-2", [{ pr_number: 802, issue_numbers: [72], reason: "Changes requested" }]);
+  surface.applyPmReviewAttention("pm-loading", null);
+  const snapshot = surface.issueMonitorModel.read().decisionAttention;
+  // #71 needs a human and has a review: one Issue. #803 has no Issue: its own entry.
+  assert.equal(snapshot.count, 3);
+  assert.equal(snapshot.summary, "Awaiting attention 3 | Needs human 1 | Unresolved reviews 3");
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(strip.title.includes(snapshot.summary));
+  assert.ok(monitorBand(body).pill.title.includes(snapshot.summary));
+  surface.applyPmReviewAttention("pm-1", null);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | Needs human 1 | Unresolved reviews 1", "a closed PM window stops counting");
+  assert.ok(strip.title.includes("Awaiting attention 2"));
+  assert.ok(monitorBand(body).pill.title.includes("Awaiting attention 2"));
+  assert.equal(snapshot.count, 3, "older snapshots stay unchanged");
+});
+
 test("needs_human derives one immutable count and reason for shared Issue views", async (t) => {
   const { body, surface, sent, mod } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
