@@ -794,6 +794,18 @@ jobs:
           node scripts/ci-windows-tests.mjs run-runtime gwt-core test windows_process_resolver
           node scripts/ci-windows-tests.mjs run-runtime gwt-core test process_adapter_parity
         timeout-minutes: 15
+      - name: Run real Windows cmd health and ConPTY parity
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: python crates/gwt-core/tests/fixtures/run_windows_cmd_runner_probe.py
+        timeout-minutes: 15
+      - name: Preserve Windows cmd consumer provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-cmd-consumer-provenance
+          path: target/issue6474-probe/green.json
+          if-no-files-found: error
       - name: Run real Claude probe caller regressions
         shell: bash
         run: |
