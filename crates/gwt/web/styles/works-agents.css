@@ -338,7 +338,7 @@
   .works-full-header > button { min-width: 44px; min-height: 44px; }
   .works-full-header > [data-action="previous"],
   .works-full-header > [data-action="next"] { order: 1; }
-  .works-full-name { flex: 1 1 0; overflow: hidden; }
+  .works-full-name { flex: 1 1 0; }
   .works-full-name .work-name,
   .works-full-meta,
   .works-full-usage { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
