@@ -1614,7 +1614,7 @@ test("T-F2: exact running profile stays distinct from the next override in both 
 
 test("urgent priority, cap fallback and PM demotion preserve assignment provenance", async ({page}) => {
   await confirm(page, [3, 4, 1], { terminal_queue: [
-    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
+    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
     {number: 4, queued_by: "auto-refill", priority: "normal", priority_reason: "urgent_limit_reached"},
     {number: 1, queued_by: "operator", priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z"},
   ]});

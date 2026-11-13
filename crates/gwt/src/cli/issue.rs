@@ -1074,8 +1074,12 @@ fn run_monitor_status<E: CliEnv>(
     effective_queue
         .entries
         .retain(|entry| !status.label_excluded_issues.contains(&entry.number));
-    output["urgent_queue"] = serde_json::to_value(prefs.urgent_queue.projection(&effective_queue))
-        .expect("urgent queue serializes");
+    output["urgent_queue"] = serde_json::to_value(prefs.urgent_queue.projection(
+        &effective_queue,
+        &prefs.priority_order,
+        prefs.priority_launch_now,
+    ))
+    .expect("urgent queue serializes");
     output["active_session_count"] = serde_json::json!(inventory.sessions.len());
     if let Some(capacity) = capacity {
         output["launch_capacity"] = capacity;
@@ -1636,6 +1640,7 @@ fn run_monitor_priority_move<E: CliEnv>(
 /// order: listed Issues first in `priority_order`, the rest in their existing
 /// (queued) order. The sort is stable, so unlisted entries keep their place.
 fn reorder_local_terminal_queue_by_priority(prefs: &mut crate::IssueMonitorPrefs) {
+    prefs.priority_launch_now = None;
     let Some(queue) = prefs
         .terminal_queues
         .get_mut(&crate::process::current_hostname())
@@ -1902,8 +1907,12 @@ fn monitor_queue_reply(
         .unwrap_or(&crate::process::current_hostname())
         .to_string();
     let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
-    let mut projection =
-        serde_json::to_value(prefs.urgent_queue.projection(&queue)).expect("queue serializes");
+    let mut projection = serde_json::to_value(prefs.urgent_queue.projection(
+        &queue,
+        &prefs.priority_order,
+        prefs.priority_launch_now,
+    ))
+    .expect("queue serializes");
     projection["urgent_queue_token"] = prefs.urgent_queue.observation_token().into();
     projection["queue_order"] = serde_json::json!(queue
         .entries
@@ -2209,7 +2218,16 @@ fn run_monitor_queue_push<E: CliEnv>(
     let projected = prefs
         .terminal_queues
         .iter()
-        .map(|(host, queue)| (host.clone(), prefs.urgent_queue.projection(queue)))
+        .map(|(host, queue)| {
+            (
+                host.clone(),
+                prefs.urgent_queue.projection(
+                    queue,
+                    &prefs.priority_order,
+                    prefs.priority_launch_now,
+                ),
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
     let payload = serde_json::json!({
         "terminal_queues": projected,
@@ -2541,8 +2559,6 @@ fn run_monitor_launch_now<E: CliEnv>(
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
         check_expected_queue_order(prefs, expected_queue_order)?;
-        prefs.priority_order.retain(|existing| *existing != number);
-        prefs.priority_order.insert(0, number);
         // Issue #3616 AC-5: priority alone cannot beat `retry_ready`. A
         // provider reset can be days out, so leaving the hold in place would
         // accept this instruction and then ignore it for the whole window.
@@ -2559,7 +2575,7 @@ fn run_monitor_launch_now<E: CliEnv>(
         );
         let now = chrono::Utc::now().to_rfc3339();
         monitor.terminal_queue_push(&[number], "launch_now", &now);
-        monitor.terminal_queue_move(number, 0, &now);
+        monitor.prioritize_launch_now(number);
         let retry_hold_cleared = monitor.clear_retry_hold(number);
         let completion_hold_cleared = monitor.clear_completion_hold(number);
         let hold_cleared = retry_hold_cleared || completion_hold_cleared;
@@ -10722,7 +10738,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        monitor.terminal_queue_push(&[7], "test", "2026-09-29T00:00:00Z");
+        monitor.terminal_queue_push(&[7, 3], "test", "2026-09-29T00:00:00Z");
         crate::save_issue_monitor_prefs(&path, &monitor.prefs()).expect("seed prefs");
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -10745,16 +10761,27 @@ mod tests {
                 .iter()
                 .map(|entry| entry.number)
                 .collect::<Vec<_>>(),
-            vec![42, 7]
+            vec![42, 7, 3]
         );
         assert_eq!(prefs.priority_order, vec![42, 7, 99]);
         assert!(prefs.enabled);
+        assert_eq!(
+            monitor_queue_reply(&prefs, None)["entries"][0]["priority_reason"],
+            "launch_now"
+        );
+        out.clear();
+        run_monitor_status(&env, None, &mut out).expect("status after launch_now");
+        let status: serde_json::Value = serde_json::from_str(&out).expect("status JSON");
+        assert_eq!(
+            status["urgent_queue"]["entries"][0]["priority_reason"],
+            "launch_now"
+        );
 
         let mut resumed =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         resumed.set_source_repository(Some(("example", "repo")));
         resumed.set_gui_connected(true);
-        let candidates = [7, 42].map(|number| crate::IssueMonitorIssue {
+        let candidates = [7, 42, 3].map(|number| crate::IssueMonitorIssue {
             author_login: None,
             number,
             title: format!("Issue {number}"),
@@ -10768,6 +10795,12 @@ mod tests {
         let now = "2026-09-29T00:01:00Z";
         // Scan the persisted operation result without a fixture auto-enqueue.
         crate::scan_issue_monitor_candidates(&mut resumed, &candidates, now);
+        assert_eq!(
+            resumed.status_view().terminal_queue[0]
+                .priority_reason
+                .as_deref(),
+            Some("launch_now")
+        );
         assert_eq!(
             resumed
                 .next_launch_request(now)
@@ -14716,6 +14749,12 @@ mod tests {
         )
         .expect("priority set");
         assert_eq!(queue_order(), vec![3, 1, 2, 4]);
+        let saved = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let entries = monitor_queue_reply(&saved, None)["entries"].clone();
+        assert_eq!(entries[0]["priority_reason"], "priority_order");
+        assert_eq!(entries[1]["priority_reason"], "priority_order");
+        assert_eq!(entries[2]["priority_reason"], "normal_order");
+        assert_eq!(entries[3]["priority_reason"], "normal_order");
 
         out.clear();
         run(
