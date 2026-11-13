@@ -354,6 +354,9 @@ test("Issue #5400 unchanged entry revisions retain the list and current detail",
 });
 
 test("Issue #5401 replays retain focus and only changed Issue keys replace rows", async ({ page }, info) => {
+  // The initial census moves Issue 5 independently of the entries response.
+  // Finish that move before counting mutations caused by entry replays.
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   const select = row(page, 2).locator(".knowledge-row-select");
   await select.focus();
   await page.evaluate(() => {
