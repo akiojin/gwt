@@ -457,6 +457,17 @@ async function installKillSwitchBackend(page) {
     }
 
     let socketRef = null;
+    // SPEC #5016 AC-HS1: like the backend, publish the RUN / BLOCK / IDLE /
+    // ERROR aggregate the status strip renders after each status change.
+    let aggregateRevision = 0;
+    const aggregateMsg = () => {
+      const statuses = windows.filter(data => data.preset === "agent").map(data => data.status);
+      const count = (...states) => statuses.filter(status => states.includes(status)).length;
+      return { kind: "project_agent_aggregate", aggregate: {
+        running_count: count("running", "starting"), block_count: count("waiting", "stopped", "interrupted", "error"),
+        idle_count: count("idle"), error_count: count("error"), unread: false, revision: ++aggregateRevision,
+      } };
+    };
 
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -473,6 +484,7 @@ async function installKillSwitchBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit(aggregateMsg());
           this.emit({ kind: "active_work_projection", projection: { id: "attention-local-live", active_works: [], local_agent_activity: {
             project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "attention-fixture", observed_at: new Date().toISOString(), agents: [
               { window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 1, is_pm: false, issue_number: null },
@@ -530,6 +542,9 @@ async function installKillSwitchBackend(page) {
             this.dispatchEvent(
               new MessageEvent("message", { data: JSON.stringify(payload) }),
             );
+            if (payload.kind === "terminal_status") {
+              this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(aggregateMsg()) }));
+            }
             queueMicrotask(resolve);
           }, 0);
         });

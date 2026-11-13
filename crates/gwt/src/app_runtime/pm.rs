@@ -2077,14 +2077,21 @@ impl AppRuntime {
         let Some(state) = self.project_state_for_root_mut(project_root) else {
             return;
         };
-        match registration {
+        let changed = match registration {
             Some(registration) => {
+                let changed = state.pm_sessions.get(project_root) != Some(&registration.session_id);
                 state
                     .pm_sessions
                     .insert(project_root.to_path_buf(), registration.session_id.clone());
+                changed
             }
-            None => {
-                state.pm_sessions.remove(project_root);
+            None => state.pm_sessions.remove(project_root).is_some(),
+        };
+        if changed {
+            if let Some(context) = self.project_context_for_root(project_root) {
+                // Works consumes the observer's role as well as WorkspaceState.
+                // Recapture it even when inventory already installed the runtime.
+                let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
             }
         }
     }

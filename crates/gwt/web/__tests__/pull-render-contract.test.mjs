@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parseHTML } from "linkedom";
-import { scanModule, assertBaseline, checkRepository } from "../../../../scripts/check-pull-render.mjs";
+import { scanModule, assertBaseline, checkRepository, scanReactSource, isReactBoundary, isRenderingModule, assertMigrationAllowlist, assertMigrationContract } from "../../../../scripts/check-pull-render.mjs";
 import { createUiStateStore } from "../ui-state-store.js";
 import { applyBranchEntriesEvent } from "../branch-list-state.js";
 const keys = findings => findings.map(finding => finding.key);
@@ -812,7 +812,7 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   const file = 'crates/gwt/web/app.js';
   const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
   const migrated = findings => findings.filter(finding => finding.root === 'receive'
-    && /^\/(pm_reports\|pm_conversation\|pane_send_result|terminal_output|terminal_snapshot)$/.test(finding.context));
+    && /^\/(pm_reports\|pm_conversation\|pm_request_task\|pane_send_result|terminal_output|terminal_snapshot)$/.test(finding.context));
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
   const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
@@ -1074,7 +1074,10 @@ test("unrelated remote advances leave the default comparison stable; explicit CI
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const directory of ["scripts", "crates/gwt/web", "node_modules"]) mkdirSync(join(root, directory), { recursive: true });
   copyFileSync(new URL("../../../../scripts/check-pull-render.mjs", import.meta.url), join(root, "scripts/check-pull-render.mjs"));
-  symlinkSync(dirname(dirname(fileURLToPath(import.meta.resolve("acorn")))), join(root, "node_modules/acorn"), "junction");
+  for (const dependency of ["acorn", "acorn-jsx"]) {
+    symlinkSync(dirname(fileURLToPath(import.meta.resolve(`${dependency}/package.json`))), join(root, "node_modules", dependency), "junction");
+  }
+  writeFileSync(join(root, "scripts/react-migration-allowlist.json"), "[]\n");
   const file = join(root, "crates/gwt/web/fixture.js");
   const original = "function receive(event) { external.send(event.value); }";
   writeFileSync(file, original);
@@ -1497,4 +1500,94 @@ test("Branch receipts isolate entries and cleanup before synchronous ingestion",
   assert.equal(state.entries.length, 1);
   receive({ ...event, load_id: 3, entries: [] });
   assert.deepEqual(counts, [1, 0]);
+});
+
+// SPEC #6943 T-022 / T-023 (AC-7, AC-8): React source may not write the DOM
+// outside hosts/, and no new imperative rendering module may appear.
+test("React source rejects direct DOM writes outside hosts/", () => {
+  const file = "crates/gwt/web-react/src/surfaces/Example.jsx";
+  for (const write of ['node.appendChild(child);', 'el.innerHTML = "";', 'document.createElement("div");',
+    'ref.current.textContent = "x";', 'el.insertAdjacentHTML("beforeend", html);', 'el.classList.add("on");',
+    'el.style.color = "red";', 'el.setAttribute("aria-busy", "true");',
+    'el["innerHTML"] = "x";', 'el.textContent += "x";', 'el.scrollTop++;',
+    'el.append(child);', 'el.remove();', '({html: el.innerHTML} = model);',
+    '[el.textContent] = values;', 'for (el.innerHTML of values) {}', 'for (el.textContent in values) {}']) {
+    const findings = scanReactSource(`const a = 1;\n${write}\n`, file);
+    assert.equal(findings.length, 1, write);
+    assert.equal(findings[0].line, 2);
+    assert.match(findings[0].message, new RegExp(file.replaceAll(".", "\\.") + ":2"));
+  }
+  const clean = 'import { createElement } from "react";\nconst x = createElement(A, { value: v });\n'
+    + 'export const B = () => <input value={v} hidden={h} className="c" onChange={e => set(e.target.value === "" ? null : 1)} />;\n'
+    + '// document.createElement("div"); el.innerHTML = "x";\n'
+    + 'const help = "el.appendChild(child);";\n'
+    + 'const legacy = React.createElement("p", null, "Ready");\n';
+  assert.deepEqual(scanReactSource(clean, file), []);
+  assert.equal(isReactBoundary("crates/gwt/web-react/src/hosts/TerminalHost.jsx"), true);
+  assert.equal(isReactBoundary("crates/gwt/web-react/src/islands/index.js"), false);
+  assert.equal(isReactBoundary(file), false);
+});
+
+test("rendering-module classification finds imperative DOM writers only", () => {
+  const file = "crates/gwt/web/example.js";
+  assert.equal(isRenderingModule('export function f(d) { d.body.appendChild(d.createElement("p")); }', file), true);
+  assert.equal(isRenderingModule('export function f(el) { el.textContent = "x"; }', file), true);
+  assert.equal(isRenderingModule('export function f(el) { el.scrollTop++; }', file), true);
+  assert.equal(isRenderingModule('export function f(m) { m.set("a", 1); return [1].map(x => x + 1); }', file), false);
+});
+
+test("default CLI enforces the migration contract and exposes JSON diagnostics", t => {
+  const root = mkdtempSync(join(tmpdir(), "gwt-react-contract-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const directory of ["scripts", "crates/gwt/web", "crates/gwt/web-react/src/surfaces", "crates/gwt/web-react/src/hosts", "node_modules"]) mkdirSync(join(root, directory), { recursive: true });
+  copyFileSync(new URL("../../../../scripts/check-pull-render.mjs", import.meta.url), join(root, "scripts/check-pull-render.mjs"));
+  for (const dependency of ["acorn", "acorn-jsx"]) {
+    symlinkSync(dirname(fileURLToPath(import.meta.resolve(`${dependency}/package.json`))), join(root, "node_modules", dependency), "junction");
+  }
+  writeFileSync(join(root, "scripts/pull-render-baseline.json"), "[]\n");
+  writeFileSync(join(root, "scripts/react-migration-allowlist.json"), "[]\n");
+  writeFileSync(join(root, "crates/gwt/web-react/src/hosts/Terminal.js"), 'el.appendChild(document.createElement("div"));\n');
+  const legacy = "crates/gwt/web/legacy.js";
+  writeFileSync(join(root, legacy), 'el.textContent = "legacy";\n');
+  writeFileSync(join(root, "scripts/react-migration-allowlist.json"), JSON.stringify([legacy]));
+  const surface = join(root, "crates/gwt/web-react/src/surfaces/Example.jsx");
+  writeFileSync(surface, 'export const Example = () => <p>Ready</p>;\n');
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q");
+  git("config", "user.name", "Guard fixture");
+  git("config", "user.email", "guard@example.invalid");
+  git("config", "core.hooksPath", join(root, ".git/hooks"));
+  git("add", "scripts", "crates");
+  git("commit", "-qm", "base");
+  git("update-ref", "refs/remotes/origin/develop", "HEAD");
+  const run = (...args) => execFileSync(process.execPath, ["scripts/check-pull-render.mjs", ...args],
+    { cwd: root, env: { ...process.env, GWT_PULL_RENDER_BASE_SHA: "HEAD" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  assert.doesNotThrow(() => run());
+  writeFileSync(surface, 'export const Example = () => <p>{el.innerHTML = "bad"}</p>;\n');
+  assert.throws(() => run(), /Example\.jsx:1[\s\S]*Recovery/);
+  assert.equal(JSON.parse(run("--json")).reactFindings.length, 1);
+  writeFileSync(surface, 'export const Example = () => <p>Ready</p>;\n');
+  rmSync(join(root, legacy));
+  writeFileSync(join(root, "scripts/react-migration-allowlist.json"), "[]\n");
+  assert.doesNotThrow(() => run(), "deleting a tracked renderer and its allowlist row is valid");
+  mkdirSync(join(root, "crates/gwt/web/react"));
+  writeFileSync(join(root, "crates/gwt/web/react/new-surface.js"), '\n\nel.appendChild(child);\n');
+  assert.throws(() => run(), /new-surface\.js:3[\s\S]*Recovery/);
+});
+
+test("migration allowlist rejects new rendering modules, stale rows, and growth", () => {
+  assert.doesNotThrow(() => assertMigrationAllowlist(["a.js"], ["a.js"], ["a.js", "b.js"]));
+  assert.throws(() => assertMigrationAllowlist(["a.js", "new.js"], ["a.js"], ["a.js"]),
+    /new imperative rendering module[\s\S]*new\.js[\s\S]*Recovery/);
+  assert.throws(() => assertMigrationAllowlist(["a.js"], ["a.js", "gone.js"], ["a.js", "gone.js"]),
+    /stale allowlist[\s\S]*react-migration-allowlist\.json:1[\s\S]*gone\.js[\s\S]*Recovery/);
+  assert.throws(() => assertMigrationAllowlist(["a.js", "c.js"], ["a.js", "c.js"], ["a.js"]),
+    /cannot grow[\s\S]*react-migration-allowlist\.json:1[\s\S]*c\.js[\s\S]*Recovery/);
+});
+
+test("checkout satisfies the React migration contract", () => {
+  const state = assertMigrationContract();
+  assert.equal(state.renderingModules.includes("crates/gwt/web/workspace-state-notice.js"), false,
+    "the migrated notice only builds a model and mounts its island");
+  assert.ok(state.renderingModules.includes("crates/gwt/web/toast-host.js"));
 });

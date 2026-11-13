@@ -74,6 +74,44 @@ test("PM spinner redraw queued before resize keeps its original wrap grid", asyn
   expect(errors).toEqual([]);
 });
 
+// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once.
+// After a decision is answered in Decide, Home asks for the remaining one only.
+test("Home and Decide read one waiting-decision count after an answer", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    const decision = (id: string, question: string) => ({ id, kind: "decision", created_at: "2026-11-12T00:00:00Z",
+      structured: { summary: { result: question, impact: null, owner: "PM",
+        decision: { question, recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } }, details: "", refs: [] } });
+    (window as any).__pmFixtureReports = [decision("hs1-a", "Retry the launch?"), decision("hs1-b", "Ship the fix now?")];
+    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(pm.locator(".task-home")).toContainText("2 decisions need your attention");
+  await pm.getByRole("button", { name: "Decide", exact: true }).click();
+  await pm.locator(".task-decisions__card").first().getByRole("button", { name: "1. Retry" }).click();
+  const send = await page.evaluate(() => (window as any).__pmTerminalFixture.sent.find((packet: any) => packet.kind === "pane_send_input"));
+  expect(send, "the answer travels the chat reply path").toBeTruthy();
+  await page.evaluate(requestId => (window as any).__pmTerminalFixture.emit({ kind: "pane_send_result", id: "pm-terminal",
+    window_id: "pm-terminal", request_id: requestId, ok: true, error: null }), send.request_id);
+  await expect(pm.locator(".task-decisions__card").first()).toContainText("Answer sent: Retry");
+  await info.attach(`hs1-decide-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await pm.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(pm.locator(".task-home")).toContainText("1 decision needs your attention");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hs1-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
 // from a particular Codex version. browser-check still serves every UI asset.
 test("PM terminal keeps redraw, grid and input consistent across view changes", async ({ page }, info) => {
@@ -428,7 +466,7 @@ async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void
       send(raw: string) {
         const packet = JSON.parse(raw);
         fixture.sent.push(packet);
-        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: [], current: null });
+        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: (window as any).__pmFixtureReports ?? [], current: (window as any).__pmFixtureCurrent ?? null });
       }
       emit(packet: unknown) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(packet) })); }
       close() { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }
@@ -474,6 +512,11 @@ test("real PTY receives one input and converges with the visible terminal grid",
     try {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await gotoLiveGwt(page, liveBase!, { enableTestBridge: true });
+      await expect.poll(async () => {
+        await sendLiveGwtEvent(page, { kind: "get_project_execution_status" });
+        return page.evaluate(() => (window as any).__gwtPlaywrightMessages
+          .findLast((entry: any) => entry.payload.kind === "project_execution_status")?.payload.status);
+      }, { timeout: 60_000 }).toMatchObject({ view_state: "open", degraded: false });
       const windows = () => page.evaluate(() => {
         const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state");
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
@@ -482,10 +525,14 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
       await expect.poll(async () => (await windows()).filter((entry: any) => entry.preset === "shell" && !before.has(entry.id))).toHaveLength(1);
       id = (await windows()).find((entry: any) => entry.preset === "shell" && !before.has(entry.id)).id;
+      await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === "terminal_status" && entry.payload.id === id)?.payload, id),
+      { timeout: 60_000 }).toMatchObject({ status: "running" });
       const showShell = async () => {
-        const index = (await windows()).findIndex((entry: any) => entry.id === id);
-        await page.locator("#window-list-button").click();
-        await page.locator("#window-list-panel .window-list-row").nth(index).click();
+        await sendLiveGwtEvent(page, { kind: "focus_window", id });
+        await expect.poll(async () => (await windows()).reduce((top: any, entry: any) =>
+          !top || (entry.z_index || 0) > (top.z_index || 0) ? entry : top, null)?.id).toBe(id);
+        await page.reload();
         await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
       };
       await showShell();
@@ -512,7 +559,7 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await page.getByRole("button", { name: "Board", exact: true }).click();
       await page.setViewportSize({ width: 1280, height: 900 });
       await showShell();
-      await grid("hidden-resize-reveal");
+      await grid("hidden-resize-reconnect");
       await page.locator("#split-view-button").click();
       await grid("split");
       await page.locator("#split-view-button").click();
@@ -520,14 +567,15 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await shell.locator(".xterm-helper-textarea").focus();
       await page.keyboard.type("/model");
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_1:2f6d6f64656c\r\n");
+      // Unix PTYs can apply ONLCR to the probe's CRLF; ConPTY preserves it.
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_1:2f6d6f64656c\r+\n/);
       await shell.locator(".xterm-helper-textarea").evaluate(node => {
         const clipboard = new DataTransfer();
         clipboard.setData("text/plain", "/model");
         node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
       });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_2:2f6d6f64656c\r\n");
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_2:2f6d6f64656c\r+\n/);
       await info.attach("real PTY observations", { body: JSON.stringify({ theme, observations, inputHex: "2f6d6f64656c", errors }), contentType: "application/json" });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "zero console/page errors").toEqual([]);

@@ -214,6 +214,7 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
 表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
+ステータスバーと Works 見出しは、タブタイトルと同じ RUNNING / BLOCK / IDLE / ERROR 件数を表示します。
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
 
@@ -292,8 +293,8 @@ iOS Safari / Android Chrome から安全に操作する接続機能を
 
 #### 停止中の Host 資格管理（Unix・ソースからビルド）
 
-`cargo build -p gwt --bin gwt-mobile-coordinator` で停止中の台帳管理コマンドを
-ビルドできます。待受やスマートフォン接続は提供しません。祖先が信頼でき、置換されない、
+`cargo build -p gwt --bin gwt-mobile-coordinator` で台帳管理コマンドを
+ビルドできます。引数なしでは停止中の管理要求を処理します。祖先が信頼でき、置換されない、
 repository 外のユーザー home を使ってください。`$HOME/.gwt`、`$HOME/.gwt/mobile`、
 `$HOME/.gwt/mobile/coordinator` は、OS ユーザーが所有する mode `0700` の directory として
 事前に用意します。symlink と macOS の拡張 ACL entry は拒否します。既存の権限を確認し、
@@ -329,6 +330,52 @@ path・secret・時計上書きは request field にありません。発行成�
 停止して再試行します。`commit_uncertain` なら `status` で現在の記録を確認してから判断し、
 自動再発行しないでください。私有保存や時計の error は表示された前提条件を修復して
 再試行し、台帳や失効記録は削除しないでください。`--help` でも field と保存条件を確認できます。
+
+#### Coordinator の HTTPS 起動（Unix・ソースからビルド）
+
+同じ binary の明示的な `serve` コマンドで配置を点検できます。現在は**全経路が
+404 を返します**。`Origin` を指定する場合は、設定済み HTTPS origin と完全一致する
+header 1 件だけを許可し、それ以外は **403** で拒否します。両応答に、script と接続を
+同じ origin に制限し frame を禁止する CSP、および `nosniff`・`no-referrer`・`no-store`
+を付けます。登録・signaling・client asset・スマートフォン接続はまだ利用できません。
+
+上記の私有 directory を用意して台帳を初期化し、対応する PEM 証明書チェーンと秘密鍵を
+repository 外の私有領域に配置してください。各 TLS file は OS ユーザー所有の
+single-link regular file、mode `0600` とし、親 directory は同じユーザー所有の
+`0700` にします。symlink と macOS の拡張 ACL entry は使えません。home と保存先の
+全祖先を信頼できる非置換の状態に保ち、読込み中・稼働中は file を直接書き換えないでください。
+
+`$HOME/.gwt/mobile/coordinator/config.json` をユーザー所有・single-link・`0600` で
+配置します。例の TLS path は実際の私有 file の絶対 path に置き換えてください。
+
+```json
+{
+  "schema_version": 1,
+  "origin": "https://coordinator.example",
+  "bind": "127.0.0.1:8443",
+  "tls_certificate": "/private/coordinator/cert.pem",
+  "tls_private_key": "/private/coordinator/key.pem",
+  "limits": {
+    "registrations": 64,
+    "peers_per_host": 8,
+    "device_messages_per_second": 32,
+    "device_burst": 64,
+    "host_messages_per_second": 256,
+    "host_burst": 512
+  }
+}
+```
+
+`target/debug/gwt-mobile-coordinator serve` を実行します。この明示コマンドだけが
+待受を開始し、設定 file が存在するだけでは起動しません。起動成功時は待受 address を
+含む JSON の `listening` receipt を標準出力へ 1 行出力します。設定・TLS・台帳の
+欠損や不正、台帳 lock の競合では固定診断と非 0 終了を返します。原因を修復して明示的に
+再実行してください。起動処理は台帳の初期化や権限修復を行いません。
+
+SIGINT または SIGTERM で新規接続の受入を止め、既存 HTTP 接続の終了後に台帳 lock を
+解放して終了します。強制 drain 期限や HTTP 総接続数の上限はまだありません。
+停止中の台帳管理を行う前に server を停止してください。これは配置用の基盤であり、
+公開モバイル service の完成版ではありません。通常の desktop 待受は変更しません。
 
 #### PC 資格の offline import と点検（Unix、source build）
 
@@ -970,9 +1017,18 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 
 Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
 マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
-（`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない
+（`.gwt/` namespace、agent の作業メモ `tasks/todo.md`、materialize された `gwt-*` skill / command、手書きの内容を含まない
 `.codex/hooks.json` / `.claude/settings.local.json`）だけであれば cleanup-ready のまま
 数えられます。それ以外の未コミット変更があれば、その Workspace は件数から外れます。
+`tasks/` 内のほかのファイルもローカルの作業として扱います。ブランチは canonical base と
+直接比較するため、リモートの作業ブランチが削除済みでもマージ済み Workspace は整理候補になります。
+
+堆積した worktree を整理するには、`Issues` の `Other` を展開し、Workspace の
+`Clean Up` または候補をまとめる `Clean Up Ready` を使います。既存の Issue worktree は
+Work を閉じた後も一覧に残り、Work 履歴は閉じたまま、稼働中の owner を持ちません。
+削除前に確認画面を表示し、worktree 全体の
+自動 prune は行いません。稼働中の agent / process や製品ファイルの変更がある
+Workspace は整理可能なグループから除外します。
 
 ### プロバイダの無料リセット
 
@@ -1947,9 +2003,20 @@ gwt が対処メッセージを表示）。
 
 PM ウィンドウの **Tasks** では、保存済みの依頼タスクを閲覧できます。未完了を優先し、
 親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
-で完了・取消も表示できます。プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
-長い概要は短縮しますが、保存済みの内容は保持します。読取り失敗時は最後に確認できた一覧を
-警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+で完了・取消も表示できます。親には、表示範囲外も含む保存済みの直接の子タスクについて、
+完了・取消・未完了・全件数を表示します。取消は達成完了と区別し、子がすべて完了しても親は自動完了しません。
+プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
+長い概要は短縮しますが、保存済みの内容は保持します。各タスクの **Purpose and completion
+criteria** を開くと、目的と先頭 5 件の完了条件を確認できます。条件の全件数を明示し、
+各項目は 240 文字まで（短縮時は省略記号付き）のプレビューとして表示します。
+読取り失敗時は最後に確認できた一覧を警告付きで残します。Tasks または Chat の
+**View task details** では、選んだタスクだけの原依頼・目的・完了条件・完了証拠・最近の変更を読み取ります。
+読取り専用プレビューの上限は原文 4,000 文字、条件 20 件、証拠 10 件、変更 20 件（新しい順）です。
+その他の文は各 1,000 文字、actor ID は 240 文字までで、件数と短縮を明示します。
+変更はそのタスクの保存済み差分を含む記録だけを対象とし、全操作の履歴ではありません。
+**Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
+**Close details** で元のタスクにフォーカスを戻します。
+このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
 同じツールバーから **Reports** と **Execution log** に切り替えられます。
 
 PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を選ぶ 1 操作で PM との会話を開けます。自分の発言は右、PM の応答は
@@ -1958,7 +2025,13 @@ PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を
 複数のメッセージを送った場合は最新の 1 件だけを開き、それ以前は **N earlier messages** に折りたたみます
 （クリックで展開）。下部の入力欄から
 PM へテキストを送れます（Enter で送信、Shift+Enter で改行）。届いたことが確認できるまで入力内容は残り、
-送れなかった場合は理由を表示します。画像の添付には **Execution log** を使います。
+送れなかった場合は理由を表示します。Chat の **Open terminal in Works** で、同じ PM セッションの
+ターミナルを開けます。PM の入口から Chat に戻っても未送信の下書きは残ります。
+**Works** の PM 行からも同じターミナルを開けます。画像の添付には **Execution log** を使います。
+
+Chat には同じ **Tasks** 一覧も並びます（狭いウィンドウでは会話の上）。
+**Show in conversation** で Task の元の発言へ移動しても、未送信の下書きは残ります。
+元の発言が現在の会話の表示範囲にない場合は、ボタンを無効にして理由を表示します。
 
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
@@ -1972,8 +2045,13 @@ PM の更新は共通の短い概要で表示し、**Details** を開くと説�
 **Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
 切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
 1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
-判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Execution log** で
-番号または自由文を回答できます。**Copy** には番号付き選択肢と詳細を含めます。
+判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Reports**、
+**Decide**、Chat 内の **Decision reports** から選択でき、送信中・失敗・送信確認の状態は
+現在の PM セッションで共有されます。**Other: reply in chat** は下書きを保持して入力欄を
+開きます。送信確認だけで判断依頼を解決済みにしたり、人間の Q&A を保存したりはしません。
+Chat の判断依頼欄は Reports 由来で、ネイティブ会話のバブルとは別に表示します。
+**Execution log** でも番号または自由文を回答できます。**Copy** には番号付き選択肢と
+詳細を含めます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、

@@ -41,7 +41,8 @@ test("Issues strip batches the latest status while model reads and other subscri
     cell.setAttribute = (...args) => { if (args[0] === "aria-label") renders++; return setAttribute(...args); };
     const previous = model.read();
     for (let index = 0; index < 50; index++) {
-      model.update(state => ({ ...state, status: { enabled: true, state: "active", queue_len: index, active_count: 1 } }));
+      model.update(state => ({ ...state, status: { enabled: true, state: "active", queue_len: index, active_count: 1 },
+        counts: { queue: index, active: 1, maxActive: 1 } }));
     }
     assert.equal(model.read().status.queue_len, 49);
     assert.equal(synchronousStatus.queue_len, 49);
@@ -56,13 +57,33 @@ test("Issues strip batches the latest status while model reads and other subscri
     model.update(state => ({ ...state, unrelated: true }));
     flush();
     assert.equal(renders, 1);
+    model.update(state => ({ ...state, status: { ...state.status, total_candidates: 73, allowed_labels: ["ready"] },
+      counts: { ...state.counts } }));
+    assert.equal(frames.size, 0, "status fields outside the strip and equal counts must not reserve a frame");
+    flush();
+    assert.equal(renders, 1, "unchanged strip presentation must not redraw");
+    for (const [field, summary] of [["humanAttention", "Needs human 1"], ["reviewAttention", "Review holds 2"], ["steeringAttention", "PM steering 3"]]) {
+      model.update(state => ({ ...state, [field]: { summary } }));
+      flush();
+      assert.ok(cell.title.includes(summary));
+    }
+    model.update(state => ({ ...state, status: { ...state.status, quota_hold: { provider: "codex", reset_at: "tomorrow" } } }));
+    flush();
+    assert.equal(value.textContent, "Hold Q49 A1/1");
+    assert.match(cell.title, /Provider codex.*Reset tomorrow/);
     model.update(state => ({ ...state, status: { enabled: true, state: "error", last_error: "scan failed" } }));
     flush();
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
-    model.update(state => ({ ...state, status: { enabled: true, state: "idle" } }));
+    assert.match(cell.title, /scan failed/);
+    model.update(state => ({ ...state, status: { enabled: true, state: "idle" },
+      counts: { queue: 0, active: 0, maxActive: 1 } }));
     flush();
     assert.equal(value.textContent, "Idle Q0 A0/1");
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+    model.update(state => ({ ...state, status: { ...state.status, state: "scan_waiting" } }));
+    flush();
+    assert.equal(value.textContent, "Idle Q0 A0/1");
+    assert.equal(cell.dataset.state, "scan_waiting", "equal labels must not hide a changed semantic state");
     const commands = [];
     fixture.document.addEventListener("op:command", event => commands.push(event.detail.id));
     cell.dispatchEvent(new fixture.window.Event("click"));
@@ -141,7 +162,9 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
   const cell = document.querySelector(".op-status-strip__cell--waiting");
   assert.ok(value, "expected #op-strip-waiting value in the strip");
   assert.ok(cell, "expected .op-status-strip__cell--waiting cell in the strip");
-  assert.equal(value.getAttribute("aria-label"), "Agents waiting for input");
+  // SPEC #5016 AC-HS1: the cell shows the server BLOCK count under the same pulse contract.
+  assert.equal(cell.querySelector(".op-status-strip__label").textContent, "BLOCK");
+  assert.equal(value.getAttribute("aria-label"), "Agents that need you, including stopped and errored agents");
 
   applyTelemetryCounts(document, { waiting: 2 });
   assert.equal(value.textContent, "2");
@@ -447,5 +470,10 @@ async function importOperatorShell() {
     .replace('from "/theme-manager.js"', `from "${pathToFileURL(resolve(here, "../theme-manager.js")).href}"`)
     .replace('from "/hotkey.js"', `from "${pathToFileURL(resolve(here, "../hotkey.js")).href}"`)
     .replace('from "/theme-toggle.js"', `from "${pathToFileURL(resolve(here, "../theme-toggle.js")).href}"`);
-  return import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const module = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  // Standalone view fixtures supply the same snapshot contract as the app model.
+  return { ...module, renderIssueMonitorStatus: (doc, status) => module.renderIssueMonitorStatus(doc, {
+    status, counts: { queue: status.queue_len ?? 0, active: status.active_count ?? 0,
+      maxActive: status.max_active_agents ?? 1 },
+  }) };
 }

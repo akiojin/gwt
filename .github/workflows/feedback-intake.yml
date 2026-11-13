@@ -15,7 +15,19 @@ concurrency:
 
 jobs:
   identify:
-    if: github.repository == 'akiojin/gwt' && !github.event.issue.pull_request
+    # Coarse pre-runner filter; the script retains the exact UUID validation.
+    # Comment events must carry their own evidence, even on a raw feedback Issue.
+    if: >-
+      github.repository == 'akiojin/gwt' && !github.event.issue.pull_request &&
+      (
+        (github.event.comment &&
+          (contains(github.event.comment.body, '<!-- gwt-feedback:') ||
+           contains(github.event.changes.body.from, '<!-- gwt-feedback:'))) ||
+        (!github.event.comment &&
+          (contains(github.event.issue.body, '<!-- gwt-feedback:') ||
+           contains(github.event.issue.labels.*.name, 'gwt-feedback') ||
+           contains(github.event.changes.body.from, '<!-- gwt-feedback:')))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

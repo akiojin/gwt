@@ -224,7 +224,8 @@ the tray menu:
 
 Project browser tabs show agent RUN / BLOCK counts in their titles and a
 status favicon. BLOCK includes waiting, stopped, and error states; shell
-windows are excluded. An unread marker clears when the project tab is visible
+windows are excluded. The status strip and the Works heading show the same
+RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
@@ -307,8 +308,8 @@ integration and validation; the existing LAN bind example is not that setup.
 
 #### Offline Host credential administration (Unix, from source)
 
-`cargo build -p gwt --bin gwt-mobile-coordinator` builds the offline registry
-administrator. It provides no listener or phone connection. Use a trusted user
+`cargo build -p gwt --bin gwt-mobile-coordinator` builds the registry
+administrator. Without arguments it handles offline requests. Use a trusted user
 home outside repositories, with non-replaceable ancestors. Provision
 `$HOME/.gwt`, `$HOME/.gwt/mobile`, and `$HOME/.gwt/mobile/coordinator` as directories
 owned by your OS user with mode `0700`. Symlinks and macOS extended ACL entries
@@ -348,6 +349,56 @@ current records before deciding what to do; do not automatically repeat issuance
 For private-storage or clock errors, repair the reported prerequisite and retry
 without deleting the registry or its revocation records. `--help` lists the
 supported request fields and storage requirements.
+
+#### Coordinator HTTPS startup (Unix, from source)
+
+The same binary provides an explicit `serve` command for deployment checks.
+Every route currently returns **404**. A supplied `Origin` must be a single header
+matching the configured HTTPS origin exactly; otherwise the server returns **403**.
+Both responses carry a Content Security Policy restricting scripts and connections
+to the same origin and blocking frames, plus `nosniff`, `no-referrer`, and `no-store`.
+Registration, signaling, client assets, and phone connections are not available.
+
+Prepare the private directories above, initialize the registry, and place a
+matching PEM certificate chain and private key in private storage outside any
+repository. Each TLS file must be owned by your OS user, a single-link regular
+file with mode `0600`, in an owned `0700` directory, without symlinks or macOS
+extended ACL entries. Keep the home and all storage ancestors trusted and
+non-replaceable, and do not edit files in place while loading or serving.
+
+Write `$HOME/.gwt/mobile/coordinator/config.json` as an owned, single-link
+`0600` file. Replace the example TLS paths with your absolute private paths:
+
+```json
+{
+  "schema_version": 1,
+  "origin": "https://coordinator.example",
+  "bind": "127.0.0.1:8443",
+  "tls_certificate": "/private/coordinator/cert.pem",
+  "tls_private_key": "/private/coordinator/key.pem",
+  "limits": {
+    "registrations": 64,
+    "peers_per_host": 8,
+    "device_messages_per_second": 32,
+    "device_burst": 64,
+    "host_messages_per_second": 256,
+    "host_burst": 512
+  }
+}
+```
+
+Run `target/debug/gwt-mobile-coordinator serve`. Only this explicit command
+starts the listener; a configuration file alone does not enable it. A successful
+startup writes one JSON `listening` receipt with the bound address to stdout.
+Missing or invalid configuration, TLS, registry, or a busy registry fails with a
+fixed diagnostic and nonzero exit. Correct the cause and explicitly retry;
+startup does not initialize the registry or repair permissions.
+
+SIGINT or SIGTERM stops accepting connections and drains existing HTTP
+connections before releasing the registry lock and exiting. There is no forced
+drain deadline or total HTTP connection limit yet. Stop the server before
+offline administration. This is a deployment foundation, not a complete public
+mobile service; the normal desktop listener remains unchanged.
 
 #### Offline PC credential import and inspection (Unix, from source)
 
@@ -1064,9 +1115,20 @@ guarantee that the disk will not fill.
 The Workspace panel's `Clean Up Ready` count uses the same idea for whole
 worktrees: a merged or change-free Workspace stays cleanup-ready when its only
 uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,
-the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
+the agent's `tasks/todo.md` work log, the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
 `.claude/settings.local.json` that still carries no hand-written content.
 Anything else you have not committed keeps the Workspace out of the count.
+Other files under `tasks/` still count as local work. The branch is compared
+directly with the canonical base, so a deleted remote work branch does not
+prevent a merged Workspace from becoming ready.
+
+To clear accumulated worktrees, open `Issues`, expand `Other`, and use a
+Workspace's `Clean Up` action or `Clean Up Ready` for the eligible group.
+Existing issue worktrees remain listed there after their Work is closed;
+their Work history stays closed and they have no active owner.
+These actions show a confirmation before removal; whole worktrees are not
+automatically pruned. Live agents/processes and production changes keep a
+Workspace out of the ready group.
 
 ### Free provider resets
 
@@ -2132,10 +2194,24 @@ gwt shows an actionable hint.
 The PM window's **Tasks** view is a read-only preview of saved request tasks. It
 shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
-shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows completed and cancelled tasks. Parents show counts of their direct subtasks
+across all saved tasks, including those outside the preview: completed, cancelled,
+unfinished, and total. Cancellation is separate from completion; finishing all
+subtasks does not complete the parent automatically. The preview contains at most 50 tasks and
 shows the total and any requests awaiting classification. Long summaries are
-shortened; the saved tasks remain complete. A read failure retains the last
-confirmed list with a warning. Task editing, automatic intake, and history import
+shortened; the saved tasks remain complete. Expand **Purpose and completion
+criteria** on a task to see its purpose and the first five completion criteria.
+The preview shows the full criteria count and limits each item to 240 characters
+(with an ellipsis for shortened text). A read failure retains the last
+confirmed list with a warning. **View task details** in Tasks or Chat reads only
+the selected task: its original request, purpose, completion criteria, completion
+evidence, and recent recorded changes. This read-only preview shows at most 4,000
+characters of the original, 20 criteria, 10 evidence references, and 20 changes
+(newest first); other text is limited to 1,000 characters per item and actor IDs
+to 240. Counts and shortened text are explicit. Changes include only receipts
+with a saved change to that task, so this is not a complete operation history.
+**Reload details** refreshes it; changes or read failures retain confirmed detail
+with a stale warning. **Close details** returns focus to its task. Task editing, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 
@@ -2147,7 +2223,15 @@ several messages in one turn, only the latest stays open; the earlier ones fold
 into an **N earlier messages** line you can expand. Type a message in
 the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
 line). Your text stays in the box until delivery is confirmed, and the reason is
-shown if it could not be sent. Use **Execution log** to attach images.
+shown if it could not be sent. Select **Open terminal in Works** in Chat to open
+the same PM session's terminal. The PM entry brings you back to Chat with your
+unsent draft preserved. You can also open the terminal from the PM row in
+**Works**. Use **Execution log** to attach images.
+
+Chat also shows the same **Tasks** preview beside the conversation (above it in
+narrow windows). **Show in conversation** returns to a task's original message
+and keeps your unsent draft. If that message is outside the current conversation
+preview, the button is unavailable and the reason is shown.
 
 The PM window's **Reports** view shows explicit Markdown reports with their kind,
 time, and a **Copy** button. Q&A reports separate the question or instruction from
@@ -2165,8 +2249,14 @@ including after a restart or a switch between Claude and Codex. New critical
 failures and decisions appear immediately; ordinary updates share one digest.
 Resolution, recurrence, and meaningful changes produce a new report.
 Decision reports show two to four numbered choices with the recommendation and
-its reason. Use **Execution log** to reply with a choice number or your own answer;
-**Copy** includes the numbered choices and complete details.
+its reason. Choose an option directly in **Reports**, **Decide**, or Chat's
+**Decision reports** section. These views share sending, failure, and confirmed
+answer state for the current PM session. **Other: reply in chat** keeps your draft
+and opens the composer for a free-text answer. A confirmed send does not mark the
+decision resolved or save a human Q&A by itself. Chat's decision section comes
+from Reports, separately from the native conversation bubbles. **Execution log**
+also accepts choice numbers or your own answer; **Copy** includes the numbered
+choices and complete details.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected

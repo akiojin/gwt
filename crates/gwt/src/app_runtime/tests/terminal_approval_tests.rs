@@ -2003,7 +2003,7 @@ fn app_runtime_pane_send_marks_resolution_before_delayed_submit() {
     let fingerprint = pane.policy.approval.unwrap().active_fingerprint;
 
     let queued =
-        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r", None);
     assert!(queued.is_empty());
     // The owner marks the exact prompt before dispatching the physical worker;
     // its typed ACK proves that the delayed submit also completed successfully.
@@ -2058,7 +2058,7 @@ fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
 
     let terminal_events = runtime.terminal_input_events(&window_id, "1\r");
     let mut pane_events =
-        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r", None);
 
     assert!(terminal_events.is_empty());
     assert!(
@@ -2102,7 +2102,7 @@ fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
         .store(false, std::sync::atomic::Ordering::Release);
     assert!(runtime.terminal_input_events(&window_id, "1\r").is_empty());
     assert!(runtime
-        .pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r")
+        .pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r", None)
         .is_empty());
     let expired_events = drain_browser_owner_input(&mut runtime);
     let expired = owner_fixture_block_on(owner.probe(&before.id, before.incarnation)).unwrap();

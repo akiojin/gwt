@@ -9253,11 +9253,14 @@ fn publish_issue_monitor_payloads(
     monitor: &mut crate::IssueMonitorState,
     project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
 ) {
+    // Read the leases before the snapshot so a connected window does not
+    // publish one scan late as "Open the gwt window".
+    monitor.set_gui_connected(issue_monitor_gui_connected(hub));
+    monitor.set_gui_window_open(hub.gui_window_open());
     refresh_issue_monitor_agent_status(hub, monitor);
-    let gui_connected = issue_monitor_gui_connected(hub);
     publish_issue_monitor_daemon_payloads(
         hub,
-        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, gui_connected),
+        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, monitor.gui_connected),
         project_store,
     );
 }
@@ -9372,6 +9375,7 @@ async fn handle_connection(
 
     let mut line = String::new();
     let mut materializer_lease = None;
+    let mut gui_window_lease = None;
     // Binds any verification child to this connection. Dropped on every exit
     // from the loop below, which is what makes a dead or disconnected caller
     // reclaim its workload instead of orphaning it (Issue #4409 AC-2).
@@ -9412,9 +9416,12 @@ async fn handle_connection(
             }
             Ok(frame @ ClientFrame::Subscribe { .. })
             | Ok(frame @ ClientFrame::SubscribeMaterializer { .. }) => {
-                let (channels, materializer) = match frame {
-                    ClientFrame::Subscribe { channels } => (channels, false),
-                    ClientFrame::SubscribeMaterializer { channels } => (channels, true),
+                let (channels, materializer, gui_window) = match frame {
+                    ClientFrame::Subscribe {
+                        channels,
+                        gui_window,
+                    } => (channels, false, gui_window),
+                    ClientFrame::SubscribeMaterializer { channels } => (channels, true, true),
                     _ => unreachable!("subscribe variants matched above"),
                 };
                 if materializer
@@ -9503,6 +9510,9 @@ async fn handle_connection(
                 // Otherwise the worker could drain a lossy notice/review
                 // outbox into the gap between lease acquisition and channel
                 // subscription.
+                if (gui_window || materializer) && gui_window_lease.is_none() {
+                    gui_window_lease = Some(hub.acquire_gui_window());
+                }
                 if materializer && materializer_lease.is_none() {
                     materializer_lease = Some(hub.acquire_issue_monitor_materializer());
                 }
@@ -12747,6 +12757,33 @@ exit 0
         assert_eq!(status.active_count, fresh_status.active_launches.len());
     }
 
+    /// Issue #7087 AC-2: a live GUI window lease with no materializer lease
+    /// publishes the reconnect diagnostic and still withholds launch requests.
+    #[test]
+    fn open_gui_window_without_materializer_publishes_reconnect_diagnostic() {
+        let hub = BroadcastHub::new();
+        let project = TempDir::new().expect("project tempdir");
+        let project_store =
+            crate::runtime_daemon_events::ProjectStoreIdentity::from_project_root(project.path());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        let window = hub.acquire_gui_window();
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+        let now = "2026-11-12T00:00:00Z";
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status.stall_reason,
+            Some(crate::IssueMonitorStallReason::GuiDisconnected)
+        );
+        assert_eq!(
+            status.gui_action.as_deref(),
+            Some(crate::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION)
+        );
+        drop(window);
+    }
+
     /// SPEC #3431 FR-144 / AS-PM-SUBSCRIBE-OBSERVER-001: channel receivers are
     /// observations, not materializer authority. Neither one observer asking
     /// for both channels nor split observer connections may drain deliveries.
@@ -13009,6 +13046,7 @@ exit 0
                     crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
                     crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
                 ],
+                gui_window: false,
             })
             .await
             .expect("observer subscribes to both channels");
@@ -13026,6 +13064,7 @@ exit 0
         split_issue_observer
             .send_frame(&ClientFrame::Subscribe {
                 channels: vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+                gui_window: false,
             })
             .await
             .expect("issue observer subscribes");
@@ -13044,6 +13083,7 @@ exit 0
                 channels: vec![
                     crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
                 ],
+                gui_window: false,
             })
             .await
             .expect("overlay observer subscribes");
@@ -24208,6 +24248,9 @@ exit 1
 
     #[test]
     fn attempting_claim_and_settlement_resume_same_intent_after_project_readmission() {
+        // Issue #7125: the fence transaction asserts selection order, not how
+        // fast a loaded coverage runner commits prefs within 250ms.
+        let _prefs_budget = super::pin_prefs_hang_guard();
         let temp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let prefs_path = temp.path().join("issue-monitor.json");

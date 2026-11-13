@@ -480,10 +480,15 @@ pub struct PmRequestTaskCompleteRequest {
     pub evidence: Vec<String>,
 }
 
-/// Selected tracking data only; originals remain outside this browser adapter.
+/// Raw tracking reads retain their shape; selected previews omit provenance.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PmRequestTaskResult {
+    Detail {
+        revision: u64,
+        key: String,
+        detail: Box<crate::pm_current::PmTaskDetail>,
+    },
     Ready {
         revision: u64,
         task: Box<gwt_core::pm_request_tasks::Task>,
@@ -752,7 +757,10 @@ pub enum FrontendEvent {
     LoadPmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
         task_id: String,
+        #[serde(default)]
+        task_key: Option<String>,
         #[serde(default)]
         receipt_operation_id: Option<String>,
     },
@@ -782,6 +790,9 @@ pub enum FrontendEvent {
     PaneSendInput {
         session_id: String,
         text: String,
+        /// Origin-connection correlation only; never pane access authority.
+        #[serde(default)]
+        request_id: Option<u64>,
     },
     /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
     /// agent pane of the same project. Caller identity comes only from the
@@ -2261,10 +2272,14 @@ pub enum UpdateAutoApplyPhase {
 }
 
 /// Server-owned project attention summary. It describes runtime state, not Work completion.
+/// SPEC #5016 AC-HS1: the only source of the RUN / BLOCK / IDLE / ERROR counts. The tab
+/// title, the status strip and the Works heading render these values and never recount.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAgentAggregate {
     pub running_count: usize,
     pub block_count: usize,
+    #[serde(default)]
+    pub idle_count: usize,
     pub error_count: usize,
     pub unread: bool,
     pub revision: u64,
@@ -2578,6 +2593,8 @@ pub enum BackendEvent {
         ok: bool,
         window_id: Option<String>,
         error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
     },
     /// A refused window operation carries no child/PTY lifecycle evidence.
     WindowCommandError {
@@ -4641,8 +4658,18 @@ mod tests {
 
         assert!(matches!(
             event,
-            FrontendEvent::PaneSendInput { session_id, text }
+            FrontendEvent::PaneSendInput { session_id, text, request_id: None }
                 if session_id == "session-1" && text == "/goal all tests pass\r"
+        ));
+        let correlated: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "pane_send_input", "session_id": "session-1", "text": "hello\r", "request_id": 17
+        })).unwrap();
+        assert!(matches!(
+            correlated,
+            FrontendEvent::PaneSendInput {
+                request_id: Some(17),
+                ..
+            }
         ));
     }
 
@@ -4874,9 +4901,14 @@ mod tests {
             ok: false,
             window_id: None,
             error: Some("no pane bound to session session-1".to_string()),
+            request_id: None,
         };
 
         let value = serde_json::to_value(&event).expect("serialize pane_send_result");
+        assert!(
+            value.get("request_id").is_none(),
+            "legacy reply shape is unchanged"
+        );
         assert_eq!(
             value.get("kind").and_then(Value::as_str),
             Some("pane_send_result")
@@ -5465,11 +5497,13 @@ mod tests {
                     id: "u1".to_owned(),
                     role: PmConversationRole::User,
                     text: "# not a heading <b>raw</b>".to_owned(),
+                    source_key: Some("b".repeat(64)),
                 },
                 PmConversationMessage {
                     id: "a1".to_owned(),
                     role: PmConversationRole::Assistant,
                     text: "# Plan\n\n- one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n\n<script>alert(1)</script>".to_owned(),
+                    source_key: None,
                 },
             ],
             detail: None,
@@ -5482,8 +5516,10 @@ mod tests {
         .unwrap();
         let messages = value["snapshot"]["messages"].as_array().unwrap();
         assert_eq!(messages[0]["text"], snapshot.messages[0].text);
+        assert_eq!(messages[0]["source_key"], "b".repeat(64));
         assert!(messages[0].get("text_html").is_none());
         assert_eq!(messages[1]["text"], snapshot.messages[1].text);
+        assert!(messages[1].get("source_key").is_none());
         let html = messages[1]["text_html"].as_str().unwrap();
         for tag in ["<h1>", "<li>", "<table>", "<pre>"] {
             assert!(html.contains(tag), "{tag} missing from {html}");

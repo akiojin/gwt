@@ -890,6 +890,7 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: Some(75),
             text: "scoped-draft".into(),
         },
     );
@@ -899,7 +900,8 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
         .iter()
         .any(|event| event["kind"] == "pane_send_result"
             && event["ok"] == true
-            && event["window_id"] == pane.id));
+            && event["window_id"] == pane.id
+            && event["request_id"] == 75));
     assert!(pane.pane.lock().unwrap().has_unsent_user_input());
     assert!(!foreign.pane.lock().unwrap().has_unsent_user_input());
     control_close(&owner, &pane);
@@ -3200,6 +3202,7 @@ fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-dispatch".into(),
         },
     );
@@ -3362,6 +3365,7 @@ fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dis
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-reach-pty\r".into(),
         },
     );
@@ -3405,6 +3409,7 @@ fn bound_agent_pane_rotation_after_precheck_rejects_before_pty_write() {
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-reach-pty\r".into(),
         },
     );
@@ -3467,6 +3472,7 @@ fn bound_agent_pane_write_holds_epoch_lease_until_actual_pty_mutation_finishes()
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "linearized-input\r".into(),
         },
     );
@@ -3521,6 +3527,7 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-block-owner\r".into(),
         },
     );

@@ -14,12 +14,13 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
     details: '**All checks passed.**', refs: ['https://example.com/issues/3431'] },
   details_html: '<p><strong>All checks passed.</strong></p><ul><li><a href="https://example.com/issues/3431">https://example.com/issues/3431</a></li></ul>' });
 
-function fixture({ tasksDefault = false } = {}) {
+function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
   const visibility = [], copied = [], sent = [];
   let model;
-  const view = createPmChat({ document, root, sessionId: 'session',
+  const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
@@ -39,11 +40,129 @@ function fixture({ tasksDefault = false } = {}) {
   return { root, model, view, visibility, copied, sent, update };
 }
 
+test('Chat opens its bound PM terminal in Works without losing the draft', () => {
+  const opened = [];
+  let available = false;
+  const { root, model, view } = fixture({ onOpenTerminal: session => { opened.push(session); return available; } });
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep this unfinished request';
+  const button = [...root.querySelectorAll('.pm-chat__chat button')]
+    .find(node => node.textContent === 'Open terminal in Works');
+  assert.ok(button, 'Chat offers a direct Works terminal action');
+  button.click();
+  assert.deepEqual(opened, ['session']);
+  assert.match(root.querySelector('.pm-chat__terminal-status').textContent, /unavailable.*current PM session/i);
+  assert.equal(draft.value, 'Keep this unfinished request');
+  assert.equal(view.isChatVisible(), true);
+  available = true;
+  button.click();
+  assert.equal(root.querySelector('.pm-chat__terminal-status').hidden, true);
+  assert.equal(draft.value, 'Keep this unfinished request');
+  model.bindPmWindowState('pm', 'replacement');
+  view.showChat();
+  button.click();
+  assert.deepEqual(opened, ['session', 'session', 'replacement']);
+  view.dispose();
+  button.click();
+  assert.equal(opened.length, 3);
+});
+
 const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revision: 4, total: tasks.length,
   pending_intake, tasks });
 const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task ${key}`,
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
+
+const bounded = text => ({ text, total_chars: [...text].length });
+const selectedDetail = () => ({ original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
+  completion_conditions: [bounded('Verify <criterion>')], completion_condition_total: 2,
+  evidence: [bounded('proof:<literal>')], evidence_total: 2, history_total: 2,
+  history: [{ revision: 4, action: 'complete', actor_kind: 'pm', actor_id: bounded('PM reviewer'),
+    at: '2026-11-13T00:00:00Z', reason: bounded('Verified <outcome>') }] });
+const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+  result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
+
+test('selected Task reads correlate key, request and Session and retain confirmed stale data', () => {
+  const { model, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one'), trackedTask('two')]) });
+  assert.equal(typeof model.requestPmTaskDetail, 'function');
+  const first = model.requestPmTaskDetail('pm', 'one');
+  assert.deepEqual(first, { kind: 'load_pm_request_task', id: 'pm', request_id: first.request_id, task_key: 'one' });
+  const second = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent(detailReply(first));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'loading');
+  model.applyPmWindowReceiveEvent(detailReply(second, { key: 'one' }));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'loading');
+  model.applyPmWindowReceiveEvent(detailReply(second));
+  const confirmed = model.readPmWindowState().windows.pm.taskDetail.data;
+  assert.equal(confirmed.original.text, 'Exact <original>\nrequest');
+  update([], null, { request_tasks: { ...taskOverview([]), revision: 5 } });
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  const reload = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent(detailReply(reload));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'error', 'older revision cannot refresh detail');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+  const retry = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent({ ...detailReply(retry), result: { state: 'error', message: 'Restore saved data.' } });
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+  const pending = model.requestPmTaskDetail('pm', 'two');
+  model.bindPmWindowState('pm', 'replacement');
+  model.applyPmWindowReceiveEvent(detailReply(pending));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail, null);
+});
+
+test('Tasks and Chat expose literal bounded selected detail with reload, Close and retained draft', () => {
+  const { root, view, model, sent, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep my draft';
+  const button = [...root.querySelectorAll('.pm-chat__task button')].find(node => node.textContent === 'View task details');
+  assert.ok(button, 'selected details are reachable from the shared row');
+  button.click();
+  const request = sent.at(-1);
+  model.applyPmWindowReceiveEvent(detailReply(request));
+  const detail = root.querySelector('.pm-chat__task-detail');
+  assert.equal(detail.getAttribute('aria-label'), 'Selected task details');
+  assert.match(detail.textContent, /Exact <original>\nrequest/);
+  assert.match(detail.textContent, /Showing 1 of 2 completion criteria/);
+  assert.match(detail.textContent, /Showing 1 of 2 evidence references/);
+  assert.match(detail.textContent, /Showing 1 of 2 recorded changes/);
+  assert.match(detail.textContent, /Verified <outcome>/);
+  assert.equal(detail.querySelectorAll('original,criterion,literal,outcome').length, 0);
+  assert.equal(draft.value, 'Keep my draft');
+  const tasks = [...root.querySelectorAll('.pm-chat__toolbar button')].find(node => node.textContent === 'Tasks');
+  tasks.click();
+  assert.equal(detail.hidden, false);
+  const reload = [...detail.querySelectorAll('button')].find(node => node.textContent === 'Reload details');
+  reload.click();
+  model.markPmTaskDetailUnavailable('pm');
+  assert.match(detail.textContent, /last confirmed|stale/i);
+  assert.match(detail.textContent, /Exact <original>/);
+  [...detail.querySelectorAll('button')].find(node => node.textContent === 'Close details').click();
+  assert.equal(detail.hidden, true);
+  assert.equal(draft.value, 'Keep my draft');
+});
+
+test('selected detail reload cannot roll back a confirmed revision ahead of the overview', () => {
+  const { model, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const first = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(first, { revision: 6 }));
+  const confirmed = model.readPmWindowState().windows.pm.taskDetail.data;
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'error');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.revision, 6);
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+});
+
+test('selected Task detail styles use Operator tokens and preserve literal whitespace', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  assert.match(css, /\.pm-chat__task-detail\s*\{[^}]*var\(--color-border\)/);
+  assert.match(css, /\.pm-chat__task-detail-text\s*\{[^}]*white-space:\s*pre-wrap/);
+});
 
 test('Home opens Chat in one action and rebinds without showing the previous conversation (AC-3431-CHAT-1)', () => {
   const { root, model, view } = fixture({ tasksDefault: true });
@@ -109,6 +228,80 @@ test('Home is the default PM view; Tasks preserves the unfinished filter and sta
   view.showTasks();
   assert.equal(filter.getAttribute('aria-pressed'), 'true');
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('Tasks and Chat show direct-child progress from the full projection independently of filters', () => {
+  const { root, update, view } = fixture();
+  const parent = trackedTask('parent', { child_progress: { total: 55, completed: 2, cancelled: 1 } });
+  const publish = task => update([], null, { request_tasks: taskOverview([
+    task, trackedTask('child', { parent_key: 'parent' }), trackedTask('legacy'),
+  ]) });
+  publish(parent);
+  view.showTasks();
+  const row = root.querySelector('[data-task-key="parent"]');
+  const label = 'Direct subtasks: 2 completed · 1 cancelled · 52 unfinished (55 total)';
+  assert.match(row.textContent, /Pending/);
+  assert.ok(row.textContent.includes(label), 'counts include children outside the preview');
+  assert.equal(root.querySelector('[data-task-key="legacy"]').textContent.includes('Direct subtasks'), false);
+  [...root.querySelectorAll('button')].find(node => node.textContent === 'Include completed').click();
+  assert.ok(row.textContent.includes(label), 'filtering does not recalculate from visible rows');
+  view.showChat();
+  assert.ok(row.textContent.includes(label), 'Chat uses the same progress projection');
+  publish(parent);
+  assert.equal(root.querySelector('[data-task-key="parent"]'), row, 'unchanged polls retain the row');
+  publish({ ...parent, child_progress: { total: 55, completed: 55, cancelled: 0 } });
+  assert.ok(row.textContent.includes('Direct subtasks: 55 completed · 0 cancelled · 0 unfinished (55 total)'));
+  assert.match(row.textContent, /Pending/, 'finishing children does not complete their parent');
+});
+
+test('Task criteria disclose bounded literal previews and retain the same Task disclosure', () => {
+  const { root, model, update, view } = fixture();
+  const criteria = { purpose: 'Keep <img src=x> as literal purpose',
+    completion_conditions: ['Verify <script>literal</script>', 'Confirm the original outcome'], completion_condition_total: 7 };
+  let task = trackedTask('known', { source_key: 'source', criteria_preview: criteria });
+  const publish = () => update([report()], null, { request_tasks: taskOverview([task, trackedTask('legacy')]) });
+  publish();
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep my unfinished request';
+  const disclosure = () => root.querySelector('[data-task-key="known"] details.pm-chat__task-criteria');
+  const initial = disclosure();
+  assert.ok(initial, 'saved criteria use a native disclosure');
+  assert.equal(initial.querySelector('summary').textContent, 'Purpose and completion criteria');
+  assert.equal(initial.hasAttribute('open'), false);
+  assert.ok(initial.textContent.includes(criteria.purpose));
+  assert.deepEqual([...initial.querySelectorAll('ol li')].map(node => node.textContent), criteria.completion_conditions);
+  assert.match(initial.textContent, /Showing 2 of 7 completion criteria\. Text is limited to 240 characters per item\./);
+  assert.equal(initial.querySelector('img, script'), null, 'preview content stays literal');
+  const legacy = root.querySelector('[data-task-key="legacy"]');
+  assert.equal(legacy.querySelector('.pm-chat__task-criteria'), null);
+  assert.ok(legacy.querySelector('button'), 'an older summary remains usable');
+  initial.setAttribute('open', '');
+  publish();
+  assert.equal(disclosure(), initial, 'report-only polls retain the disclosure node');
+  task = { ...task, title: 'Updated title', criteria_preview: { ...criteria, purpose: 'Updated purpose' } };
+  publish();
+  assert.equal(disclosure().hasAttribute('open'), true, 'same-key Task updates retain the disclosure');
+  assert.ok(disclosure().textContent.includes('Updated purpose'));
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'original', role: 'user', text: 'Original request', source_key: 'source' }]));
+  assert.equal(disclosure().hasAttribute('open'), true, 'source-link arrival retains the disclosure');
+  update([], null, { request_tasks: { state: 'error', message: 'Unreadable task store' } });
+  assert.equal(disclosure().hasAttribute('open'), true, 'a stale confirmed preview stays expanded');
+  assert.match(root.querySelector('.pm-chat__tasks').textContent, /last confirmed list/);
+  assert.equal(draft.value, 'Keep my unfinished request');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(root.querySelectorAll('.pm-chat__task-criteria').length, 0, 'a new PM Session clears old criteria');
+});
+
+test('Task criteria disclosure uses Operator tokens and a visible keyboard focus ring', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  for (const selector of ['\\.pm-chat__task-criteria', '\\.pm-chat__task-criteria > summary']) {
+    const rule = css.match(new RegExp(`${selector}\\s*\\{([^}]+)\\}`));
+    assert.ok(rule, `${selector} has an Operator style rule`);
+    assert.match(rule[1], /var\(--/);
+    assert.doesNotMatch(rule[1], /#[0-9a-f]|rgba?\(/i);
+  }
+  assert.match(css, /\.pm-chat__task-criteria > summary:focus-visible\s*\{[^}]*outline:[^}]*var\(--color-focus-ring\)/);
 });
 
 test('A current-card failure keeps the last explanation but never hides newly saved reports (#6950)', () => {
@@ -752,6 +945,47 @@ test('Works full terminals own browser and native file drops and their progress'
 const conversation = (messages, extra = {}) => ({ kind: 'pm_conversation', id: 'pm', session_id: 'session',
   snapshot: { conversation_id: 'c', availability: 'ready', detail: null, messages, ...extra } });
 
+test('Chat shares parent/child Tasks and returns only to their exact human source', () => {
+  const { root, model, view, update } = fixture();
+  const tasks = [trackedTask('parent', { source_key: 'source' }),
+    trackedTask('child', { parent_key: 'parent', source_key: 'source' })];
+  update([], null, { request_tasks: taskOverview(tasks, 0) });
+  view.showChat();
+  const preview = root.querySelector('.pm-chat__tasks');
+  const links = () => [...preview.querySelectorAll('button')].filter(node => node.textContent === 'Show in conversation');
+  assert.equal(preview.hidden, false);
+  assert.equal(links().length, 2);
+  assert.ok(links().every(button => button.disabled), 'a missing conversation never supplies a guessed target');
+  assert.match(preview.textContent, /original message.*not.*current conversation preview/i);
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep this unfinished request';
+  model.applyPmWindowReceiveEvent(conversation([
+    { id: 'same-text', role: 'user', text: 'Same request', source_key: 'foreign' },
+    { id: 'original', role: 'user', text: 'Same request', source_key: 'source' },
+    { id: 'answer', role: 'assistant', text: 'Same request', source_key: 'source' },
+  ]));
+  assert.ok(links().every(button => !button.disabled), 'late conversation arrival updates both parent and child');
+  const original = root.querySelector('[data-message-id="original"]');
+  const navigation = [];
+  original.scrollIntoView = () => navigation.push('scroll');
+  original.focus = () => navigation.push('focus');
+  view.showTasks();
+  links()[1].click();
+  assert.equal(view.isChatVisible(), true);
+  assert.deepEqual(navigation, ['scroll', 'focus']);
+  assert.equal(original.getAttribute('tabindex'), '-1');
+  assert.equal(draft.value, 'Keep this unfinished request');
+  assert.equal(preview.querySelectorAll('.pm-chat__task').length, 2);
+  model.applyPmWindowReceiveEvent(conversation([
+    { id: 'answer', role: 'assistant', text: 'Same request', source_key: 'source' },
+  ], { conversation_id: 'replacement' }));
+  assert.ok(links().every(button => button.disabled), 'a rotated conversation and assistant source cannot match');
+  links()[0].click();
+  assert.deepEqual(navigation, ['scroll', 'focus'], 'a stale button cannot navigate to the old bubble');
+  model.bindPmWindowState('pm', 'replacement-session');
+  assert.equal(preview.querySelectorAll('.pm-chat__task').length, 0);
+});
+
 test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-CHAT-1)', () => {
   const { root, model, view, update } = fixture({ tasksDefault: true });
   update([report()]);
@@ -766,7 +1000,7 @@ test('Chat shows the PM conversation as user-right and PM-left bubbles (AC-3431-
   [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Chat').click();
   const chat = root.querySelector('.pm-chat__chat');
   assert.equal(chat.hidden, false);
-  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, false, 'Chat shares the existing Tasks preview');
   const bubbles = [...chat.querySelectorAll('.pm-chat__bubble')];
   assert.deepEqual(bubbles.map(bubble => [bubble.dataset.messageId, bubble.dataset.role]),
     [['u1', 'user'], ['a1', 'assistant'], ['u2', 'user']]);
@@ -860,23 +1094,23 @@ test('Chat composer sends text to the PM pane and keeps it until delivery is con
   assert.equal(key({ isComposing: true }).defaultPrevented, false, 'Enter during IME composition is not a send');
   assert.equal(sent.length, 0);
   assert.equal(key().defaultPrevented, true);
-  assert.deepEqual(sent, [{ kind: 'pane_send_input', session_id: 'session', text: 'Ship #3431?\nThen report.\r' }]);
+  assert.deepEqual(sent, [{ kind: 'pane_send_input', session_id: 'session', text: 'Ship #3431?\nThen report.\r', request_id: sent[0].request_id }]);
   assert.equal(draft.value, 'Ship #3431?\nThen report.', 'the draft is kept while delivery is pending');
   assert.equal(button.disabled, true);
   assert.equal(draft.readOnly, true, 'the pending draft cannot be edited and then lost on success');
   assert.match(status.textContent, /Sending/);
   key();
   assert.equal(sent.length, 1, 'a pending message is not sent twice');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'other', error: null });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'other', error: null, request_id: sent[0].request_id });
   assert.match(status.textContent, /Sending/, 'another window result is ignored');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'no live runtime for remote pane' });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'no live runtime for remote pane', request_id: sent[0].request_id });
   assert.equal(draft.value, 'Ship #3431?\nThen report.', 'a refused message stays in the draft');
   assert.equal(status.textContent, 'Not sent: no live runtime for remote pane. Your message is kept.');
   assert.equal(button.disabled, false);
   assert.equal(draft.readOnly, false);
   form.dispatchEvent(new root.ownerDocument.defaultView.Event('submit', { cancelable: true }));
   assert.equal(sent.length, 2);
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'pm', error: null });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: true, window_id: 'pm', error: null, request_id: sent[1].request_id });
   assert.equal(draft.value, '', 'a delivered message clears the draft');
   assert.equal(status.textContent, '');
   model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: 'pm', error: 'late' });
@@ -893,10 +1127,47 @@ test('Chat composer sends text to the PM pane and keeps it until delivery is con
   model.markPmChatSendUnavailable('pm');
   assert.match(status.textContent, /Not sent.*not connected/i);
   key();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: null, error: 'no pane bound to this project session' });
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', ok: false, window_id: null, error: 'no pane bound to this project session', request_id: sent.at(-1).request_id });
   assert.match(status.textContent, /Not sent.*no pane bound/, 'a session refusal reaches the only pending send');
   model.bindPmWindowState('pm', 'replacement');
   assert.equal(model.requestPmChatSend('pm', 'x').session_id, 'replacement');
+});
+
+test('Chat ignores unrelated and expired send results while preserving the current draft', () => {
+  const { root, model, view, sent } = fixture();
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  const submit = () => {
+    draft.value = 'Keep this message';
+    draft.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+    root.querySelector('.pm-chat__composer').dispatchEvent(new root.ownerDocument.defaultView.Event('submit', { cancelable: true }));
+    return sent.at(-1);
+  };
+  const first = submit();
+  const reply = (request_id, window_id = 'pm') => model.applyPmWindowReceiveEvent({
+    kind: 'pane_send_result', request_id, window_id, ok: true, error: null });
+  reply(undefined);
+  assert.equal(draft.value, 'Keep this message', 'a legacy Command Palette result cannot clear the Chat draft');
+  reply(first.request_id + 1);
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'pending');
+  model.expirePmChatSend('pm');
+  const retry = submit();
+  assert.notEqual(retry.request_id, first.request_id);
+  reply(first.request_id);
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'pending', 'an expired attempt cannot settle its retry');
+  reply(retry.request_id, 'other');
+  assert.equal(draft.value, 'Keep this message', 'the correlated reply still must match its window');
+  reply(retry.request_id);
+  assert.equal(draft.value, '', 'only the matching result clears the draft');
+  const oldSession = submit();
+  model.bindPmWindowState('pm', 'replacement');
+  const rebound = submit();
+  reply(oldSession.request_id);
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'pending', 'a former Session result cannot settle a new send');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', request_id: rebound.request_id,
+    window_id: null, ok: false, error: 'no pane bound to this project session' });
+  assert.equal(model.readPmWindowState().windows.pm.chatSend.status, 'failed');
+  assert.equal(draft.value, 'Keep this message', 'a matching early refusal preserves the draft');
 });
 
 test('Chat composer is Operator-styled and stays below the scrolling conversation', async () => {
@@ -905,7 +1176,338 @@ test('Chat composer is Operator-styled and stays below the scrolling conversatio
   assert.match(rule('pm-chat__chat'), /display:\s*flex/);
   assert.match(rule('pm-chat__conversation'), /overflow-y:\s*auto/);
   assert.match(rule('pm-chat__composer'), /border-top:\s*1px solid var\(--color-border\)/);
+  assert.match(rule('pm-chat__workspace'), /display:\s*flex/);
+  assert.match(css, /@container\s*\(max-width:\s*760px\)[\s\S]*?\.pm-chat--chat\s+\.pm-chat__workspace\s*\{[^}]*flex-direction:\s*column/);
   for (const name of ['pm-chat__composer', 'pm-chat__draft', 'pm-chat__composer-status', 'pm-chat__collapsed', 'pm-chat__collapsed-summary']) {
     assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(/i, name);
   }
+});
+
+const decisionReport = (id = 'decision-1') => ({ ...structuredReport(id), kind: 'decision',
+  structured: { summary: { result: 'The launch error task is waiting for a wording choice.',
+      impact: 'The task stays stopped until you choose.', owner: 'Noah',
+      decision: { question: 'Which recovery message should the agent use?',
+        recommendation: 'Use the shorter message', reason: 'It names the next step without internal terms.',
+        options: ['Use the shorter message', 'Keep the detailed message'] } },
+    details: '', refs: [] } });
+
+test('Chat and Reports share Decide answer pending, failure, retry and confirmed state', () => {
+  const { root, model, view, update, sent } = fixture();
+  const incoming = decisionReport();
+  incoming.structured.summary.decision.options = ['Use <short> wording', 'Keep the detailed message',
+    'Inspect the saved evidence', 'Wait for another report'];
+  update([incoming]);
+  view.showChat();
+  const region = root.querySelector('section[aria-label="Decision reports"]');
+  assert.ok(region, 'Chat labels its report-derived decisions separately from native messages');
+  assert.ok(region.closest('.pm-chat__conversation'), 'decisions stay in the Chat scrolling area');
+  const chatControls = () => region.querySelector('[data-decision-id="decision-1"] .pm-chat__decision-controls');
+  const reportControls = () => root.querySelector('[data-report-id="decision-1"] .pm-chat__decision-controls');
+  assert.ok(chatControls(), 'Chat exposes the saved decision controls');
+  assert.ok(reportControls(), 'Reports exposes the same decision controls');
+  for (const controls of [chatControls(), reportControls()]) {
+    assert.deepEqual([...controls.querySelectorAll('.pm-chat__decision-option')].map(button => button.textContent),
+      incoming.structured.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
+    assert.equal(controls.querySelector('short'), null, 'option labels are literal text');
+    assert.match(controls.textContent, /Recommended: Use the shorter message/);
+  }
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep my unfinished request';
+  const option = chatControls().querySelectorAll('.pm-chat__decision-option')[1];
+  update([incoming]);
+  assert.equal(chatControls().querySelectorAll('.pm-chat__decision-option')[1], option,
+    'unchanged polling keeps the focused choice node');
+  option.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].text,
+    'Answer to "Which recovery message should the agent use?": 2. Keep the detailed message\r');
+  for (const controls of [chatControls(), reportControls()]) {
+    assert.ok([...controls.querySelectorAll('button')].every(button => button.disabled));
+    assert.match(controls.querySelector('[role="status"]').textContent, /Sending/);
+  }
+  assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
+    'pending state keeps the keyboard-selected option node');
+  root.querySelector('.task-decisions__option').click();
+  assert.equal(sent.length, 1, 'switching surfaces cannot duplicate an in-flight answer');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[0].request_id,
+    ok: false, error: 'The PM pane refused the message.' });
+  for (const controls of [chatControls(), reportControls()]) {
+    assert.match(controls.querySelector('[role="alert"]').textContent, /The PM pane refused the message/);
+    assert.equal(controls.querySelector('.pm-chat__decision-option').disabled, false);
+  }
+  assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
+    'a failed answer leaves the original option available for keyboard retry');
+  assert.match(root.querySelector('.task-decisions__card').textContent, /The PM pane refused the message/);
+  const retry = reportControls().querySelector('.pm-chat__decision-option');
+  let focused = retry;
+  Object.defineProperty(root.ownerDocument, 'activeElement', { configurable: true, get: () => focused });
+  retry.click();
+  assert.equal(sent.length, 2, 'an explicit choice retries the failed answer');
+  assert.doesNotMatch(chatControls().textContent, /Answer sent/);
+  const confirmedStatus = reportControls().querySelector('[role="status"]');
+  confirmedStatus.focus = () => { focused = confirmedStatus; };
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[1].request_id,
+    ok: true });
+  for (const controls of [chatControls(), reportControls()]) {
+    assert.match(controls.querySelector('[role="status"]').textContent, /Answer sent: Use <short> wording/);
+    assert.equal(controls.querySelectorAll('button').length, 0);
+  }
+  assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent: Use <short> wording/);
+  assert.ok(focused === confirmedStatus, 'confirmation moves focus from the removed option to its status');
+  assert.equal(draft.value, 'Keep my unfinished request', 'a choice send never clears an unrelated composer draft');
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
+});
+
+test('Other opens Chat without sending or overwriting the draft', () => {
+  const { root, view, update, sent } = fixture();
+  update([decisionReport(), { ...report('untyped'), kind: 'decision', body: 'Approve the release note wording?' }]);
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'My own unfinished answer';
+  let focused = false;
+  draft.focus = () => { focused = true; };
+  const controls = root.querySelector('[data-report-id="decision-1"] .pm-chat__decision-controls');
+  assert.ok(controls, 'a structured Report offers a free reply');
+  const reply = [...controls.querySelectorAll('button')].find(button => button.textContent === 'Other: reply in chat');
+  assert.ok(reply);
+  reply.click();
+  assert.equal(view.isChatVisible(), true);
+  assert.equal(focused, true, 'the existing composer receives focus');
+  assert.equal(draft.value, 'My own unfinished answer');
+  assert.equal(sent.length, 0);
+  const untypedControls = root.querySelectorAll('[data-decision-id="untyped"] .pm-chat__decision-controls, [data-report-id="untyped"] .pm-chat__decision-controls');
+  assert.equal(untypedControls.length, 2);
+  for (const controls of untypedControls) {
+    assert.equal(controls.querySelectorAll('.pm-chat__decision-option').length, 0,
+      'a report without a typed packet never invents options');
+  }
+  root.querySelector('.pm-chat__composer').dispatchEvent(new root.ownerDocument.defaultView.Event('submit'));
+  assert.equal(sent[0].text, 'My own unfinished answer\r');
+  assert.equal(draft.value, 'My own unfinished answer', 'the free reply stays in its existing draft until confirmed');
+});
+
+test('Decision controls follow same-report updates and reset on PM rebind while native messages keep their order', () => {
+  const { root, model, update } = fixture();
+  const incoming = decisionReport();
+  update([incoming]);
+  const region = root.querySelector('section[aria-label="Decision reports"]');
+  assert.ok(region, 'the report-derived Chat region exists');
+  model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Native PM message' },
+    { id: 'u1', role: 'user', text: 'Native user message' }]));
+  assert.equal(root.querySelector('section[aria-label="Decision reports"]'), region,
+    'native conversation updates keep the decision section attached');
+  assert.deepEqual([...root.querySelectorAll('.pm-chat__bubble')].map(node => node.dataset.messageId), ['a1', 'u1']);
+  assert.equal(region.closest('.pm-chat__bubble'), null);
+  const changed = decisionReport();
+  changed.structured.summary.decision.options.push('Ask the reviewer');
+  update([changed]);
+  for (const controls of root.querySelectorAll('.pm-chat__decision-controls')) {
+    assert.equal(controls.querySelectorAll('.pm-chat__decision-option').length, 3);
+  }
+  root.querySelector('[data-report-id="decision-1"] .pm-chat__decision-option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(region.querySelector('[data-decision-id]'), null, 'a rebind removes the previous report decisions');
+  update([incoming]);
+  assert.doesNotMatch(region.textContent, /Answer sent/);
+  assert.equal(region.querySelectorAll('.pm-chat__decision-option').length, 2,
+    'the same report is actionable in its new Session');
+  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0);
+});
+
+test('Report decision controls use Operator layout tokens and wrap long option buttons', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  const rule = name => css.match(new RegExp(`\\.${name}\\s*\\{([^}]*)\\}`))?.[1] || '';
+  assert.match(rule('pm-chat__decision-controls'), /gap:\s*var\(--space-/);
+  assert.match(rule('pm-chat__decision-options'), /flex-wrap:\s*wrap/);
+  assert.match(rule('pm-chat__decision-option'), /white-space:\s*normal/);
+  assert.match(rule('pm-chat__decision-option'), /overflow-wrap:\s*anywhere/);
+  for (const name of ['pm-chat__decision-reports', 'pm-chat__decision-controls', 'pm-chat__decision-options', 'pm-chat__decision-option']) {
+    assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(|position:\s*(fixed|absolute)/i, name);
+  }
+});
+
+test('Decide lists only decision reports and answers through the chat reply path', () => {
+  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
+  update([report(), decisionReport(), { ...report('blocker-1'), kind: 'blocker' }]);
+  view.showDecisions();
+  const decide = root.querySelector('.task-decisions');
+  assert.ok(decide, 'a Decide surface exists');
+  assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
+  const cards = root.querySelectorAll('.task-decisions__card');
+  assert.equal(cards.length, 1, 'progress and blocker reports are not promoted to decisions');
+  assert.match(decide.textContent, /1 decision/);
+  const options = [...cards[0].querySelectorAll('.task-decisions__option')];
+  assert.equal(options.length, 2);
+  options[1].click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'pane_send_input');
+  assert.match(sent[0].text,
+    /^Answer to "Which recovery message should the agent use\?": 2\. Keep the detailed message/);
+  options[0].click();
+  assert.equal(sent.length, 1, 'no second answer is sent while the first is in flight');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const card = root.querySelector('.task-decisions__card');
+  assert.match(card.textContent, /Answer sent: Keep the detailed message/);
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
+    'a confirmed answer cannot be answered again');
+});
+
+test('Decide keeps a decision actionable and shows the error when the answer send fails', () => {
+  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
+  update([decisionReport()]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  assert.equal(sent.length, 1);
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: false,
+    error: 'The PM pane refused the message.' });
+  const card = root.querySelector('.task-decisions__card');
+  assert.match(card.textContent, /The PM pane refused the message\./);
+  const options = card.querySelectorAll('.task-decisions__option');
+  assert.equal(options.length, 2, 'the decision stays actionable after a failed send');
+  assert.equal(options[0].disabled, false);
+});
+
+test('Decide offers the chat reply path for a decision report without a typed packet', () => {
+  const { root, view, update, sent } = fixture({ tasksDefault: true });
+  update([{ ...report('plain-decision'), kind: 'decision', body: 'Approve the release note wording?' }]);
+  view.showDecisions();
+  const card = root.querySelector('.task-decisions__card');
+  assert.ok(card, 'an untyped decision report is still listed');
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
+    'no options are invented without a typed packet');
+  const reply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Reply in chat');
+  assert.ok(reply);
+  reply.click();
+  assert.equal(sent.length, 0, 'the reply path never sends by itself');
+  assert.equal(root.querySelector('.pm-chat__chat').hidden, false, 'the chat view opens for the reply');
+});
+
+test('Home Review decisions opens the Decide surface', async () => {
+  const { root, update } = fixture({ tasksDefault: true });
+  update([decisionReport()], null, { request_tasks: taskOverview([]) });
+  // Home renders through the store's frame batching; wait for the frame to
+  // land instead of assuming a synchronous render.
+  let review = null;
+  for (let attempt = 0; attempt < 80 && !review; attempt++) {
+    review = [...root.querySelectorAll('.task-home button')]
+      .find(button => /Review 1 decision/.test(button.textContent));
+    if (!review) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(review, 'Home offers Review decisions while a decision waits');
+  review.click();
+  assert.equal(root.querySelector('.task-decisions').parentElement.hidden, false);
+  assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
+});
+
+// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once,
+// so answering a decision in Decide cannot leave Home still asking for it.
+test('Home and Decide read one waiting-decision count after an answer', async () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const home = () => root.querySelector('.task-home')?.textContent ?? '';
+  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.match(home(), /1 decision needs your attention/, 'Home does not count the answered decision');
+  const actionable = [...root.querySelectorAll('.task-decisions__card')]
+    .filter(card => card.querySelector('.task-decisions__option'));
+  assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
+});
+
+test('Decide forgets session answers when the PM session changes', () => {
+  const { root, model, view, update } = fixture({ tasksDefault: true });
+  update([decisionReport()]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent/);
+  model.bindPmWindowState('pm', 'other-session');
+  update([decisionReport()]);
+  const card = root.querySelector('.task-decisions__card');
+  assert.doesNotMatch(card.textContent, /Answer sent/);
+  assert.equal(card.querySelectorAll('.task-decisions__option').length, 2,
+    'the same decision is actionable again in the new session');
+});
+
+// --- SPEC #7007 T-012/T-013: Progress and Log views in the PM pane ---
+
+async function waitForPm(find, label) {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const found = find();
+    if (found) return found;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+test('Progress view lists request tasks from the snapshot with snapshot totals', async () => {
+  const { root, view, update } = fixture();
+  update([], null, { request_tasks: { state: 'ready', revision: 4, total: 57, pending_intake: 3,
+    tasks: [trackedTask('one', { status: 'in_progress', assignee: 'Maya' })] } });
+  view.showProgress();
+  const card = await waitForPm(() => root.querySelector('.task-card'), 'a Progress task card');
+  assert.match(card.textContent, /Task one/);
+  assert.match(card.textContent, /Maya/);
+  const progress = root.querySelector('.task-progress');
+  assert.equal(progress.parentElement.hidden, false, 'the Progress surface is visible');
+  assert.match(progress.textContent, /57 tasks/);
+  const progressButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Progress');
+  assert.ok(progressButton, 'the toolbar carries a Progress view button');
+  assert.equal(progressButton.getAttribute('aria-pressed'), 'true');
+  view.dispose();
+});
+
+test('Home View progress opens the Progress surface', async () => {
+  const { root, view, update } = fixture({ tasksDefault: true });
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'in_progress' })]) });
+  const button = await waitForPm(() => [...root.querySelectorAll('.task-home button')]
+    .find(node => node.textContent === 'View progress →'), 'the Home View progress action');
+  button.click();
+  assert.equal(root.querySelector('.task-progress').parentElement.hidden, false);
+  assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
+  view.dispose();
+});
+
+test('Progress View task details switches to the Tasks view and requests the detail', async () => {
+  const { root, view, update, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'in_progress' })]) });
+  view.showProgress();
+  const details = await waitForPm(() => [...root.querySelectorAll('.task-card button')]
+    .find(node => node.textContent === 'View task details'), 'the Progress detail action');
+  details.click();
+  assert.equal(root.querySelector('.task-progress').parentElement.hidden, true);
+  assert.equal(sent.filter(request => request.kind === 'load_pm_request_task').length, 1,
+    'the detail read travels the existing task detail path');
+  view.dispose();
+});
+
+test('Log view renders fed notification groups and routes the drawer action', async () => {
+  const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
+  const root = document.getElementById('host');
+  const viewed = [];
+  const view = createPmChat({ document, root, sessionId: 'session',
+    onLogVisibility: () => {}, onViewNotification: entry => viewed.push(entry) });
+  view.receiveLog([{ id: 7, key: 'window-command:agent-1:input', category: 'action',
+    title: 'Input failed', message: 'Your input was not delivered to the window.',
+    details: 'owner identity mismatch', count: 2, latestAt: new Date().toISOString(),
+    resolved: false, activatable: false }]);
+  view.showTaskLog();
+  const card = await waitForPm(() => root.querySelector('.task-log__card'), 'a Log group card');
+  assert.match(card.textContent, /Input failed/);
+  assert.match(card.textContent, /Action required/);
+  assert.match(card.textContent, /Repeated 2 times/);
+  const logButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Log');
+  assert.ok(logButton, 'the toolbar carries a Log view button distinct from Execution log');
+  assert.equal(logButton.getAttribute('aria-pressed'), 'true');
+  const viewButton = [...card.querySelectorAll('button')]
+    .find(node => node.textContent === 'View in Notifications');
+  viewButton.click();
+  assert.equal(viewed.length, 1);
+  assert.equal(viewed[0].key, 'window-command:agent-1:input');
+  view.dispose();
 });

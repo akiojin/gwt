@@ -1,0 +1,7 @@
+{
+  "unexpected_issue_record_changes": [],
+  "changed_project_files": [
+    "crates/gwt/src/index_worker.rs"
+  ],
+  "expected_file": "crates/gwt/src/index_worker.rs"
+}
