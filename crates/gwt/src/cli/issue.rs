@@ -1081,6 +1081,8 @@ fn run_monitor_status<E: CliEnv>(
         output["launch_capacity"] = capacity;
     }
     output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
+    output["duplicate_worktree_sessions"] =
+        serde_json::json!(inventory.duplicate_worktree_sessions());
     output["session_observation"] = serde_json::json!({
         "complete": inventory.uncertainties.is_empty(),
         "uncertainties": inventory.uncertainties,
@@ -13878,6 +13880,14 @@ mod tests {
         status.as_object_mut().unwrap().remove("released");
         assert_eq!(status["scan_aborted"], false);
         status.as_object_mut().unwrap().remove("scan_aborted");
+        // Issue #5132: duplicate Issue-linked worktree Sessions are reported.
+        assert_eq!(
+            status
+                .as_object_mut()
+                .unwrap()
+                .remove("duplicate_worktree_sessions"),
+            Some(serde_json::json!([]))
+        );
         for pointer in ["/inbox", "/urgent_queue/entries"] {
             for row in status.pointer_mut(pointer).unwrap().as_array_mut().unwrap() {
                 assert_eq!(row["kind"], "issue");

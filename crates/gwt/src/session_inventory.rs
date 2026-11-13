@@ -1377,12 +1377,106 @@ impl SessionInventory {
         }
         groups.into_values().collect()
     }
+
+    /// Issue #5132: worktrees observed with two or more Issue-linked Sessions.
+    /// Sessions are oldest first, so the original holder leads each group.
+    /// Unlinked Sessions (PM, manual) are not implementation duplicates.
+    pub fn duplicate_worktree_sessions(&self) -> Vec<DuplicateWorktreeSessions> {
+        let mut groups: BTreeMap<&Path, Vec<&SessionObservation>> = BTreeMap::new();
+        for session in self.sessions.iter().filter(|s| s.issue_number.is_some()) {
+            groups
+                .entry(session.worktree_path.as_path())
+                .or_default()
+                .push(session);
+        }
+        groups
+            .into_iter()
+            .filter(|(_, sessions)| sessions.len() > 1)
+            .map(|(worktree_path, mut sessions)| {
+                sessions.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+                let issue_numbers: BTreeSet<u64> =
+                    sessions.iter().filter_map(|s| s.issue_number).collect();
+                DuplicateWorktreeSessions {
+                    worktree_path: worktree_path.to_path_buf(),
+                    issue_numbers: issue_numbers.into_iter().collect(),
+                    sessions: sessions
+                        .into_iter()
+                        .map(|s| DuplicateWorktreeSession {
+                            session_id: s.session_id.clone(),
+                            issue_number: s.issue_number,
+                            started_at: s.started_at.clone(),
+                            launch_origin: s.launch_origin,
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DuplicateWorktreeSessions {
+    pub worktree_path: PathBuf,
+    pub issue_numbers: Vec<u64>,
+    pub sessions: Vec<DuplicateWorktreeSession>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DuplicateWorktreeSession {
+    pub session_id: String,
+    pub issue_number: Option<u64>,
+    pub started_at: String,
+    pub launch_origin: SessionLaunchOrigin,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gwt_agent::{AgentId, AgentStatus};
+
+    /// Issue #5132: a second Issue-linked Session in one worktree is reported
+    /// directly, so the PM need not diff `worktree_sessions` every cycle.
+    #[test]
+    fn issue_5132_duplicate_worktree_sessions_lists_only_shared_issue_worktrees() {
+        let observation =
+            |id: &str, issue: Option<u64>, worktree: &str, started: &str| SessionObservation {
+                session_id: id.to_string(),
+                issue_number: issue,
+                execution_binding_missing: false,
+                agent_id: "codex".to_string(),
+                worktree_path: PathBuf::from(worktree),
+                worktree_exists: true,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: 0,
+                started_at: started.to_string(),
+                launch_origin: SessionLaunchOrigin::Launch,
+                launch_entrypoint: None,
+                restore_source_session_id: None,
+            };
+        let inventory = SessionInventory {
+            sessions: vec![
+                observation("late", Some(825), "/w/issue-825", "2026-10-06T09:38:34Z"),
+                observation("early", Some(825), "/w/issue-825", "2026-10-06T06:55:24Z"),
+                observation("single", Some(824), "/w/issue-824", "2026-10-06T06:00:00Z"),
+                observation("pm", None, "/w/root", "2026-10-06T05:00:00Z"),
+                observation("manual", None, "/w/root", "2026-10-06T05:10:00Z"),
+            ],
+            uncertainties: Vec::new(),
+        };
+        let duplicates = serde_json::to_value(inventory.duplicate_worktree_sessions()).unwrap();
+        assert_eq!(
+            duplicates,
+            serde_json::json!([{
+                "worktree_path": "/w/issue-825",
+                "issue_numbers": [825],
+                "sessions": [
+                    {"session_id": "early", "issue_number": 825, "started_at": "2026-10-06T06:55:24Z", "launch_origin": "launch"},
+                    {"session_id": "late", "issue_number": 825, "started_at": "2026-10-06T09:38:34Z", "launch_origin": "launch"},
+                ],
+            }])
+        );
+    }
 
     #[test]
     fn issue_5644_expired_inventory_is_uncertain_instead_of_empty() {
