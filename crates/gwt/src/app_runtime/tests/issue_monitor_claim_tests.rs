@@ -10366,6 +10366,7 @@ fn grok_live_native_initial_task_starts_first_response() {
                         .contents()
                         .contains("GWT_GROK_LIVE_RESPONSE")
                 {
+                    // test-hygiene: allow-wall-clock-deadline Measure the live 180-second startup contract after accepted native work and the response; elapsed time is not synchronization.
                     return Ok::<_, String>(started.elapsed());
                 }
                 tokio::task::yield_now().await;
