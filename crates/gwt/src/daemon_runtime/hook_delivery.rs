@@ -48,6 +48,21 @@ pub(super) fn deliver(
     event: &RuntimeHookEvent,
     mut send: impl FnMut(&RuntimeHookEvent) -> Result<(), String>,
 ) -> Result<(), String> {
+    let mut send = |notice: &RuntimeHookEvent| {
+        // Journal preparation uses the aggregate hook deadline. Start the
+        // missing-GUI transport cap only after pending state is published;
+        // entering a nested deadline still preserves any shorter aggregate.
+        // Scope it to this runtime-state invocation, not a later Forward replay.
+        let _live_deadline = (event.kind == RuntimeHookEventKind::RuntimeState
+            && event.source_event.as_deref() == Some("UserPromptSubmit"))
+        .then(|| {
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now()
+                    + super::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET.resolve(),
+            )
+        });
+        send(notice)
+    };
     // An inherited environment must never journal a different Session's hook.
     if event.gwt_session_id.as_deref() != runtime_path.file_stem().and_then(|id| id.to_str()) {
         return send(event);
@@ -76,7 +91,7 @@ fn deliver_journaled(
     // Serialize this Session only, including its bounded POST, so an older
     // attempt cannot clear or replay state after a newer hook has delivered it.
     super::profile_hook_live_phase(event, "hook-live/journal-lock", || {
-        fs2::FileExt::lock_exclusive(&lock)
+        gwt_core::operation_deadline::lock_exclusive(&lock)
     })?;
     let mut state: DeliveryState =
         super::profile_hook_live_phase(event, "hook-live/journal-read", || match fs::read(path) {
@@ -141,6 +156,8 @@ impl DeliveryState {
 mod tests {
     use super::*;
     use crate::daemon_runtime::RuntimeHookEventKind;
+    use gwt_core::operation_deadline::{self, ScopedOperationClock, ScopedOperationDeadline};
+    use std::time::{Duration, Instant};
 
     fn event(kind: RuntimeHookEventKind, status: Option<&str>) -> RuntimeHookEvent {
         RuntimeHookEvent {
@@ -148,6 +165,7 @@ mod tests {
             source_event: Some("PreToolUse".into()),
             gwt_session_id: Some("session-test".into()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("provider-session".into()),
             project_root: Some("/project".into()),
             branch: Some("work/test".into()),
@@ -156,6 +174,66 @@ mod tests {
             message: None,
             occurred_at: "2026-10-15T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn user_prompt_submit_transport_budget_begins_after_pending_publication() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime_path = home.path().join("runtime/123/session-test.json");
+        let journal = delivery_path(&runtime_path).unwrap();
+        let mut runtime = event(RuntimeHookEventKind::RuntimeState, Some("Running"));
+        runtime.source_event = Some("UserPromptSubmit".into());
+        let now = Instant::now();
+        let _clock = ScopedOperationClock::set(now);
+        let aggregate = now + Duration::from_secs(1);
+        let _aggregate = ScopedOperationDeadline::enter(aggregate);
+        let budget = &super::super::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET;
+        let live_budget = budget.default_value();
+        let _live = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(budget, live_budget);
+
+        deliver(&runtime_path, &runtime, |sent| {
+            let saved: DeliveryState =
+                serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(saved.pending.as_ref(), Some(sent));
+            assert_eq!(operation_deadline::current(), Some(now + live_budget));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(operation_deadline::current(), Some(aggregate));
+
+        // A shorter aggregate remainder is never replenished by the live cap.
+        let aggregate = now + live_budget / 2;
+        let _shorter_aggregate = ScopedOperationDeadline::enter(aggregate);
+        deliver(&runtime_path, &runtime, |_| {
+            assert_eq!(operation_deadline::current(), Some(aggregate));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn expired_aggregate_refuses_journal_delivery_without_losing_pending_state() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime_path = home.path().join("runtime/123/session-test.json");
+        let runtime = event(RuntimeHookEventKind::RuntimeState, Some("Running"));
+        assert!(deliver(&runtime_path, &runtime, |_| Err("offline".into())).is_err());
+        let journal = delivery_path(&runtime_path).unwrap();
+        let before = fs::read(&journal).unwrap();
+        let deadline = Instant::now();
+        let _clock = ScopedOperationClock::set(deadline);
+        let _aggregate = ScopedOperationDeadline::enter(deadline);
+        let mut attempts = 0;
+        let result = deliver(
+            &runtime_path,
+            &event(RuntimeHookEventKind::Forward, None),
+            |_| {
+                attempts += 1;
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().contains("deadline expired"));
+        assert_eq!(attempts, 0);
+        assert_eq!(fs::read(journal).unwrap(), before);
     }
 
     #[test]

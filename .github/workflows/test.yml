@@ -927,7 +927,7 @@ jobs:
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee "$RUNNER_TEMP/feedback-ownership.log"
-          grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
+          grep -Fq 'test result: ok. 40 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
       - name: Run native fleet orphan process handle contracts
         shell: bash
         run: |
@@ -1091,6 +1091,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: windows-workspace
         continue-on-error: true
+      - name: Build checkout binaries for Windows cold restart
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build -p gwt --bin gwt --bin gwtd
+        timeout-minutes: 30
       # Build once, then exercise both installed provider commands through
       # the same direct probe, Session persistence, and ConPTY launch routes.
       - name: Build the deterministic Windows agent launch E2E
@@ -1138,6 +1143,31 @@ jobs:
           done
           exit "$status"
         timeout-minutes: 60
+      - name: Install pinned Chromium for Windows cold restart
+        shell: bash
+        run: bash scripts/install-playwright-browsers.sh browsers
+        timeout-minutes: 20
+      - name: Verify Windows Works cold restart in both themes
+        shell: bash
+        env:
+          GWT_PLAYWRIGHT_EXACT_RELAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/windows-works-headed.json
+        run: |
+          bash scripts/run-visual-tests.sh exact-relaunch-live.spec.ts \
+            --grep 'Works shows the real PM and four implementation children after reload' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
+        timeout-minutes: 20
+      - name: Retain Windows cold restart evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-works-cold-restart
+          path: |
+            crates/gwt/playwright/test-results/
+            ${{ runner.temp }}/windows-works-headed.json*
+          if-no-files-found: warn
       - name: Check tests left real HOME project stores unchanged
         if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
         run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
@@ -1158,6 +1188,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
+      # SPEC #6943 AC-2: the committed React bundle must match a fresh,
+      # lockfile-pinned build of crates/gwt/web-react.
+      - name: Check React bundle freshness and run React tests
+        run: |
+          bash scripts/check-frontend-build.sh
+          node --test crates/gwt/web-react/__tests__/use-store-selector.test.mjs scripts/check-frontend-build.test.mjs
+          node --experimental-loader ./crates/gwt/web-react/__tests__/jsx-loader.mjs --test crates/gwt/web-react/__tests__/task-home.test.mjs
+        timeout-minutes: 5
       - name: Run frontend unit tests
         env:
           GWT_PULL_RENDER_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -1183,7 +1221,9 @@ jobs:
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
             bash scripts/run-visual-tests.sh
-        timeout-minutes: 15
+        # The full serial suite measured 14.7m before image/bootstrap overhead.
+        # Retain all cases and retries with finite execution headroom.
+        timeout-minutes: 25
 
   report-post-merge-failure:
     needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]

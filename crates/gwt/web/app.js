@@ -10,6 +10,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         initOperatorShell,
         applyTelemetryCounts,
         subscribeIssueMonitorStatus,
+        subscribeWorkAttentionSummary,
         applyProviderUsage,
         subscribeRuntimeHealth,
         subscribeProjectOwnerHealth,
@@ -80,7 +81,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
-      import { createProjectPageMetadata } from "/project-page-metadata.js";
+      import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
@@ -191,7 +192,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
-      subscribeProjectOwnerHealth(document, projectOwnerHealthModel);
+      subscribeProjectOwnerHealth(document, projectOwnerHealthModel, { send, createFocusTrap });
       const runtimeHealthModel = createUiStateStore(null);
       subscribeRuntimeHealth(document, runtimeHealthModel, {
         focusWindow: (windowId) => requestWindowFrame(windowId),
@@ -488,6 +489,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
       const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+      subscribeWorkAttentionSummary(document, activeWorkProjectionModel);
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -933,7 +935,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -2552,41 +2554,35 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         send({ kind: "open_pm_agent" });
       }
 
-      function recomputeOperatorTelemetry() {
+      // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
+      let projectAgentSummaryModel = null;
 
+      function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
+        // RUNNING / BLOCK / IDLE / ERROR come only from the server aggregate
+        // summary, the same value the tab title and the Works heading render.
+        const summary = projectAgentSummaryModel?.read() ?? projectAgentSummary();
         const counts = {
-          running: 0,
+          running: summary.running,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
           // them inside their owning surface — they live inside the Issue window.
           running_inline: 0,
-          idle: 0,
-          // FR-039 (anshin): waiting is its own LOUD telemetry state for
-          // agents waiting on the operator. It used to collapse into idle;
-          // now it drives the WAITING strip cell instead.
-          waiting: 0,
-          error: 0,
+          idle: summary.idle,
+          waiting: summary.block,
+          error: summary.error,
         };
-        // The same host census supplies Agents and Works membership. Catalog
-        // state enriches that proof; a historical Work never creates an agent.
+        // The host census only explains where running agents are placed.
         const activity = agentActivityModel.read();
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
-          if (!data || !presetSupportsWaitingStatus(data.preset)) { unknown = true; continue; }
-          const state = { starting: "running", running: "running", waiting: "waiting",
-            idle: "idle", ready: "idle", error: "error", interrupted: "error" }[catalog.runtimeStates[data.id] ?? data.status];
-          if (state) counts[state] += 1;
-          else unknown = true;
-          if (state === "running" && data.placement?.kind === "issue_preview") counts.running_inline += 1;
+          if (!data || !presetSupportsWaitingStatus(data.preset)) continue;
+          const status = catalog.runtimeStates[data.id] ?? data.status;
+          if ((status === "running" || status === "starting") && data.placement?.kind === "issue_preview") counts.running_inline += 1;
         }
-        if (unknown) {
-          for (const state of ["running", "waiting", "idle", "error"]) counts[state] = "—";
-          counts.running_inline = 0;
-        }
+        counts.running_inline = Math.min(counts.running_inline, counts.running);
         const activeWorks = activeWorkItemsFromProjection();
         if (activeWorks.length > 0) counts.branches = activeWorks.length;
         applyOperatorTelemetryCounts(counts);
@@ -4202,7 +4198,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4264,6 +4260,24 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onTaskDetail: key => {
+            const request = requestPmTaskDetail(windowData.id, key);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowData.id, request.request_id);
+            window.setTimeout(() => markPmTaskDetailUnavailable(windowData.id, request.request_id), 30000);
+          },
+          onOpenTerminal: sessionId => {
+            if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
+            openSurface("works");
+            return true;
+          },
+          onSend: text => {
+            const request = requestPmChatSend(windowData.id, text);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
+            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
+            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
+          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -4793,6 +4807,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       const { update: applyProjectAggregate, ...projectPageMetadata } = createProjectPageMetadata({ document, window, send });
+      projectAgentSummaryModel = projectPageMetadata.summary;
+      projectAgentSummaryModel.subscribe(summary => summary, () => recomputeOperatorTelemetry());
 
       const agentCompletionNotifier = createAgentCompletionNotifier({
         window,
@@ -5195,7 +5211,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             runtimeHealthModel.update(() => event.snapshot || {});
             break;
           case "pm_reports":
-          case "pm_conversation": {
+          case "pm_conversation":
+          case "pm_request_task":
+          case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }
@@ -5658,6 +5676,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
       worksSurface = createWorksSurface({
         systemSettingsModel,
+        summaryModel: projectAgentSummaryModel,
+        workProjectionModel: activeWorkProjectionModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,

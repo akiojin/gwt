@@ -121,8 +121,9 @@ pub(crate) struct AgentBridgeFailure {
     reason: AgentBridgeFailureReason,
     http_status: Option<reqwest::StatusCode>,
     error_code: Option<crate::AgentWorkspaceUpdateErrorCode>,
+    terminal_work_details: Option<Box<gwt_core::workspace_projection::WorkTerminalDiagnosis>>,
     bridge_code: Option<String>,
-    bridge_reason: Option<String>,
+    bridge_reason: Option<Box<str>>,
     recovery_operations: RecoveryOperationSet,
     diagnostic_reason: Option<String>,
     mismatched_fields: Box<[String]>,
@@ -136,6 +137,7 @@ impl AgentBridgeFailure {
             reason,
             http_status: None,
             error_code: None,
+            terminal_work_details: None,
             bridge_code: None,
             bridge_reason: None,
             recovery_operations: RecoveryOperationSet::default(),
@@ -154,13 +156,16 @@ impl AgentBridgeFailure {
         message: &'static str,
     ) -> Self {
         let bridge_code = response.and_then(|response| safe_bridge_token(&response.code));
-        let bridge_reason = response.and_then(|response| safe_bridge_token(&response.reason));
+        let bridge_reason = response
+            .and_then(|response| safe_bridge_token(&response.reason))
+            .map(String::into_boxed_str);
         Self {
             reason,
             http_status: Some(status),
             error_code: bridge_code
                 .as_deref()
                 .and_then(parse_workspace_update_error_code),
+            terminal_work_details: response.and_then(|response| response.details.clone()),
             bridge_code,
             bridge_reason,
             recovery_operations: RecoveryOperationSet::from_response(
@@ -192,6 +197,31 @@ impl AgentBridgeFailure {
             && self.error_code
                 == Some(crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired)
             && self.bridge_reason.as_deref() == Some("workspace_ensure_required")
+    }
+
+    pub(crate) fn error_code(&self) -> Option<crate::AgentWorkspaceUpdateErrorCode> {
+        self.error_code
+    }
+
+    pub(crate) fn terminal_work_details(
+        &self,
+    ) -> Option<&gwt_core::workspace_projection::WorkTerminalDiagnosis> {
+        self.terminal_work_details.as_deref()
+    }
+
+    pub(crate) fn structured_workspace_error(&self) -> Option<crate::AgentWorkspaceUpdateError> {
+        Some(crate::AgentWorkspaceUpdateError {
+            code: self.error_code()?,
+            message: self.to_string(),
+            diagnostic_reason: self.diagnostic_reason.clone(),
+            mismatched_fields: self.mismatched_fields.to_vec(),
+            recovery_operations: self
+                .recovery_operations
+                .names()
+                .map(str::to_string)
+                .collect(),
+            details: self.terminal_work_details().cloned().map(Box::new),
+        })
     }
 
     pub(crate) fn is_missing_route_rejection(&self) -> bool {
@@ -396,6 +426,10 @@ fn parse_workspace_update_error_code(code: &str) -> Option<crate::AgentWorkspace
         "provenance_mismatch" => Some(crate::AgentWorkspaceUpdateErrorCode::ProvenanceMismatch),
         "identity_conflict" => Some(crate::AgentWorkspaceUpdateErrorCode::IdentityConflict),
         "transaction_conflict" => Some(crate::AgentWorkspaceUpdateErrorCode::TransactionConflict),
+        "primary_actor_required" => {
+            Some(crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired)
+        }
+        "terminal_work" => Some(crate::AgentWorkspaceUpdateErrorCode::TerminalWork),
         "internal" => Some(crate::AgentWorkspaceUpdateErrorCode::Internal),
         _ => None,
     }
@@ -403,6 +437,8 @@ fn parse_workspace_update_error_code(code: &str) -> Option<crate::AgentWorkspace
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceBridgeDiagnosticResponse {
+    #[serde(default)]
+    details: Option<Box<gwt_core::workspace_projection::WorkTerminalDiagnosis>>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -459,6 +495,9 @@ pub struct RuntimeHookEvent {
     /// this field before broadcasting a runtime event to browser clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_readiness_nonce: Option<String>,
+    /// Internal native turn identity. Public browser events omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_prompt_id: Option<String>,
     #[serde(default)]
     pub agent_session_id: Option<String>,
     #[serde(default)]
@@ -593,6 +632,12 @@ impl HookForwardTarget {
         url.set_path("/internal/workspace-update");
         url.set_query(None);
         url.set_fragment(None);
+        Ok(url)
+    }
+
+    pub fn workspace_reopen_url(&self) -> Result<Url, String> {
+        let mut url = self.workspace_update_url()?;
+        url.set_path("/internal/workspace-reopen");
         Ok(url)
     }
 
@@ -1212,6 +1257,78 @@ pub(crate) fn send_blocked_build_abort_terminalization_via_agent_bridge(
     )
 }
 
+fn require_primary_bridge_claim(claim: Option<&str>) -> Result<(), AgentBridgeFailure> {
+    if claim.is_some_and(|claim| !claim.trim().is_empty()) {
+        return Ok(());
+    }
+    let mut failure = AgentBridgeFailure::new(
+        AgentBridgeFailureReason::AuthorityMismatch,
+        "a primary actor claim is required before contacting the Host",
+    );
+    failure.error_code = Some(crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired);
+    failure.bridge_code = Some("primary_actor_required".to_string());
+    Err(failure)
+}
+
+pub(crate) fn send_workspace_reopen_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceReopenRequest,
+) -> Result<crate::AgentWorkspaceReopenReceipt, AgentBridgeFailure> {
+    require_primary_bridge_claim(request.primary_provider_session_id.as_deref())?;
+    let url = target.workspace_reopen_url().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host workspace reopen target is invalid",
+        )
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "failed to build the Host workspace reopen client",
+            )
+        })?;
+    let response = client.post(url).bearer_auth(&target.token).json(request).send()
+        .map_err(|_| AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host workspace reopen is unavailable; no local fallback was attempted and its outcome may be unknown",
+        ))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host workspace reopen rejection could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        return Err(AgentBridgeFailure::rejected(
+            AgentBridgeFailureReason::OperationRejected,
+            status,
+            diagnostic.as_ref(),
+            false,
+            "Host rejected workspace reopen; no local fallback was attempted",
+        ));
+    }
+    let receipt = response.json::<crate::AgentWorkspaceReopenReceipt>().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host workspace reopen returned an invalid success response; no local fallback was attempted",
+        )
+    })?;
+    if receipt.schema_version != crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION
+        || receipt.work_id.trim().is_empty()
+        || receipt.reopen_event_id.trim().is_empty()
+    {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host workspace reopen returned invalid receipt evidence; no local fallback was attempted",
+        ));
+    }
+    Ok(receipt)
+}
+
 fn send_terminalization_via_agent_bridge(
     target: &HookForwardTarget,
     url: Url,
@@ -1420,14 +1537,6 @@ fn emit_runtime_state_notice(event: &str, input: &str, session: Option<Session>)
         Duration::ZERO,
         "ok",
     );
-    // Hook-live is a best-effort notification after the authoritative runtime
-    // state write. A missing GUI must not consume half of the aggregate
-    // UserPromptSubmit budget before the Board and obligation handlers run.
-    let _live_deadline = (event == "UserPromptSubmit").then(|| {
-        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() + USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET.resolve(),
-        )
-    });
     let live_started = Instant::now();
     let notice = RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
@@ -1586,6 +1695,10 @@ impl RuntimeHookEvent {
             )
             .ok(),
             agent_session_id,
+            native_prompt_id: hook_event
+                .as_ref()
+                .and_then(RawHookEvent::native_prompt_id)
+                .map(str::to_string),
             project_root,
             branch,
             status,
@@ -2194,6 +2307,7 @@ mod tests {
             source_event: Some(source_event.to_string()),
             gwt_session_id: Some("gwt-session-test".to_string()),
             continuation_readiness_nonce: readiness_nonce.map(str::to_string),
+            native_prompt_id: None,
             agent_session_id: Some("agent-session-test".to_string()),
             project_root: Some("/tmp/project".to_string()),
             branch: Some("work/issue-3480".to_string()),
@@ -2201,6 +2315,45 @@ mod tests {
             tool_name: None,
             message: None,
             occurred_at: "2026-08-15T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn issue_3706_native_turn_stop_keeps_its_prompt_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = Session::new(
+            temp.path(),
+            "work/issue-3706",
+            gwt_agent::AgentId::GrokBuild,
+        );
+        for (source, input, expected) in [
+            (
+                "Stop",
+                r#"{"sessionId":"grok-session","promptId":"grok-turn"}"#,
+                Some("grok-turn"),
+            ),
+            ("Stop", r#"{"sessionId":"grok-session"}"#, None),
+            (
+                "Stop",
+                r#"{"sessionId":"grok-session","promptId":"  "}"#,
+                None,
+            ),
+            (
+                "PreToolUse",
+                r#"{"sessionId":"grok-session","toolName":"read_file"}"#,
+                None,
+            ),
+        ] {
+            let event = RuntimeHookEvent::from_hook(
+                RuntimeHookEventKind::RuntimeState,
+                Some(source),
+                Some("Idle".into()),
+                None,
+                Some(session.clone()),
+                RawHookEvent::read_from_str(input).unwrap(),
+            );
+            let encoded = serde_json::to_value(event).unwrap();
+            assert_eq!(encoded["native_prompt_id"].as_str(), expected, "{source}");
         }
     }
 
@@ -2550,10 +2703,36 @@ mod tests {
             url: std::env::var("GWT_MEASURE_HOOK_URL").expect("measurement receiver"),
             token: "measurement-only".into(),
         };
-        let event = hook_live_test_event("PreToolUse", None);
+        let mode = std::env::var("GWT_MEASURE_HOOK_MODE").unwrap_or_default();
+        let event = hook_live_test_event(
+            if mode == "journal" {
+                "UserPromptSubmit"
+            } else {
+                "PreToolUse"
+            },
+            None,
+        );
         crate::cli::hook::diagnostics::begin_event();
         let started = Instant::now();
-        let result = if std::env::var("GWT_MEASURE_HOOK_MODE").as_deref() == Ok("plain") {
+        let result = if mode == "journal" {
+            let home = tempfile::tempdir().unwrap();
+            let runtime_path = home.path().join("runtime/123/gwt-session-test.json");
+            let _aggregate = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                // test-hygiene: allow-wall-clock-deadline Measure the real unchanged UserPromptSubmit aggregate deadline.
+                Instant::now() + Duration::from_millis(200),
+            );
+            hook_delivery::deliver(&runtime_path, &event, |event| {
+                emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+            })
+            .and_then(|()| {
+                let health = hook_live_delivery_health(&runtime_path).unwrap();
+                if health.pending_runtime_state || health.last_success_at.is_none() {
+                    Err("journal did not record the transport ACK".into())
+                } else {
+                    Ok(())
+                }
+            })
+        } else if mode == "plain" {
             bounded_plain_http_hook_live_attempt(
                 &event,
                 &target,
@@ -2565,7 +2744,7 @@ mod tests {
         };
         let elapsed = started.elapsed();
         crate::cli::hook::diagnostics::record_event_total(
-            "PreToolUse",
+            event.source_event.as_deref().unwrap(),
             elapsed,
             if result.is_ok() { "ok" } else { "error" },
             crate::cli::hook::diagnostics::event_metrics(0),
@@ -2901,6 +3080,7 @@ mod tests {
             ),
         ]);
         let request = crate::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: "session-workspace-busy".into(),
             observation: crate::AgentRuntimeObservation {
@@ -3309,6 +3489,7 @@ mod tests {
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
         let _path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &path);
         let request = crate::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: session.id.clone(),
             observation: crate::AgentRuntimeObservation {
@@ -3372,6 +3553,7 @@ mod tests {
         let _url = ScopedEnvVar::unset(GWT_HOOK_FORWARD_URL_ENV);
         let _token = ScopedEnvVar::unset(GWT_HOOK_FORWARD_TOKEN_ENV);
         let request = crate::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: "session-reason-codes".to_string(),
             observation: crate::AgentRuntimeObservation {
@@ -3609,6 +3791,212 @@ mod tests {
             AgentBridgeFailureReason::OperationRejected
         );
         permission_server.receive();
+    }
+
+    #[test]
+    fn terminal_authority_bridge_rejection_keeps_typed_code() {
+        for code in ["terminal_work", "primary_actor_required"] {
+            let diagnostic: WorkspaceBridgeDiagnosticResponse =
+                serde_json::from_value(serde_json::json!({
+                    "code": code,
+                    "reason": code,
+                    "diagnostic_reason": "host_binding_stale",
+                    "mismatched_fields": ["capability_generation", "private-field-sentinel"],
+                    "recovery_operations": ["workspace.reopen", "private-operation-sentinel"],
+                    "message": "private-message-sentinel"
+                }))
+                .expect("parse authority diagnostic");
+            let failure = AgentBridgeFailure::rejected(
+                AgentBridgeFailureReason::OperationRejected,
+                StatusCode::CONFLICT,
+                Some(&diagnostic),
+                false,
+                "Host rejected the mutation",
+            );
+            assert!(
+                failure.error_code.is_some(),
+                "authority rejection must retain typed code {code}"
+            );
+            assert!(!failure.is_exact_workspace_ensure_required());
+            let structured = failure
+                .structured_workspace_error()
+                .expect("typed workspace error");
+            assert_eq!(structured.code, failure.error_code().unwrap());
+            assert_eq!(
+                structured.diagnostic_reason.as_deref(),
+                Some("host_binding_stale")
+            );
+            assert_eq!(structured.mismatched_fields, ["capability_generation"]);
+            assert_eq!(structured.recovery_operations, ["workspace.reopen"]);
+            assert!(!serde_json::to_string(&structured)
+                .unwrap()
+                .contains("sentinel"));
+        }
+    }
+
+    #[test]
+    fn terminal_work_bridge_retains_recovery_details_over_http() {
+        let details = serde_json::json!({
+            "work_id": "work-terminal", "event_id": "done-event",
+            "event_time": "2026-09-11T00:00:00Z",
+            "source_operation": "workspace.update", "authority_class": null,
+            "execution_generation": null, "terminal_kind": "done",
+            "recoverable": true, "recovery_operation": "workspace.reopen"
+        });
+        let server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "terminal_work", "reason": "terminal_work", "details": details
+            }),
+        );
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "secret".into(),
+        };
+        let request = crate::AgentWorkspaceUpdateRequest {
+            schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+            claimed_session_id: "session-terminal".into(),
+            primary_provider_session_id: None,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/repo".into(),
+                git_toplevel: "/repo".into(),
+                repo_hash: "repo".into(),
+                branch: "work/terminal".into(),
+            },
+            intent: crate::AgentWorkspaceUpdateIntent::default(),
+        };
+        let error = send_workspace_update_via_agent_bridge_detailed(&target, &request)
+            .expect_err("terminal Work must be a typed rejection");
+        assert_eq!(
+            error.error_code(),
+            Some(crate::AgentWorkspaceUpdateErrorCode::TerminalWork)
+        );
+        assert_eq!(
+            serde_json::to_value(
+                error
+                    .structured_workspace_error()
+                    .unwrap()
+                    .details
+                    .expect("recovery details")
+            )
+            .unwrap(),
+            details
+        );
+        assert!(!error.is_exact_workspace_ensure_required());
+        server.receive();
+    }
+
+    #[test]
+    fn legacy_done_update_without_native_claim_reaches_host() {
+        // Provider classification belongs to the caller and authenticated Host.
+        // Absence of Codex evidence is not proof of a delegated Codex actor.
+        let server = BindingProbeServer::start(
+            StatusCode::OK,
+            serde_json::json!({
+                "schema_version": crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                "work_id": "legacy-work", "journal_entry_id": "done-event"
+            }),
+        );
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "secret".into(),
+        };
+        let request = crate::AgentWorkspaceUpdateRequest {
+            schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+            claimed_session_id: "legacy-session".into(),
+            primary_provider_session_id: None,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/repo".into(),
+                git_toplevel: "/repo".into(),
+                repo_hash: "repo".into(),
+                branch: "work/legacy".into(),
+            },
+            intent: crate::AgentWorkspaceUpdateIntent {
+                status_category: Some(
+                    gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+                ),
+                ..Default::default()
+            },
+        };
+        let receipt = send_workspace_update_via_agent_bridge_detailed(&target, &request)
+            .expect("legacy or unknown provider must reach authenticated Host validation");
+        assert_eq!(receipt.journal_entry_id, "done-event");
+        let (_, body) = server.receive();
+        assert!(body.get("primary_provider_session_id").is_none());
+        assert_eq!(body["intent"]["status_category"], "done");
+    }
+
+    #[test]
+    fn workspace_reopen_missing_route_and_missing_primary_fail_closed() {
+        let server = BindingProbeServer::start(StatusCode::OK, serde_json::json!({}));
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "secret".into(),
+        };
+        let mut request = crate::AgentWorkspaceReopenRequest {
+            schema_version: crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+            claimed_session_id: "session-reopen".into(),
+            primary_provider_session_id: None,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/repo".into(),
+                git_toplevel: "/repo".into(),
+                repo_hash: "repo".into(),
+                branch: "work/reopen".into(),
+            },
+            reason: "continue unfinished work".into(),
+            observed_done_event_id: "done-event".into(),
+        };
+        let missing_claim = send_workspace_reopen_via_agent_bridge(&target, &request)
+            .expect_err("missing claim must be rejected before HTTP");
+        assert_eq!(
+            missing_claim.error_code(),
+            Some(crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired)
+        );
+        assert!(missing_claim.http_status.is_none());
+        request.primary_provider_session_id = Some("private-primary-id".into());
+        let missing_route = send_workspace_reopen_via_agent_bridge(&target, &request)
+            .expect_err("older Host without reopen must fail closed");
+        assert!(missing_route.is_missing_route_rejection());
+        assert!(!missing_route.is_exact_workspace_ensure_required());
+        assert!(!format!("{missing_route:?}").contains("private-primary-id"));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "must not fall back to another mutation route"
+        );
+    }
+
+    #[test]
+    fn legacy_terminal_request_schema_rejects_additive_primary_claim() {
+        // Preserve the pre-#3725 Host decoder: a new client must never have its
+        // primary claim silently ignored by an older Host.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyTerminalRequest {
+            schema_version: u32,
+            claimed_session_id: String,
+            observation: crate::AgentRuntimeObservation,
+            terminal_kind: crate::AgentWorkTerminalKind,
+        }
+        let mut payload = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "session-legacy",
+            "observation": {
+                "cwd": "/repo", "git_toplevel": "/repo",
+                "repo_hash": "repo-hash", "branch": "work/legacy"
+            },
+            "terminal_kind": "done"
+        });
+        let legacy: LegacyTerminalRequest =
+            serde_json::from_value(payload.clone()).expect("legacy request remains valid");
+        assert_eq!(legacy.schema_version, 1);
+        assert_eq!(legacy.claimed_session_id, "session-legacy");
+        assert_eq!(legacy.observation.branch, "work/legacy");
+        assert_eq!(legacy.terminal_kind, crate::AgentWorkTerminalKind::Done);
+        payload["primary_provider_session_id"] = serde_json::json!("private-primary-id");
+        let error = serde_json::from_value::<LegacyTerminalRequest>(payload)
+            .expect_err("legacy Host must fail closed on a primary claim");
+        assert!(error.to_string().contains("unknown field"));
+        assert!(!error.to_string().contains("private-primary-id"));
     }
 
     #[test]

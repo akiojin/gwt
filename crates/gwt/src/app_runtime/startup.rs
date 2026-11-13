@@ -960,6 +960,26 @@ impl AppRuntime {
         self.spawn_startup_generation_reaper(&startup_worktrees);
         spawn_startup_orphan_intake_prune(orphan_intake_prune_plans);
 
+        gwt::perf::startup::set_restored_window_count(
+            self.pending_startup_auto_resume_sessions.len()
+                + self
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.workspace.persisted().windows.iter())
+                    .filter(|window| should_auto_start_restored_window(window))
+                    .count(),
+        );
+        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
+        // pane once the frontend surfaces are ready (the same startup deferral
+        // rule that keeps Agent PTYs behind surface initialization).
+        // Projects opened later get it from `open_project_path_events`.
+        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        let _ = self.persist();
+    }
+
+    /// Start prepared process restores after the GUI owns its daemon subscribers.
+    /// Continue resumes here without waiting for a browser surface-ready event.
+    pub(crate) fn resume_bootstrapped_runtimes(&mut self) {
         let windows = self
             .tabs
             .iter()
@@ -973,13 +993,6 @@ impl AppRuntime {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        gwt::perf::startup::set_restored_window_count(
-            self.pending_startup_auto_resume_sessions.len()
-                + windows
-                    .iter()
-                    .filter(|(_, window)| should_auto_start_restored_window(window))
-                    .count(),
-        );
         for (tab_id, window) in windows {
             if !should_auto_start_restored_window(&window) {
                 continue;
@@ -1000,12 +1013,6 @@ impl AppRuntime {
                 }
             }
         }
-        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
-        // pane once the frontend surfaces are ready (the same startup deferral
-        // rule that keeps Agent PTYs behind surface initialization).
-        // Projects opened later get it from `open_project_path_events`.
-        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
-        let _ = self.persist();
         if self.tabs.iter().any(|tab| {
             gwt_core::project_execution_policy::load(&tab.project_root)
                 .ok()
@@ -2488,7 +2495,13 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
-        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id) {
+        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%session_id, error_kind = ?error.kind(), %error,
+                "excluding restored Session with unreadable launch recovery receipt");
+                true
+            })
+        {
             return None;
         }
         gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)

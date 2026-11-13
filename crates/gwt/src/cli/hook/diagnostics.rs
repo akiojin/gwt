@@ -166,6 +166,7 @@ fn normalized_handler(value: &str) -> &'static str {
         "runtime-state/session-metadata" => "runtime-state/session-metadata",
         "runtime-state/pending-resume" => "runtime-state/pending-resume",
         "runtime-state/state-write" => "runtime-state/state-write",
+        "runtime-state/completion-publish" => "runtime-state/completion-publish",
         "runtime-state/live-emit" => "runtime-state/live-emit",
         "hook-live/budget-entry" => "hook-live/budget-entry",
         "hook-live/event-build" => "hook-live/event-build",

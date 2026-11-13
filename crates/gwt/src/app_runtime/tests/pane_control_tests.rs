@@ -890,6 +890,7 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: Some(75),
             text: "scoped-draft".into(),
         },
     );
@@ -899,7 +900,8 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
         .iter()
         .any(|event| event["kind"] == "pane_send_result"
             && event["ok"] == true
-            && event["window_id"] == pane.id));
+            && event["window_id"] == pane.id
+            && event["request_id"] == 75));
     assert!(pane.pane.lock().unwrap().has_unsent_user_input());
     assert!(!foreign.pane.lock().unwrap().has_unsent_user_input());
     control_close(&owner, &pane);
@@ -1972,6 +1974,55 @@ fn close_finalizer_falls_back_when_blocking_spawner_fails() {
         assert!(
             Instant::now() < deadline,
             "fallback finalizer must terminate and reap the detached PTY"
+        );
+        // test-hygiene: allow-short-duration bounded OS child-exit polling; the detached child has no exit notification in this fixture
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Issue #7035 AC-2: the daemon names panes in the owner namespace
+/// (`{project_key}::project-pane-…`). Its idle close must resolve the GUI
+/// alias and tear the pane down instead of silently no-op'ing.
+#[test]
+fn daemon_idle_close_by_owner_pane_id_closes_the_gui_alias() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-1",
+        project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let window_id = "tab-project::agent-1".to_string();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let owner_pane_id = runtime.runtimes[&window_id].owner_pane_id.clone();
+    assert_ne!(
+        owner_pane_id, window_id,
+        "fixture must separate the namespaces"
+    );
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
+
+    assert!(!runtime
+        .issue_monitor_idle_pane_close_events(
+            &owner_pane_id,
+            Some(2970),
+            "review_verdict_published"
+        )
+        .is_empty());
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+
+    // test-hygiene: allow-wall-clock-deadline Bound the wait for a detached PTY child that has no exit notification.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while pty.try_wait().expect("probe child").is_none() {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Report a PTY that the close never reaped promptly.
+            Instant::now() < deadline,
+            "an owner-namespace idle close must reap the review PTY"
         );
         // test-hygiene: allow-short-duration bounded OS child-exit polling; the detached child has no exit notification in this fixture
         std::thread::sleep(Duration::from_millis(10));
@@ -3151,6 +3202,7 @@ fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-dispatch".into(),
         },
     );
@@ -3313,6 +3365,7 @@ fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dis
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-reach-pty\r".into(),
         },
     );
@@ -3356,6 +3409,7 @@ fn bound_agent_pane_rotation_after_precheck_rejects_before_pty_write() {
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-reach-pty\r".into(),
         },
     );
@@ -3418,6 +3472,7 @@ fn bound_agent_pane_write_holds_epoch_lease_until_actual_pty_mutation_finishes()
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "linearized-input\r".into(),
         },
     );
@@ -3472,6 +3527,7 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
         &owner,
         &pane,
         AgentFrontendRequest::SendInput {
+            request_id: None,
             text: "must-not-block-owner\r".into(),
         },
     );

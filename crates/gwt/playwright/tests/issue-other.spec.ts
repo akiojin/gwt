@@ -86,9 +86,65 @@ test("Work detail preserves all six managed hook states and pending metadata", a
 
 test("Work projection snapshots and patches update Other while retaining session history", async ({ page }, info) => {
   await boot(page);
+  const blockCell = page.locator(".op-status-strip__cell--waiting");
+  const worksBlock = page.locator('.works-counts [data-count="block"]');
+  const worksBlockCell = worksBlock.locator("..");
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "project_agent_aggregate", aggregate: {
+    revision: 100, running_count: 3, block_count: 7, idle_count: 0, error_count: 0, unread: false,
+  } }));
+  await expect(page.locator("#op-strip-waiting")).toHaveText("7");
+  await expect(worksBlock).toHaveText("7");
   const other = page.locator("details.issue-other-group");
   await other.locator("summary").click();
   await row(page, "other-paused").click();
+  await page.evaluate(() => {
+    const fixture = window as any;
+    for (const id of ["other-paused", "linked-visible"]) {
+      const work = fixture.__otherProjection.active_works.find((work: any) => work.id === id);
+      work.blocked_agents = 1;
+      work.next_action = "Await token";
+    }
+    fixture.__otherEmit({ kind: "active_work_projection", projection: fixture.__otherProjection });
+  });
+  await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "needs_attention");
+  await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveText("Await token");
+  const linkedReason = page.locator('[data-issue-number="4556"] .knowledge-row-secondary-item[data-kind="reason"]');
+  await expect(linkedReason).toHaveText("Await token");
+  const attention = "Workspaces needing attention 2\nLinked issue: Await token\nIndependent work: Await token";
+  await expect(blockCell).toHaveAttribute("title", attention);
+  await expect(worksBlockCell).toHaveAttribute("title", attention);
+  // The agent aggregate is unchanged: a new reason must still reach both views.
+  await page.evaluate(() => {
+    const fixture = window as any;
+    for (const id of ["other-paused", "linked-visible"]) {
+      fixture.__otherProjection.active_works.find((work: any) => work.id === id).next_action = "Await review";
+    }
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection: fixture.__otherProjection });
+  });
+  await expect(blockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
+  await expect(worksBlockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
+  await expect(page.locator("#op-strip-waiting")).toHaveText("7");
+  await expect(worksBlock).toHaveText("7");
+  await page.locator('[data-surface="works"]').click();
+  await expect(page.locator(".works-heading")).toBeVisible();
+  await page.screenshot({ path: info.outputPath("workspace-attention-shared-state.png"), fullPage: true });
+  await page.locator('[data-surface="issues"]').click();
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    for (const id of ["other-paused", "linked-visible"]) {
+      const work = projection.active_works.find((work: any) => work.id === id);
+      work.blocked_agents = 0;
+      work.next_action = "";
+    }
+    fixture.__otherProjection = projection;
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection });
+  });
+  await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "paused");
+  await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveCount(0);
+  await expect(linkedReason).toHaveCount(0);
+  await expect(blockCell).toHaveAttribute("title", "Workspaces needing attention 0");
+  await expect(worksBlockCell).toHaveAttribute("title", "Workspaces needing attention 0");
   await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
   await page.evaluate(() => {
     const fixture = window as any;
@@ -112,6 +168,10 @@ test("Work projection snapshots and patches update Other while retaining session
     expect.objectContaining({ session_id: "ledger-other", agent_session_id: "conversation-other" }),
   ]);
   await page.screenshot({ path: info.outputPath("work-projection-patch.png") });
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection_patch",
+    projection: { id: "projection-other" } }));
+  await expect(blockCell).toHaveAttribute("title", "");
+  await expect(worksBlockCell).toHaveAttribute("title", "");
   await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection", projection: null }));
   await expect(row(page, "other-paused")).toHaveCount(0);
   await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
@@ -141,11 +201,158 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
   await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  await expect(page.locator('[data-metric="queue"]')).toHaveText("Queue 3");
+  await expect(page.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
+  for (const [status, queue] of [
+    [{ queue_len: 0, active_count: 0, max_active_agents: 0 }, 0],
+    [{ queue_len: 4 }, 4],
+  ] as const) {
+    await page.evaluate(status => (window as any).__otherEmit({ kind: "issue_monitor_status", status }), status);
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Run Q${queue} A0/0`);
+    await expect(page.locator('[data-metric="queue"]')).toHaveText(`Queue ${queue}`);
+    await expect(page.locator('[data-metric="capacity"]')).toHaveText("0 of 0");
+    await expect(page.locator('[data-metric="active"]')).toHaveAttribute("aria-description", /Issues agent capacity: 0\/0/);
+    await expect(search).toBeFocused();
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
+  }
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__stripMutations = 0;
+    fixture.__stripObserver = new MutationObserver(records => { fixture.__stripMutations += records.length; });
+    fixture.__stripObserver.observe(document.getElementById("op-strip-issue-monitor"), {
+      subtree: true, attributes: true, childList: true, characterData: true,
+    });
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: { total_candidates: 73, allowed_labels: ["ready"] } });
+  });
+  await expect(page.locator('[data-metric="queue"]')).toHaveAttribute("title", "Total 73");
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  expect(await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__stripObserver.disconnect();
+    return fixture.__stripMutations;
+  }), "an unrelated status update reaches Issues without redrawing the strip").toBe(0);
   expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
+  expect(await messages(page, "set_issue_monitor_max_active_agents")).toEqual([]);
   await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
   if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
     await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });
   }
+});
+
+test("needs_human snapshot shares counts and reasons across Issue views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const emit = (state: string, reason?: string) => page.evaluate(({ state, reason }) => {
+    const item = (number: number, state: string, error_message?: string, issueState = "open") => ({
+      issue: { number, title: `Issue ${number}`, state: issueState }, state, error_message,
+    });
+    (window as any).__otherEmit({ kind: "issue_monitor_inbox", items: [
+      item(4556, "needs_human", "Stale reason"), item(4556, state, reason),
+      item(4557, "needs_human", "stopped: PM paused"),
+      item(4558, "needs_human", "Completed", "closed"),
+    ] });
+  }, { state, reason });
+  const pill = page.locator(".knowledge-monitor-pill");
+  const strip = page.locator("#op-strip-issue-monitor");
+  const rowReason = page.locator('.knowledge-row[data-issue-number="4556"] [data-key="reason"]');
+  const detailReason = page.locator('.issue-detail-status [data-key="reason"]');
+  await emit("needs_human", "Choose credentials");
+  await expect(pill).toHaveAttribute("title", /Needs human 1/);
+  await expect(strip).toHaveAttribute("title", /Needs human 1/);
+  await expect(rowReason).toHaveText("Choose credentials");
+  await expect(detailReason).toHaveText("Choose credentials");
+  await emit("needs_human");
+  await expect(rowReason).toHaveText("Human decision required");
+  await expect(detailReason).toHaveText("Human decision required");
+  await page.screenshot({ path: info.outputPath("needs-human-shared-state.png"), fullPage: true });
+  await emit("queued");
+  await expect(pill).toHaveAttribute("title", /Needs human 0/);
+  await expect(strip).toHaveAttribute("title", /Needs human 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+});
+
+test("review holds share counts and reasons across Issue views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const emit = (held: boolean, closed = false) => page.evaluate(({ held, closed }) => {
+    const fixture = window as any;
+    fixture.__otherEmit({ kind: "issue_monitor_inbox", items: [{
+      issue: { number: 4556, title: "Issue 4556", state: closed ? "closed" : "open" },
+      state: "launched",
+    }] });
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: {
+      enabled: true, state: "active", autonomous_issues: held ? [{
+        issue_number: 4556, phase: "implementing", needs_human: false,
+        review_dispatch_hold: { reason: "max_active reached (2/2)", since: "2026-11-12T15:00:00Z" },
+      }] : [],
+    } });
+  }, { held, closed });
+  const pill = page.locator(".knowledge-monitor-pill");
+  const strip = page.locator("#op-strip-issue-monitor");
+  const rowReason = page.locator('.knowledge-row[data-issue-number="4556"] [data-key="reason"]');
+  const detailReason = page.locator('.issue-detail-status [data-key="reason"]');
+  await emit(true);
+  await expect(pill).toHaveAttribute("title", /Review holds 1/);
+  await expect(strip).toHaveAttribute("title", /Review holds 1/);
+  await expect(rowReason).toHaveText("max_active reached (2/2)");
+  await expect(detailReason).toHaveText("max_active reached (2/2)");
+  await page.screenshot({ path: info.outputPath("review-holds-shared-state.png"), fullPage: true });
+  await emit(false);
+  await expect(pill).toHaveAttribute("title", /Review holds 0/);
+  await expect(strip).toHaveAttribute("title", /Review holds 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+  await emit(true, true);
+  await expect(pill).toHaveAttribute("title", /Review holds 0/);
+  await expect(strip).toHaveAttribute("title", /Review holds 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+});
+
+test("PM steering shares counts and reasons across Issue views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const emit = (steering: boolean, closed = false, failure = "") => page.evaluate(({ steering, closed, failure }) => {
+    const fixture = window as any;
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: {
+      enabled: true, state: "active", autonomous_issues: [{
+        issue_number: 4556, phase: "idle", needs_human: false,
+        ...(steering ? { steering: { reason: "Retry budget needs PM steering",
+          requested_at: "2026-11-13T00:00:00Z", count: 9 } } : {}),
+      }],
+    } });
+    fixture.__otherEmit({ kind: "issue_monitor_inbox", items: [{
+      issue: { number: 4556, title: "Issue 4556", state: closed ? "closed" : "open" },
+      state: failure ? "launch_failed" : "queued", error_message: failure || null,
+    }] });
+  }, { steering, closed, failure });
+  const pill = page.locator(".knowledge-monitor-pill");
+  const strip = page.locator("#op-strip-issue-monitor");
+  const rowReason = page.locator('.knowledge-row[data-issue-number="4556"] [data-key="reason"]');
+  const detailReason = page.locator('.issue-detail-status [data-key="reason"]');
+  await emit(true);
+  await expect(pill).toHaveAttribute("title", /PM steering 1/);
+  await expect(strip).toHaveAttribute("title", /PM steering 1/);
+  await expect(rowReason).toHaveText("Retry budget needs PM steering");
+  await expect(detailReason).toHaveText("Retry budget needs PM steering");
+  await page.screenshot({ path: info.outputPath("pm-steering-shared-state.png"), fullPage: true });
+  await emit(true, false, "Latest launch failure");
+  await expect(pill).toHaveAttribute("title", /PM steering 1/);
+  await expect(rowReason).toHaveText("Latest launch failure");
+  await expect(detailReason).toHaveText("Latest launch failure");
+  await emit(false);
+  await expect(pill).toHaveAttribute("title", /PM steering 0/);
+  await expect(strip).toHaveAttribute("title", /PM steering 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
+  await emit(true, true);
+  await expect(pill).toHaveAttribute("title", /PM steering 0/);
+  await expect(strip).toHaveAttribute("title", /PM steering 0/);
+  await expect(rowReason).toHaveCount(0);
+  await expect(detailReason).toHaveCount(0);
 });
 
 test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {

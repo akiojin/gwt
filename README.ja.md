@@ -29,9 +29,13 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
-  有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
+- **Provider usage** — USAGE に Claude の Fable / Opus の週次枠を同時表示します。
+  未提供の枠は `—`、古い取得値は `stale` と表示します。ホバーすると共通の
+  アカウント枠・リセット時刻や、有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
   Claude アカウント枠は Settings → Usage & Limits で有効化してください。
+  Codex のサブスクリプション枠が満杯でもクレジットが残っている場合は、
+  `Using credits` と残高を表示します。同一アカウントの観測が2点そろうと、
+  popover に観測間の1時間あたりのクレジット消費量を表示します。初回は表示しません。
 
 ## インストール
 
@@ -118,9 +122,12 @@ Stop 契約が利用するため保持します。旧 agent identity reset は�
 未作成なら新たに作成しません。
 
 組み込みフロントエンドの cleanup リクエストには operation ID を必須とします。
-更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略し、
-Fast mode を無効にして起動します。旧設定は保存内容を書き換えずに読み替えます。
-Issues のプロファイルと直接の Session Resume は従来の設定を維持します。
+更新前から開いているタブは再読み込みしてください。Launch Wizard は常に権限確認を省略します。
+Agent Settings でモデル・推論レベル・速度の既定値を保存できます。Codex は Off / Fast / Ultrafast、
+Claude Code は専用の Fast トグルを使い、Monitor と PM の起動プロファイルでも指定できます。
+Codex の旧 Fast bool 設定は実効 Off を維持し、明示的な速度選択でのみ Fast / Ultrafast が有効になります。
+Ultrafast には対応モデルと対象契約・workspace 権限が必要です。非対応の tier が省略される場合は
+Codex の警告が端末に表示されます。[Codex の速度要件](https://learn.chatgpt.com/docs/agent-configuration/speed)も参照してください。
 
 ## 前提
 
@@ -201,10 +208,13 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
   エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
 - **Open Project…**: Hub を開き、フォルダ選択を直接開始します。
 - **Clone from GitHub…**: Clone Project ダイアログを開いた状態で Hub を表示します。
-- **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
+- **Quit**: tray アイコン、埋込サーバー、GUI 管理のプロジェクト daemon と PTY 子プロセスを
+  停止します。背景で継続中の作業も対象です。他の GUI が接続中の daemon や、独立起動した
+  daemon は動作を維持します。
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
 表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
+ステータスバーと Works 見出しは、タブタイトルと同じ RUNNING / BLOCK / IDLE / ERROR 件数を表示します。
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
 
@@ -283,8 +293,8 @@ iOS Safari / Android Chrome から安全に操作する接続機能を
 
 #### 停止中の Host 資格管理（Unix・ソースからビルド）
 
-`cargo build -p gwt --bin gwt-mobile-coordinator` で停止中の台帳管理コマンドを
-ビルドできます。待受やスマートフォン接続は提供しません。祖先が信頼でき、置換されない、
+`cargo build -p gwt --bin gwt-mobile-coordinator` で台帳管理コマンドを
+ビルドできます。引数なしでは停止中の管理要求を処理します。祖先が信頼でき、置換されない、
 repository 外のユーザー home を使ってください。`$HOME/.gwt`、`$HOME/.gwt/mobile`、
 `$HOME/.gwt/mobile/coordinator` は、OS ユーザーが所有する mode `0700` の directory として
 事前に用意します。symlink と macOS の拡張 ACL entry は拒否します。既存の権限を確認し、
@@ -320,6 +330,52 @@ path・secret・時計上書きは request field にありません。発行成�
 停止して再試行します。`commit_uncertain` なら `status` で現在の記録を確認してから判断し、
 自動再発行しないでください。私有保存や時計の error は表示された前提条件を修復して
 再試行し、台帳や失効記録は削除しないでください。`--help` でも field と保存条件を確認できます。
+
+#### Coordinator の HTTPS 起動（Unix・ソースからビルド）
+
+同じ binary の明示的な `serve` コマンドで配置を点検できます。現在は**全経路が
+404 を返します**。`Origin` を指定する場合は、設定済み HTTPS origin と完全一致する
+header 1 件だけを許可し、それ以外は **403** で拒否します。両応答に、script と接続を
+同じ origin に制限し frame を禁止する CSP、および `nosniff`・`no-referrer`・`no-store`
+を付けます。登録・signaling・client asset・スマートフォン接続はまだ利用できません。
+
+上記の私有 directory を用意して台帳を初期化し、対応する PEM 証明書チェーンと秘密鍵を
+repository 外の私有領域に配置してください。各 TLS file は OS ユーザー所有の
+single-link regular file、mode `0600` とし、親 directory は同じユーザー所有の
+`0700` にします。symlink と macOS の拡張 ACL entry は使えません。home と保存先の
+全祖先を信頼できる非置換の状態に保ち、読込み中・稼働中は file を直接書き換えないでください。
+
+`$HOME/.gwt/mobile/coordinator/config.json` をユーザー所有・single-link・`0600` で
+配置します。例の TLS path は実際の私有 file の絶対 path に置き換えてください。
+
+```json
+{
+  "schema_version": 1,
+  "origin": "https://coordinator.example",
+  "bind": "127.0.0.1:8443",
+  "tls_certificate": "/private/coordinator/cert.pem",
+  "tls_private_key": "/private/coordinator/key.pem",
+  "limits": {
+    "registrations": 64,
+    "peers_per_host": 8,
+    "device_messages_per_second": 32,
+    "device_burst": 64,
+    "host_messages_per_second": 256,
+    "host_burst": 512
+  }
+}
+```
+
+`target/debug/gwt-mobile-coordinator serve` を実行します。この明示コマンドだけが
+待受を開始し、設定 file が存在するだけでは起動しません。起動成功時は待受 address を
+含む JSON の `listening` receipt を標準出力へ 1 行出力します。設定・TLS・台帳の
+欠損や不正、台帳 lock の競合では固定診断と非 0 終了を返します。原因を修復して明示的に
+再実行してください。起動処理は台帳の初期化や権限修復を行いません。
+
+SIGINT または SIGTERM で新規接続の受入を止め、既存 HTTP 接続の終了後に台帳 lock を
+解放して終了します。強制 drain 期限や HTTP 総接続数の上限はまだありません。
+停止中の台帳管理を行う前に server を停止してください。これは配置用の基盤であり、
+公開モバイル service の完成版ではありません。通常の desktop 待受は変更しません。
 
 #### PC 資格の offline import と点検（Unix、source build）
 
@@ -561,6 +617,14 @@ daemon を強制終了しません。明示的な JSON `daemon.start` は停止�
 既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
 endpoint を確認できます。
 
+owner のヘルスチェックが連続してタイムアウトすると、通常の接続障害とは区別して
+**Wedged** と表示します。GWT はスタックサンプル（macOS）、直近の terminal-delivery
+警告、CPU の観測値を `~/.gwt/logs/owner-recovery/<pid>-<id>/` へ自動保存します。
+Project のステータス欄にある **Restart daemon…** から内容を確認して再起動できます。
+診断保存後に SIGTERM を送り、猶予期間内に終了しなければ SIGKILL を送ります。
+同じ daemon が所有する全 agent（他プロジェクトの agent を含む）が停止し、未保存の
+ターミナル作業を失う可能性があります。確認なしで daemon を強制終了することはありません。
+
 Hub の **終了待ちプロジェクト** には既知のプロジェクトの daemon 状態を表示します。
 **再確認** で更新し、**終了を再試行** で失敗した終了処理を再試行できます。対象は
 認証済みで終了処理中の GUI 管理 daemon に限り、GUI が接続していないことを確認します。
@@ -681,6 +745,14 @@ Queued には `auto-refill` などの追加元も表示されます。
 保守用の `issue.monitor.queue.remove` に `all_terminals:true` を指定すると、このマシンの
 project store に保存された全端末のキューから `numbers` を外し、自動補充の手動除外も記録します。
 省略時はこのホストだけが対象です。別マシンの独立した project store は変更しません。
+
+macOS では CLI と Monitor が `scutil --get LocalHostName` をホスト ID として使用し、
+取得できない場合は `whoami::hostname` にフォールバックします。他 OS は `whoami::hostname` を使います。
+ID はプロセスごとに一度取得するため、マシン名の変更後は gwt を再起動してください。
+`issue.monitor.status` の `caller_host_identity` で ID・取得元・ネットワーク上のホスト名と異なる理由を確認できます。
+旧ホストのキューを復旧するには、`issue.monitor.queue.adopt` に `{"terminal":"old-host"}` を渡します。
+未実行の項目を自ホストへ移し、旧スケジュール予約を解放して再計画します。
+claim 取得中・起動中・実行中の作業は既存の所有者に残し、他のホストのキューは変更しません。
 
 前提 Issue の完了を待つには、Issue 本文に `Blocked-by: #123 #456` のような行を追加します。
 Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号を
@@ -1920,17 +1992,37 @@ gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
 
-PM ウィンドウは **Tasks** で開き、保存済みの依頼タスクを閲覧できます。未完了を優先し、
+PM ウィンドウの **Tasks** では、保存済みの依頼タスクを閲覧できます。未完了を優先し、
 親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
-で完了・取消も表示できます。プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
-長い概要は短縮しますが、保存済みの内容は保持します。読取り失敗時は最後に確認できた一覧を
-警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+で完了・取消も表示できます。親には、表示範囲外も含む保存済みの直接の子タスクについて、
+完了・取消・未完了・全件数を表示します。取消は達成完了と区別し、子がすべて完了しても親は自動完了しません。
+プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
+長い概要は短縮しますが、保存済みの内容は保持します。各タスクの **Purpose and completion
+criteria** を開くと、目的と先頭 5 件の完了条件を確認できます。条件の全件数を明示し、
+各項目は 240 文字まで（短縮時は省略記号付き）のプレビューとして表示します。
+読取り失敗時は最後に確認できた一覧を警告付きで残します。Tasks または Chat の
+**View task details** では、選んだタスクだけの原依頼・目的・完了条件・完了証拠・最近の変更を読み取ります。
+読取り専用プレビューの上限は原文 4,000 文字、条件 20 件、証拠 10 件、変更 20 件（新しい順）です。
+その他の文は各 1,000 文字、actor ID は 240 文字までで、件数と短縮を明示します。
+変更はそのタスクの保存済み差分を含む記録だけを対象とし、全操作の履歴ではありません。
+**Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
+**Close details** で元のタスクにフォーカスを戻します。
+このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
 同じツールバーから **Reports** と **Execution log** に切り替えられます。
 
-PM ウィンドウの **Chat** は PM との会話をチャット形式で表示します。自分の発言は右、PM の応答は
+PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を選ぶ 1 操作で PM との会話を開けます。自分の発言は右、PM の応答は
 左のバブルに並び、PM の Markdown（見出し・箇条書き・表・コード）を整形します。PM セッション自身の
-会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。現在は閲覧専用のため、
-PM への入力には **Execution log** を使います。
+会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。1 回のターンで PM が
+複数のメッセージを送った場合は最新の 1 件だけを開き、それ以前は **N earlier messages** に折りたたみます
+（クリックで展開）。下部の入力欄から
+PM へテキストを送れます（Enter で送信、Shift+Enter で改行）。届いたことが確認できるまで入力内容は残り、
+送れなかった場合は理由を表示します。Chat の **Open terminal in Works** で、同じ PM セッションの
+ターミナルを開けます。PM の入口から Chat に戻っても未送信の下書きは残ります。
+**Works** の PM 行からも同じターミナルを開けます。画像の添付には **Execution log** を使います。
+
+Chat には同じ **Tasks** 一覧も並びます（狭いウィンドウでは会話の上）。
+**Show in conversation** で Task の元の発言へ移動しても、未送信の下書きは残ります。
+元の発言が現在の会話の表示範囲にない場合は、ボタンを無効にして理由を表示します。
 
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
@@ -1944,8 +2036,13 @@ PM の更新は共通の短い概要で表示し、**Details** を開くと説�
 **Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
 切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
 1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
-判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Execution log** で
-番号または自由文を回答できます。**Copy** には番号付き選択肢と詳細を含めます。
+判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Reports**、
+**Decide**、Chat 内の **Decision reports** から選択でき、送信中・失敗・送信確認の状態は
+現在の PM セッションで共有されます。**Other: reply in chat** は下書きを保持して入力欄を
+開きます。送信確認だけで判断依頼を解決済みにしたり、人間の Q&A を保存したりはしません。
+Chat の判断依頼欄は Reports 由来で、ネイティブ会話のバブルとは別に表示します。
+**Execution log** でも番号または自由文を回答できます。**Copy** には番号付き選択肢と
+詳細を含めます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、

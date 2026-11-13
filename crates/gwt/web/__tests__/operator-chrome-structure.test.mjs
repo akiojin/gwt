@@ -110,6 +110,9 @@ const frontendStyle = `${inlineStyle}\n${componentsStyle}`;
 test("Issue #6476: narrow project chrome keeps Operator tokens and shared controls", () => {
   const mobile = extractMediaBlocks(componentsStyle, "max-width: 600px");
   assert.match(mobile, /\.project-bar/, "project actions need a narrow-screen layout");
+  assert.match(mobile, /\.op-rail__group\s*\{[^}]*display:\s*contents/, "phone rail entries flow as one wrapping set");
+  assert.match(mobile, /\.op-rail__item\s*\{[^}]*min-height:\s*44px/, "rail entries keep 44px touch targets");
+  assert.doesNotMatch(mobile, /\.op-rail\s*\{[^}]*overflow-x:\s*(auto|scroll)/, "rail entries are never hidden behind a sideways scroll");
   assert.match(mobile, /var\(--space-/);
   assert.doesNotMatch(mobile, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
   assert.equal(document.querySelector("#op-theme-toggle").getAttribute("role"), "radiogroup");
@@ -344,56 +347,47 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Issue #3340 AS-03: Status Strip counts live census without catalog completion totals", () => {
+test("SPEC #5016 AC-HS1: Status Strip renders the server summary, never a census recount", () => {
   let activity = { count: 2, agents: [
     { window_id: "agent", session_id: "current" },
     { window_id: "pm", session_id: "manager", is_pm: true },
+    { window_id: "board", session_id: "board" },
   ] };
   const windows = [
-    { id: "agent", session_id: "current", preset: "codex", status: "running" },
+    { id: "agent", session_id: "current", preset: "codex", status: "running", placement: { kind: "issue_preview" } },
     { id: "pm", session_id: "manager", preset: "claude", status: "waiting" },
-    { id: "old", session_id: "retired", preset: "codex", status: "running" },
-    { id: "board", preset: "board", status: "running" },
+    { id: "board", session_id: "board", preset: "board", status: "running", placement: { kind: "issue_preview" } },
   ];
-  const runtimeStates = { old: "stopped" };
+  let summary = { running: 4, block: 3, idle: 2, error: 1 };
   let counts, activeWorks = [{ active_agents: 9 }];
   const dependencies = { window: { __operatorShell: { applyTelemetryCounts() {} } },
     agentActivityModel: { read: () => activity },
     windowCatalogModel: { read: () => ({ catalog: { appState: { tabs: [
-      { id: "active", project_key: "this-project", workspace: { windows: [] } },
-      { id: "sibling", project_key: "this-project", workspace: { windows } },
-    ] }, runtimeStates } }) },
-    allProjectWindowIds: () => windows.map(window => window.id),
+      { id: "active", project_key: "this-project", workspace: { windows } },
+    ] }, runtimeStates: {} } }) },
+    projectAgentSummaryModel: { read: () => summary },
+    projectAgentSummary: () => ({ running: 0, block: 0, idle: 0, error: 0 }),
     activeWorkItemsFromProjection: () => activeWorks,
-    activeWorkProjection: { active_agents: 9 }, windowMap: new Map(),
-    workspaceWindowById: id => windows.find(window => window.id === id),
     presetSupportsWaitingStatus: preset => ["codex", "claude"].includes(preset),
-    mapAgentTelemetryState,
     applyOperatorTelemetryCounts: value => { counts = value; },
   };
   const recompute = Function(...Object.keys(dependencies),
     `return () => { ${extractFunctionBody(appSource, "recomputeOperatorTelemetry")} };`)(...Object.values(dependencies));
   recompute();
-  assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
-  assert.equal(counts.waiting, 1);
+  assert.deepEqual([counts.running, counts.waiting, counts.idle, counts.error], [4, 3, 2, 1],
+    "the census (1 running, 1 waiting) cannot replace the server summary");
+  assert.equal(counts.running_inline, 1, "only agent presets explain inline placement");
+  assert.equal(counts.branches, 1);
   assert.equal(Object.hasOwn(counts, "agents"), false);
   assert.equal(Object.hasOwn(counts, "done"), false);
-  const [implementation, pm] = activity.agents;
-  activity = { count: 1, agents: [pm] }; runtimeStates.pm = "running"; recompute();
-  assert.equal(counts.running, 1, "a PM-only census still contributes to runtime telemetry");
-  activity = { count: 1, agents: [implementation] }; runtimeStates.agent = "idle"; recompute();
-  assert.equal(counts.running, 0, "an assigned idle implementation child is not running");
-  assert.equal(counts.idle, 1);
-  runtimeStates.agent = "running"; recompute();
-  assert.equal(counts.running, 1, "an implementation child resuming work returns to RUNNING");
-  activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
-  assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
-  activity = { count: 0, agents: [] }; recompute();
-  assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
+  summary = { running: 0, block: 1, idle: 0, error: 0 }; recompute();
+  assert.equal(counts.running_inline, 0, "the inline breakdown never exceeds RUNNING");
   activity = { count: null, agents: [] }; recompute();
-  assert.equal(counts.running, "—", "unknown is never a measured zero");
+  assert.equal(counts.waiting, 1, "an unavailable census does not hide the server summary");
   activeWorks = []; recompute();
   assert.equal(Object.hasOwn(counts, "branches"), false, "catalog refresh preserves independent branch inventory");
+  assert.doesNotMatch(extractFunctionBody(appSource, "recomputeOperatorTelemetry"), /counts\[state\]\s*\+=/,
+    "the strip must not count agent states itself");
 });
 
 test("Status Strip RUNNING counter filters non-agent preset windows", () => {
@@ -2390,7 +2384,7 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
   );
 });
 
-test("Launch wizard omits permission and Fast mode choices while preserving other settings", () => {
+test("Launch wizard omits permission choices while preserving explicit provider speed settings", () => {
   assert.equal(
     launchWizardSource.includes("wizardAdvancedOpen"),
     false,
@@ -2404,16 +2398,13 @@ test("Launch wizard omits permission and Fast mode choices while preserving othe
     );
   }
 
-  // SPEC-1921 AC-1921-L2/L3: permissions and Fast mode are fixed launch
-  // behavior, including when an older backend View still advertises controls.
+  // Permission controls remain fixed; Issue #7030 restores explicit speed
+  // choices through provider-specific controls.
   for (const retired of [
     '"Launch settings"',
     '"Skip permission prompts"',
-    '"Fast mode"',
     "show_skip_permissions",
-    "show_fast_mode",
     "set_skip_permissions",
-    "set_fast_mode",
     "set_codex_fast_mode",
   ]) {
     assert.equal(

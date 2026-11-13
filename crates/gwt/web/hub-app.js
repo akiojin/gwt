@@ -193,7 +193,7 @@ function createHubApp({ document: doc, window: win }) {
       row.append(projectLink(project));
       if (project.owner_health) {
         const health = project.owner_health;
-        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "degraded" ? "Unavailable" : "Connecting");
+        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "wedged" ? "Wedged" : health.state === "degraded" ? "Unavailable" : "Connecting");
         badge.dataset.projectHealth = project.project_key;
         badge.dataset.state = health.state;
         badge.title = health.detail || "";

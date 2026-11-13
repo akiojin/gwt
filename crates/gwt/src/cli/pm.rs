@@ -661,6 +661,30 @@ pub(super) fn run<E: CliEnv>(
             } else {
                 None
             };
+            // A human question that arrived mid-work or after its response
+            // deadline has no current human turn to bind. Without requested
+            // authorizations its answer is still saved, as a display-only Q&A
+            // that grants no authority and settles no turn (Issue #6950).
+            let unbound = match (&instruction, &qa_turn) {
+                (Some(input), turn)
+                    if ambient_session_id().is_some() && input.authorizations.is_empty() =>
+                {
+                    turn.as_ref().is_none_or(|turn| {
+                        super::hook::pm_reporting::instruction_prompt_identity(
+                            &repo_path,
+                            turn,
+                            &input.original,
+                        )
+                        .is_err()
+                    })
+                }
+                _ => false,
+            };
+            let (instruction, qa_turn) = if unbound {
+                (None, None)
+            } else {
+                (instruction, qa_turn)
+            };
             let (report, saved_instruction) = if let Some(mut input) = instruction {
                 pm_report::validate_report_input(kind, &body, question.as_deref()).map_err(
                     |error| {
@@ -1120,12 +1144,6 @@ fn request_tasks(
     Ok(code)
 }
 
-fn native_request_source_id(provider: &str, conversation: &str, message: &str) -> String {
-    let identity = serde_json::to_vec(&(provider, conversation, message))
-        .expect("native identity is a serializable string tuple");
-    format!("native:{}", gwt_core::pm_authorization::digest(&identity))
-}
-
 /// Native selection never consumes a hook observation or accepts authored text.
 fn native_request_tasks(
     actor: &str,
@@ -1134,7 +1152,9 @@ fn native_request_tasks(
     selector: Option<&RequestTaskSelector>,
     capture: Option<&NativeCaptureRequest>,
 ) -> Result<serde_json::Value, gwt_core::pm_request_tasks::TaskError> {
-    use crate::pm_conversation::{PmConversationAvailability, PmConversationRole};
+    use crate::pm_conversation::{
+        native_request_source_id, PmConversationAvailability, PmConversationRole,
+    };
     use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, IntakeSource, Request, TaskError};
     use serde_json::json;
 

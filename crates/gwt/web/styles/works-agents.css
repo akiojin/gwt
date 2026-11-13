@@ -330,6 +330,22 @@
   .roster-past td::before { content: attr(data-label); color: var(--color-text-muted); }
   .roster-past td:last-child { text-align: start; }
 }
+/* SPEC 6476 T-005h: on a phone the header wrapped meta and usage over several
+   lines. Keep three rows: the controls, then meta and usage on one line each.
+   The full text stays in the DOM. */
+@media (max-width: 600px) {
+  .works-full-header { gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-2); }
+  .works-full-header > button { min-width: 44px; min-height: 44px; }
+  .works-full-header > [data-action="previous"],
+  .works-full-header > [data-action="next"] { order: 1; }
+  .works-full-name { flex: 1 1 0; }
+  .works-full-name .work-name,
+  .works-full-meta,
+  .works-full-usage { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .works-full-meta,
+  .works-full-usage { flex: 0 0 100%; order: 2; }
+  .works-full-usage { order: 3; }
+}
 @media (max-width: 480px) {
   .agents-surface { padding: var(--space-3); }
   .works-counts { gap: var(--space-2); }

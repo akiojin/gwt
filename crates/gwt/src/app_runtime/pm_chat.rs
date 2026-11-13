@@ -9,6 +9,7 @@ use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent, ProjectContext, U
 pub(super) enum PmRequestTaskOperation {
     Read {
         task_id: String,
+        task_key: Option<String>,
         receipt_operation_id: Option<String>,
     },
     Reopen(gwt::protocol::PmRequestTaskUserRequest),
@@ -88,8 +89,36 @@ fn request_task_result(
     let (request, action) = match operation {
         PmRequestTaskOperation::Read {
             task_id,
+            task_key,
             receipt_operation_id,
         } => {
+            if let Some(selected_key) = task_key {
+                if selected_key.trim().is_empty()
+                    || !task_id.is_empty()
+                    || receipt_operation_id.is_some()
+                {
+                    return Err(TaskError::Invalid(
+                        "task_key requires a nonempty key without task_id or receipt_operation_id"
+                            .into(),
+                    ));
+                }
+                let state = store
+                    .read()
+                    .map_err(|error| match error {
+                        TaskError::Unreadable(_) => TaskError::Unreadable(
+                            "Request task details could not be read. Restore this project's saved task store and try again.".into(),
+                        ),
+                        error => error,
+                    })?
+                    .ok_or(TaskError::MissingTask)?;
+                let detail = gwt::pm_current::task_detail(&state, &selected_key)
+                    .ok_or(TaskError::MissingTask)?;
+                return Ok(PmRequestTaskResult::Detail {
+                    revision: state.revision,
+                    key: selected_key,
+                    detail: Box::new(detail),
+                });
+            }
             if task_id.trim().is_empty() {
                 return Err(TaskError::Invalid("nonempty task_id is required".into()));
             }
@@ -298,6 +327,7 @@ impl AppRuntime {
                     reports: Vec::new(),
                     current: None,
                     error: Some("This window has no registered PM.".to_owned()),
+                    current_error: None,
                 },
             )];
         };
@@ -339,6 +369,7 @@ impl AppRuntime {
                     .collect(),
                 current: data.current.map(Box::new),
                 error: data.error,
+                current_error: data.current_error,
             });
         });
         Vec::new()

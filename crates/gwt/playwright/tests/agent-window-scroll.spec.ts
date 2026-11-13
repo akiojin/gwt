@@ -152,6 +152,9 @@ test.describe("Agent window scrollback lifecycle", () => {
 
     await expect(agentTile(page, "agent-1")).toBeVisible();
     await emitTerminalStatus(page, "agent-1", "error", "Stop-block hit an error");
+    // SPEC #5016 AC-HS1: the backend publishes the project aggregate the strip renders.
+    await emitBackendEvent(page, { kind: "project_agent_aggregate", aggregate: {
+      running_count: 0, block_count: 1, idle_count: 0, error_count: 1, unread: true, revision: 1 } });
 
     // SPEC-2014 US-36 (FR-120/121): the raw TTY must never be covered by a
     // foreground status/error overlay. Error detail surfaces in the window
@@ -264,6 +267,104 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     deviceScaleFactor: 1,
     hasTouch: true,
     viewport: { width: 390, height: 844 },
+  });
+
+  // SPEC #6476 T-005r (AC-1): the Command Rail groups wrapped separately into
+  // three rows on a phone (213px at 390px) and left the agent terminal 312px.
+  // Every entry must stay visible without scrolling (#4777) as a 44px tap
+  // target, in at most two rows at 390px and three at 320px.
+  test("command rail stays compact on a phone and leaves the screen to the terminal", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    for (const [width, rows] of [[320, 3], [390, 2]] as const) {
+      await page.setViewportSize({ width, height: 844 });
+      const rail = (await page.locator(".op-rail").boundingBox())!;
+      const bar = (await page.locator(".project-bar").boundingBox())!;
+      expect(rail.height, `rail height at ${width}px`).toBeLessThanOrEqual(rows * 48);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+        "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      expect(await page.locator(".op-rail").evaluate(element => element.scrollWidth - element.clientWidth),
+        "the rail must not hide entries behind a sideways scroll").toBeLessThanOrEqual(0);
+      const items = page.locator(".op-rail__item:visible");
+      expect(await items.count()).toBeGreaterThanOrEqual(11);
+      for (const item of await items.all()) {
+        await expect(item).toBeInViewport({ ratio: 1 });
+        const box = (await item.boundingBox())!;
+        expect(box.width, await item.innerText()).toBeGreaterThanOrEqual(44);
+        expect(box.height, await item.innerText()).toBeGreaterThanOrEqual(44);
+        expect(box.y + box.height).toBeLessThanOrEqual(rail.y + rail.height + 1);
+        expect(await item.evaluate(element => {
+          const r = element.getBoundingClientRect();
+          return element.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }), "rail entry must be tappable").toBe(true);
+      }
+      const surface = (await page.locator(".surface-area").boundingBox())!;
+      expect(surface.y, "the surface starts right below the rail").toBeLessThanOrEqual(bar.y + bar.height + rows * 48 + 1);
+      if (width === 390) {
+        const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
+        expect(screen.height, "the terminal gains the rows the wrapped rail took (312px before)").toBeGreaterThanOrEqual(412);
+      }
+      await page.screenshot({ path: info.outputPath(`mobile-rail-${width}.png`) });
+    }
+    await page.getByRole("button", { name: "Logs", exact: true }).tap();
+    await page.getByRole("button", { name: "Works", exact: true }).tap();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
+    await page.setViewportSize({ width: 1360, height: 900 });
+    const desktop = (await page.locator(".op-rail").boundingBox())!;
+    expect(desktop.height, "desktop rail remains a vertical column").toBeGreaterThan(desktop.width);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // SPEC #6476 T-005h (AC-1): the Works header wrapped meta and usage over
+  // several lines on a phone (about 160px at 390px). Below 601px it is three
+  // fixed rows: Back / name / previous / next, then meta and usage on one
+  // line each, with the full text kept in the DOM.
+  test("works header stays three rows on a phone and keeps desktop layout", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const header = page.locator(".works-full-header");
+    const desktopLayout = () => header.evaluate(element => {
+      const meta = element.querySelector(".works-full-meta")!;
+      const back = element.querySelector("[data-action='back']")!;
+      return {
+        padding: getComputedStyle(element).padding,
+        metaWhiteSpace: getComputedStyle(meta).whiteSpace,
+        metaBasis: getComputedStyle(meta).flexBasis,
+        backMinHeight: getComputedStyle(back).minHeight,
+      };
+    });
+    for (const width of [601, 1360]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await desktopLayout(), `header unchanged at ${width}px`).toEqual({
+        padding: "8px 12px", metaWhiteSpace: "normal", metaBasis: "240px", backMinHeight: "auto",
+      });
+    }
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const box = (await header.boundingBox())!;
+      expect(box.height, `header height at ${width}px`).toBeLessThanOrEqual(100);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth))
+        .toBeLessThanOrEqual(0);
+      const firstRow = await Promise.all(["[data-action='back']", "[data-action='previous']", "[data-action='next']"]
+        .map(selector => header.locator(selector).boundingBox()));
+      for (const control of firstRow) {
+        expect(control!.width).toBeGreaterThanOrEqual(44);
+        expect(control!.height).toBeGreaterThanOrEqual(44);
+        expect(Math.abs(control!.y - firstRow[0]!.y), "controls share the first row").toBeLessThanOrEqual(1);
+      }
+      for (const selector of [".works-full-meta", ".works-full-usage"]) {
+        const line = header.locator(selector);
+        const lineBox = (await line.boundingBox())!;
+        expect(lineBox.y, `${selector} sits below the controls`).toBeGreaterThanOrEqual(firstRow[0]!.y + firstRow[0]!.height - 1);
+        expect(await line.evaluate(element => {
+          const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
+          return element.getBoundingClientRect().height <= lineHeight + 1;
+        }), `${selector} is one line`).toBe(true);
+        expect((await line.textContent())!.length, `${selector} keeps its full text`).toBeGreaterThan(20);
+      }
+      await page.screenshot({ path: info.outputPath(`works-header-${width}.png`) });
+    }
+    const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
+    expect(screen.height, "the terminal gains the header rows (412px before)").toBeGreaterThanOrEqual(460);
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
   test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {

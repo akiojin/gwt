@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 mod reports;
 mod tasks;
 pub use reports::PmReportsReader;
-pub use tasks::PmTaskOverview;
+pub use tasks::{task_detail, PmTaskDetail, PmTaskOverview};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmIssueFact {
@@ -330,8 +330,10 @@ mod tests {
         let draft = |id: String| TaskDraft {
             title: "界".repeat(300),
             id,
-            purpose: "private purpose".into(),
-            completion_conditions: vec!["original outcome".into()],
+            purpose: "目的".repeat(150),
+            completion_conditions: (0..6)
+                .map(|i| format!("{i}:{}", "条件".repeat(150)))
+                .collect(),
             issue_numbers: vec![],
             goal_ids: vec![],
             assignee: Some("PM".into()),
@@ -341,7 +343,7 @@ mod tests {
             ActorKind::Pm,
             Action::Decompose {
                 source_id: "private-source".into(),
-                root: draft("private-root".into()),
+                root: draft("private-000-root".into()),
                 children: (0..55)
                     .map(|i| draft(format!("private-child-{i:03}")))
                     .collect(),
@@ -354,27 +356,90 @@ mod tests {
                 task_id: "private-child-000".into(),
             },
         );
+        apply(
+            3,
+            ActorKind::Pm,
+            Action::Complete {
+                task_id: "private-child-054".into(),
+                condition_revision: 1,
+                review_generation: 1,
+                evidence: vec!["synthetic:verified-child".into()],
+            },
+        );
+        apply(
+            4,
+            ActorKind::Pm,
+            Action::AddChild {
+                parent_id: "private-child-001".into(),
+                child: draft("private-grandchild".into()),
+            },
+        );
         let (updated, data) = reader.poll(&repo, None, Some(&captured)).unwrap();
         let value = serde_json::to_value(data.current).unwrap();
         let overview = &value["request_tasks"];
         assert_eq!(overview["state"], "ready");
-        assert_eq!(overview["total"], 56);
+        assert_eq!(overview["total"], 57);
         assert_eq!(overview["pending_intake"], 0);
         let rows = overview["tasks"].as_array().unwrap();
         assert_eq!(rows.len(), 50);
-        let beyond_id_limit = format!("{:x}", Sha256::digest(b"private-child-050"));
+        let beyond_id_limit = format!("{:x}", Sha256::digest(b"private-child-049"));
         assert!(rows.iter().any(|row| row["key"] == beyond_id_limit));
         assert!(rows.iter().all(|row| row["status"] != "cancelled"));
         assert_eq!(rows[0]["key"].as_str().unwrap().len(), 64);
+        let source_key = format!("{:x}", Sha256::digest(b"private-source"));
+        assert!(rows.iter().all(|row| row["source_key"] == source_key));
         assert!(rows[0]["title"].as_str().unwrap().chars().count() <= 241);
-        assert!(rows[0]["parent_key"].as_str().is_some());
+        assert!(rows[1]["parent_key"].as_str().is_some());
+        assert_eq!(
+            rows[0]["status"], "pending",
+            "child completion is not parent completion"
+        );
+        assert_eq!(
+            rows[0]["child_progress"],
+            serde_json::json!({
+                "total": 55, "completed": 1, "cancelled": 1,
+            }),
+            "counts include hidden children and exclude the grandchild"
+        );
+        assert_eq!(
+            rows[1]["child_progress"],
+            serde_json::json!({
+                "total": 1, "completed": 0, "cancelled": 0,
+            })
+        );
+        assert!(
+            rows[2].get("child_progress").is_none(),
+            "leaves have no child progress"
+        );
+        let preview = &rows[0]["criteria_preview"];
+        assert_eq!(preview["purpose"], format!("{}…", "目的".repeat(120)));
+        assert_eq!(preview["completion_condition_total"], 6);
+        let conditions = preview["completion_conditions"].as_array().unwrap();
+        assert_eq!(conditions.len(), 5);
+        for (index, condition) in conditions.iter().enumerate() {
+            assert_eq!(
+                condition,
+                &serde_json::json!(format!("{index}:{}…", "条件".repeat(119)))
+            );
+        }
+        let mut legacy = overview.clone();
+        for row in legacy["tasks"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("source_key");
+            row.as_object_mut().unwrap().remove("criteria_preview");
+            row.as_object_mut().unwrap().remove("child_progress");
+        }
+        let legacy: PmTaskOverview = serde_json::from_value(legacy).unwrap();
+        let legacy = serde_json::to_value(legacy).unwrap();
+        assert!(legacy["tasks"][0].get("source_key").is_none());
+        assert!(legacy["tasks"][0].get("criteria_preview").is_none());
+        assert!(legacy["tasks"][0].get("child_progress").is_none());
         let text = overview.to_string();
         for private in [
-            "private-root",
+            "private-000-root",
             "private-child",
             "private-source",
             "PRIVATE ORIGINAL",
-            "private purpose",
+            "5:条件",
             "authority",
             "receipt",
         ] {
@@ -390,13 +455,13 @@ mod tests {
         // PM status and request tracking are independent durable sources.
         std::fs::write(status_path(&repo), "broken PM status").unwrap();
         let (unrelated_error, data) = reader.poll(&repo, None, Some(&updated)).unwrap();
-        assert!(data.error.is_some());
+        assert!(data.error.is_none() && data.current_error.is_some());
         assert_eq!(
             serde_json::to_value(data.current).unwrap()["request_tasks"]["state"],
             "ready"
         );
         apply(
-            3,
+            5,
             ActorKind::Pm,
             Action::Progress {
                 task_id: "private-child-001".into(),
@@ -408,7 +473,7 @@ mod tests {
         let (progressed, data) = reader.poll(&repo, None, Some(&unrelated_error)).unwrap();
         assert_eq!(progressed.revision, unrelated_error.revision + 1);
         assert_eq!(
-            serde_json::to_value(data.current).unwrap()["request_tasks"]["tasks"][0]["wait_reason"],
+            serde_json::to_value(data.current).unwrap()["request_tasks"]["tasks"][1]["wait_reason"],
             "CI verdict"
         );
         std::fs::remove_file(status_path(&repo)).unwrap();

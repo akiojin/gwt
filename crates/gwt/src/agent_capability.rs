@@ -122,6 +122,7 @@ pub enum AgentFrontendRequest {
     },
     SendInput {
         text: String,
+        request_id: Option<u64>,
     },
     PmSendInput {
         operation_id: String,

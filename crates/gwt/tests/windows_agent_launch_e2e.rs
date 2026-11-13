@@ -13,6 +13,9 @@
 
 #![cfg(windows)]
 
+#[path = "windows_shell_observer.rs"]
+mod shell_observer;
+
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -900,10 +903,10 @@ async fn assert_public_ws_conpty_boundary_async(
             shell_screen = vt100::Parser::new(32, 120, 0);
         }
         shell_screen.process(&bytes);
-        // Parsed visible child output proves that ConPTY progressed beyond
-        // its native DSR handshake. The owner answers that query once; this
-        // public client must never inject a second report.
-        child_ready |= !shell_screen.screen().contents().trim().is_empty();
+        // The banner can precede the interactive input loop. Wait for the
+        // completed PowerShell/cmd prompt before sending the one-shot command.
+        // The owner still answers DSR once; never inject a second report here.
+        child_ready |= shell_observer::input_ready(shell_screen.screen());
         if remote_snapshot_seen && child_ready && !command_sent {
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(

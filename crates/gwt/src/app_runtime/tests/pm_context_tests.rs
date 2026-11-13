@@ -108,6 +108,105 @@ fn pm_request_task_browser_reply(
 }
 
 #[test]
+fn pm_request_task_browser_detail_uses_opaque_key_and_preserves_legacy_reads() {
+    use sha2::{Digest, Sha256};
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let store = completed_pm_request_task_fixture(&repo);
+    let state_path =
+        gwt_core::pm_peer::project_dir(&repo).join("project-state/request-tasks/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let invoke = |runtime: &mut AppRuntime, wire| {
+        pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, "browser-a", wire)
+    };
+    let key = format!("{:x}", Sha256::digest(b"synthetic-task"));
+    let read = serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1",
+        "request_id":1, "task_key":key, "task_id":""});
+    let detail = invoke(&mut runtime, read.clone());
+    assert_eq!(detail["state"], "detail");
+    assert_eq!(detail["revision"], 3);
+    assert_eq!(detail["key"], key);
+    let mut key_only = read.clone();
+    key_only.as_object_mut().unwrap().remove("task_id");
+    assert_eq!(invoke(&mut runtime, key_only), detail);
+    assert_eq!(
+        detail["detail"]["original"],
+        serde_json::json!({
+            "text":"Synthetic browser-adapter fixture request", "total_chars":41
+        })
+    );
+    assert_eq!(
+        detail["detail"]["evidence"][0]["text"],
+        "synthetic:fixture-outcome"
+    );
+    assert_eq!(detail["detail"]["history_total"], 2);
+    assert_eq!(detail["detail"]["history"][0]["revision"], 3);
+    assert_eq!(detail["detail"]["history"][1]["revision"], 2);
+    let serialized = detail.to_string();
+    for excluded in [
+        "authority",
+        "request_digest",
+        "fixture-capture",
+        "fixture-complete",
+        "synthetic-intake-fixture",
+        "synthetic-source",
+        "synthetic-task",
+    ] {
+        assert!(
+            !serialized.contains(excluded),
+            "private metadata: {excluded}"
+        );
+    }
+    for selector in ["task_id", "receipt_operation_id"] {
+        let mut mixed = read.clone();
+        mixed[selector] = serde_json::json!("synthetic-task");
+        assert_eq!(invoke(&mut runtime, mixed)["code"], "invalid_request");
+    }
+    let mut unknown = read.clone();
+    unknown["task_key"] = serde_json::json!("0".repeat(64));
+    assert_eq!(invoke(&mut runtime, unknown)["code"], "missing_task");
+    let legacy = invoke(
+        &mut runtime,
+        serde_json::json!({"kind":"load_pm_request_task",
+        "id":"tab-1::agent-1", "request_id":2, "task_id":"synthetic-task"}),
+    );
+    assert_eq!(legacy["state"], "ready");
+    assert_eq!(
+        legacy["task"],
+        serde_json::to_value(&store.read().unwrap().unwrap().tasks["synthetic-task"]).unwrap()
+    );
+    assert!(legacy["receipt"].is_null());
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+
+    fs::write(
+        &state_path,
+        br#"{"schema_version":"PRIVATE-DECODE-SENTINEL"}"#,
+    )
+    .unwrap();
+    let error = invoke(&mut runtime, read);
+    assert_eq!(error["code"], "unreadable_store");
+    assert!(!error.to_string().contains("PRIVATE-DECODE-SENTINEL"));
+}
+
+#[test]
 fn pm_request_task_browser_reopen_resolves_user_and_reconciles_receipts() {
     let _env_lock = env_test_lock()
         .lock()
@@ -530,6 +629,8 @@ fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access()
     ] {
         for mut wire in [
             read.clone(),
+            serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1",
+                "request_id":8, "task_key":"0".repeat(64)}),
             serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":2,
             "request":{"operation_id":"foreign-reopen", "expected_revision":3, "reason":"Synthetic foreign request", "task_id":"synthetic-task"}}),
             serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":3,
@@ -564,6 +665,8 @@ fn pm_request_task_browser_refuses_foreign_windows_before_private_store_access()
     runtime.tabs.retain(|tab| tab.id != "tab-1");
     for wire in [
         serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1", "request_id":3, "task_id":"synthetic-task"}),
+        serde_json::json!({"kind":"load_pm_request_task", "id":"tab-1::agent-1",
+            "request_id":8, "task_key":"0".repeat(64)}),
         serde_json::json!({"kind":"reopen_pm_request_task", "id":"tab-1::agent-1", "request_id":4,
             "request":{"operation_id":"closed-project-reopen", "expected_revision":3, "reason":"Synthetic closed project request", "task_id":"synthetic-task"}}),
         serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":5,
@@ -920,6 +1023,8 @@ fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
             AppRuntime::pm_launch_config(
                 &worktree,
                 &gwt::pm_registry::PmLaunchProfile {
+                    codex_speed: None,
+                    fast_mode: None,
                     agent_id: "codex".into(),
                     model: None,
                     reasoning: None,
@@ -1046,6 +1151,8 @@ fn pm_launch_config_reads_a_stored_version_selector_as_installed() {
         let config = AppRuntime::pm_launch_config(
             worktree,
             &gwt::pm_registry::PmLaunchProfile {
+                codex_speed: None,
+                fast_mode: None,
                 agent_id: agent_id.to_string(),
                 model: None,
                 reasoning: None,
@@ -1083,6 +1190,8 @@ fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_projec
     let configured = AppRuntime::pm_launch_config(
         worktree,
         &gwt::pm_registry::PmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "codex".to_string(),
             model: Some("gpt-5.1-codex-max".to_string()),
             reasoning: Some("high".to_string()),
@@ -1097,6 +1206,8 @@ fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_projec
     let grok = AppRuntime::pm_launch_config(
         worktree,
         &gwt::pm_registry::PmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "grok".to_string(),
             model: Some("DefaultXL".to_string()),
             reasoning: Some("xhigh".to_string()),
@@ -1144,6 +1255,8 @@ fn set_pm_launch_profile_accepts_grok_and_persists_model_and_reasoning() {
     runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetPmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "grok".to_string(),
             model: Some("  grok-4.20-beta  ".to_string()),
             reasoning: Some("  xhigh  ".to_string()),
@@ -1201,6 +1314,8 @@ fn pm_status_projects_configured_and_running_agent_model_and_reasoning() {
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
     gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
         prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "codex".to_string(),
             model: Some("gpt-5.6".to_string()),
             reasoning: Some("xhigh".to_string()),
@@ -1248,6 +1363,8 @@ fn pm_launch_config_exports_project_state_scratch_dir() {
         let config = AppRuntime::pm_launch_config(
             &worktree,
             &gwt::pm_registry::PmLaunchProfile {
+                codex_speed: None,
+                fast_mode: None,
                 agent_id: agent_id.to_string(),
                 model: None,
                 reasoning: None,
@@ -1279,6 +1396,8 @@ fn pm_launch_config_always_skips_permissions() {
         ("codex", "--yolo"),
     ] {
         let profile = gwt::pm_registry::PmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -1672,6 +1791,8 @@ fn pm_close_completion_stays_with_owner_and_is_dropped_after_owner_closes() {
         configured_agent_id: "codex".to_string(),
         configured_model: None,
         configured_reasoning: None,
+        configured_codex_speed: None,
+        configured_fast_mode: None,
         running_agent_id: None,
         running_model: None,
         running_reasoning: None,
@@ -2994,6 +3115,8 @@ fn set_pm_loop_interval_accepts_minimum_and_preserves_live_pm() {
     gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
         prefs.settings.auto_start = false;
         prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "codex".to_string(),
             model: Some("gpt-5.1-codex-max".to_string()),
             reasoning: Some("high".to_string()),
@@ -3132,6 +3255,8 @@ fn set_pm_launch_profile_rejects_an_unsupported_agent() {
     runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetPmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "gemini".to_string(),
             model: Some("gemini-3-pro".to_string()),
             reasoning: None,
@@ -3147,6 +3272,8 @@ fn set_pm_launch_profile_rejects_an_unsupported_agent() {
     runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetPmLaunchProfile {
+            codex_speed: None,
+            fast_mode: None,
             agent_id: "codex".to_string(),
             model: Some("gpt-5.1-codex-max".to_string()),
             reasoning: Some("high".to_string()),

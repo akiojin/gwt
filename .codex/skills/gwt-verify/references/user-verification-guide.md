@@ -174,7 +174,6 @@ The handoff is **automatically skipped** (no user prompt) when:
   human `confirmed`, and the launch waiver is never `skipped(<reason>)`.
 - The owner has not explicitly requested a human check. Record the optional
   result only if useful; do not invent a skip or confirmation.
-- `--mode quick` is in effect (TDD mid-iteration).
 - `Changed surfaces: (none)` — nothing to verify.
 - All changed surfaces are `docs-only` per `surface-taxonomy.md`.
 - The caller passed `--skip-user-check` for an explicit non-interactive

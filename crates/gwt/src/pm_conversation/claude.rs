@@ -62,5 +62,6 @@ pub(super) fn message(
         id: uuid.to_owned(),
         role,
         text,
+        source_key: None,
     }))
 }

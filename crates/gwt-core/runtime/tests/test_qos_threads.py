@@ -109,6 +109,11 @@ class QosThreadEnvTests(unittest.TestCase):
     def test_windows_background_qos_lowers_io_priority(self):
         kernel = mock.Mock()
         kernel.GetCurrentProcess.return_value = 123
+        def prior_working_set(handle, minimum, maximum, flags):
+            self.assertEqual(handle, 123)
+            minimum._obj.value, maximum._obj.value, flags._obj.value = 204800, 1413120, 10
+            return 1
+        kernel.GetProcessWorkingSetSizeEx.side_effect = prior_working_set
         with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
             ctypes, "windll", types.SimpleNamespace(kernel32=kernel), create=True
         ):
@@ -118,6 +123,7 @@ class QosThreadEnvTests(unittest.TestCase):
             [mock.call(123, 0x00100000), mock.call(123, 0x00004000)],
         )
         self.assertEqual(kernel.GetCurrentProcess.restype, ctypes.wintypes.HANDLE)
+        kernel.SetProcessWorkingSetSizeEx.assert_called_once_with(123, 204800, 1413120, 10)
 
     def test_windows_background_mode_failure_keeps_cpu_priority_fallback(self):
         kernel = mock.Mock()
@@ -134,9 +140,16 @@ class QosThreadEnvTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX process priority uses nice")
     def test_background_qos_lowers_process_priority_on_posix(self):
-        with mock.patch("os.nice") as fake_nice:
+        with mock.patch("os.nice", return_value=0) as fake_nice:
             runner.configure_qos_threads("background")
-        fake_nice.assert_called_once_with(10)
+        self.assertEqual(fake_nice.call_args_list, [mock.call(0), mock.call(10)])
+
+    def test_worker_keeps_inherited_posix_background_priority(self):
+        with mock.patch.object(runner.os, "name", "posix"), mock.patch.object(
+            runner.os, "nice", return_value=10, create=True
+        ) as nice:
+            runner._lower_process_priority()
+        nice.assert_called_once_with(0)
 
     @unittest.skipIf(os.name == "nt", "POSIX process priority uses nice")
     def test_interactive_qos_keeps_normal_priority(self):
