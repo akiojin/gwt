@@ -503,6 +503,12 @@ fn check_member_runner(root: &Path, profile: &IssueMonitorLaunchProfile) -> Resu
         .working_dir(root)
         .runtime_target(profile.runtime_target)
         .build();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        &gwt_core::paths::gwt_config_path(),
+        config.runtime_target,
+    )?
+    .with_project_root(root)
+    .apply_to_config(&mut config);
     gwt_agent::resolve_host_runner_health_checked(&mut config).map(|_| ())
 }
 
@@ -2072,6 +2078,42 @@ mod tests {
             )),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn issue_7181_runner_health_uses_active_profile_path() {
+        let (_temp, _home, root, _sessions, _roster) = fixture();
+        let bin = root.join("profile-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let runner = bin.join(if cfg!(windows) {
+            "hermes.cmd"
+        } else {
+            "hermes"
+        });
+        fs::write(
+            &runner,
+            if cfg!(windows) {
+                "@echo off\r\necho 1.2.3\r\necho profile>profile-probe\r\nexit /b 0\r\n"
+            } else {
+                "#!/bin/sh\nprintf '1.2.3\\n'\nprintf profile > profile-probe\n"
+            },
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut settings = gwt_config::Settings::default();
+        settings
+            .profiles
+            .set_env_var("default", "PATH", bin.to_str().unwrap())
+            .unwrap();
+        settings.save(&gwt_core::paths::gwt_config_path()).unwrap();
+        let profile = serde_json::from_value(serde_json::json!({"agent_id":"hermes"})).unwrap();
+        // test-hygiene: allow-production-probe-deadline Verify the scheduler probes the real fixture runner selected only by the active profile PATH.
+        check_member_runner(&root, &profile).unwrap();
+        assert!(root.join("profile-probe").is_file());
     }
 
     #[test]
