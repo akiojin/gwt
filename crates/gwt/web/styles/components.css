@@ -959,6 +959,7 @@ body::after {
   }
 
   .project-actions > .arrange-button,
+  .project-actions .update-check > .arrange-button,
   .project-actions > .app-version,
   .project-actions .op-theme-toggle__option {
     min-width: 44px;
