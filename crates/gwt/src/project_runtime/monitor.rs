@@ -1258,28 +1258,132 @@ mod retry_tests {
 }
 
 const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issues startup timed out after ";
+
+#[cfg(test)]
+mod startup_diagnosis_tests {
+    use super::monitor_startup_failure_detail;
+
+    #[test]
+    fn grok_unsubmitted_composer_and_hook_rejection_are_distinct() {
+        let composer = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\n╭────────────────────╮\n  ❯ $gwt-execute #7183\n╰────────────────────╯\nShift+Tab mode"),
+        );
+        assert!(
+            composer.contains("initial prompt was not submitted"),
+            "{composer}"
+        );
+        let rejected = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\nUserPromptSubmit hook blocked: project policy denied this prompt\n│ ❯ │"),
+        );
+        assert!(
+            rejected.contains("initial prompt rejected by hook"),
+            "{rejected}"
+        );
+        assert!(rejected.contains("project policy denied this prompt"));
+    }
+
+    #[test]
+    fn grok_startup_reports_authentication_and_confirmation_evidence() {
+        let auth =
+            monitor_startup_failure_detail(7183, Some("Sign in to Grok\nEnter your API key"));
+        assert!(auth.contains("authentication required"), "{auth}");
+        let confirmation = monitor_startup_failure_detail(
+            7183,
+            Some("Do you trust the contents of this directory?\nYes, proceed\nNo, quit"),
+        );
+        assert!(
+            confirmation.contains("confirmation required"),
+            "{confirmation}"
+        );
+    }
+
+    #[test]
+    fn ordinary_banner_and_codex_diagnostics_keep_their_meaning() {
+        let banner = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\nRead Terms and Privacy Policy.\n│ ❯ │"),
+        );
+        assert!(!banner.contains("confirmation required"), "{banner}");
+        assert!(banner.contains("no initial prompt submission or tool activity"));
+        let history = monitor_startup_failure_detail(
+            7183,
+            Some("❯ $gwt-execute #7183\nPreToolUse hook denied: tool not allowed\n╭────╮\n  ❯\n╰────╯"),
+        );
+        assert!(
+            history.contains("no initial prompt submission or tool activity"),
+            "{history}"
+        );
+        let codex = monitor_startup_failure_detail(
+            7183,
+            Some("› $gwt-execute #7183\nError: startup failed"),
+        );
+        assert!(codex.contains("initial prompt was not submitted"));
+        assert!(codex.contains("last output: Error: startup failed"));
+    }
+}
+
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
     let owner = format!("#{issue}");
+    let mut in_prompt_box = false;
     let unsubmitted = screen.lines().any(|line| {
-        let Some(composer) = line.trim_start().strip_prefix('›') else {
+        let line = line.trim_start();
+        if line.starts_with('╭') || line.starts_with('╰') {
+            in_prompt_box = line.starts_with('╭');
+            return false;
+        }
+        let Some(composer) = line.strip_prefix('›').or_else(|| {
+            // Grok's composer is inside a rounded box, while submitted
+            // conversation history also uses ❯ outside that box.
+            in_prompt_box
+                .then_some(line.trim_start_matches('│').trim_start())?
+                .strip_prefix('❯')
+        }) else {
             return false;
         };
         let mut words = composer.split_whitespace();
         words.next() == Some("$gwt-execute") && words.next() == Some(owner.as_str())
     });
-    let observation = if unsubmitted {
+    let blocked_hook = screen.lines().rev().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        (lower.contains("userpromptsubmit") || lower.trim_start().starts_with("prompt "))
+            && lower.contains("hook")
+            && ["blocked", "rejected", "denied"]
+                .iter()
+                .any(|word| lower.contains(word))
+    });
+    let authentication = screen.lines().rev().find(|line| {
+        let lower = line.trim().to_ascii_lowercase();
+        lower.starts_with("sign in to grok") || lower.starts_with("enter your api key")
+    });
+    let confirmation = screen.lines().rev().find(|line| {
+        line.trim()
+            .to_ascii_lowercase()
+            .starts_with("do you trust ")
+    });
+    let observation = if blocked_hook.is_some() {
+        "initial prompt rejected by hook"
+    } else if authentication.is_some() {
+        "authentication required before initial prompt can start"
+    } else if confirmation.is_some() {
+        "confirmation required: folder trust must be granted before initial prompt can start"
+    } else if unsubmitted {
         "initial prompt was not submitted"
     } else {
         "no initial prompt submission or tool activity"
     };
-    let error = screen
-        .lines()
-        .find(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("could not read windows sandbox configuration")
-                || lower.contains("error")
-                || lower.contains("failed")
+    let error = blocked_hook
+        .or(authentication)
+        .or(confirmation)
+        .or_else(|| {
+            screen.lines().find(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("could not read windows sandbox configuration")
+                    || lower.contains("error")
+                    || lower.contains("failed")
+            })
         })
         .map(|line| {
             format!(

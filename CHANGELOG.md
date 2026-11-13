@@ -1,6 +1,142 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.164.1] - 2026-11-13
+
+### Bug Fixes
+
+- **gui:** スマートフォン幅で Agents 画面の操作を 44px のタッチ目標にする
+- **runtime:** Preserve owner identity in terminal convergence
+- **launch:** Diagnose grok startup confirmation waits
+- **monitor:** Publish GUI disconnect grace before exposing zero windows
+- **issue-monitor:** Exclude unhealthy runners from member scheduling
+- **issue-monitor:** Retain unhealthy runner diagnostics without a plan
+- **issue-monitor:** Check runner health in the launch environment
+
+### Documentation
+
+- **perf:** Record recovered local admission delivery
+- **perf:** Record delivered source and live probe limits
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7171 配送完了の Work イベントを保存する
+- **work:** Issue #7171 後続スライスの Work イベントを保存する
+- **work:** T-005t 配送精算の Work イベントを保存する
+- **work:** T-005g 着手時の Work イベントを保存する
+- **work:** Record issue 7183 diagnostic PR
+
+## [9.164.0] - 2026-11-13
+
+### Bug Fixes
+
+- **test:** Visual runnerのNode環境パスを正規化する
+- **test:** Windows Claudeの保存先を隔離HOMEに合わせる
+- **test:** PM branchを登録済みworktreeで検証する
+- **ui:** Derive review holds from shared monitor state
+- **test:** Signal-free GUI停止の待機をQuitApp猶予後まで延ばす
+- **ui:** PM steering の件数と理由を共有モデルから描画
+- **gui:** 狭画面の Command Rail を横スクロールでなく折返しで全項目表示する
+- **gui:** 狭画面 rail の PM 規則を ID セレクタにして PM CSS 検査範囲を保つ
+- **ui:** Share workspace attention summaries
+- **runtime:** Preserve PM identity across cold restore
+- **runtime:** Refresh activity when PM identity changes
+- **ui:** Issues stripの不要な再描画を抑止する
+- **pm:** タスク更新時に詳細ボタンのフォーカスを保持する
+- **gui:** 狭画面 Works header の名前で focus ring を切らない
+- **gui:** ソフトキーボード表示時に terminal 入力行を覆わない
+- **ui:** タイトルとfaviconの不要な再描画を抑止する
+- **execution:** Parse verification status in blocker reasons
+- **gui:** タップ後に操作の説明 tooltip を表示したまま残さない
+- **issue-monitor:** Provider quota hold を他ツールのメンバーに割り当てた Issue へ波及させない
+- **restore:** 起動失敗を該当エージェント窓だけに反映する
+- **workspace:** 警告を分離して終端診断のJSONを保持する
+- **process:** Normalize verbatim cmd paths before shell execution
+- **windows:** Cmd の verbatim パス表記を共有境界で正規化
+
+### Features
+
+- **pm:** ChatとReportsから判断へ回答できるようにする
+- **mobile:** Coordinatorの明示serveコマンドを追加する
+- **pm:** Tasksに目的と完了条件のプレビューを追加する
+- **mobile:** Enforce coordinator origin and response headers
+- **gui:** スマートフォン幅で Command Rail を1行に収めて terminal 表示を広げる
+- **pm:** Tasksに直接の子タスクの進捗を表示する
+- **pm:** タスクの原依頼・証拠・変更履歴を表示する
+- **gui:** スマートフォン幅で Works の terminal header を3行に詰める
+- **web:** Add #7007 Progress and Log surfaces, typed window errors (T-012, T-013, T-014)
+
+### Miscellaneous Tasks
+
+- **work:** PR #6949 の参照記録を保存する
+- **work:** Windows cold restart の再開検証を記録する
+- **work:** Windows cold restart 再検証のイベントを記録する
+- **work:** 質問形式回帰の配信監査を保存する
+- **work:** 判断回答のPR記録を保存する
+- **work:** Record coordinator serve PR linkage
+- **work:** Record review hold PR linkage
+- **work:** #4735 新世代のWorkイベントを記録する
+- **work:** #4735 レビュー追随sliceのWorkイベントを記録する
+- **work:** PR #7155 の関連付けを記録
+- **work:** 完了条件プレビューのPR記録を保存する
+- **work:** Record coordinator HTTP PR linkage
+- **work:** T-005r 配信中の Work イベントを保存する
+- **work:** T-005r 精算後の Work イベントを保存する
+- **work:** 後継世代の精算 Work イベントを保存する
+- **work:** T-005h 着手時の Work イベントを保存する
+- **work:** Record workspace attention PR
+- **work:** Record PR #7158 delivery link
+- **work:** 直接子進捗のPR記録を保存する
+- **work:** Record monitor counts PR
+- **work:** タスク詳細のPR関連記録を保存する
+- **work:** MSELのPR関連付けを記録する
+- **work:** タスク詳細の補正PR関連付けを記録する
+- **work:** T-005h 配送確定の Work イベントを保存する
+- **work:** T-005k 着手時の Work イベントを保存する
+- **work:** T-005k 配送確定の Work イベントを保存する
+- **work:** T-005k 精算の Work イベントを保存する
+- **work:** 共有状態モデルのPR関連記録を保存する
+- **work:** T-005t 着手時の Work イベントを保存する
+- **work:** Issue #7125 の完了 Work イベントを記録する
+- **work:** Record issue 7125 acceptance verification
+- **work:** Record issue 7125 pull request linkage
+- **work:** Record issue 7015 source delivery scope
+- **work:** Record issue 7015 pull request link
+- **work:** Record issue 7015 delivery settlement
+- **work:** Record Issue 6382 CI audit and delivery boundary
+- **work:** Record issue 6382 successor delivery
+- **work:** Link issue 6382 delivery PR
+- **work:** Record Issue #3725 diagnostic verification
+- **work:** Link Issue #3725 diagnostic PR
+- **work:** Issue #6474 のPR関連付けを記録
+- **work:** Record issue 6474 verified PR association
+
+### Performance
+
+- **monitor:** Scope pr discovery to local launch candidates
+
+### Refactor
+
+- **ui:** Share monitor queue and slot counts
+
+### Testing
+
+- **windows:** Worksのcold restartを実ブラウザで検証する
+- **windows:** Shell入力をprompt表示後まで待つ
+- **windows:** Cursor行でShell入力準備を確認する
+- **windows:** Fake Claudeのhook shellを実CLIに合わせる
+- **ui:** 実PTY検証を現行の起動と復元に追従させる
+- **works:** 状態配送のACK後に表示を検証する
+- **pm:** Assert backoff through PM preparation state
+- **runtime:** Hook失敗前に実censusの反映を待つ
+- **web:** Specify #7007 Progress/Log surfaces and typed window errors (T-011)
+- **web:** Align window-interrupted-state E2E with typed window errors (#7007 T-014)
+- **windows:** ConPTY 検証で起動時の端末応答を返す
+
+### Ci
+
+- **windows:** Native試験より前にcheckoutをビルドする
+
 ## [9.163.0] - 2026-11-12
 
 ### Bug Fixes
