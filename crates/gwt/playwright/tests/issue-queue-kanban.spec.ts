@@ -98,6 +98,40 @@ test.describe("Issues touch navigation", () => {
       await expect(detail).toBeHidden();
     }
   });
+
+  // SPEC #6476 T-005q: the monitor row, search and New/Refresh measured
+  // 30-42px tall on a phone. Below 601px they are 44px tap targets.
+  test("Issues monitor controls, search and actions are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const controls = root.locator(".knowledge-monitor-controls :is(button, input):visible, .knowledge-search:visible, .workspace-toolbar-actions button:visible");
+    const sizes = () => controls.evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { label: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30) || node.className, width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => controls.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+    expect((await sizes()).some(control => control.height < 44), "the fixture starts with desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    expect(desktop).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains desktop control sizes").toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const measured = await sizes();
+      expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
+      expect(measured).toHaveLength(9);
+      for (const control of measured) {
+        expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-controls-${width}.png`) });
+    }
+    const toggle = root.getByRole("switch", { name: "Auto-refill", exact: true });
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.tap();
+    await expect.poll(() => messages(page)).toEqual([expect.objectContaining({ kind: "set_issue_monitor_auto_refill", enabled: true })]);
+  });
 });
 
 test("Issue #6994 merged work awaits measurement in Backlog with an explicit requeue action", async ({ page }) => {
