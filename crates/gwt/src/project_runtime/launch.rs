@@ -1454,7 +1454,8 @@ pub fn effective_host_codex_config_path(
         } else {
             child_cwd.join(codex_home)
         };
-        return canonical_launch_path(&resolved, "CODEX_HOME").map(|home| home.join("config.toml"));
+        return canonical_launch_path(&resolved, "CODEX_HOME")
+            .map(|home| test_isolated_codex_config(home.join("config.toml")));
     }
 
     let user_home = match semantics {
@@ -1479,7 +1480,13 @@ pub fn effective_host_codex_config_path(
             user_home.display()
         ));
     }
-    Ok(user_home.join(".codex").join("config.toml"))
+    Ok(test_isolated_codex_config(
+        user_home.join(".codex").join("config.toml"),
+    ))
+}
+
+fn test_isolated_codex_config(path: PathBuf) -> PathBuf {
+    gwt_config::home::test_isolated_config_path(path, Path::new(".codex/config.toml"))
 }
 
 fn canonical_launch_path(path: &Path, role: &str) -> Result<PathBuf, String> {

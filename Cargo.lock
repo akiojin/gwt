@@ -1559,6 +1559,7 @@ dependencies = [
  "chrono",
  "dunce",
  "fs2",
+ "gwt-config",
  "gwt-core",
  "include_dir",
  "serde",
