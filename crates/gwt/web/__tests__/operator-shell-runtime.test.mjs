@@ -32,7 +32,49 @@ test("Issues strip reads shared attention summaries on model-only updates", asyn
   model.update(state => ({ ...state, steeringAttention: { count: 0, summary: "PM steering 0", byIssue: {} } }));
   assert.match(cell.title, /PM steering 0/);
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Off");
+  model.update(state => ({ ...state, status: { enabled: true, state: "active" },
+    counts: { queue: 3, active: 1, maxActive: 2 } }));
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q3 A1/2");
+  model.update(state => ({ ...state, counts: { queue: 0, active: 0, maxActive: 0 } }));
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q0 A0/0");
   unsubscribe();
+});
+
+test("BLOCK tooltips in the strip and Works heading read the same Work projection summary", async () => {
+  const { subscribeWorkAttentionSummary, applyTelemetryCounts } = await importOperatorShell();
+  const { createActiveWorkProjectionModel } = await import("../issue-other-surface.js");
+  const { createWorksSurface } = await import("../works-surface.js");
+  const { document } = parseHTML(html);
+  const store = value => createUiStateStore(value, { scheduleFrame: run => { run(); return () => {}; } });
+  const { model, applyActiveWorkProjectionReceiveEvent: receive } = createActiveWorkProjectionModel();
+  const unsubscribe = subscribeWorkAttentionSummary(document, model);
+  const surface = createWorksSurface({ document, workProjectionModel: model,
+    windowCatalogModel: store({ catalog: { appState: { tabs: [] }, runtimeStates: {} } }),
+    activityModel: store({ agents: [] }), rosterModel: store({ members: [] }),
+    summaryModel: store({ running: 3, block: 7, idle: 0, error: 0 }), mountTerminal() {}, mountPreview() {} });
+  applyTelemetryCounts(document, { running: 3, waiting: 7 });
+  const strip = document.querySelector(".op-status-strip__cell--waiting");
+  const heading = surface.element.querySelector('[data-count="block"]');
+  const unchangedCounts = () => {
+    assert.equal(document.getElementById("op-strip-waiting").textContent, "7");
+    assert.equal(heading.textContent, "7", "Workspace counts never replace agent BLOCK counts");
+  };
+  for (const reason of ["Await token", "Await review"]) {
+    receive({ kind: "active_work_projection", projection: { id: "project",
+      active_works: [{ id: "w", title: "Ship change", blocked_reason: reason }] } });
+    const expected = model.read().projection.attentionSummary.summary;
+    // Initial delivery is frame-batched; awaiting its task observes the actual subscription.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(strip.title, expected);
+    assert.equal(heading.parentElement.title, expected);
+    unchangedCounts();
+  }
+  receive({ kind: "active_work_projection", projection: null });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(strip.title, "");
+  assert.equal(heading.parentElement.title, "");
+  unchangedCounts();
+  unsubscribe(); surface.dispose(); model.dispose();
 });
 
 test("runtime health batches a frame into the same latest immutable cell and detail snapshot", async () => {

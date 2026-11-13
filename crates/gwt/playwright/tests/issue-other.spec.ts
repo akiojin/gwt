@@ -86,6 +86,14 @@ test("Work detail preserves all six managed hook states and pending metadata", a
 
 test("Work projection snapshots and patches update Other while retaining session history", async ({ page }, info) => {
   await boot(page);
+  const blockCell = page.locator(".op-status-strip__cell--waiting");
+  const worksBlock = page.locator('.works-counts [data-count="block"]');
+  const worksBlockCell = worksBlock.locator("..");
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "project_agent_aggregate", aggregate: {
+    revision: 100, running_count: 3, block_count: 7, idle_count: 0, error_count: 0, unread: false,
+  } }));
+  await expect(page.locator("#op-strip-waiting")).toHaveText("7");
+  await expect(worksBlock).toHaveText("7");
   const other = page.locator("details.issue-other-group");
   await other.locator("summary").click();
   await row(page, "other-paused").click();
@@ -102,6 +110,25 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveText("Await token");
   const linkedReason = page.locator('[data-issue-number="4556"] .knowledge-row-secondary-item[data-kind="reason"]');
   await expect(linkedReason).toHaveText("Await token");
+  const attention = "Workspaces needing attention 2\nLinked issue: Await token\nIndependent work: Await token";
+  await expect(blockCell).toHaveAttribute("title", attention);
+  await expect(worksBlockCell).toHaveAttribute("title", attention);
+  // The agent aggregate is unchanged: a new reason must still reach both views.
+  await page.evaluate(() => {
+    const fixture = window as any;
+    for (const id of ["other-paused", "linked-visible"]) {
+      fixture.__otherProjection.active_works.find((work: any) => work.id === id).next_action = "Await review";
+    }
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection: fixture.__otherProjection });
+  });
+  await expect(blockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
+  await expect(worksBlockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
+  await expect(page.locator("#op-strip-waiting")).toHaveText("7");
+  await expect(worksBlock).toHaveText("7");
+  await page.locator('[data-surface="works"]').click();
+  await expect(page.locator(".works-heading")).toBeVisible();
+  await page.screenshot({ path: info.outputPath("workspace-attention-shared-state.png"), fullPage: true });
+  await page.locator('[data-surface="issues"]').click();
   await page.evaluate(() => {
     const fixture = window as any;
     const projection = structuredClone(fixture.__otherProjection);
@@ -116,6 +143,8 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(row(page, "other-paused")).toHaveAttribute("data-attention", "paused");
   await expect(row(page, "other-paused").locator(".workspace-attention-reason")).toHaveCount(0);
   await expect(linkedReason).toHaveCount(0);
+  await expect(blockCell).toHaveAttribute("title", "Workspaces needing attention 0");
+  await expect(worksBlockCell).toHaveAttribute("title", "Workspaces needing attention 0");
   await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
   await page.evaluate(() => {
     const fixture = window as any;
@@ -139,6 +168,10 @@ test("Work projection snapshots and patches update Other while retaining session
     expect.objectContaining({ session_id: "ledger-other", agent_session_id: "conversation-other" }),
   ]);
   await page.screenshot({ path: info.outputPath("work-projection-patch.png") });
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection_patch",
+    projection: { id: "projection-other" } }));
+  await expect(blockCell).toHaveAttribute("title", "");
+  await expect(worksBlockCell).toHaveAttribute("title", "");
   await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection", projection: null }));
   await expect(row(page, "other-paused")).toHaveCount(0);
   await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
@@ -168,7 +201,40 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
   await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  await expect(page.locator('[data-metric="queue"]')).toHaveText("Queue 3");
+  await expect(page.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
+  for (const [status, queue] of [
+    [{ queue_len: 0, active_count: 0, max_active_agents: 0 }, 0],
+    [{ queue_len: 4 }, 4],
+  ] as const) {
+    await page.evaluate(status => (window as any).__otherEmit({ kind: "issue_monitor_status", status }), status);
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Run Q${queue} A0/0`);
+    await expect(page.locator('[data-metric="queue"]')).toHaveText(`Queue ${queue}`);
+    await expect(page.locator('[data-metric="capacity"]')).toHaveText("0 of 0");
+    await expect(page.locator('[data-metric="active"]')).toHaveAttribute("aria-description", /Issues agent capacity: 0\/0/);
+    await expect(search).toBeFocused();
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
+  }
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__stripMutations = 0;
+    fixture.__stripObserver = new MutationObserver(records => { fixture.__stripMutations += records.length; });
+    fixture.__stripObserver.observe(document.getElementById("op-strip-issue-monitor"), {
+      subtree: true, attributes: true, childList: true, characterData: true,
+    });
+    fixture.__otherEmit({ kind: "issue_monitor_status", status: { total_candidates: 73, allowed_labels: ["ready"] } });
+  });
+  await expect(page.locator('[data-metric="queue"]')).toHaveAttribute("title", "Total 73");
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  expect(await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__stripObserver.disconnect();
+    return fixture.__stripMutations;
+  }), "an unrelated status update reaches Issues without redrawing the strip").toBe(0);
   expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
+  expect(await messages(page, "set_issue_monitor_max_active_agents")).toEqual([]);
   await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
   if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
     await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });

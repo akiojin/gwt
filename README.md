@@ -2183,13 +2183,24 @@ gwt shows an actionable hint.
 The PM window's **Tasks** view is a read-only preview of saved request tasks. It
 shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
-shows completed and cancelled tasks. The preview contains at most 50 tasks and
+shows completed and cancelled tasks. Parents show counts of their direct subtasks
+across all saved tasks, including those outside the preview: completed, cancelled,
+unfinished, and total. Cancellation is separate from completion; finishing all
+subtasks does not complete the parent automatically. The preview contains at most 50 tasks and
 shows the total and any requests awaiting classification. Long summaries are
 shortened; the saved tasks remain complete. Expand **Purpose and completion
 criteria** on a task to see its purpose and the first five completion criteria.
 The preview shows the full criteria count and limits each item to 240 characters
 (with an ellipsis for shortened text). A read failure retains the last
-confirmed list with a warning. Task editing, automatic intake, and history import
+confirmed list with a warning. **View task details** in Tasks or Chat reads only
+the selected task: its original request, purpose, completion criteria, completion
+evidence, and recent recorded changes. This read-only preview shows at most 4,000
+characters of the original, 20 criteria, 10 evidence references, and 20 changes
+(newest first); other text is limited to 1,000 characters per item and actor IDs
+to 240. Counts and shortened text are explicit. Changes include only receipts
+with a saved change to that task, so this is not a complete operation history.
+**Reload details** refreshes it; changes or read failures retain confirmed detail
+with a stale warning. **Close details** returns focus to its task. Task editing, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 

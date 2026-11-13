@@ -12327,6 +12327,7 @@ impl AppRuntime {
                 id,
                 request_id,
                 task_id,
+                task_key,
                 receipt_operation_id,
             } => self.pm_request_task_events(
                 context,
@@ -12335,6 +12336,7 @@ impl AppRuntime {
                 request_id,
                 pm_chat::PmRequestTaskOperation::Read {
                     task_id,
+                    task_key,
                     receipt_operation_id,
                 },
             ),
@@ -16316,18 +16318,35 @@ impl AppRuntime {
                     {
                         return Vec::new();
                     }
-                    let pm_root = self
-                        .project_state_mut(&context)
-                        .and_then(|state| state.pending_pm_launches.remove(&window_id));
-                    let pm_cache_changed = match (pm_root, snapshot.pm_registration.as_ref()) {
-                        (Some(root), Some(registration))
-                            if root == context.project_root
+                    let latest_pm_launch = self.project_state_mut(&context).is_some_and(|state| {
+                        state.pending_pm_launches.remove(&window_id);
+                        !state
+                            .pending_pm_launches
+                            .values()
+                            .any(|root| root == &context.project_root)
+                    });
+                    // Cold restore may finish outside ensure's marking interval.
+                    // Trust its registration only while it is still durable;
+                    // a newer PM may have completed since this snapshot was read.
+                    let pm_cache_changed = match snapshot.pm_registration.as_ref() {
+                        Some(registration)
+                            if latest_pm_launch
                                 && snapshot.session_id.as_deref()
-                                    == Some(registration.session_id.as_str()) =>
+                                    == Some(registration.session_id.as_str())
+                                && gwt::pm_registry::load_pm_prefs(
+                                    &gwt::pm_registry::pm_prefs_path_for_repo_path(
+                                        &context.project_root,
+                                    ),
+                                )
+                                .ok()
+                                .and_then(|prefs| prefs.registration)
+                                .is_some_and(|current| {
+                                    current.session_id == registration.session_id
+                                }) =>
                         {
-                            let changed =
-                                self.pm_session_for_root(&root) != Some(&registration.session_id);
-                            self.sync_pm_session_cache(&root, Some(registration));
+                            let changed = self.pm_session_for_root(&context.project_root)
+                                != Some(&registration.session_id);
+                            self.sync_pm_session_cache(&context.project_root, Some(registration));
                             changed
                         }
                         _ => false,
