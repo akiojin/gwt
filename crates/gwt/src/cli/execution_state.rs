@@ -29853,7 +29853,7 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 10);
+            assert_eq!(probes.len(), 11);
             assert!(probes.iter().all(|probe| {
                 let operation = probe["operation"].as_str().unwrap_or_default();
                 let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
