@@ -314,6 +314,8 @@ fn resolve_cmd_shim(
 }
 
 fn build_cmd_command_expression(command: &Path, args: &[OsString]) -> String {
+    // cmd.exe does not understand the verbatim paths accepted by file lookup.
+    let command = crate::paths::normalize_windows_child_process_path(command);
     let mut tokens = Vec::with_capacity(args.len() + 1);
     tokens.push(quote_cmd_token(&command.as_os_str().to_string_lossy()));
     tokens.extend(

@@ -79,3 +79,36 @@ fn std_adapter_executes_cmd_shim_metacharacters_as_literal_arguments() {
         "{output:?}"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn std_adapter_executes_verbatim_cmd_command_and_path_entry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let shim = temp.path().join("runner.cmd");
+    std::fs::write(&shim, "@echo off\r\necho GWT_ARG:%~1\r\n").expect("write cmd shim");
+    let verbatim = std::fs::canonicalize(&shim).expect("canonical cmd path");
+    assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
+    let requests = [
+        ProcessPlanRequest::new(&verbatim),
+        ProcessPlanRequest::new("runner").env("PATH", verbatim.parent().unwrap()),
+    ];
+    let comspec = std::env::var_os("ComSpec").expect("Windows ComSpec");
+    let mut failures = Vec::new();
+    for request in requests {
+        let mut command = resolved_command(
+            request
+                .arg("--version")
+                .inherit_env(false)
+                .env("PATHEXT", ".CMD")
+                .env("ComSpec", &comspec),
+        )
+        .expect("resolve the same cmd fixture");
+        let output = command.output().expect("spawn cmd shim");
+        if !output.status.success()
+            || !String::from_utf8_lossy(&output.stdout).contains("GWT_ARG:--version")
+        {
+            failures.push(output);
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
