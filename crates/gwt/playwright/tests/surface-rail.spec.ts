@@ -1020,6 +1020,76 @@ test.describe("Surface rail", () => {
     }
     expect(errors, "zero console/page errors").toEqual([]);
   });
+
+  // SPEC #6476 T-005lg (AC-1): on a phone the Logs refresh was 24px and the
+  // filters 32px tall, and the two-column timeline squeezed the detail pane.
+  test.describe("Logs touch targets", () => {
+    test.use({ hasTouch: true });
+    test("Logs controls and entries are 44px tap targets on a phone", async ({ page }, info) => {
+      const errors = captureBrowserErrors(page);
+      await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
+      await page.locator("#op-rail [data-cmd='open-logs']").click();
+      const logs = page.locator(".logs-root:visible");
+      await expect(logs.locator(".logs-search-input")).toBeVisible({ timeout: 10_000 });
+      const windowId = await page.locator(".workspace-window[data-preset='logs']").getAttribute("data-id");
+      // Answer the initial project request, then load global entries: they carry
+      // no project scope, so the fixture needs no project tab.
+      const emitLogs = (entries: unknown[]) => page.evaluate(({ id, entries }) =>
+        (window as any).__surfaceRailSocket().emit({ kind: "log_entries", id, entries }), { id: windowId, entries });
+      await emitLogs([]);
+      await expect(logs.locator(".logs-status")).toHaveText("0 visible / 0 total");
+      await logs.locator(".logs-scope-select").selectOption("global");
+      await emitLogs([
+        { id: "t005lg-1", severity: "error", source: "gwt::launch", message: "Launch timed out", timestamp: "2026-11-14T00:00:00Z", detail: "after 30s", fields: {} },
+        { id: "t005lg-2", severity: "info", source: "gwt::scan", message: "Scan finished", timestamp: "2026-11-14T00:01:00Z", fields: { count: 3 } },
+      ]);
+      await expect(logs.locator(".logs-entry")).toHaveCount(2);
+      // A live warning shows the unread-alerts button, which must be tappable too.
+      await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "log_entry_appended", entry:
+        { id: "t005lg-3", severity: "warn", source: "gwt::pm", message: "Slot released", timestamp: "2026-11-14T00:02:00Z", fields: {} } }));
+      await expect(logs.locator(".logs-unread-button")).toHaveText("1 unread alert");
+      const controls = ".logs-root:visible :is(.workspace-toolbar-actions button, .logs-filter-bar :is(select, input), .logs-entry):visible";
+      const sizes = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.className, left: box.left, right: box.right, width: box.width, height: box.height };
+      }));
+      const minHeights = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+      expect((await sizes()).some(control => control.height < 44), "the fixture has desktop-sized controls").toBe(true);
+      const desktop = await minHeights();
+      expect(desktop).not.toContain("44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+      expect(await logs.locator(".logs-layout").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
+        "601px keeps the timeline and detail side by side").toBe(2);
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+        const measured = await sizes();
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(["Refresh logs", "text-button logs-unread-button", "logs-scope-select", "logs-search-input"]));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+          "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+        const timeline = (await logs.locator(".logs-timeline").boundingBox())!;
+        const detail = (await logs.locator(".logs-detail-pane").boundingBox())!;
+        expect(detail.width, `the detail pane uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
+        expect(detail.y, `the detail sits below the timeline at ${width}px`).toBeGreaterThanOrEqual(timeline.y + timeline.height - 1);
+        for (const pane of [timeline, detail]) expect(pane.height, `neither pane collapses at ${width}x${height}`).toBeGreaterThanOrEqual(120);
+        await logs.locator(".logs-entry", { hasText: "Scan finished" }).tap();
+        await expect(logs.locator(".logs-detail-message")).toHaveText("Scan finished");
+        await logs.locator(".logs-severity-select").selectOption("error");
+        await expect(logs.locator(".logs-entry")).toHaveCount(1);
+        await expect(logs.locator(".logs-unread-button")).toBeVisible();
+        await logs.locator(".logs-severity-select").selectOption("debug");
+        await page.screenshot({ path: info.outputPath(`logs-controls-${width}.png`) });
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+  });
 });
 
 function windowById(page: Page, id: string) {

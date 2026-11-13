@@ -4326,6 +4326,18 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* SPEC #6476 T-005lg: on a phone the Logs refresh was 24px and the filters
+   32px tall, and the two columns left the detail pane a sliver. Make them 44px
+   tap targets and stack the timeline above the detail below 601px; a short
+   screen scrolls the surface instead of collapsing either pane. */
+@media (max-width: 600px) {
+  .logs-root { overflow-y: auto; }
+  .logs-root .workspace-toolbar-actions button,
+  .logs-filter-field :is(select, input) { min-width: 44px; min-height: 44px; }
+  .logs-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 1fr) minmax(120px, 1fr); }
+  .logs-timeline { border-right: 0; border-bottom: 1px solid var(--color-border); }
+}
+
 .branch-list-root {
   container-type: inline-size;
 }
