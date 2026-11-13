@@ -18,42 +18,57 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
-## 2026-11-13: recovered source delivery（鈴木 和斗）
+## 2026-11-13: 回収・配信確認と実測の制約（鈴木 和斗）
 
-Producer commit `c830090e7249d84339a2b15e775c89c35ac13410` was recovered from
-`origin/work/issue-6877` and merged into the existing macOS worktree. The
-previous source-unavailable blocker no longer applies. No production code was
-rewritten. The narrow delivery target remains SPEC #4093 FR-6877-8 / T-R28.
+Producer `c830090e7249d84339a2b15e775c89c35ac13410` を remote branch から
+回収した。独立差分レビューは阻害0、今回の再実装はない。
+HEAD `2012bffa10cb86b599f4bae1d16c5d89e795baaf` の canonical pre-pr
+`vrr-8d3e6f7b108946a79654b96dd9585321` は6/6工程PASS。
+worker / queue / urgent / cache 131件、hygiene37件が成功し、各1件の既存
+opt-in / maintenance helper は除外した。workspace Clippy / format も成功。
 
-Fetched `origin/main` at `a431860c89d5ec94c698977a537ec33473359ff9` contains the
-previous performance slices through PR #7120, but not this producer commit.
-AC-1 and AC-3 retain their delivered status. AC-2 remains unproven for the
-changed runtime; AC-4 and AC-5 still lack the specified six-agent and
-five-minute/sixty-minute measurements. The historical pre-change measurements
-below cannot establish acceptance of this source. The Issue stays open.
+中断を挟んだ作業中に元producerの [PR #7180](https://github.com/akiojin/gwt/pull/7180)
+が先にmergeされていた。再fetchで source と merge
+`36232045db0793c92f65bdfe62e286017a81b911` の包含を確認した。
+[Release PR #7182](https://github.com/akiojin/gwt/pull/7182) / v9.164.0 の
+`origin/main=c2d8f88182ec5df772c73226fa18f19daa6f5b38` は両者を包含する。
+PR #7184 は文書とWork記録だけに整理した。原sourceの13必須checkは全成功。
+source SHA c830090e7 のCI coverage（outer shell除外後）は次のとおり。
 
-The independent diff review found no blocking defect: optional discovery keeps
-local, urgent, stored-grant, settlement, and auto-refill candidates; omitted
-observations preserve known holds; pending timeline pages are pruned when
-outside the selected set. Completion probes and live prelaunch authority stay
-unchanged. Existing regression tests are reused for the delivery verification.
-The local worker suite passed 102 tests with 0 failures and its existing
-opt-in live probe ignored; formatting and diff checks passed.
+| gate | covered / total | 割合 | 閾値 |
+| --- | --- | --- | --- |
+| gwt-core + gwt | 433622 / 469491 | 92.36% | 90% |
+| その他domain crates | 66971 / 72108 | 92.88% | 80% |
 
-Acceptance Surface: non-user-facing (background optional association reads;
-no rendering, browser contract, or interactive control changes).
+[Coverage 証跡](https://github.com/akiojin/gwt/actions/runs/43363727256/job/131689558722)
+はこのsource SHAの結果であり、文書のみのPR #7184の再計測値ではない。
 
-Delivery follows the repository's `work/issue-6877 -> develop -> release -> main`
-path. The main source-branch check is preserved. A release version/changelog
-requires the release owner's approval; this source delivery does not change
-those artifacts or the running fleet.
+### 600秒の読み取り専用診断
 
-AC-2 measurement preflight: `issue.monitor.status` projects cached state and
-cannot execute a scan. The daemon scan also performs claim/settlement/effect
-work; a second daemon sharing the live HOME would not be a read-only probe.
-An isolated loader-only probe omits completion and in-flight readers and cannot
-prove the whole-scan threshold. Re-measure the deployed matching binary over a
-complete 600-second window after the release owner coordinates deployment.
+既存 opt-in `issue_6954_live_readonly_stages` を新filterを含むtest binaryで
+実行した。記録されたsourceは `0424947f5a575313ac7392a46551353d046eeac2`。
+ScopedGwtHomeの空cache、実GitHub、起動時prefsのsnapshotを使用し、
+claim / effect実行 / pruning / fleetの再起動は行っていない。
+最初の試行はホスト中断で約55分のログ空白が入り、受け入れ証拠から除外した。
+再試行は一時的にidle sleepを抑止し、連続した時刻窓を確認した。
+
+- UTC窓: 2026-11-13T06:29:42.591815+00:00 以上、2026-11-13T06:39:42.591815+00:00 未満。
+- この600秒にgh start **25件**。issuesは5件、残りはclosed pulls。
+- 全実行は603.58秒、20 iteration。
+  scan/cache failureは2件、open-PR readbackのsampleは0件。
+- `gh api issues` と closed-pullsページ取得が14秒のstage deadlineに達した。
+  診断testはfailure ledgerの非ゼロを検出してFAILした。
+- ローカルraw: `/tmp/issue6877-live-awake/run-3e55afd1-d8f2-49b7-96b9-18039ed32f79/live-stage.jsonl`。
+  SHA-256: `f800f07fca213ed1604623952f3fc08c50c069a056e6284369da12320b5403d7`。
+
+これは空cacheから始める一部stageの診断で、完走した稼働fleetの全scanではない。
+新filterのopen-PR readbackにも到達しておらず、AC-2の達成/未達判定には使えない。
+稼働hostのアプリはv9.163.0のままだった。AC-2/4/5は未チェックを維持し、
+v9.164.0以降の識別済みruntimeの全scanを600秒測定する必要がある。
+六つの実装agentが連続稼働する条件と、5分/60分のCPU対も未証明。
+Issue #6877をcloseしない。
+
+Acceptance Surface: non-user-facing (measurement records only).
 
 User Verification Result: n/a (autonomous)
 
