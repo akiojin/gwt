@@ -116,6 +116,70 @@ test("Home and Decide read one waiting-decision count after an answer", async ({
   expect(errors, "console and page errors").toEqual([]);
 });
 
+// SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+// same awaiting-attention value the status strip reads.
+test("status strip counts unresolved reviews from the PM current facts", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    (window as any).__pmFixtureCurrent = {
+      facts: { source: "daemon", active_windows: [], review_attention: [
+        { pr_number: 801, issue_numbers: [71], reason: "Changes requested" },
+        { pr_number: 803, issue_numbers: [], reason: "2 unresolved review threads" },
+      ] },
+      request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] },
+    };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await expect(pm).toBeVisible();
+  const strip = page.locator("#op-strip-issue-monitor");
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 2 \| Unresolved reviews 2/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hsv-strip-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
+// SPEC #5016 HSF: the PM Live facts needs_human line shows the shared value
+// the status strip reads. A stopped (Held) Issue is not a pending decision,
+// even though the raw facts list still names it.
+test("PM Live facts and the status strip read one needs_human value", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    (window as any).__pmFixtureCurrent = {
+      facts: { source: "daemon", active_windows: [], needs_human_count: 2 },
+      request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] },
+    };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await expect(pm).toBeVisible();
+  await page.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "issue_monitor_inbox", items: [
+    { issue: { number: 91, title: "Decide the scope", state: "open", labels: [] }, state: "needs_human", error_message: "Scope decision" },
+    { issue: { number: 92, title: "Held work", state: "open", labels: [] }, state: "needs_human", error_message: "stopped: held by PM" },
+  ] }));
+  await expect(page.locator("#op-strip-issue-monitor")).toHaveAttribute("title", /Needs human 1/);
+  await expect(pm.locator('[aria-label="Live facts"]')).toContainText("needs_human: 1");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hsf-live-facts-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
 // from a particular Codex version. browser-check still serves every UI asset.
 test("PM terminal keeps redraw, grid and input consistent across view changes", async ({ page }, info) => {

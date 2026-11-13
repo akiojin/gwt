@@ -5,22 +5,25 @@ fn bootstrap_defers_physical_restores_until_runtime_ownership_is_installed() {
     // Quit can discard PendingApp before the event loop installs its owner
     // subscribers. Bootstrap therefore prepares restores without starting a
     // physical process; StartupReady resumes Continue without waiting for UI.
-    let source = include_str!("../startup.rs");
-    let bootstrap = source
-        .split_once("pub(crate) fn bootstrap(&mut self)")
-        .expect("bootstrap implementation")
-        .1
-        .split_once("\n    }\n")
-        .expect("bootstrap boundary")
-        .0;
-    assert!(
-        !bootstrap.contains("self.start_window("),
-        "startup Quit must not inherit a shell launched before GUI ownership is installed"
-    );
-    assert!(
-        !bootstrap.contains("self.startup_auto_resume_ready_events()"),
-        "Continue must resume after GUI ownership is installed, including legacy PM restores"
-    );
+    let source = include_str!("../startup.rs").replace("\r\n", "\n");
+    for source in [source.clone(), source.replace('\n', "\r\n")] {
+        let source = source.replace("\r\n", "\n");
+        let bootstrap = source
+            .split_once("pub(crate) fn bootstrap(&mut self)")
+            .expect("bootstrap implementation")
+            .1
+            .split_once("\n    }\n")
+            .expect("bootstrap boundary")
+            .0;
+        assert!(
+            !bootstrap.contains("self.start_window("),
+            "startup Quit must not inherit a shell launched before GUI ownership is installed"
+        );
+        assert!(
+            !bootstrap.contains("self.startup_auto_resume_ready_events()"),
+            "Continue must resume after GUI ownership is installed, including legacy PM restores"
+        );
+    }
 }
 
 #[test]

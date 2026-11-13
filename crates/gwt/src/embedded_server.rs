@@ -4520,7 +4520,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
-        let _env_lock = gwt_core::test_support::env_lock();
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #7204: the verdict must not depend on the 2 s wake budget. A
+        // loaded runner spent it inside a file lock after the reservation, and
+        // the retry reserved a second transaction. The provider ACK below ends
+        // the delivery instead of an expiry into the Unconfirmed replay path.
+        let _wake_budget = ScopedEnvVar::set(
+            "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        );
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let (mut runtime, probe, id) =
@@ -4582,7 +4594,34 @@ mod tests {
             Instant::now(),
         );
         forward_browser_inputs(&events, &mut runtime);
+        // Acknowledge the protected wake as its provider prompt hook would,
+        // once the owner has prepared its durable receipt.
+        let receipts = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(
+            &runtime.project_context("browser-tab").unwrap().project_root,
+        );
+        let provider_ack = std::thread::spawn(move || loop {
+            let prepared = gwt::pm_registry::load_pm_delivery_receipts(&receipts)
+                .unwrap()
+                .into_iter()
+                .find(|receipt| {
+                    receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+                });
+            if let Some(receipt) = prepared {
+                gwt::pm_registry::finish_pm_delivery_receipt(
+                    &receipts,
+                    &receipt.operation_id,
+                    &receipt.target_session_id,
+                    &receipt.body_sha256,
+                    gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+                    None,
+                )
+                .unwrap();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        });
         crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+        provider_ack.join().unwrap();
         assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
         assert!(!probe.pty.has_unsent_user_input());
         assert!(!runtime.pane_has_unsent_user_input(&id));

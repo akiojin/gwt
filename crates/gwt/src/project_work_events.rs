@@ -4671,6 +4671,8 @@ mod tests {
             load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
         };
 
+        let _tracing =
+            tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -4697,7 +4699,7 @@ mod tests {
         let state_path = state_dir.join("work-events-intake.json");
         let close_path = state_dir.join("work-events-closed.jsonl");
         let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
-        assert!(first.projection_rebuilt);
+        assert!(first.projection_rebuilt, "initial rebuild: {first:?}");
 
         let done_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
         let mut done = WorkEvent::new(WorkEventKind::Done, "work-durable-recovery", done_at);

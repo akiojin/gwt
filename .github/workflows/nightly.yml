@@ -268,6 +268,10 @@ jobs:
         continue-on-error: true
       - name: Check paired evidence comparison
         run: python -m unittest discover -s scripts -p test_ci_verify_timings.py
+      # Keep cold compilation outside the budget for the two complete schedules.
+      - name: Build the paired measurement suite
+        run: cargo test -p gwt --lib --all-features --no-run
+        timeout-minutes: 45
       - name: Measure serial and grouped derived gwt-lib schedules
         run: python scripts/ci_verify_timings.py --output target/verify-timings
         timeout-minutes: 90

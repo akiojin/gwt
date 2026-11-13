@@ -1198,6 +1198,7 @@ export function createKnowledgeKanbanSurface({
         steeringAttention: { count: null, summary: "", byIssue: {} },
         reviewAttention: { count: null, summary: "", byIssue: {} },
         pmDecisionAttention: { count: null, summary: "", byWindow: {} },
+        prReviewAttention: { count: null, summary: "", byIssue: {}, byWindow: {} },
         decisionAttention: { count: null, summary: "" }, status: {
         enabled: false,
         state: "disabled",
@@ -1528,7 +1529,8 @@ export function createKnowledgeKanbanSurface({
       // PM decisions belong to a PM window, not an Issue, so they add to the
       // Issue union instead of joining it.
       function withDecisionAttention(model) {
-        const issueParts = [model.humanAttention, model.reviewAttention, model.steeringAttention]
+        const issueParts = [model.humanAttention, model.reviewAttention, model.steeringAttention,
+          model.prReviewAttention]
           .filter(part => part?.count != null);
         const decisions = model.pmDecisionAttention?.count != null ? model.pmDecisionAttention : null;
         const parts = decisions ? [...issueParts, decisions] : issueParts;
@@ -1551,6 +1553,27 @@ export function createKnowledgeKanbanSurface({
           const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
           return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
             summary: count == null ? "" : `PM decisions ${count}` } });
+        });
+      }
+
+      // SPEC #5016 HSV: a PM window publishes the unresolved reviews its
+      // current facts observed; `null` (not loaded, or closed) removes it.
+      // A PR without an Issue is its own entry in the Issue union.
+      function applyPmReviewAttention(windowId, items) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.prReviewAttention.byWindow };
+          if (Array.isArray(items)) byWindow[windowId] = items.map(item => ({ ...item }));
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const byIssue = {};
+          for (const item of windows.flat()) {
+            const numbers = Array.isArray(item.issue_numbers) ? item.issue_numbers : [];
+            const keys = numbers.length ? numbers.map(String) : [`pr-${item.pr_number}`];
+            for (const key of keys) byIssue[key] ??= { reason: String(item.reason || "").trim() || "Review unresolved" };
+          }
+          const count = windows.length ? Object.keys(byIssue).length : null;
+          return withDecisionAttention({ ...model, prReviewAttention: { count, byIssue, byWindow,
+            summary: count == null ? "" : `Unresolved reviews ${count}` } });
         });
       }
 
@@ -6265,6 +6288,7 @@ export function createKnowledgeKanbanSurface({
         applyRepositoryLabels,
         applyIssueMonitorInbox,
         applyPmDecisions,
+        applyPmReviewAttention,
         applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
