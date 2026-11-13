@@ -346,6 +346,11 @@
   .works-full-usage { flex: 0 0 100%; order: 2; }
   .works-full-usage { order: 3; }
 }
+/* SPEC 6476 T-005g: on a phone the Agents controls kept their 28-32px desktop
+   size. Make every control a 44px tap target below 601px. */
+@media (max-width: 600px) {
+  .agents-surface :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
+}
 @media (max-width: 480px) {
   .agents-surface { padding: var(--space-3); }
   .works-counts { gap: var(--space-2); }
