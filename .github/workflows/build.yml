@@ -179,9 +179,12 @@ jobs:
         run: |
           cargo check -p gwt-core -p gwt
           # Cold linking belongs to preparation, outside the socket execution budget.
-          cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run
-          cargo test -p gwt --lib --test runtime_tests --no-run
+          # Test line tables are omitted only here; keep default checks and cache keys.
+          CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run
+          CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt --lib --test runtime_tests --no-run
       - name: Test short socket fixtures with a long native TMPDIR
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: bash scripts/test-short-socket-fixtures.sh
         timeout-minutes: 15
 
