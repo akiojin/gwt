@@ -28,12 +28,23 @@ pub enum WorkspaceCommand {
         reason: String,
         observed_done_event_id: String,
     },
+    RepairCloseProof {
+        reason: String,
+    },
     /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
-    EventsReconcile { reference: String, dry_run: bool },
+    EventsReconcile {
+        reference: String,
+        dry_run: bool,
+    },
     /// Ask the authenticated Host to close one eligible Work record.
-    Close { work_id: String, close_kind: String },
+    Close {
+        work_id: String,
+        close_kind: String,
+    },
     /// Read the outcome of one update without contacting or mutating the Host.
-    Receipt { operation_id: String },
+    Receipt {
+        operation_id: String,
+    },
     /// `workspace.update` — update Workspace current projection and journal.
     Update {
         title: Option<String>,
@@ -48,7 +59,9 @@ pub enum WorkspaceCommand {
         title_summary: Option<String>,
     },
     /// `workspace.candidates` — list join candidates.
-    Candidates { agent_session: String },
+    Candidates {
+        agent_session: String,
+    },
     /// `workspace.join`.
     Join {
         agent_session: String,
@@ -79,10 +92,16 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_list` —
     /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
     /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
-    ProjectionList { stale: bool, all: bool },
+    ProjectionList {
+        stale: bool,
+        all: bool,
+    },
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
-    ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    ProjectionPrune {
+        dry_run: bool,
+        ids: Vec<String>,
+    },
     /// Diagnose the shared host endpoint catalog without resolving stale roots.
     ProjectScan,
     /// Quarantine abandoned machine-local project stores; dry-run by default.
@@ -115,7 +134,10 @@ pub enum WorkspaceCommand {
     },
     /// Refold one existing Work's portable container aliases from its durable
     /// sources. This never creates lifecycle events or changes ownership.
-    WorkRepair { work_id: String, dry_run: bool },
+    WorkRepair {
+        work_id: String,
+        dry_run: bool,
+    },
 }
 
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
@@ -127,6 +149,13 @@ pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
             })
         }
         "update" => parse_update(rest),
+        "repair-close-proof" if rest.len() == 2 && rest[0] == "--reason" => {
+            let reason = parse_required_value(rest, 0, "reason")?;
+            if reason.trim().is_empty() {
+                return Err(CliParseError::MissingFlag("reason"));
+            }
+            Ok(WorkspaceCommand::RepairCloseProof { reason })
+        }
         "reopen" => {
             let mut reason = None;
             let mut observed_done_event_id = None;
@@ -1654,6 +1683,58 @@ pub(super) fn run<E: CliEnv>(
                 let root = crate::validated_project_state_root_for_session_recovery(&session)
                     .map_err(core_error)?;
                 match crate::agent_project_state::apply_authenticated_workspace_reopen(
+                    &root,
+                    &session_id,
+                    request,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return emit_workspace_error(out, &error),
+                }
+            };
+            out.push_str(
+                &serde_json::to_string(&receipt)
+                    .map_err(|error| string_error(error.to_string()))?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        WorkspaceCommand::RepairCloseProof { reason } => {
+            let session_id = ambient_session_id().ok_or_else(|| {
+                string_error(
+                    "workspace.repair_close_proof requires ambient GWT_SESSION_ID".to_string(),
+                )
+            })?;
+            let request = crate::AgentWorkspaceCloseProofRepairRequest {
+                schema_version: crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+                claimed_session_id: session_id.clone(),
+                observation: crate::observe_agent_runtime(env.repo_path())
+                    .map_err(|error| string_error(error.to_string()))?,
+                primary_provider_session_id: native_primary_provider_session_id(),
+                reason,
+            };
+            let receipt = if let Some(target) =
+                crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
+            {
+                match crate::daemon_runtime::send_workspace_close_proof_repair_via_agent_bridge(
+                    &target, &request,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return emit_workspace_bridge_error(out, &error),
+                }
+            } else {
+                if std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV).is_some() {
+                    return Err(string_error(
+                        "managed workspace.repair_close_proof requires its Host bridge capability"
+                            .to_string(),
+                    ));
+                }
+                let session = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+                )
+                .map_err(|error| string_error(error.to_string()))?;
+                let root = crate::validated_project_state_root_for_session_recovery(&session)
+                    .map_err(core_error)?;
+                match crate::agent_project_state::apply_authenticated_workspace_close_proof_repair(
                     &root,
                     &session_id,
                     request,
@@ -9832,6 +9913,28 @@ pub(crate) mod tests {
             assert!(!String::from_utf8_lossy(&env.stdout).contains(primary));
             assert!(!String::from_utf8_lossy(&env.stderr).contains(primary));
         }
+
+        // AC-4: the eligible primary can safely retry proof repair when the
+        // existing exact Done proof already passes, without reopening Work.
+        let before_repair = workspace_recovery_state_bytes(&paths);
+        let mut env = TestEnv::new(worktree);
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "workspace.repair_close_proof",
+            "params": { "reason": "Confirm accepted terminal proof" }
+        })
+        .to_string();
+        let code = crate::cli::env::dispatch(&mut env, &["gwtd".to_string()]);
+        assert_eq!(
+            code,
+            0,
+            "eligible primary proof repair: {} {}",
+            String::from_utf8_lossy(&env.stdout),
+            String::from_utf8_lossy(&env.stderr)
+        );
+        assert_eq!(workspace_recovery_state_bytes(&paths), before_repair);
+        assert!(!String::from_utf8_lossy(&env.stdout).contains(primary));
+        assert!(!String::from_utf8_lossy(&env.stderr).contains(primary));
     }
 
     #[test]

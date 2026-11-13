@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
-    resolve_workspace_work_event_container, workspace_execution_container_same,
-    DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
-    WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
-    WorkspaceExecutionContainerRef,
+    machine_local_close_event_matches_projected_lifecycle, resolve_workspace_work_event_container,
+    workspace_execution_container_same, DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance,
+    WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem, WorkItemsIntakeSnapshot,
+    WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceStatusCategory,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -827,6 +827,116 @@ where
         allow_close_proof_recovery,
     )?;
     Ok((report, loaded_metadata, close_fingerprint))
+}
+
+/// Explicit proof-only repair from the caller's complete shared-source inventory.
+/// The caller authenticates the target and holds its owner/Session authority
+/// lease. Candidate validation runs before compaction; publication revalidation
+/// runs under the final Work writer lock after snapshot and transaction checks.
+/// No lifecycle event or source file is written, and rejected close identities
+/// must never acquire proof merely because they occur in the local log.
+pub fn repair_work_events_with_shared_loader<F, T, V, G>(
+    works_path: &Path,
+    target_work_id: &str,
+    load_shared_contents: F,
+    close_path: Option<&Path>,
+    validate_candidate: V,
+    before_publication: G,
+) -> Result<(WorkEventsIntakeReport, T, Option<String>)>
+where
+    F: FnOnce() -> Result<(Vec<SharedWorkEventsSource>, T)>,
+    V: FnOnce(&WorkItemsProjection) -> Result<()>,
+    G: FnOnce() -> Result<()>,
+{
+    let snapshot = WorkItemsIntakeSnapshot::capture_for_container_repair(works_path, close_path)?;
+    let previous = snapshot.raw_projection()?.ok_or_else(|| {
+        GwtError::Other("close proof repair refused: existing Works projection is required".into())
+    })?;
+    let was_active = unique_close_proof_repair_target(&previous, target_work_id)?.status_category
+        == WorkspaceStatusCategory::Active;
+    let (shared_contents, metadata) = load_shared_contents()?;
+    let close_content = snapshot.local_content()?;
+    let close_fingerprint = close_content.map(content_fingerprint);
+    let (report, mut candidate, _) = prepare_rebuilt_work_events(
+        Ok(Some(previous)),
+        shared_contents,
+        close_content,
+        Vec::new(),
+    )?;
+    if report.skipped_invalid > 0 || report.skipped_opaque > 0 {
+        return Err(GwtError::Other(
+            "close proof repair refused: complete readable event history is required".into(),
+        ));
+    }
+    snapshot.apply_detachments(&mut candidate)?;
+    let target = unique_close_proof_repair_target(&candidate, target_work_id)?;
+    if target.status_category != WorkspaceStatusCategory::Done {
+        return Err(GwtError::Other(
+            "close proof repair refused: complete replay must establish the exact Done Work".into(),
+        ));
+    }
+    let mut accepted_durable_done = false;
+    if let Some(content) = close_content {
+        let accepted_events = target
+            .events
+            .iter()
+            .map(|event| (event.id.as_str(), event))
+            .collect::<HashMap<_, _>>();
+        for (durable, _) in collect_machine_local_work_events(content)? {
+            let accepted = accepted_events.get(durable.id.as_str());
+            if durable.work_item_id != target_work_id && accepted.is_none() {
+                continue;
+            }
+            if !accepted.is_some_and(|event| {
+                machine_local_close_event_matches_projected_lifecycle(&durable, event)
+                    && durable.source_operation == event.source_operation
+                    && durable.authority_class == event.authority_class
+                    && durable.execution_generation == event.execution_generation
+                    && durable.recovery == event.recovery
+            }) {
+                return Err(GwtError::Other(format!(
+                    "close proof repair refused: local event {} was not accepted by complete replay",
+                    durable.id
+                )));
+            }
+            accepted_durable_done |= durable.kind == WorkEventKind::Done;
+        }
+    }
+    if was_active && !accepted_durable_done {
+        return Err(GwtError::Other(
+            "close proof repair refused: Active Work requires an accepted durable Done close"
+                .into(),
+        ));
+    }
+    validate_candidate(&candidate)?;
+    let prepared = snapshot.prepare_rebuilt(candidate)?;
+    snapshot.commit_repair_with_preflight(Some(&prepared), before_publication)?;
+    Ok((report, metadata, close_fingerprint))
+}
+
+fn unique_close_proof_repair_target<'a>(
+    projection: &'a WorkItemsProjection,
+    work_id: &str,
+) -> Result<&'a WorkItem> {
+    let mut targets = projection
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_id);
+    match (targets.next(), targets.next()) {
+        (Some(target), None)
+            if !target.discarded
+                && matches!(
+                    target.status_category,
+                    WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Done
+                ) =>
+        {
+            Ok(target)
+        }
+        _ => Err(GwtError::Other(
+            "close proof repair refused: exactly one non-Discarded Active or Done Work is required"
+                .into(),
+        )),
+    }
 }
 
 fn publish_rebuilt_work_events(

@@ -8,9 +8,9 @@ use crate::agent_capability::{
 };
 use crate::{
     AgentBuildAbortTerminalizationRequest, AgentWorkMaterializationProbeRequest,
-    AgentWorkTerminalizationRequest, AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError,
-    AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent,
-    RuntimeHookEvent,
+    AgentWorkTerminalizationRequest, AgentWorkspaceCloseProofRepairRequest,
+    AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, RuntimeHookEvent,
 };
 use axum::{
     extract::{
@@ -1481,6 +1481,10 @@ pub fn agent_router(state: TransportState, access_log: AccessLogSink) -> Router 
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route("/internal/workspace-reopen", post(workspace_reopen_handler))
         .route(
+            "/internal/workspace-close-proof-repair",
+            post(workspace_close_proof_repair_handler),
+        )
+        .route(
             "/internal/work-materialization-probe",
             post(work_materialization_probe_handler),
         )
@@ -1814,6 +1818,74 @@ async fn workspace_reopen_handler(
             AgentWorkspaceUpdateError::new(
                 AgentWorkspaceUpdateErrorCode::Internal,
                 "Host workspace reopen task failed before a response was produced",
+            ),
+        ),
+    }
+}
+
+async fn workspace_close_proof_repair_handler(
+    headers: HeaderMap,
+    State(state): State<TransportState>,
+    Json(request): Json<AgentWorkspaceCloseProofRepairRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "close_proof_repair_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::cli::execution_state::with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &execution_binding,
+            || {
+                crate::apply_bound_authenticated_workspace_close_proof_repair(
+                    &mutation_project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                )
+            },
+        )
+        .map_err(|_| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "close proof repair authority lease is unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "close proof repair authority changed before mutation",
+            )
+        })?
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt)) => {
+            state.send(TransportEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host close proof repair task failed before a response was produced",
             ),
         ),
     }

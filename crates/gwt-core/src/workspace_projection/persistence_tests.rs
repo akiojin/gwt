@@ -17075,6 +17075,368 @@ fn exact_close_confirmation_survives_compacted_done_and_prior_pauses() {
     }
 }
 
+struct CloseProofRepairFixture {
+    works: PathBuf,
+    closes: PathBuf,
+    sources: Vec<crate::work_events_intake::SharedWorkEventsSource>,
+    done: WorkEvent,
+}
+
+impl CloseProofRepairFixture {
+    fn new(directory: &Path, compacted: bool) -> Self {
+        let works = directory.join("works.json");
+        let closes = directory.join("work-events-closed.jsonl");
+        let at = Utc.timestamp_opt(20_000, 0).unwrap();
+        let start = WorkEvent::new(WorkEventKind::Start, "proof-repair-work", at);
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            &start.work_item_id,
+            at + chrono::Duration::seconds(1),
+        );
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        let mut projection = WorkItemsProjection::empty(at);
+        projection.apply_event(start.clone());
+        projection.apply_event(done.clone());
+        let mut shared = vec![start];
+        if compacted {
+            for index in 0..=super::super::MAX_INLINE_WORK_EVENTS {
+                let update = WorkEvent::new(
+                    WorkEventKind::Update,
+                    &done.work_item_id,
+                    at + chrono::Duration::seconds(index as i64 + 2),
+                );
+                projection.apply_event(update.clone());
+                shared.push(update);
+            }
+        }
+        save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+        append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
+        let content = shared
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        Self {
+            works,
+            closes,
+            sources: vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                content, None,
+            )],
+            done,
+        }
+    }
+
+    fn bytes(&self) -> Vec<Option<Vec<u8>>> {
+        [
+            self.works.clone(),
+            workspace_close_projection_proofs_path(&self.works),
+            self.closes.clone(),
+            pending_workspace_state_transaction_path_for_work_items(&self.works),
+        ]
+        .iter()
+        .map(|path| fs::read(path).ok())
+        .collect()
+    }
+}
+
+#[test]
+fn close_proof_repair_replays_accepted_compacted_history() {
+    let _guard = lock_test_env();
+    for proof_gap in ["missing", "stale", "omitted"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), true);
+        let proof_path = workspace_close_projection_proofs_path(&fixture.works);
+        if proof_gap == "missing" {
+            fs::remove_file(&proof_path).unwrap();
+        } else {
+            let mut proofs: CloseProjectionProofs =
+                serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+            for snapshot in &mut proofs.snapshots {
+                if proof_gap == "stale" {
+                    snapshot.projection_hash = "stale".into();
+                } else if let Some(events) = snapshot.events.get_mut(&fixture.done.work_item_id) {
+                    events.remove(&fixture.done.id);
+                }
+            }
+            fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
+        }
+        let stored = load_workspace_work_items_from_path(&fixture.works)
+            .unwrap()
+            .unwrap();
+        assert!(validate_exact_work_machine_local_close_events_read_only(
+            &stored.work_items[0],
+            &fixture.works,
+            &fixture.closes,
+        )
+        .is_err());
+        if proof_gap == "omitted" {
+            assert!(
+                !workspace_close_projection_needs_rebuild(&fixture.works, &fixture.closes).unwrap(),
+                "explicit repair must preserve the automatic intake guard"
+            );
+        }
+        let closes_before = fs::read(&fixture.closes).unwrap();
+        let validated = std::cell::Cell::new(false);
+        let guarded = std::cell::Cell::new(false);
+        let (report, metadata, fingerprint) =
+            crate::work_events_intake::repair_work_events_with_shared_loader(
+                &fixture.works,
+                &fixture.done.work_item_id,
+                || Ok((fixture.sources.clone(), "complete sources")),
+                Some(&fixture.closes),
+                |candidate| {
+                    assert!(candidate.work_items[0]
+                        .events
+                        .iter()
+                        .any(|event| event == &fixture.done));
+                    assert!(
+                        candidate.work_items[0].events.len() > super::super::MAX_INLINE_WORK_EVENTS
+                    );
+                    validated.set(true);
+                    Ok(())
+                },
+                || {
+                    assert!(validated.get());
+                    let lock = fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(fixture.works.with_extension("lock"))
+                        .unwrap();
+                    assert!(fs2::FileExt::try_lock_exclusive(&lock).is_err());
+                    guarded.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(report.applied > 0);
+        assert_eq!(metadata, "complete sources");
+        assert_eq!(
+            fingerprint,
+            Some(crate::work_events_intake::content_fingerprint(
+                std::str::from_utf8(&closes_before).unwrap()
+            ))
+        );
+        assert!(guarded.get());
+        let repaired = load_workspace_work_items_from_path(&fixture.works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired.work_items[0].completed_at,
+            Some(fixture.done.updated_at)
+        );
+        validate_exact_work_machine_local_close_events_read_only(
+            &repaired.work_items[0],
+            &fixture.works,
+            &fixture.closes,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&fixture.closes).unwrap(), closes_before);
+    }
+}
+
+#[test]
+fn close_proof_repair_replays_active_projection_only_with_durable_done() {
+    let _guard = lock_test_env();
+    for has_durable_done in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let stored = load_workspace_work_items_from_path(&fixture.works)
+            .unwrap()
+            .unwrap();
+        let mut active = WorkItemsProjection::empty(stored.updated_at);
+        for event in stored.work_items[0]
+            .events
+            .iter()
+            .filter(|event| event.kind != WorkEventKind::Done)
+        {
+            active.apply_event(event.clone());
+        }
+        save_workspace_work_items_projection_to_path(&fixture.works, &active).unwrap();
+        let mut sources = fixture.sources.clone();
+        if !has_durable_done {
+            fs::write(&fixture.closes, b"").unwrap();
+            let mut derived_done = fixture.done.clone();
+            derived_done.id = "shared-derived-done".into();
+            derived_done.kind = WorkEventKind::Update;
+            sources.push(crate::work_events_intake::SharedWorkEventsSource::new(
+                serde_json::to_string(&derived_done).unwrap() + "\n",
+                None,
+            ));
+        }
+        let before = fixture.bytes();
+        let result = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || Ok((sources, ())),
+            Some(&fixture.closes),
+            |candidate| {
+                assert_eq!(
+                    candidate.work_items[0].status_category,
+                    WorkspaceStatusCategory::Done
+                );
+                Ok(())
+            },
+            || Ok(()),
+        );
+        if has_durable_done {
+            result.expect("accepted durable Done repairs its stale Active projection");
+            let repaired = load_workspace_work_items_from_path(&fixture.works)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                repaired.work_items[0].completed_at,
+                Some(fixture.done.updated_at)
+            );
+            validate_exact_work_machine_local_close_events_read_only(
+                &repaired.work_items[0],
+                &fixture.works,
+                &fixture.closes,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&fixture.closes).ok(), before[2]);
+        } else {
+            let error = result.expect_err("derived status alone is not a durable Done close");
+            assert!(
+                error.to_string().contains("accepted durable Done"),
+                "{error}"
+            );
+            assert_eq!(fixture.bytes(), before);
+        }
+    }
+}
+
+#[test]
+fn close_proof_repair_refuses_divergent_terminal_authority_without_publication() {
+    let _guard = lock_test_env();
+    for field in ["operation", "authority", "generation", "recovery"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let mut divergent = fixture.done.clone();
+        match field {
+            "operation" => divergent.source_operation = Some("foreign.close".into()),
+            "authority" => divergent.authority_class = Some(WorkAuthorityClass::PrimaryAgent),
+            "generation" => divergent.execution_generation = Some("foreign-generation".into()),
+            "recovery" => {
+                divergent.recovery = Some(WorkRecoveryLink {
+                    terminal_event_id: "foreign-terminal".into(),
+                    reason: "foreign recovery".into(),
+                });
+            }
+            _ => unreachable!(),
+        }
+        append_workspace_work_events_to_path(&fixture.closes, &[divergent]).unwrap();
+        let before = fixture.bytes();
+        let error = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || Ok((fixture.sources.clone(), ())),
+            Some(&fixture.closes),
+            |_| panic!("contradictory close authority must not reach candidate validation"),
+            || panic!("contradictory close authority must not reach publication"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not accepted by complete replay"),
+            "{error}"
+        );
+        assert_eq!(fixture.bytes(), before, "{field}");
+    }
+}
+
+#[test]
+fn close_proof_repair_refuses_unaccepted_history_without_publication() {
+    let _guard = lock_test_env();
+    for invalid_history in ["rejected", "divergent", "discarded", "incomplete"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let mut sources = fixture.sources.clone();
+        if invalid_history == "incomplete" {
+            sources.push(crate::work_events_intake::SharedWorkEventsSource::new(
+                "{broken", None,
+            ));
+        } else {
+            let mut invalid = fixture.done.clone();
+            match invalid_history {
+                "rejected" => invalid.id = "zz-rejected-close".into(),
+                "divergent" => invalid.updated_at += chrono::Duration::seconds(1),
+                "discarded" => {
+                    invalid.id = "discarded-close".into();
+                    invalid.kind = WorkEventKind::Discard;
+                    invalid.status_category = None;
+                    invalid.updated_at -= chrono::Duration::seconds(1);
+                }
+                _ => unreachable!(),
+            }
+            append_workspace_work_events_to_path(&fixture.closes, &[invalid]).unwrap();
+        }
+        let before = fixture.bytes();
+        let error = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || Ok((sources, ())),
+            Some(&fixture.closes),
+            |_| panic!("invalid rebuilt history must not reach caller validation"),
+            || panic!("invalid rebuilt history must not reach publication"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("repair refused"), "{error}");
+        assert_eq!(fixture.bytes(), before, "{invalid_history}");
+    }
+}
+
+#[test]
+fn close_proof_repair_preserves_state_on_guard_or_snapshot_refusal() {
+    let _guard = lock_test_env();
+    for rejection in ["candidate", "publication", "snapshot", "pending"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let before = fixture.bytes();
+        let guarded = std::cell::Cell::new(false);
+        let error = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || {
+                if rejection == "snapshot" {
+                    let proof = workspace_close_projection_proofs_path(&fixture.works);
+                    let mut changed = fs::read(&proof).unwrap();
+                    changed.push(b'\n');
+                    fs::write(proof, changed).unwrap();
+                } else if rejection == "pending" {
+                    fs::write(
+                        pending_workspace_state_transaction_path_for_work_items(&fixture.works),
+                        b"{pending",
+                    )
+                    .unwrap();
+                }
+                Ok((fixture.sources.clone(), ()))
+            },
+            Some(&fixture.closes),
+            |_| {
+                if rejection == "candidate" {
+                    Err(GwtError::Other("candidate authority changed".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                guarded.set(true);
+                Err(GwtError::Other("publication authority changed".into()))
+            },
+        )
+        .unwrap_err();
+        let mut expected = before;
+        match rejection {
+            "snapshot" => expected[1].as_mut().unwrap().push(b'\n'),
+            "pending" => expected[3] = Some(b"{pending".to_vec()),
+            _ => {}
+        }
+        assert_eq!(fixture.bytes(), expected, "{rejection}: {error}");
+        assert_eq!(guarded.get(), rejection == "publication");
+        assert!(!error.to_string().is_empty());
+    }
+}
+
 #[test]
 fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
     let _guard = lock_test_env();
