@@ -10241,6 +10241,128 @@ fn grok_monitor_auto_launch_delivers_initial_task_before_first_response() {
     assert!(pane.pty.try_wait().unwrap().is_some());
 }
 
+struct GrokTrustCleanup {
+    path: PathBuf,
+    key: String,
+}
+
+impl GrokTrustCleanup {
+    fn remove_grant(&self) -> std::io::Result<()> {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.path.with_extension("toml.lock"))?;
+        FileExt::lock_exclusive(&lock)?;
+        let contents = match fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let mut document: toml::Value = toml::from_str(&contents).map_err(std::io::Error::other)?;
+        let Some(folders) = document.get_mut("folders") else {
+            return Ok(());
+        };
+        let folders = folders
+            .as_table_mut()
+            .ok_or_else(|| std::io::Error::other("Grok trust folders must be a table"))?;
+        if folders.remove(&self.key).is_none() {
+            return Ok(());
+        }
+        let contents = toml::to_string_pretty(&document).map_err(std::io::Error::other)?;
+        // Match Grok's locked read-modify-write protocol, including its 0600
+        // temporary file and atomic replacement. Never restore a stale snapshot.
+        let mut staged = tempfile::NamedTempFile::new_in(self.path.parent().unwrap())?;
+        staged.write_all(contents.as_bytes())?;
+        staged.as_file().sync_all()?;
+        staged.persist(&self.path).map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
+impl Drop for GrokTrustCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = self.remove_grant() {
+            if thread::panicking() {
+                eprintln!("Grok fixture trust cleanup failed: {error}");
+            } else {
+                panic!("Grok fixture trust cleanup failed: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn grok_trust_cleanup_preserves_existing_and_intervening_entries() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("trusted_folders.toml");
+    fs::write(
+        &path,
+        "[folders.fixture]\ntrusted=true\n[folders.existing]\ntrusted=false\n",
+    )
+    .unwrap();
+    let cleanup = GrokTrustCleanup {
+        path: path.clone(),
+        key: "fixture".into(),
+    };
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("toml.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let dropping = thread::spawn(move || drop(cleanup));
+    fs::write(&path, "[folders.fixture]\ntrusted=true\n[folders.existing]\ntrusted=false\n[folders.concurrent]\ntrusted=true\n").unwrap();
+    FileExt::unlock(&lock).unwrap();
+    dropping.join().unwrap();
+    let value: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(value["folders"].get("fixture").is_none());
+    assert_eq!(
+        value["folders"]["existing"]["trusted"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        value["folders"]["concurrent"]["trusted"].as_bool(),
+        Some(true)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn grok_trust_cleanup_runs_while_fixture_unwinds() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("trusted_folders.toml");
+    fs::write(
+        &path,
+        "[folders.fixture]\ntrusted=true\n[folders.existing]\ntrusted=true\n",
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(|| {
+        let _cleanup = GrokTrustCleanup {
+            path: path.clone(),
+            key: "fixture".into(),
+        };
+        panic!("simulate failed live assertion");
+    });
+    assert!(result.is_err());
+    let value: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(value["folders"].get("fixture").is_none());
+    assert_eq!(
+        value["folders"]["existing"]["trusted"].as_bool(),
+        Some(true)
+    );
+}
+
 #[test]
 #[ignore = "requires explicit opt-in, installed Grok and authentication; makes one paid model request"]
 fn grok_live_native_initial_task_starts_first_response() {
@@ -10287,6 +10409,9 @@ fn grok_live_native_initial_task_starts_first_response() {
     let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
     let _grok_home = ScopedEnvVar::set("GROK_HOME", &live_home);
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join("codex-home"));
+    // Declare before the fixture so its owner/process cleanup runs before
+    // this guard removes the temporary repository's persisted trust grant.
+    let _trust_cleanup: GrokTrustCleanup;
     let mut fixture = monitor_relaunch_fixture(
         temp.path(),
         "grok-live-initial-task",
@@ -10294,6 +10419,20 @@ fn grok_live_native_initial_task_starts_first_response() {
         MonitorNativeHolderFixture::None,
         false,
     );
+    let repository_key = fs::canonicalize(&fixture.project_root).unwrap();
+    let native_key = repository_key.to_string_lossy();
+    assert!(
+        previous_trust
+            .as_ref()
+            .and_then(|value| value.get("folders"))
+            .and_then(|folders| folders.get(native_key.as_ref()))
+            .is_none(),
+        "the temporary repository must not have an existing trust entry"
+    );
+    _trust_cleanup = GrokTrustCleanup {
+        path: trust_path.clone(),
+        key: native_key.to_string(),
+    };
     // Synthetic history belongs to the fixture; only the real CLI uses the
     // existing authentication home. Never read or copy credential files.
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &temp.path().join("fixture-grok-home"));
@@ -10410,8 +10549,6 @@ fn grok_live_native_initial_task_starts_first_response() {
     if let Some(previous) = previous_trust.as_ref() {
         assert_preserved_trust(previous, &current_trust);
     }
-    let repository_key = fs::canonicalize(&fixture.project_root).unwrap();
-    let native_key = repository_key.to_string_lossy();
     let recorded = current_trust["folders"]
         .get(native_key.as_ref())
         .expect("Grok records the shared repository key");

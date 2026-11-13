@@ -156,8 +156,9 @@ unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgp
   `XAI_API_KEY` for API-key workflows. For host launches, gwt passes Grok’s
   official `--trust` for the launched Git repository, including its main checkout
   and linked worktrees. This enables project hooks, MCP/LSP, instructions, and
-  skills for that repository; manual CLI defaults and other repositories are
-  unchanged.
+  skills for that repository. Grok saves the grant in `trusted_folders.toml`, so
+  later manual launches using the same trust store and repository key also use
+  it. Global CLI defaults and grants for other repositories are unchanged.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
