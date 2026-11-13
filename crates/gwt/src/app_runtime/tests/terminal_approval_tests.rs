@@ -514,6 +514,9 @@ fn app_runtime_native_conpty_pushes_running_waiting_idle_and_process_exit() {
         )));
         // test-hygiene: allow-wall-clock-deadline Issue #3809 requires each runtime hook state push within one second.
         assert!(started.elapsed() <= Duration::from_secs(1));
+        // The hook was consumed through its own subscription above. Do not
+        // replay older statuses while observing output after the next input.
+        receiver = owner.subscribe();
         if expected == WindowProcessStatus::Running {
             probe
                 .pty
@@ -2872,51 +2875,8 @@ fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
     state.project_owner_identity = owner.client().identity().cloned();
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    #[cfg(windows)]
-    owner_fixture_block_on(async {
-        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
-        // This plain Shell has no frontend terminal to answer ConPTY's
-        // startup query. Use the actual query to order the normal response.
-        let mut output = Vec::new();
-        // test-hygiene: allow-wall-clock-deadline Bounds the real terminal handshake; raw CPR and READY establish ordering.
-        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-            loop {
-                match source.recv().await.expect("actual Shell startup event") {
-                    OwnerEvent::Output {
-                        id,
-                        incarnation,
-                        data,
-                        ..
-                    } if id == before.id && incarnation == before.incarnation => {
-                        output.extend(data);
-                        if output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
-                            break;
-                        }
-                    }
-                    OwnerEvent::Status {
-                        id,
-                        incarnation,
-                        exit_confirmed: true,
-                        detail,
-                        ..
-                    } if id == before.id && incarnation == before.incarnation => {
-                        panic!("actual Shell exited before its terminal handshake: {detail:?}");
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .expect("actual Shell cursor-position query");
-        owner
-            .command(OwnerCommand::Input {
-                id: before.id.clone(),
-                incarnation: before.incarnation,
-                data: b"\x1b[1;1R".to_vec(),
-            })
-            .await
-            .expect("normal terminal cursor-position response");
-    });
+    // The physical owner answers and consumes ConPTY cursor queries. READY is
+    // the public startup boundary on every platform, including Windows.
     owner_fixture_block_on(async {
         // test-hygiene: allow-wall-clock-deadline The real READY marker orders input after Shell startup; elapsed time only bounds an OS/IPC hang.
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {

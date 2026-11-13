@@ -531,11 +531,27 @@ fn paired_windows_timings_preserve_evidence_outside_the_pr_path() {
     assert!(job.contains("ref: develop"));
     assert!(job.contains("fetch-depth: 0"));
     assert!(job.contains("cargo-nextest@0.9.146"));
+    assert!(job.contains("timeout-minutes: 120"));
+    let (_, build) = named_steps(job)
+        .into_iter()
+        .find(|(name, _)| name == "Build the paired measurement suite")
+        .expect("compile the complete suite outside the measurement budget");
+    assert!(build.contains("cargo test -p gwt --lib --all-features --no-run"));
+    assert!(build.contains("timeout-minutes: 45"));
+    assert!(!build.contains("continue-on-error"));
+    assert!(!build.contains("if:"));
+    assert!(
+        job.find("Build the paired measurement suite").unwrap()
+            < job
+                .find("Measure serial and grouped derived gwt-lib schedules")
+                .unwrap()
+    );
     let (_, measure) = named_steps(job)
         .into_iter()
         .find(|(name, _)| name == "Measure serial and grouped derived gwt-lib schedules")
         .expect("both schedules run in one step on the same host");
     assert!(measure.contains("python scripts/ci_verify_timings.py --output target/verify-timings"));
+    assert!(measure.contains("timeout-minutes: 90"));
     assert!(!measure.contains("continue-on-error"));
     assert!(!measure.contains("if:"));
     let (_, upload) = named_steps(job)
