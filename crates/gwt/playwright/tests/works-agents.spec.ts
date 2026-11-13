@@ -50,6 +50,16 @@ test.describe("Works and Agents approved baseline", () => {
     expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
   });
 
+  test("a workspace snapshot cannot roll back a later runtime status in the same burst", async ({ page }) => {
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      fixture.workspaceStatus("starting");
+      fixture.status("agent-one", "idle");
+    });
+    await expect(workRow(page, "agent-one")).toHaveAttribute("data-state", "idle");
+    await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
+  });
+
   test("live Works never disappear while activity and catalogs converge", async ({ page }, info) => {
     await page.evaluate(() => {
       const surface = document.querySelector(".works-surface:not(.works-surface--preview)")!;
