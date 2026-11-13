@@ -902,7 +902,7 @@ pub fn apply_bound_authenticated_workspace_close_proof_repair(
         gwt_core::workspace_projection::with_exact_workspace_done_read_only(
             &authority.target,
             &authority.work_id,
-            &revalidate,
+            revalidate,
         )
     });
     match confirmation {
@@ -945,7 +945,7 @@ pub fn apply_bound_authenticated_workspace_close_proof_repair(
     gwt_core::workspace_projection::with_exact_workspace_done_read_only(
         &authority.target,
         &authority.work_id,
-        &revalidate,
+        revalidate,
     )
     .map_err(classify_target_error)?
     .map_err(|error| {

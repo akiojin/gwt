@@ -9,6 +9,17 @@ use crate::app_runtime::ProjectContext;
 
 pub(crate) use gwt::project_work_events::ingest_project_work_events_paths_with_inventory;
 
+// Preserve the binary runtime tests' paths-injected entry point across the
+// library extraction; Cargo does not enable cfg(test) on library dependencies.
+#[cfg(test)]
+pub(crate) fn ingest_project_work_events_paths(
+    project_root: &std::path::Path,
+    work_items_path: &std::path::Path,
+    state_path: &std::path::Path,
+) -> gwt::project_work_events::WorkEventsIngestSummary {
+    ingest_project_work_events_paths_with_inventory(project_root, work_items_path, state_path, None)
+}
+
 /// One worker and one coalesced follow-up per project, including forced opens.
 #[derive(Default)]
 pub(crate) struct WorkEventsIngestQueue {
