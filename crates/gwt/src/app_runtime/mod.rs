@@ -14433,9 +14433,6 @@ fn work_branch_scan_targets(
 ) -> Vec<WorkBranchScanTarget> {
     let mut by_branch: HashMap<String, WorkBranchScanTarget> = HashMap::new();
     for item in &projection.work_items {
-        if item.is_terminal() {
-            continue;
-        }
         for container in &item.execution_containers {
             let Some(branch) = container
                 .branch
@@ -14445,6 +14442,17 @@ fn work_branch_scan_targets(
             else {
                 continue;
             };
+            // Issue #3447: closing Work does not remove its materialization.
+            // Keep scanning existing issue worktrees without reopening Work.
+            if item.is_terminal()
+                && (!branch.starts_with("work/issue-")
+                    || !container
+                        .worktree_path
+                        .as_ref()
+                        .is_some_and(|path| path.is_dir()))
+            {
+                continue;
+            }
             let target = by_branch
                 .entry(branch.clone())
                 .or_insert_with(|| WorkBranchScanTarget {

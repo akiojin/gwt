@@ -1124,7 +1124,8 @@ prevent a merged Workspace from becoming ready.
 
 To clear accumulated worktrees, open `Issues`, expand `Other`, and use a
 Workspace's `Clean Up` action or `Clean Up Ready` for the eligible group.
-Use `Branches > Clean Up` to inspect older branches outside that list.
+Existing issue worktrees remain listed there after their Work is closed;
+their Work history stays closed and they have no active owner.
 These actions show a confirmation before removal; whole worktrees are not
 automatically pruned. Live agents/processes and production changes keep a
 Workspace out of the ready group.

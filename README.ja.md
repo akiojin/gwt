@@ -1024,8 +1024,9 @@ Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考�
 直接比較するため、リモートの作業ブランチが削除済みでもマージ済み Workspace は整理候補になります。
 
 堆積した worktree を整理するには、`Issues` の `Other` を展開し、Workspace の
-`Clean Up` または候補をまとめる `Clean Up Ready` を使います。一覧外の古いブランチは
-`Branches > Clean Up` で確認できます。削除前に確認画面を表示し、worktree 全体の
+`Clean Up` または候補をまとめる `Clean Up Ready` を使います。既存の Issue worktree は
+Work を閉じた後も一覧に残り、Work 履歴は閉じたまま、稼働中の owner を持ちません。
+削除前に確認画面を表示し、worktree 全体の
 自動 prune は行いません。稼働中の agent / process や製品ファイルの変更がある
 Workspace は整理可能なグループから除外します。
 

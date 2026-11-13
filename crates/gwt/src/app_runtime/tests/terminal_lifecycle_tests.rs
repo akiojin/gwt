@@ -2176,7 +2176,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     fs::write(repo.join(".codex/hooks.json"), "{\n  \"hooks\": {}\n}\n").expect("seed hooks");
     run_git(&repo, &["add", "README.md", ".codex/hooks.json"]);
     run_git(&repo, &["commit", "-qm", "seed"]);
-    run_git(&repo, &["branch", "work/gwt-writes"]);
+    run_git(&repo, &["branch", "work/issue-3447"]);
     run_git(
         &repo,
         &["update-ref", "refs/remotes/origin/develop", "develop"],
@@ -2193,14 +2193,15 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     // runtime does in a real worktree.
     gwt_core::workspace_projection::record_workspace_work_event(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Update,
+            gwt_core::workspace_projection::WorkEventKind::Done,
             "work-gwt-writes-row",
             chrono::Utc::now(),
         );
         event.title = Some("gwt writes only".to_string());
+        event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-                branch: Some("work/gwt-writes".to_string()),
+                branch: Some("work/issue-3447".to_string()),
                 worktree_path: Some(repo.clone()),
                 pr_number: None,
                 pr_url: None,
@@ -2254,7 +2255,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         "gwt's own runtime writes must not make a branch dirty: {dirty_branches:?}"
     );
     assert!(
-        cleanup_ready_branches.contains_key("work/gwt-writes"),
+        cleanup_ready_branches.contains_key("work/issue-3447"),
         "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
          {cleanup_ready_branches:?}"
     );
@@ -2269,7 +2270,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
         .readiness
-        .base_target(&repo, "work/gwt-writes", &tips)
+        .base_target(&repo, "work/issue-3447", &tips)
         .unwrap()
         .is_some());
     assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
@@ -2283,7 +2284,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     fs::write(repo.join("tasks/worker.rs"), "fn main() {}\n").expect("write production task");
     assert!(super::super::work_branch_has_dirty_worktree(
         &super::super::WorkBranchScanTarget {
-            branch: "work/gwt-writes".to_string(),
+            branch: "work/issue-3447".to_string(),
             worktree_paths: vec![repo],
             has_merged_pr: false,
         }
