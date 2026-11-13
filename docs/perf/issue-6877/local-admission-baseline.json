@@ -1,0 +1,153 @@
+{
+  "owner": "Issue #6877",
+  "classification": "gwt runtime performance",
+  "base_sha": "36248cbf10fe6d4acfbc0dc7150b6122627f8d92",
+  "branch_only_commits_before_edits": 0,
+  "runtime": {
+    "product_version": "9.163.0",
+    "release_tag_sha": "45dbe3e771ecfd6615101792922fcf4a94d803d4",
+    "pr_7120_merge_is_release_tag_ancestor": true,
+    "gui_pid": 50300,
+    "process_started_at": "2026-11-12T18:08:38.7969909Z",
+    "binary_sha256": "2a96b7c0315b42544749cafa5779f31de92531f1bbda1a78913d649da6be6a31",
+    "binary": "$LOCALAPPDATA/Programs/GWT/gwt.exe",
+    "provenance_limit": "Installed product version and binary hash recorded; this is not a measurement of the later checkout modification.",
+    "binary_hash_capture": "Computed once before the CPU window; both snapshots retain that hash, not independent before/after file hashes."
+  },
+  "scan_log": {
+    "path": "~/.gwt/logs/gwt.log.2026-11-13",
+    "filter": "fields.kind=gh, fields.phase=start, span.name=issue_monitor_scan, span.project_root=E:/gwt",
+    "parent_pid_available": false,
+    "windows": [
+      {
+        "start": "2026-11-13T09:20:00+09:00",
+        "end_exclusive": "2026-11-13T09:30:00+09:00",
+        "seconds": 600,
+        "project": "E:/gwt",
+        "scan_gh_starts": 28,
+        "labels": {
+          "gh api graphql issue timelines": 20,
+          "gh api issues": 5,
+          "gh pr view 6611 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+          "gh api repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": 1,
+          "gh api repos/akiojin/gwt/branches/main/protection": 1
+        },
+        "gh_rows_sha256": "907edb85bb73f9c05961125206555f54f20797f6ca1835f42b8ab84e8448cdd9",
+        "timeline_readbacks": 20,
+        "completed_issue_observations": 64,
+        "pending_readbacks": 20,
+        "all_log_git_cherry_starts": 0
+      },
+      {
+        "start": "2026-11-13T09:30:00+09:00",
+        "end_exclusive": "2026-11-13T09:40:00+09:00",
+        "seconds": 600,
+        "project": "E:/gwt",
+        "scan_gh_starts": 30,
+        "labels": {
+          "gh pr view 7165 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+          "gh api repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1 --include": 1,
+          "gh api graphql issue timelines": 20,
+          "gh api issues": 5,
+          "gh pr view 6611 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+          "gh api repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": 1,
+          "gh api repos/akiojin/gwt/branches/main/protection": 1
+        },
+        "gh_rows_sha256": "e14a77cba1d3c046a3074712f2f9c02f3a9c7ed7f35943ade051d0cee1d1096f",
+        "timeline_readbacks": 20,
+        "completed_issue_observations": 66,
+        "pending_readbacks": 20,
+        "all_log_git_cherry_starts": 0
+      }
+    ]
+  },
+  "later_read_only_census": {
+    "last_scan_at": "2026-11-13T00:52:23Z",
+    "inbox_count": 77,
+    "local_queue_numbers": [
+      7097,
+      7015,
+      6979,
+      5390,
+      6405,
+      4427,
+      3725,
+      3447,
+      6474,
+      6877,
+      7033
+    ],
+    "terminal_queue_auto_refill": false,
+    "active_launches": [
+      3725,
+      4427,
+      6474,
+      6877,
+      6979,
+      7015
+    ],
+    "limitation": "Snapshot after the two complete log windows, not a continuous census of either window.",
+    "queued_rest_page": {
+      "cache_file": "~/.gwt/cache/rest-list-pages/9e0b48a2b6529a90.json",
+      "key": "repos/akiojin/gwt/issues?state=open&labels=gwt-queued&sort=created&direction=desc&per_page=100&page=1",
+      "fetched_at": "2026-11-13T00:58:18.079289Z",
+      "non_pr_issue_count": 77
+    }
+  },
+  "cpu_sample": {
+    "start": "2026-11-13T00:53:04.7941923Z",
+    "end": "2026-11-13T00:53:09.8738557Z",
+    "elapsed_seconds": 5.079832700000001,
+    "cpu_seconds": 5.453125,
+    "formula": "100 * delta process CPU seconds / delta monotonic wall seconds; one core=100%",
+    "cpu_percent": 107.34851563123327,
+    "rss_bytes": 3044020224,
+    "private_bytes": 3461328896,
+    "limitation": "Single late-runtime sample; no continuous six-running-agent census or five-minute/sixty-minute pair.",
+    "process_cpu_seconds_start": 8444.546875,
+    "process_cpu_seconds_end": 8450.0,
+    "monotonic_elapsed_seconds_start": 0.0095885,
+    "monotonic_elapsed_seconds_end": 5.0894212
+  },
+  "acceptance": {
+    "AC-2": "Installed scan counts 28/30 exceed 20 per 600 seconds. Individual Issue/cursor duplicates cannot be inferred from summary logs.",
+    "AC-4": "Not proven; late sample 107.35% and strict agent-state condition not continuously observed.",
+    "AC-5": "Unmeasured: no matching five-minute and sixty-minute samples; fleet was not restarted."
+  },
+  "frontier_snapshot_replay": {
+    "captured_at": "2026-11-13T01:20:25.712854+00:00",
+    "queue_page_fetched_at": "2026-11-13T01:18:46.536559800Z",
+    "queue_page_sha256": "30e1ad3599b333c05cda7a4aa0835227719a95504b2802bf8c9b289eace41733",
+    "prefs_sha256": "e8fa4901128188067bd8574adee7eee1733046d6be2cb16a2d5cb667f063ea64",
+    "open_queued_issues": 77,
+    "stored_local_queue_members": 10,
+    "conservative_selected_queued_issues": 19,
+    "selected_issue_numbers": [
+      7102,
+      7097,
+      7033,
+      7030,
+      7016,
+      7015,
+      6979,
+      6877,
+      6730,
+      6474,
+      6405,
+      5561,
+      5390,
+      5332,
+      4810,
+      4804,
+      4427,
+      3725,
+      3447
+    ],
+    "selection_reasons_may_overlap": {
+      "settlement": 14,
+      "local": 10
+    },
+    "auto_refill": false,
+    "limitation": "Read-only replay of the proposed frontier against two current snapshots. Counts are not a deployed runtime after measurement or a prediction of total gh calls. Nonqueued urgent/refill Issues are not in this queued-list-only replay."
+  }
+}
