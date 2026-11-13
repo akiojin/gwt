@@ -52,7 +52,7 @@ fn pm_delivery_owner_fixture_for_agent(
     });
     #[cfg(not(windows))]
     {
-        fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; exec cat >/dev/null\n").unwrap();
+        fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; printf 'pm-fixture-ready\\n'; exec cat >/dev/null\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -79,6 +79,27 @@ fn pm_delivery_owner_fixture_for_agent(
         target.status
     );
     assert_eq!(target.session.as_ref().unwrap().agent_id, agent_id);
+    // Issue #6071: the PTY start gate and runner write startup output
+    // asynchronously. Wait until the runner's post-`stty` marker has been
+    // parsed so no late startup bytes can redraw over a test-painted surface.
+    #[cfg(not(windows))]
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !target
+            .pane
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .contains("pm-fixture-ready")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PM delivery fixture runner never reported readiness"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
     if agent_id == gwt_agent::AgentId::GrokBuild {
         target
             .pane
