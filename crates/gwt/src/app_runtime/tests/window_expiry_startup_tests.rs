@@ -318,7 +318,7 @@ fn closed_completed_idle_pane_releases_capacity_with_bookkeeping_warning() {
 fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     use crate::app_runtime::terminal_convergence::{
         observe_terminal_windows_in_background, RestoreAdmission, TerminalCloseEligibility,
-        TerminalCloseReason, TerminalWindowSnapshot,
+        TerminalCloseReason,
     };
     use gwt::cli::{
         execution_state as execution,
@@ -407,14 +407,12 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     state.project_owner_identity = Some(identity.clone());
     let idle = owner_runtime_status_event(&owner, &physical, "Idle", "Stop");
     runtime.handle_project_owner_event(&context, 1, &identity, idle);
-    if bookkeeping_warning {
-        // The authenticated owner hook above updates its live projection;
-        // the provider's CLI hook also persists that Stop in Session metadata.
-        physical.with_agent_environment(|| {
-            gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
-                .expect("actual provider Stop metadata");
-        });
-    }
+    // The authenticated owner hook above updates its live projection;
+    // the provider's CLI hook also persists that Stop in Session metadata.
+    physical.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
+            .expect("actual provider Stop metadata");
+    });
     let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&session_path).expect("load actual bound holder");
     assert!(session.restore_window_on_startup);
@@ -542,7 +540,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     } else {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
-            window_id: window_id.clone(),
+            window_id: owner_id.clone(),
         }]
     };
     prefs.closure_records = if bookkeeping_warning {
@@ -607,7 +605,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         TerminalCloseReason::SettledExecution
     };
     assert_eq!(
-        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
         RestoreAdmission::RefuseTerminal(reason)
     );
     let generation = runtime
@@ -618,17 +616,18 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         .copied()
         .expect("actual GUI window generation");
     let mut observations = Vec::new();
+    assert_ne!(
+        window_id, owner_id,
+        "the GUI alias differs from its owner pane"
+    );
+    let snapshots = runtime.terminal_window_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].window_id, window_id);
+    assert_eq!(snapshots[0].lifecycle_generation, Some(generation));
     let settlement_trace = capture_tracing_events(|| {
         observations = observe_terminal_windows_in_background(
             &runtime.sessions_dir,
-            vec![TerminalWindowSnapshot {
-                window_id: window_id.clone(),
-                session_id: session_id.to_string(),
-                project_root: repo.clone(),
-                worktree_path: repo.clone(),
-                window_status: WindowProcessStatus::Idle,
-                lifecycle_generation: Some(generation),
-            }],
+            snapshots,
             Duration::from_secs(5),
         );
     });
@@ -638,7 +637,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         "terminal settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
-        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
         RestoreAdmission::RefuseTerminal(reason)
     );
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
@@ -866,6 +865,7 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
 
     let snapshot = |window_id: &str, session_id: &str| TerminalWindowSnapshot {
         window_id: window_id.to_string(),
+        monitor_window_id: window_id.to_string(),
         session_id: session_id.to_string(),
         project_root: repo.clone(),
         worktree_path: repo.clone(),

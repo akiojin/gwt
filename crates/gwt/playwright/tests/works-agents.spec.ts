@@ -601,6 +601,40 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".works-source-note")).toBeVisible();
   });
 
+  // SPEC #6476 T-005g (AC-1): on a phone the Agents controls kept their
+  // desktop size (Team/Past 28px, settings, rest, register, name and tool
+  // 31-32px), below a 44px tap target. Below 601px every control on Team and
+  // Past is at least 44px; wider layouts keep their sizes.
+  test("Agents controls are 44px tap targets on a phone and keep their desktop size", async ({ page }, info) => {
+    await openRail(page, "agents");
+    await expect(roster(page).locator(".roster-count")).toHaveText("3");
+    const controls = ".agents-surface:not(.agents-surface--preview) :is(button, input, select, textarea):visible";
+    const sizes = () => page.locator(controls).evaluateAll(nodes => nodes.filter(node => node.isConnected).map(node => {
+      const box = node.getBoundingClientRect();
+      return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 40) || node.tagName, width: box.width, height: box.height };
+    }));
+    const minHeights = () => page.locator(controls).evaluateAll(nodes => [...new Set(nodes.filter(node => node.isConnected).map(node => getComputedStyle(node).minHeight))].sort());
+    expect((await sizes()).some(control => control.height < 44), "the fixture has desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    await page.setViewportSize({ width: 601, height: 1000 });
+    await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+    expect(desktop).not.toContain("44px");
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const tab of ["Past", "Team"]) {
+        await roster(page).getByRole("tab", { name: tab, exact: true }).click();
+        const measured = await sizes();
+        expect(measured.length, `${tab} has controls at ${width}px`).toBeGreaterThan(2);
+        for (const control of measured) {
+          expect(control.height, `${tab} ${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${tab} ${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        }
+        await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+        await page.screenshot({ path: info.outputPath(`agents-${tab.toLowerCase()}-${width}.png`) });
+      }
+    }
+  });
+
   test("Agents recovers lost registration catalogs on reconnect without losing the name draft", async ({ page }, info) => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.holdCatalogs());
     await openRail(page, "agents");
