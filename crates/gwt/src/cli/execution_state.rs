@@ -13911,16 +13911,16 @@ fn launched_by_issue_monitor(session: &gwt_agent::Session) -> bool {
         .any(|arg| crate::issue_monitor::has_issue_monitor_launch_provenance(arg))
 }
 
-/// Whether a settlement reason blames a human who was supposed to look at the
-/// change.
+/// Find the marker claiming an absent human verifier, excluding declared
+/// `n/a` or `deferred` results without hiding other claims in the same text.
 ///
 /// The agent's own automated `Agent Visual Check` is deliberately excluded: a
 /// headed run that found console errors is a real defect, not an absent
 /// reviewer, and refusing to record it would hide a genuine blocker.
-fn blames_absent_human_verification(text: &str) -> bool {
+fn absent_human_verification_claim(text: &str) -> Option<&'static str> {
     let lowered = text.to_ascii_lowercase();
     if lowered.contains("agent visual check") {
-        return false;
+        return None;
     }
     [
         "user verification",
@@ -13930,8 +13930,24 @@ fn blames_absent_human_verification(text: &str) -> bool {
         "ユーザー確認",
         "ユーザ確認",
     ]
-    .iter()
-    .any(|needle| lowered.contains(needle))
+    .into_iter()
+    .find(|needle| {
+        lowered.match_indices(needle).any(|(index, _)| {
+            let suffix = &lowered[index + needle.len()..];
+            let Some(value) = suffix.strip_prefix(" result") else {
+                return true;
+            };
+            let value = value.trim_start_matches([' ', '\t', ':', '：', '*', '`', 'は']);
+            !["n/a", "deferred"].iter().any(|status| {
+                value.strip_prefix(status).is_some_and(|rest| {
+                    rest.chars().next().is_none_or(|ch| {
+                        ch.is_whitespace()
+                            || matches!(ch, '(' | ')' | '.' | ',' | ';' | '。' | '*' | '`')
+                    })
+                })
+            })
+        })
+    })
 }
 
 /// Issue #4217 AC-6: refuse a terminal block whose only blocker is that
@@ -13950,20 +13966,27 @@ fn autonomous_verification_block_refusal(
     if route != Some(gwt_agent::LaunchRoute::Autonomous) {
         return None;
     }
-    let names_absent_human = blames_absent_human_verification(reason)
-        || missing_verification.is_some_and(blames_absent_human_verification);
-    if !names_absent_human {
-        return None;
-    }
+    let (field, marker) = [
+        ("params.reason", reason),
+        (
+            "params.missing_verification",
+            missing_verification.unwrap_or_default(),
+        ),
+    ]
+    .into_iter()
+    .find_map(|(field, text)| {
+        absent_human_verification_claim(text).map(|marker| (field, marker))
+    })?;
     Some(format!(
-        "execution: blocked refused — this is an autonomous launch \
+        "execution: blocked refused — matched `{marker}` in {field}; this is an autonomous launch \
          (launch_route: autonomous), so a missing user or visual verification \
          is not a blocker: nobody is watching by design. Record \
          `{label} n/a (autonomous)` in the PR body. Run the required automated \
          verification, including headed E2E for UI changes, hand off a Ready PR \
          for CI auto-merge, and settle this execution normally. If \
-         something else is genuinely blocking you, restate params.reason \
-         without the verification clause.\n",
+         something else is genuinely blocking you, describe that blocker and \
+         record `{label} n/a (autonomous)` (or `{label} deferred`) as a separate \
+         status declaration; these values do not claim a missing reviewer.\n",
         label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
     ))
 }
@@ -30082,6 +30105,14 @@ exit 1
             assert!(out.contains("launch_route: autonomous"), "{out}");
             assert!(out.contains("n/a (autonomous)"), "{out}");
             assert!(out.contains("Ready PR"), "{out}");
+            assert!(
+                out.contains("matched `user verification` in params.reason"),
+                "{out}"
+            );
+            assert!(
+                out.contains("User Verification Result: n/a (autonomous)"),
+                "{out}"
+            );
             assert_eq!(
                 load(repo.path())
                     .expect("load execution record")
@@ -30090,6 +30121,85 @@ exit 1
                 ExecutionControlStatus::Active,
                 "a refused block must leave the execution running, not half-settled"
             );
+        }
+
+        #[test]
+        fn autonomous_verification_status_declarations_are_not_blocker_claims() {
+            for declaration in [
+                "User Verification Result: n/a",
+                "User Verification Result n/a",
+                "User Verification Result: n/a (no UI surface)",
+                "User Verification Result: n/a (autonomous)",
+                "User Verification Resultはn/a (autonomous)",
+                "User Verification Result: deferred (autonomous execution)",
+                "User Verification Result: deferred",
+            ] {
+                for (reason, missing) in [
+                    (declaration, Some("host verification lease wedged")),
+                    ("host verification lease wedged", Some(declaration)),
+                ] {
+                    assert_eq!(
+                        autonomous_verification_block_refusal(
+                            Some(gwt_agent::LaunchRoute::Autonomous),
+                            reason,
+                            missing,
+                        ),
+                        None,
+                        "{declaration}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn autonomous_verification_status_does_not_hide_other_blocker_claims() {
+            for claim in [
+                "User Verification Result: pending",
+                "User Verification Result: confirmed required before a PR",
+                "User Verification Result: n/awaiting confirmation",
+                "User Verification Result: deferredly waiting",
+                "User Verification Result: n/a (autonomous); user confirmation pending",
+                "User Verification Result: deferred\nユーザー確認待ち",
+                "User Verification Result: n/a but visual verification is missing",
+            ] {
+                let refusal = autonomous_verification_block_refusal(
+                    Some(gwt_agent::LaunchRoute::Autonomous),
+                    "host verification lease wedged",
+                    Some(claim),
+                )
+                .unwrap_or_else(|| panic!("must refuse: {claim}"));
+                assert!(refusal.contains("params.missing_verification"), "{refusal}");
+            }
+        }
+
+        #[test]
+        fn autonomous_execution_records_a_real_blocker_with_na_verification_status() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4427-genuine";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            let reason =
+                "host verification lease wedged\nUser Verification Result: n/a (no UI surface)";
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: reason.to_string(),
+                    missing_verification: Some("User Verification Result: deferred".to_string()),
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 0, "{out}");
+            let record = load(repo.path()).expect("load record").expect("record");
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
+            assert_eq!(record.blocked_reason.as_deref(), Some(reason));
         }
 
         /// AC-6: the refusal reads the blocker, not the launch. A genuine
