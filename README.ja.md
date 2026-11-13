@@ -1017,9 +1017,17 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 
 Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
 マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
-（`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない
+（`.gwt/` namespace、agent の作業メモ `tasks/todo.md`、materialize された `gwt-*` skill / command、手書きの内容を含まない
 `.codex/hooks.json` / `.claude/settings.local.json`）だけであれば cleanup-ready のまま
 数えられます。それ以外の未コミット変更があれば、その Workspace は件数から外れます。
+`tasks/` 内のほかのファイルもローカルの作業として扱います。ブランチは canonical base と
+直接比較するため、リモートの作業ブランチが削除済みでもマージ済み Workspace は整理候補になります。
+
+堆積した worktree を整理するには、`Issues` の `Other` を展開し、Workspace の
+`Clean Up` または候補をまとめる `Clean Up Ready` を使います。一覧外の古いブランチは
+`Branches > Clean Up` で確認できます。削除前に確認画面を表示し、worktree 全体の
+自動 prune は行いません。稼働中の agent / process や製品ファイルの変更がある
+Workspace は整理可能なグループから除外します。
 
 ### プロバイダの無料リセット
 
