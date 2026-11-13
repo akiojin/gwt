@@ -1232,7 +1232,7 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
-            bash scripts/run-visual-tests.sh
+            bash scripts/run-visual-tests.sh --workers=2
         # The full serial suite measured 14.7m before image/bootstrap overhead.
         # Retain all cases and retries with finite execution headroom.
         timeout-minutes: 25
