@@ -1431,3 +1431,83 @@ test('Decide forgets session answers when the PM session changes', () => {
   assert.equal(card.querySelectorAll('.task-decisions__option').length, 2,
     'the same decision is actionable again in the new session');
 });
+
+// --- SPEC #7007 T-012/T-013: Progress and Log views in the PM pane ---
+
+async function waitForPm(find, label) {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const found = find();
+    if (found) return found;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+test('Progress view lists request tasks from the snapshot with snapshot totals', async () => {
+  const { root, view, update } = fixture();
+  update([], null, { request_tasks: { state: 'ready', revision: 4, total: 57, pending_intake: 3,
+    tasks: [trackedTask('one', { status: 'in_progress', assignee: 'Maya' })] } });
+  view.showProgress();
+  const card = await waitForPm(() => root.querySelector('.task-card'), 'a Progress task card');
+  assert.match(card.textContent, /Task one/);
+  assert.match(card.textContent, /Maya/);
+  const progress = root.querySelector('.task-progress');
+  assert.equal(progress.parentElement.hidden, false, 'the Progress surface is visible');
+  assert.match(progress.textContent, /57 tasks/);
+  const progressButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Progress');
+  assert.ok(progressButton, 'the toolbar carries a Progress view button');
+  assert.equal(progressButton.getAttribute('aria-pressed'), 'true');
+  view.dispose();
+});
+
+test('Home View progress opens the Progress surface', async () => {
+  const { root, view, update } = fixture({ tasksDefault: true });
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'in_progress' })]) });
+  const button = await waitForPm(() => [...root.querySelectorAll('.task-home button')]
+    .find(node => node.textContent === 'View progress →'), 'the Home View progress action');
+  button.click();
+  assert.equal(root.querySelector('.task-progress').parentElement.hidden, false);
+  assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
+  view.dispose();
+});
+
+test('Progress View task details switches to the Tasks view and requests the detail', async () => {
+  const { root, view, update, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'in_progress' })]) });
+  view.showProgress();
+  const details = await waitForPm(() => [...root.querySelectorAll('.task-card button')]
+    .find(node => node.textContent === 'View task details'), 'the Progress detail action');
+  details.click();
+  assert.equal(root.querySelector('.task-progress').parentElement.hidden, true);
+  assert.equal(sent.filter(request => request.kind === 'load_pm_request_task').length, 1,
+    'the detail read travels the existing task detail path');
+  view.dispose();
+});
+
+test('Log view renders fed notification groups and routes the drawer action', async () => {
+  const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
+  const root = document.getElementById('host');
+  const viewed = [];
+  const view = createPmChat({ document, root, sessionId: 'session',
+    onLogVisibility: () => {}, onViewNotification: entry => viewed.push(entry) });
+  view.receiveLog([{ id: 7, key: 'window-command:agent-1:input', category: 'action',
+    title: 'Input failed', message: 'Your input was not delivered to the window.',
+    details: 'owner identity mismatch', count: 2, latestAt: new Date().toISOString(),
+    resolved: false, activatable: false }]);
+  view.showTaskLog();
+  const card = await waitForPm(() => root.querySelector('.task-log__card'), 'a Log group card');
+  assert.match(card.textContent, /Input failed/);
+  assert.match(card.textContent, /Action required/);
+  assert.match(card.textContent, /Repeated 2 times/);
+  const logButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Log');
+  assert.ok(logButton, 'the toolbar carries a Log view button distinct from Execution log');
+  assert.equal(logButton.getAttribute('aria-pressed'), 'true');
+  const viewButton = [...card.querySelectorAll('button')]
+    .find(node => node.textContent === 'View in Notifications');
+  viewButton.click();
+  assert.equal(viewed.length, 1);
+  assert.equal(viewed[0].key, 'window-command:agent-1:input');
+  view.dispose();
+});

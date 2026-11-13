@@ -16,6 +16,7 @@ import { parseHTML } from "linkedom";
 
 import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
 import { createUiStateStore } from "../ui-state-store.js";
+import { windowCommandErrorPresentation } from "../window-command-error.js";
 import { notificationForTransition, monitorDiagnostic } from "../agent-completion-notifications.js";
 import { createNotificationCenter } from "../notification-center.js";
 
@@ -32,15 +33,19 @@ test("window command failures notify without publishing a lifecycle transition",
   const initialization = appSource.match(/const windowCommandErrorModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
   assert.ok(initialization, "operation errors need their own UI model");
   const records = [], alerts = [];
-  const receive = new Function("createUiStateStore", "notificationCenter", "alertsToasts", `
+  const receive = new Function("createUiStateStore", "notificationCenter", "alertsToasts", "windowCommandErrorPresentation", `
     ${initialization}
     return event => { ${caseBlock(appSource, "window_command_error").replace('case "window_command_error":', '')} };
-  `)(createUiStateStore, { recordError: event => records.push(event) }, { push: event => alerts.push(event) });
+  `)(createUiStateStore, { recordError: event => records.push(event) }, { push: event => alerts.push(event) }, windowCommandErrorPresentation);
   receive({ kind: "window_command_error", id: "agent-1", operation: "resize", message: "Refresh the project connection and try again." });
   assert.equal(records.length, 1);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].title, "Resize failed");
   assert.equal(alerts[0].message, records[0].message);
+  // SPEC #7007 T-014: the headline is the typed presentation, and the raw
+  // backend wording travels as history details instead of the message.
+  assert.match(records[0].message, /terminal size may be out of date/i);
+  assert.equal(records[0].details, "Refresh the project connection and try again.");
   assert.doesNotMatch(initialization, /applyStatus|terminalStatusModel|Agent error|hit an error/);
   assert.equal(DEFAULT_COALESCE_KINDS.has("window_command_error"), false);
 });

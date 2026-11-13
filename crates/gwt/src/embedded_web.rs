@@ -192,6 +192,18 @@ root_js_modules! {
     // pm-chat.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.
     "task-decisions.js" => "createTaskDecisions",
+    // SPEC #7007 — task-centered Progress island host for the PM chat surface.
+    // pm-chat.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load 404s and the splash hangs.
+    "task-progress.js" => "createTaskProgress",
+    // SPEC #7007 — task-centered Log island host for the PM chat surface.
+    // pm-chat.js and app.js import this at module top level, so the asset
+    // MUST be registered or the ES module load 404s and the splash hangs.
+    "task-log.js" => "createTaskLog",
+    // SPEC #7007 T-014 — typed window command error presentation.
+    // app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load 404s and the splash hangs.
+    "window-command-error.js" => "windowCommandErrorPresentation",
     // SPEC #3206 — shared floating-toast primitive behind the bottom-right
     // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",
