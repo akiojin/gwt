@@ -6115,6 +6115,15 @@ button.workspace-board-ref:focus-visible {
   .pm-chat--chat .pm-chat__workspace { flex-direction: column; }
   .pm-chat--chat .pm-chat__tasks { order: -1; flex-basis: 35%; max-height: 40%; max-width: none; border-inline-start: 0; border-bottom: 1px solid var(--color-border); }
 }
+/* T-005pm: on a phone the view toolbar stayed one row wider than the window,
+   so the last views sat off screen, and PM buttons, the report filter and
+   the expanders were 18-31px tall. Wrap the toolbars and make every control
+   a 44px target; an expander keeps its marker and centers its text. */
+@media (max-width: 600px) {
+  .pm-chat__toolbar { flex-wrap: wrap; }
+  .pm-chat :is(button, select, summary) { min-width: 44px; min-height: 44px; }
+  .pm-chat summary { align-content: center; }
+}
 .task-home { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
 .task-home__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .task-home__header h1 { margin: 0; font-size: var(--type-xl); }

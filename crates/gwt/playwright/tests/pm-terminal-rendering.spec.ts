@@ -180,6 +180,95 @@ test("PM Live facts and the status strip read one needs_human value", async ({ p
   expect(errors, "console and page errors").toEqual([]);
 });
 
+// SPEC #6476 T-005pm (AC-1): on a phone the PM view toolbar stayed one 625px
+// row in a 380px window, so Log / Reports / Execution log sat off screen, and
+// the PM buttons, the report filter and the expanders were 18-31px tall.
+test.describe("PM touch targets", () => {
+  test.use({ hasTouch: true });
+  test("PM views and their controls are reachable 44px tap targets on a phone", async ({ page }, info) => {
+    const errors: string[] = [];
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    await page.addInitScript(() => {
+      (window as any).__pmFixtureReports = [{ id: "t005pm-a", kind: "decision", created_at: "2026-11-14T00:00:00Z",
+        structured: { summary: { result: "Retry the launch?", impact: null, owner: "PM",
+          decision: { question: "Retry the launch?", recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } },
+          details: "The last launch timed out.", refs: [] } }];
+      (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 1, pending_intake: 0, tasks: [{
+        key: "t005pm-task", title: "Ship the fix", status: "in_progress", assignee: "agent-one", next_action: "Review the PR",
+        criteria_preview: { purpose: "Fix the launch", completion_conditions: ["Tests pass"], completion_condition_total: 1 } }] } };
+    });
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installPmBackend(page);
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto(appUrl);
+    await page.locator("#op-pm-entry").click();
+    const pm = page.locator(`.workspace-window[data-id="${PM}"] .pm-chat`);
+    const views = pm.locator(".pm-chat__toolbar[role='group'] button");
+    await expect(views).toHaveCount(8);
+    const names = await views.allTextContents();
+    const view = (name: string) => views.filter({ hasText: new RegExp(`^${name}$`) });
+    const controls = () => pm.evaluate(root => [...root.querySelectorAll("button, select, summary")]
+      .filter(node => (node as HTMLElement).offsetParent !== null)
+      .map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30), left: box.left, right: box.right,
+          width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
+      }));
+    // The fixture data renders the controls that only exist with PM data.
+    await view("Decide").click();
+    await expect(pm.getByRole("button", { name: "1. Retry" })).toBeVisible();
+    await view("Tasks").click();
+    await expect(pm.locator(".pm-chat__task-criteria > summary")).toBeVisible();
+    await expect(pm.getByRole("button", { name: "View task details" })).toBeVisible();
+    await view("Reports").click();
+    await expect(pm.locator(".pm-chat__transcript summary").first()).toBeVisible();
+    const minHeights = async () => {
+      const seen: string[] = [];
+      for (const name of names) {
+        await view(name).click();
+        seen.push(...(await controls()).map(control => `${name}:${control.name}:${control.minHeight}`));
+      }
+      return seen;
+    };
+    const desktop = await minHeights();
+    expect(desktop.join("\n")).not.toContain(":44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+      for (const name of names) {
+        await view(name).tap();
+        await expect(view(name), `${name} opens at ${width}px`).toHaveAttribute("aria-pressed", "true");
+        for (const control of await controls()) {
+          expect(control.height, `${name} ${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${name} ${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${name} ${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${name} ${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+          `${name} does not scroll sideways at ${width}px`).toBe(true);
+      }
+      await view("Tasks").tap();
+      const criteria = pm.locator(".pm-chat__task-criteria");
+      const before = await criteria.evaluate(node => (node as HTMLDetailsElement).open);
+      const summary = (await criteria.locator("> summary").boundingBox())!;
+      await criteria.locator("> summary").tap({ position: { x: summary.width / 2, y: summary.height - 4 } });
+      await expect.poll(() => criteria.evaluate(node => (node as HTMLDetailsElement).open), "the enlarged summary area toggles").toBe(!before);
+      await view("Home").tap();
+      await pm.locator(".task-home__primary", { hasText: "Create task" }).tap();
+      await expect(view("Chat"), "Create task opens the PM chat").toHaveAttribute("aria-pressed", "true");
+      await expect(pm.locator(".pm-chat__draft")).toBeFocused();
+      await info.attach(`t005pm-${width}-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    }
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    expect(errors, "console and page errors").toEqual([]);
+  });
+});
+
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
 // from a particular Codex version. browser-check still serves every UI asset.
 test("PM terminal keeps redraw, grid and input consistent across view changes", async ({ page }, info) => {
