@@ -1971,6 +1971,33 @@ mod tests {
         );
     }
 
+    /// Issue #7171 AC-1/AC-3: one provider's quota hold only gates Issues
+    /// planned for that provider's members; the queue is held only when every
+    /// pooled member tool is held.
+    #[test]
+    fn issue_7171_head_provider_hold_does_not_hold_other_tool_members() {
+        let (_temp, _home, _roster, mut prefs) = issue_7027_busy_plan();
+        let host = crate::process::current_hostname();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let now = "2026-11-13T03:00:00Z";
+        monitor
+            .provider_quota_holds
+            .insert("claude".into(), "2026-11-19T03:15:00Z".into());
+        assert_eq!(monitor.launch_admission_hold_at(now), None);
+        assert!(monitor.provider_quota_hold_at(now).is_none());
+        for number in [41, 42] {
+            assert!(monitor.retry_ready_for_saved_profile(number, now));
+        }
+        monitor
+            .provider_quota_holds
+            .insert("codex".into(), "2026-11-19T03:15:00Z".into());
+        assert_eq!(
+            monitor.launch_admission_hold_at(now),
+            Some(IssueMonitorStallReason::QuotaHold)
+        );
+    }
+
     #[test]
     fn agent_schedule_new_plan_uses_idle_member_when_future_load_is_equal() {
         let (_temp, _home, root, sessions, roster) = fixture();

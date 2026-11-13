@@ -14964,15 +14964,17 @@ impl IssueMonitorState {
 
     /// SPEC #3914 FR-008: every distinct provider in the candidate pool, in
     /// pool order.
+    ///
+    /// A member-bound pool keeps every pooled member's own tool (Issue #7027:
+    /// a planned member launches with its registered tool), so one provider's
+    /// hold does not hold Issues planned for other tools' members (#7171).
     fn saved_launch_providers(&self) -> Vec<String> {
-        if let Some(primary) = self
+        if self
             .launch_profiles
             .first()
-            .filter(|profile| profile.agent_member_id.is_some())
+            .is_some_and(|profile| profile.agent_member_id.is_some())
         {
-            return normalize_issue_monitor_provider(&primary.agent_id)
-                .into_iter()
-                .collect();
+            return launch_pool_providers(&self.launch_profiles);
         }
         if self.launch_auto {
             launch_pool_providers(
