@@ -3609,6 +3609,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         applyPmDecisions,
+        applyPmReviewAttention,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
@@ -4227,6 +4228,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.unsubscribeLog?.();
         view.controller.dispose();
         applyPmDecisions(windowId, null);
+        applyPmReviewAttention(windowId, null);
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
         view.body.append(...view.logHost.childNodes);
@@ -4296,6 +4298,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
           // SPEC #5016 HSK: unanswered decisions join the shared attention count.
           onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
+          // SPEC #5016 HSV: unresolved reviews join the same shared count.
+          onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
         });
         pmChatViews.set(windowData.id, view);
         // SPEC #7007 T-013: the Log view mirrors this page's notification

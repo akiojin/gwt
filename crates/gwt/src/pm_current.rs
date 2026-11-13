@@ -36,6 +36,17 @@ pub struct PmMonitorFacts {
     pub pending_update: Option<String>,
     pub update_known: bool,
     pub error: Option<String>,
+    /// SPEC #5016 HSV: open PRs whose review is unresolved, from the cached
+    /// `pr.list` observation. `None` means nothing was observed (not zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_attention: Option<Vec<PmReviewAttention>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmReviewAttention {
+    pub pr_number: u64,
+    pub issue_numbers: Vec<u64>,
+    pub reason: String,
 }
 
 fn facts_from_monitor(
@@ -95,6 +106,61 @@ fn release_from_cache(
             })
         });
     (release, cache.fetched_at)
+}
+
+/// SPEC #5016 HSV: reads only what `pr.list` already observed; it never
+/// triggers a GitHub read of its own.
+fn review_attention_from_cache(
+    cache: &gwt_git::pr_status::PrInventoryCache,
+) -> Option<Vec<PmReviewAttention>> {
+    cache.fetched_at?;
+    let items = cache
+        .rows
+        .iter()
+        .filter(|row| {
+            row["state"]
+                .as_str()
+                .is_none_or(|state| state.eq_ignore_ascii_case("OPEN"))
+        })
+        .filter_map(|row| {
+            let pr_number = row["number"].as_u64()?;
+            let threads = cache
+                .heavy
+                .get(&pr_number)
+                .and_then(|heavy| heavy.review_state)
+                .map_or(0, |state| state.unresolved_threads);
+            let reason = if row["reviewDecision"] == "CHANGES_REQUESTED" {
+                "Changes requested".to_owned()
+            } else if threads > 0 {
+                format!(
+                    "{threads} unresolved review thread{}",
+                    if threads == 1 { "" } else { "s" }
+                )
+            } else {
+                return None;
+            };
+            let mut issue_numbers: Vec<u64> = row["closingIssuesReferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|issue| issue["number"].as_u64())
+                .collect();
+            if issue_numbers.is_empty() {
+                issue_numbers.extend(
+                    row["headRefName"]
+                        .as_str()
+                        .and_then(|name| name.strip_prefix("work/issue-"))
+                        .and_then(|tail| tail.parse::<u64>().ok()),
+                );
+            }
+            Some(PmReviewAttention {
+                pr_number,
+                issue_numbers,
+                reason,
+            })
+        })
+        .collect();
+    Some(items)
 }
 
 fn project_dir(repo: &Path) -> PathBuf {
@@ -227,8 +293,9 @@ fn snapshot_from_inventory(
     // Reuse pr.list's budget/TTL read, without advancing its escalation history.
     // A failed refresh can still expose the previous observation and its time.
     let _ = gwt_git::pr_status::fetch_pr_inventory_cached(repo, &cache_path, &options);
-    (facts.release, facts.release_observed_at) =
-        release_from_cache(&gwt_git::pr_status::PrInventoryCache::load(&cache_path));
+    let cache = gwt_git::pr_status::PrInventoryCache::load(&cache_path);
+    (facts.release, facts.release_observed_at) = release_from_cache(&cache);
+    facts.review_attention = review_attention_from_cache(&cache);
     if let Some(staged) = gwt_core::update::load_pending_update_manifest() {
         facts.pending_update = Some(staged.version);
         facts.update_known = true;
@@ -668,5 +735,54 @@ mod tests {
         let (release, at) = release_from_cache(&cache);
         assert_eq!(release.unwrap().number, 5352);
         assert_eq!(at, Some(observed));
+    }
+
+    // SPEC #5016 HSV: unresolved reviews come from the cached observation only.
+    #[test]
+    fn review_attention_reads_changes_requested_and_unresolved_threads_from_cache() {
+        let mut cache = gwt_git::pr_status::PrInventoryCache::default();
+        assert_eq!(
+            review_attention_from_cache(&cache),
+            None,
+            "no observation is unknown, never zero"
+        );
+        cache.fetched_at = Some("2026-11-13T09:00:00Z".parse().unwrap());
+        assert_eq!(review_attention_from_cache(&cache), Some(Vec::new()));
+        cache.rows = vec![
+            serde_json::json!({"number": 801, "state": "OPEN", "headRefName": "work/issue-71", "reviewDecision": "CHANGES_REQUESTED", "closingIssuesReferences": [{"number": 70}]}),
+            serde_json::json!({"number": 802, "state": "OPEN", "headRefName": "work/issue-72", "reviewDecision": "APPROVED"}),
+            serde_json::json!({"number": 803, "state": "OPEN", "headRefName": "feature/x", "reviewDecision": "REVIEW_REQUIRED"}),
+            serde_json::json!({"number": 804, "state": "MERGED", "headRefName": "work/issue-74", "reviewDecision": "CHANGES_REQUESTED"}),
+        ];
+        cache.heavy.insert(
+            802,
+            gwt_git::pr_status::PrInventoryHeavy {
+                updated_at: None,
+                head_ref_oid: None,
+                status_check_rollup: None,
+                body: None,
+                hydrated_at: "2026-11-13T09:00:00Z".parse().unwrap(),
+                review_state: Some(gwt_git::pr_status::PrReviewState {
+                    unresolved_threads: 2,
+                    coderabbit_review_complete: true,
+                }),
+            },
+        );
+        let items = review_attention_from_cache(&cache).unwrap();
+        assert_eq!(
+            items,
+            vec![
+                PmReviewAttention {
+                    pr_number: 801,
+                    issue_numbers: vec![70],
+                    reason: "Changes requested".into(),
+                },
+                PmReviewAttention {
+                    pr_number: 802,
+                    issue_numbers: vec![72],
+                    reason: "2 unresolved review threads".into(),
+                },
+            ]
+        );
     }
 }
