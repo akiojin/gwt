@@ -97,6 +97,9 @@ test("Home and Decide read one waiting-decision count after an answer", async ({
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
   await pm.getByRole("button", { name: "Home", exact: true }).click();
   await expect(pm.locator(".task-home")).toContainText("2 decisions need your attention");
+  // SPEC #5016 HSK: the status strip reads the same waiting set from the shared model.
+  const strip = page.locator("#op-strip-issue-monitor");
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 2 \| PM decisions 2/);
   await pm.getByRole("button", { name: "Decide", exact: true }).click();
   await pm.locator(".task-decisions__card").first().getByRole("button", { name: "1. Retry" }).click();
   const send = await page.evaluate(() => (window as any).__pmTerminalFixture.sent.find((packet: any) => packet.kind === "pane_send_input"));
@@ -107,6 +110,7 @@ test("Home and Decide read one waiting-decision count after an answer", async ({
   await info.attach(`hs1-decide-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
   await pm.getByRole("button", { name: "Home", exact: true }).click();
   await expect(pm.locator(".task-home")).toContainText("1 decision needs your attention");
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 1 \| PM decisions 1/);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await info.attach(`hs1-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
   expect(errors, "console and page errors").toEqual([]);

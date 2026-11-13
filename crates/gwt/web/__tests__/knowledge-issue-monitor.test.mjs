@@ -449,6 +449,45 @@ test("awaiting attention derives one union count that the strip and Issues pill 
   assert.equal(snapshot.count, 3, "older snapshots stay unchanged");
 });
 
+// SPEC #5016 HSK: unanswered PM decisions join the same combined value.
+test("awaiting attention adds each PM window's unanswered decisions once", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  surface.applyPmDecisions("pm-1", { waiting: 2, ids: ["d-1", "d-2"] });
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | PM decisions 2", "decisions count before any inbox snapshot");
+  surface.applyIssueMonitorInbox([61, 62].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: "open" },
+    state: number === 61 ? "needs_human" : "queued",
+    error_message: number === 61 ? "Choose credentials" : undefined,
+  })));
+  surface.applyPmDecisions("pm-2", { waiting: 1, ids: ["d-1"] });
+  surface.applyPmDecisions("pm-loading", null);
+  const snapshot = surface.issueMonitorModel.read().decisionAttention;
+  // Decision ids are per PM window: the same id in two windows is two decisions.
+  assert.equal(snapshot.count, 4);
+  assert.equal(snapshot.summary, "Awaiting attention 4 | Needs human 1 | PM decisions 3");
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(strip.title.includes(snapshot.summary));
+  assert.ok(monitorBand(body).pill.title.includes(snapshot.summary));
+  surface.applyPmDecisions("pm-1", null);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | Needs human 1 | PM decisions 1", "a closed PM window stops counting");
+  assert.ok(strip.title.includes("Awaiting attention 2"));
+  assert.ok(monitorBand(body).pill.title.includes("Awaiting attention 2"));
+  assert.equal(snapshot.count, 4, "older snapshots stay unchanged");
+});
+
 test("needs_human derives one immutable count and reason for shared Issue views", async (t) => {
   const { body, surface, sent, mod } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

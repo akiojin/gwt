@@ -248,7 +248,7 @@ export function createPmWindowModel() {
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
 export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onSend = () => {}, onOpenTerminal = () => false,
-  onViewNotification = () => {},
+  onViewNotification = () => {}, onDecisionsWaiting = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -259,6 +259,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let chatDigest;
   let chatSend = null;
   let draftSend = null;
+  let publishedWaiting;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -587,7 +588,17 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     renderHome(state, decisions);
     renderDecisions(state, decisions);
     renderReportDecisions(decisions);
+    publishWaitingDecisions(decisions);
     return decisions;
+  }
+  // SPEC #5016 HSK: the shared attention model gets the same waiting set
+  // that Home counts; `null` while reports are not loaded.
+  function publishWaitingDecisions({ items, answered, waiting }) {
+    const ids = waiting == null ? null : items.filter(item => !answered[item.id]).map(item => item.id);
+    const key = JSON.stringify(ids);
+    if (key === publishedWaiting) return;
+    publishedWaiting = key;
+    onDecisionsWaiting(ids && { waiting: ids.length, ids });
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
