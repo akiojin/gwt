@@ -4520,7 +4520,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
-        let _env_lock = gwt_core::test_support::env_lock();
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Issue #7204: the verdict must not depend on the 2 s wake budget. A
         // loaded runner spent it inside a file lock after the reservation, and
         // the retry reserved a second transaction. The provider ACK below ends
