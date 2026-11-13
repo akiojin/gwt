@@ -4794,6 +4794,19 @@ button.workspace-board-ref:focus-visible {
   :root[data-theme] [data-settings-issues-controls] .settings-field > :last-child {
     grid-column: 1;
   }
+
+  /* T-005sf: panel form controls kept their 13-36px desktop size. Every
+     Settings checkbox sits inside a label, so the label is its target.
+     Caption labels for selects and inputs keep their own height. */
+  :root[data-theme] .settings-root :is(button, select, textarea, input:not([type="checkbox"])):not(.settings-tabs *),
+  :root[data-theme] .settings-root label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* The 24px-wide icon buttons (custom agent edit/delete, env row remove). */
+  :root[data-theme] .settings-root .icon-button {
+    min-width: 44px;
+  }
 }
 
 :root[data-theme] .settings-input {

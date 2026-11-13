@@ -906,6 +906,78 @@ test.describe("Surface rail", () => {
       }
       expect(errors, "zero console/page errors").toEqual([]);
     });
+
+    // SPEC #6476 T-005sf: inside the panels, checkboxes were 13-16px, selects
+    // and inputs 32px and buttons 36px on a phone. A checkbox's tap target is
+    // its label when it has one, otherwise the box itself.
+    test("Settings panel form controls are 44px tap targets on a phone", async ({ page }, info) => {
+      const errors = captureBrowserErrors(page);
+      await installSurfaceAssets(page);
+      await installSurfaceRailBackend(page);
+      await page.goto(surfaceAppUrl);
+      await page.locator("#op-rail [data-surface='settings']").click();
+      const settings = page.locator(".settings-root:visible");
+      const tabs = settings.locator(".settings-tabs [role='tab']");
+      await expect(tabs).toHaveCount(8);
+      // Render a custom agent row so its 24px icon buttons are measured too.
+      await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "custom_agent_list", agents: [{
+        id: "fixture-cli", display_name: "Fixture CLI", command: "fixture-command", default_args: [],
+        mode_args: { normal: [], continue: [], resume: [] }, skip_permissions_args: [], env: {} }] }));
+      await tabs.filter({ hasText: "Custom Agents" }).click();
+      await expect(settings.locator(".icon-button:visible")).not.toHaveCount(0);
+      const targets = () => settings.evaluate(root => [...root.querySelectorAll(":is(button, input, select, textarea)")]
+        .filter(node => !node.closest(".settings-tabs") && (node as HTMLElement).offsetParent !== null)
+        .map(node => {
+          const input = node as HTMLInputElement;
+          const label = input.type === "checkbox"
+            ? input.closest("label") || (input.id ? root.querySelector(`label[for="${input.id}"]`) : null)
+            : null;
+          const target = (label || node) as HTMLElement;
+          const box = target.getBoundingClientRect();
+          return { name: input.getAttribute("aria-label") || target.textContent!.trim().slice(0, 30) || input.name || input.type || node.tagName,
+            width: box.width, height: box.height, minHeight: getComputedStyle(target).minHeight };
+        }));
+      const desktop: string[] = [];
+      for (let index = 0; index < 8; index++) {
+        await tabs.nth(index).click();
+        desktop.push(...(await targets()).map(target => `${index}:${target.name}:${target.minHeight}`));
+      }
+      expect(desktop.join("\n")).not.toContain(":44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      const at601: string[] = [];
+      for (let index = 0; index < 8; index++) {
+        await tabs.nth(index).click();
+        at601.push(...(await targets()).map(target => `${index}:${target.name}:${target.minHeight}`));
+      }
+      expect(at601, "601px keeps each panel control's desktop size").toEqual(desktop);
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        for (let index = 0; index < 8; index++) {
+          await tabs.nth(index).tap();
+          const panel = (await tabs.nth(index).textContent())!.trim();
+          for (const target of await targets()) {
+            expect(target.width, `${panel} ${target.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+            expect(target.height, `${panel} ${target.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          }
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+            `${panel} does not scroll sideways at ${width}px`).toBe(true);
+          const captions = await settings.evaluate(root => [...root.querySelectorAll("label")]
+            .filter(label => (label as HTMLElement).offsetParent !== null && !label.querySelector("input[type=checkbox]"))
+            .map(label => getComputedStyle(label).minHeight));
+          expect(captions, `${panel} caption labels keep their own height`).not.toContain("44px");
+        }
+        await settings.getByRole("tab", { name: "System", exact: true }).tap();
+        await page.screenshot({ path: info.outputPath(`settings-form-${width}.png`) });
+      }
+      const trust = settings.locator('input[type="checkbox"][id$="settings-system-codex-hooks"]');
+      const label = settings.locator("label", { has: page.locator('input[id$="settings-system-codex-hooks"]') });
+      await expect(trust).toBeEnabled();
+      const before = await trust.isChecked();
+      const box = (await label.boundingBox())!;
+      await label.tap({ position: { x: box.width - 4, y: box.height - 4 } });
+      await expect(trust).toBeChecked({ checked: !before });
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
   });
 
   // SPEC #6476 T-005b2 (AC-1): on a phone the Board header filters were 19px
