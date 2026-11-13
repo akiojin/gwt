@@ -314,6 +314,59 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  // SPEC #6476 T-005h (AC-1): the Works header wrapped meta and usage over
+  // several lines on a phone (about 160px at 390px). Below 601px it is three
+  // fixed rows: Back / name / previous / next, then meta and usage on one
+  // line each, with the full text kept in the DOM.
+  test("works header stays three rows on a phone and keeps desktop layout", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const header = page.locator(".works-full-header");
+    const desktopLayout = () => header.evaluate(element => {
+      const meta = element.querySelector(".works-full-meta")!;
+      const back = element.querySelector("[data-action='back']")!;
+      return {
+        padding: getComputedStyle(element).padding,
+        metaWhiteSpace: getComputedStyle(meta).whiteSpace,
+        metaBasis: getComputedStyle(meta).flexBasis,
+        backMinHeight: getComputedStyle(back).minHeight,
+      };
+    });
+    for (const width of [601, 1360]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await desktopLayout(), `header unchanged at ${width}px`).toEqual({
+        padding: "8px 12px", metaWhiteSpace: "normal", metaBasis: "240px", backMinHeight: "auto",
+      });
+    }
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const box = (await header.boundingBox())!;
+      expect(box.height, `header height at ${width}px`).toBeLessThanOrEqual(100);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth))
+        .toBeLessThanOrEqual(0);
+      const firstRow = await Promise.all(["[data-action='back']", "[data-action='previous']", "[data-action='next']"]
+        .map(selector => header.locator(selector).boundingBox()));
+      for (const control of firstRow) {
+        expect(control!.width).toBeGreaterThanOrEqual(44);
+        expect(control!.height).toBeGreaterThanOrEqual(44);
+        expect(Math.abs(control!.y - firstRow[0]!.y), "controls share the first row").toBeLessThanOrEqual(1);
+      }
+      for (const selector of [".works-full-meta", ".works-full-usage"]) {
+        const line = header.locator(selector);
+        const lineBox = (await line.boundingBox())!;
+        expect(lineBox.y, `${selector} sits below the controls`).toBeGreaterThanOrEqual(firstRow[0]!.y + firstRow[0]!.height - 1);
+        expect(await line.evaluate(element => {
+          const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
+          return element.getBoundingClientRect().height <= lineHeight + 1;
+        }), `${selector} is one line`).toBe(true);
+        expect((await line.textContent())!.length, `${selector} keeps its full text`).toBeGreaterThan(20);
+      }
+      await page.screenshot({ path: info.outputPath(`works-header-${width}.png`) });
+    }
+    const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
+    expect(screen.height, "the terminal gains the header rows (412px before)").toBeGreaterThanOrEqual(460);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     await setActiveAgentTab(page, "agent-2");
